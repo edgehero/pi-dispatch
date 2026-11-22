@@ -19,3 +19,11 @@ test("subscription header resets retain a full week while API model cooldowns ke
 	assert.equal(resetFromHeaders(headers, at), at + 6 * 3_600_000);
 	assert.equal(resetFromHeaders(headers, at, 32 * 86_400_000), at + 7 * 86_400_000);
 });
+test("a 429 body takes the ChatGPT usage-limit pair as quota codes and never the retryable outages (issue #960)", async () => {
+	for (const code of ["subscription_sharing_usage_limit_exceeded", "subscription_sharing_workplace_individual_usage_limit_exceeded"]) {
+		const evidence = await subscriptionFailureFromResponse(Response.json({ error: { code, message: "limit", resets_at: (at + 3_600_000) / 1000 } }, { status: 429 }), { now });
+		assert.deepEqual(evidence, { subscriptionCode: code, resetAt: at + 3_600_000 });
+		assert.deepEqual(providerFailureOf(classifyProviderFailure({ stopReason: "error", errorMessage: "limit" }, { status: 429, ...evidence, subscriptionProvider: "openai" })), { kind: "quota-exhausted", ...evidence, subscriptionProvider: "openai" });
+	}
+	for (const code of ["subscription_sharing_usage_unavailable", "subscription_sharing_user_unavailable"]) assert.equal(await subscriptionFailureFromResponse(Response.json({ error: { code } }, { status: 429 }), { now }), null, code);
+});

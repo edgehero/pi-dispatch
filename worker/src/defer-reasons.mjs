@@ -67,7 +67,7 @@ export const DEFER_WHYS = Object.freeze({
 	endpoint: Object.freeze({ bucket: "slot", sentence: "Every slot of model endpoint {endpoint} is taken" }),
 	// Issue #918: a private endpoint's own words, so the console never calls a device a model endpoint.
 	"private-endpoint": Object.freeze({ bucket: "slot", sentence: "Every slot of the private endpoint {endpoint} is taken" }),
-	"subscription-quota": Object.freeze({ bucket: "check", sentence: "The subscription account is exhausted; waits for newer evidence, a known reset or an operator trial. Asks again at {until}" }),
+	"subscription-quota": Object.freeze({ bucket: "check", sentence: "The subscription account is exhausted; waits for newer evidence, a known reset, an operator trial or, for a refusal that named no reset, the automatic retest six hours on. Asks again at {until}" }),
 	"subscription-owner": Object.freeze({ bucket: "ready", sentence: "Waits for the host that owns its subscription connection" }),
 	"subscription-auth": Object.freeze({ bucket: "check", sentence: "Waits until the subscription credential can be renewed at {until}" }),
 	"model-cooldown": Object.freeze({ bucket: "check", sentence: "No reviewed model is available; a model is cooling down. Asks again at {until}" }),

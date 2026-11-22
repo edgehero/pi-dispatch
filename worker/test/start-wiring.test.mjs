@@ -3418,6 +3418,33 @@ test("a TERMINAL failed attempt comments ONCE through the real adapter; a retrie
 	assert.ok(!retried.some((l) => l.event === "comment" || l.event === "comment_failed"), "no adapter activity at all on a retried attempt");
 });
 
+test("a terminal container-infra-exit whose attempt signed a used-up quota posts the quota sentence; anything else posts what it did (issue #960)", { skip }, async () => {
+	const posted = [];
+	const host = fakeHost({ postStatusComment: async (_job, _target, text) => void posted.push(text) });
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const { handlers } = await runStart({ makeAuth, makeHost: () => host });
+	const { FAILED_COMMENT, FAILED_COMMENT_BY_PROVIDER_FAILURE, FAILED_COMMENT_BY_REASON } = await import("../src/comment-tables.mjs");
+	const { NETNS_KEEPER_NOT_HOLDING } = await import("../src/processor.mjs");
+	const quota = { kind: "quota-exhausted", subscriptionCode: "subscription_sharing_usage_limit_exceeded", subscriptionProvider: "openai" };
+	let n = 0;
+	for (const [label, fields, expected] of [
+		["a signed quota stop", { reason: "container-infra-exit", providerFailure: quota }, FAILED_COMMENT_BY_PROVIDER_FAILURE["quota-exhausted"]],
+		["a quota stop with no subscription code", { reason: "container-infra-exit", providerFailure: { kind: "quota-exhausted" } }, FAILED_COMMENT_BY_PROVIDER_FAILURE["quota-exhausted"]],
+		["no provider failure", { reason: "container-infra-exit" }, FAILED_COMMENT],
+		["an overload", { reason: "container-infra-exit", providerFailure: { kind: "overloaded" } }, FAILED_COMMENT],
+		["a malformed failure", { reason: "container-infra-exit", providerFailure: { ...quota, subscriptionCode: "invented_code" } }, FAILED_COMMENT],
+		["a kind that is not a table key", { reason: "container-infra-exit", providerFailure: { kind: "toString" } }, FAILED_COMMENT],
+		["another reason", { reason: "container-exit-unknown", providerFailure: quota }, FAILED_COMMENT],
+		["a reason with its own row", { reason: NETNS_KEEPER_NOT_HOLDING, providerFailure: quota }, FAILED_COMMENT_BY_REASON[NETNS_KEEPER_NOT_HOLDING]],
+	]) {
+		posted.length = 0;
+		handlers.failed({ id: `q${++n}`, data: { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } }, attemptsMade: 2, finishedOn: 123 }, Object.assign(new Error("provider prose never posted"), fields));
+		await settleListeners();
+		assert.deepEqual(posted, [expected], label);
+	}
+	assert.match(FAILED_COMMENT_BY_PROVIDER_FAILURE["quota-exhausted"], /^Failed: the AI provider refused this job's model because the account's usage limit or quota is used up/);
+});
+
 test("PI_ON_FAILURE fires for the paid terminals only: terminal-failed and policy worker-abort/runner-policy/provider-auth-refused, nothing else", { skip }, async () => {
 	// An unresolvable command still proves the THREADING (the on_failure line is the hook's own), while
 	// spawning nothing on a test machine.

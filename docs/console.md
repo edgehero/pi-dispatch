@@ -2626,7 +2626,9 @@ Connections names the selected profile, owning host, compatibility, credential s
 the connection/application bucket's quota observations, their age, missing values, exhausted windows and paid
 extra-usage policy separately from deployment dollar caps. A missing observation is unknown. Known weekly
 resets are not shortened to the physical model cooldown's six-hour maximum; unknown-reset exhaustion remains
-until newer evidence or one person's normally budgeted trial.
+until newer evidence or one person's normally budgeted trial, or, when a provider's refusal recorded it (a ChatGPT
+usage limit), until its automatic retest, which the Pickup line shows with its time, ends with the provider
+answering.
 
 Operators see commands to run in the owning host's terminal. Sign-in, logout, usage renewal and trial authority
 do not run inside the browser, and viewers receive no management controls. Credentials, raw account/profile

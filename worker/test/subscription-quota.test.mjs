@@ -140,9 +140,11 @@ test("unknown-reset exhaustion never expires or clears from missing, stale or pa
 	await store.record(identity(), failure());
 	setTime(NOW + 90 * DAY);
 	assert.equal((await store.read(identity())).blockedUnknownReset, true);
-	assert.equal((await store.admit(identity())).until, null);
+	// Past the retest (issue #960) a pickup may TRY the connection once; the block itself stays.
+	assert.equal((await store.admit(identity(), { consumeTrial: false })).reason, "subscription-trial");
 	await store.record(identity(), claude({}, NOW + 90 * DAY));
-	assert.equal((await store.admit(identity())).ok, false);
+	assert.equal((await store.read(identity())).state, "exhausted");
+	assert.equal((await store.admit(identity(), { consumeTrial: false })).reason, "subscription-trial", "an unknown read admits nothing but the retest");
 	const stale = await store.record(identity(), claude(known(), NOW + DAY));
 	assert.equal(stale.reason, "subscription-stale-evidence");
 	assert.equal((await store.read(identity())).blockedUnknownReset, true);

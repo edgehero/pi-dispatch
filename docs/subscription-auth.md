@@ -98,7 +98,13 @@ stops further renewal, so such a job ends as `credential-expired` before its las
 
 OpenAI proactive usage lookup is unavailable on this direct Responses integration unless its adapter publishes
 a supported typed observation. Known quota failures still supply closed exhaustion/reset evidence; other
-percentages remain unknown. `auth usage` reports unsupported or unavailable explicitly, without scraping
+percentages remain unknown. A ChatGPT subscription past its plan's usage limit (or a Business workspace's
+per-user limit) answers the model call with HTTP 200 and the refusal inside the stream; the runner reads the
+refusal's closed code (`subscription_sharing_usage_limit_exceeded`, or
+`subscription_sharing_workplace_individual_usage_limit_exceeded`) from that event, never from the sentence pi
+prints, so the job is recorded with `providerFailure.kind` `quota-exhausted` and the connection shows exhausted.
+ChatGPT's passing outages (`subscription_sharing_usage_unavailable`, `subscription_sharing_user_unavailable`)
+are not a quota and pause nothing. `auth usage` reports unsupported or unavailable explicitly, without scraping
 another CLI's diagnostics or claiming that a connected credential has remaining quota.
 
 The host store must be outside the global overlay, job directories, sandbox roots and every local job's
@@ -324,7 +330,18 @@ capacity. A known exhausted window blocks through its full observed reset, inclu
 six-hour physical model cooldown does not shorten it. All applicable exhausted windows must clear.
 
 An exhausted window without a reset has no guessed timeout. Newer authoritative usage evidence can clear it;
-partial, missing or older evidence cannot. Refresh observations on the owner:
+partial, missing or older evidence cannot. When the exhaustion came from a provider's refusal (a ChatGPT usage
+limit names no reset), the connection is retested by one job six hours after the newest refusal: `auth status`
+shows that instant as `retestAt`. Exactly one pickup across the fleet claims the retest. If it meets the limit
+again, the next retest is six hours after that refusal; so it is after a rate limit or any other provider's quota
+stop, which settle nothing. If the provider answered it (a verified exit 0, 1 or 2 after at least one call on that
+provider returned output, and no quota or rate-limit failure ended it, so an overload or a policy stop later in the
+run still counts), the refusal is cleared and every job may use the connection again. If the run provably never
+called that provider (a policy stop before its first call, say, and an exit line whose usage rules the provider
+out), the retest is given back and the next pickup tries again at once. Otherwise (calls that returned nothing, a
+usage record that cannot rule the provider out) the next retest is six hours after it started, and so is it for a
+retest whose container never started. Exhaustion read from a usage window (Claude's) and exhaustion with a known
+reset are never retested. Refresh observations on the owner:
 
 ```sh
 pi-dispatch auth usage claude-main
@@ -336,8 +353,11 @@ If reset information remains unavailable, a person may authorize one normally bu
 pi-dispatch auth trial claude-main
 ```
 
-The command starts no job and does not clear exhaustion. Candidate inspection consumes nothing. Only selected
-admission claims the trial atomically for one durable attempt; another attempt cannot reuse it. A known reset,
+The command starts no job and does not clear exhaustion; the job that claims the trial clears a provider's
+refusal the same way a retest does, once the provider answered it, and a job that never called the provider leaves
+the trial for the next pickup. Candidate inspection consumes nothing. Only selected
+admission claims the trial atomically for one durable attempt; another attempt cannot use it while that one holds it,
+and gets it only when that attempt gave it back unasked. A known reset,
 newer evidence or stale state prevents the corresponding stale trial grant. The trial bypasses no model,
 credential, replay, recovery, count, token or dollar check.
 

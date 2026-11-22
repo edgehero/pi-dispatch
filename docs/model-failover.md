@@ -28,7 +28,7 @@ The worker considers the primary, then the fallbacks in order. Each candidate mu
 
 The image must declare `modelFailover`; an older image is refused before spend as `job-image-model-failover-unsupported`. Rebuild it before enabling the list.
 
-The runner classifies the final provider failure after pi's own retries. A 429 with a usable reset becomes `rate-limited`; known quota/spend-limit errors, and 429s without one, become `quota-exhausted`. Overload/5xx becomes `overloaded`. Parameter and authentication errors do not authorize switching, and neither does a request that never got an answer from the provider, such as the egress proxy refusing the connection: that is the network, not the model. Amazon Bedrock is the exception: its client reports the proxy's refusal as if Bedrock had answered with that status, so a proxy error there can still cool a Bedrock model. Reset visibility depends on the provider adapter: an unavailable reset uses the no-reset policy rather than a guessed time.
+The runner classifies the final provider failure after pi's own retries. A 429 with a usable reset becomes `rate-limited`; known quota/spend-limit errors, and 429s without one, become `quota-exhausted`. Overload/5xx becomes `overloaded`. Parameter and authentication errors do not authorize switching, and neither does a request that never got an answer from the provider, such as the egress proxy refusing the connection: that is the network, not the model. Amazon Bedrock is the exception: its client reports the proxy's refusal as if Bedrock had answered with that status, so a proxy error there can still cool a Bedrock model. Reset visibility depends on the provider adapter: an unavailable reset uses the no-reset policy rather than a guessed time. A ChatGPT subscription past its usage limit refuses inside an HTTP 200 stream; the runner reads the refusal's closed code from that event, never from the sentence pi prints, so it is `quota-exhausted` too ([subscription authentication](subscription-auth.md)).
 
 Cooldowns are shared across workers per exact provider/model. A provider reset is capped at six hours; quota without a reset uses six hours, and rate limit/overload without a reset uses 60 seconds. A later observation cannot shorten a longer existing cooldown. Context overflow does not cool a model globally: that job can choose only a candidate with a known larger context window.
 
@@ -45,8 +45,14 @@ adds its separate authentication and account-quota admission even without fallba
 the existing API-key path; portfolio weights do not choose models. See [subscription authentication](subscription-auth.md).
 
 Subscription account windows are separate from the physical model cooldown above. A known weekly reset is
-preserved for the full week. Exhaustion with no reset persists until newer evidence or a person's one-attempt
-trial; it is not cleared by the six-hour model timeout. The reviewed fallback order still applies, and each
+preserved for the full week. Exhaustion with no reset persists until newer evidence or a person's trial (one job
+that reaches the provider), or, when a provider's refusal recorded it, until a retest the provider answers: one job
+tries the connection six hours after the newest refusal, and its exit clears the refusal once the provider has
+answered it; the six-hour model timeout alone does not clear it. While it lasts, every openai model on that connection
+is blocked, not only the one that was refused, because the limit belongs to the account. A fallback on another
+subscription runs the retry; a fallback billed by an API key behind a subscription primary is skipped
+(`auth-mixed-billing`), so such a trigger waits for the limit instead. A random pool draws again among its
+other candidates. The reviewed fallback order still applies, and each
 candidate must have authorized authentication and pass all ordinary admission gates. Candidate checks do not
 consume a trial or rotate accounts. Nothing switches credentials inside a running attempt.
 

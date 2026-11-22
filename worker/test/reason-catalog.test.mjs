@@ -44,6 +44,7 @@ const AMBIGUOUS = new Map([
 	["job-user-unmappable", { posts: Object.values(tables.JOB_USER_COMMENTS), because: "JOB_USER_COMMENTS is keyed by the cause, which the record does not carry" }],
 	["envelope-mismatch", { posts: Object.values(tables.ENVELOPE_MISMATCH_COMMENTS), because: "ENVELOPE_MISMATCH_COMMENTS is keyed by the cause (no envelope, or a different one), which the record does not carry" }],
 	["podman-conf-widens-job", { posts: Object.values(tables.PODMAN_CONF_COMMENTS), because: "PODMAN_CONF_COMMENTS is keyed by the source and the finding, which the record does not carry" }],
+	["container-infra-exit", { posts: [tables.FAILED_COMMENT, ...Object.values(tables.FAILED_COMMENT_BY_PROVIDER_FAILURE)], because: "a terminal attempt posts FAILED_COMMENT, or a row of FAILED_COMMENT_BY_PROVIDER_FAILURE keyed by the signed providerFailure kind (issue #960), which no why carries" }],
 ]);
 
 /** Is this export a plain table (an object literal, frozen or not), as opposed to a string, a function or a class? */
@@ -61,6 +62,7 @@ const CAUSE_KEYED = new Map([
 	["MODEL_NOT_ALLOWED_COMMENTS", { reason: "model-not-allowed", keys: "the pre-start path: main (no why) or the why fallback-unlisted", whyKeys: ["fallback-unlisted"] }],
 	["ENVELOPE_MISMATCH_COMMENTS", { reason: "envelope-mismatch", keys: "the cause (no-envelope, mismatch)" }],
 	["PODMAN_CONF_COMMENTS", { reason: "podman-conf-widens-job", keys: "the source and finding (rootful-*, live-*, widens, unread)" }],
+	["FAILED_COMMENT_BY_PROVIDER_FAILURE", { reason: "container-infra-exit", keys: "the signed providerFailure kind (quota-exhausted)" }],
 ]);
 
 /**
@@ -207,8 +209,9 @@ test("a reason with a fixed comment explains itself with that comment, identical
 });
 
 test("the reasons for infrastructure exits are failures written here: no table is keyed by them, and none is the generic failure comment", () => {
-	// A terminal attempt with one of them posts FAILED_COMMENT (FAILED_COMMENT_BY_REASON has no row for them), so the
-	// catalog's sentence says more than the issue was told, and must not pretend to be what the issue was told.
+	// A terminal attempt with one of them posts FAILED_COMMENT (FAILED_COMMENT_BY_REASON has no row for them; a
+	// container-infra-exit may post its signed provider failure's row instead, issue #960), so the catalog's sentence says
+	// more than the issue was told, and must not pretend to be what the issue was told.
 	for (const token of [CONTAINER_INFRA_EXIT, CONTAINER_EXIT_UNKNOWN, WORKER_ERROR]) {
 		assert.ok(Object.hasOwn(REASONS, token), token);
 		assert.match(REASONS[token].sentence, /^Failed: /, token);
@@ -225,7 +228,7 @@ test("each ambiguous reason really has two or more different comments, and the c
 		assert.ok(posts.length + (templated ? 1 : 0) >= 2, `${reason} (${because}): two or more paths, or it is not ambiguous and must be derived`);
 		for (const post of posts) assert.notEqual(REASONS[reason].sentence, post, `${reason}: ${because}, so the catalog's sentence is general`);
 	}
-	assert.equal(AMBIGUOUS.size, 8, "the list stays tight: a new entry is a reviewed decision");
+	assert.equal(AMBIGUOUS.size, 9, "the list stays tight: a new entry is a reviewed decision");
 });
 
 test("why picks the comment that was posted, where the table is keyed by it", () => {

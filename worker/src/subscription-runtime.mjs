@@ -178,6 +178,45 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 			if (written.ok && written.status?.state === "exhausted" && written.status?.bindingValid !== false && (job.auxiliaryModels === undefined || snapshot.provider === job.provider)) return { quotaExhausted: true };
 		}
 	}
+	/**
+	 * Issue #960: settles a connection's trial after a verified exit line whose code matches the container's (0, 1 or 2)
+	 * and was not aborted, for the attempt holding it (subscription-quota.mjs holds the trial and claim-time guards).
+	 * - A rate or quota failure, on any provider (a quota read from prose names none), settles nothing here: `observe`
+	 *   records that refusal and the trial with it.
+	 * - A metered call on this connection's provider that returned output clears the refusals (`clearTrialEvidence`):
+	 *   the provider answered, so the limit is open, whatever ended the run after (an overload later, a policy stop).
+	 * - A run that provably never called that provider gives the trial back (`releaseTrial`): it proved nothing about the
+	 *   limit. Proof is the rule the dollar settlement trusts (dollar-budget.mjs `modelDollarSettlement`): no ledger on a
+	 *   line that counted no calls, or a ledger whose `truncated` is exactly 0, with no `other/other` row that made calls
+	 *   (folded overflow and model-less calls land there) and no call in a row of that provider.
+	 * - Anything else (calls that returned no output, a ledger that cannot rule the provider out) leaves the trial used,
+	 *   and the next retest comes six hours after its claim. Only a row named for that provider counts as its answer,
+	 *   never `other/other`.
+	 * The usage ledger names calls by provider, not by session, and every call to that provider in the job used this
+	 * connection: a provider is either the job's subscription or not (`auth-mixed-billing`). Only a snapshot whose binding
+	 * still holds is settled, as `observe` records only for one. Each connection apart; a refused settlement is no error.
+	 */
+	async function settleTrial(job, result, snapshots, { attemptId } = {}) {
+		if (result?.exitAuth !== "verified" || ![0, 1, 2].includes(result?.code) || result?.exitLineCode !== result?.code || result?.aborted === true || typeof attemptId !== "string") return [];
+		if (["quota-exhausted", "rate-limited"].includes(result.providerFailure?.kind) || result.tokens?.metered !== true) return [];
+		const models = Array.isArray(result.usage?.models) ? result.usage.models : null;
+		const settled = [];
+		for (const snapshot of snapshots) {
+			const rows = models?.filter((row) => row?.provider === snapshot.provider) ?? [];
+			const answered = rows.some((row) => row.calls > 0 && row.output > 0);
+			const unasked = models === null ? result.tokens.calls === 0 : result.usage.truncated === 0 && !models.some((row) => row?.provider === "other" && row?.model === "other" && row.calls > 0) && !rows.some((row) => row.calls > 0);
+			if (!answered && !unasked) continue;
+			const route = job.auxiliaryModels === undefined ? { provider: snapshot.provider, id: job.model } : subscriptionRoutes(job).find((ref) => ref.provider === snapshot.provider);
+			if (!route) continue;
+			const model = lookup(route.provider, route.id);
+			const bound = await auth.check(snapshot.provider, { model: route.id, api: model?.api, baseUrl: model?.baseUrl });
+			if (!bound.ok || !bound.managed || !sameBinding(bound, snapshot)) continue;
+			const identity = subscriptionIdentity(snapshot);
+			const written = answered ? await quota.clearTrialEvidence(identity, { attemptId, observedAt: now() }) : await quota.releaseTrial(identity, { attemptId });
+			if (written.ok) settled.push({ provider: snapshot.provider, trial: answered ? "cleared" : "released" });
+		}
+		return settled;
+	}
 	function sameBinding(row, snapshot) {
 		return (row.connectionId ?? row.id) === snapshot.connectionId && row.provider === snapshot.provider && row.ownerHost === snapshot.ownerHost && row.accountGroup === snapshot.accountGroup && row.generation === snapshot.generation && row.adapter === snapshot.adapter && (row.bindingSignature === undefined || row.bindingSignature === snapshot.bindingSignature);
 	}
@@ -220,5 +259,5 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		if (next.provider !== snapshot.provider || next.connectionId !== snapshot.connectionId || next.bindingSignature !== snapshot.bindingSignature || next.adapter !== snapshot.adapter || next.accountGroup !== snapshot.accountGroup) return null;
 		return { ...snapshot, ...next };
 	}
-	return { check, inspectPolicy, prepare, validate, observe, usage, status, extend, current, watch: (snapshot, changed) => auth.watch?.(snapshot.connectionId, changed) };
+	return { check, inspectPolicy, prepare, validate, observe, settleTrial, usage, status, extend, current, watch: (snapshot, changed) => auth.watch?.(snapshot.connectionId, changed) };
 }

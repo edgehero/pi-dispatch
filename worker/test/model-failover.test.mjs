@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import { createHmac } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { FAILURE_KINDS, MAX_RESET_MS } from "../../image/runner/src/provider-failure.mjs";
-import { PROVIDER_FAILURE_KINDS } from "../src/model-failover-protocol.mjs";
+import { FAILURE_KINDS, MAX_RESET_MS, SUBSCRIPTION_QUOTA_CODES as RUNNER_QUOTA_CODES } from "../../image/runner/src/provider-failure.mjs";
+import { PROVIDER_FAILURE_KINDS, SUBSCRIPTION_QUOTA_CODES, providerFailureOf } from "../src/model-failover-protocol.mjs";
+import { SUBSCRIPTION_QUOTA_CODES as STORE_QUOTA_CODES } from "../src/subscription-quota.mjs";
+import { modelAttemptIdOf } from "../src/model-attempts.mjs";
 import { test } from "node:test";
 import { failoverListUsable } from "../src/model-ref.mjs";
 import { FAILOVER_PRICED_APIS, MODEL_COOLDOWN_MAX_MS, checkFailoverCandidate, failoverEgressRequired, failoverModelView, markModelCooldown, modelCooldownKey, readModelAttempt, readModelCooldown, readModelCooldowns, selectFailoverJob, writeModelAttempt } from "../src/model-failover.mjs";
@@ -42,6 +44,8 @@ test("the worker's eligibility APIs equal the runner's pinned cost-bound APIs", 
 	const body = source.match(/export const PRICED_APIS = Object\.freeze\(\[([\s\S]*?)\]\)/)[1];
 	assert.deepEqual(FAILOVER_PRICED_APIS, [...body.matchAll(/"([^"]+)"/g)].map((m) => m[1]));
 	assert.deepEqual(PROVIDER_FAILURE_KINDS, FAILURE_KINDS, "the signed wire vocabulary has one closed meaning");
+	assert.deepEqual(SUBSCRIPTION_QUOTA_CODES, RUNNER_QUOTA_CODES, "the quota codes the runner signs are the ones the wire accepts");
+	assert.equal(STORE_QUOTA_CODES, SUBSCRIPTION_QUOTA_CODES, "and the ones the quota store records, one list");
 	assert.equal(MODEL_COOLDOWN_MAX_MS, MAX_RESET_MS, "worker TTL and measured runner reset use the same bound");
 });
 
@@ -609,4 +613,85 @@ test("fallback attempts retain explicit auxiliaries without treating their subsc
 	assert.equal(result.ref, fallback);
 	assert.deepEqual(candidates, ["primary", "fallback"]);
 	assert.deepEqual(result.job.models, [fallback, ...auxiliaryModels]);
+});
+
+test("the wire takes ChatGPT's two usage limits as subscription codes and refuses its two passing outages (issue #960)", () => {
+	for (const subscriptionCode of ["subscription_sharing_usage_limit_exceeded", "subscription_sharing_workplace_individual_usage_limit_exceeded"]) {
+		assert.deepEqual(providerFailureOf({ kind: "quota-exhausted", subscriptionCode, subscriptionProvider: "openai" }), { kind: "quota-exhausted", subscriptionCode, subscriptionProvider: "openai" });
+		assert.equal(providerFailureOf({ kind: "quota-exhausted", subscriptionCode }), null, "a code needs the provider it was observed on");
+	}
+	for (const subscriptionCode of ["subscription_sharing_usage_unavailable", "subscription_sharing_user_unavailable"]) assert.equal(providerFailureOf({ kind: "quota-exhausted", subscriptionCode, subscriptionProvider: "openai" }), null, subscriptionCode);
+	const line = (fields) => JSON.stringify({ event: "exit", code: 1, reason: "error", ...fields });
+	assert.deepEqual(parseExitProviderFailure(line({ providerFailure: { kind: "quota-exhausted", subscriptionCode: "subscription_sharing_usage_limit_exceeded", subscriptionProvider: "openai" } })), { kind: "quota-exhausted", subscriptionCode: "subscription_sharing_usage_limit_exceeded", subscriptionProvider: "openai" });
+});
+
+test("a signed ChatGPT usage-limit exit takes the existing road: a safe attempt, a six-hour cooldown, the fallback on the retry (issue #960)", async () => {
+	const failure = { kind: "quota-exhausted", subscriptionCode: "subscription_sharing_usage_limit_exceeded", subscriptionProvider: "openai" };
+	const observed = [];
+	let attempt = 0;
+	const runtime = {
+		inspectPolicy: async () => ({ ok: true }),
+		// The primary's connection is exhausted once the refusal was observed; the fallback is another subscription.
+		check: async (candidate) => candidate.provider === "openai" && observed.length ? { ok: false, managed: true, wait: "subscription-quota", until: null } : { ok: true, managed: [{ id: candidate.provider, provider: candidate.provider }] },
+		prepare: async () => ({ ok: true, snapshots: [] }), validate: async () => true,
+		observe: async (_job, result) => { observed.push(result.providerFailure); return { quotaExhausted: true }; },
+	};
+	const fixture = pickupFixture({ extraDeps: { subscriptionRuntime: runtime }, container: async () => ++attempt === 1 ? { code: 1, exitLineCode: 1, exitAuth: "verified", aborted: false, providerFailure: failure, toolsStarted: false, replaySafe: true } : { code: 0, aborted: false } });
+	await assert.rejects(fixture.run, { name: "InfraRetry", reason: "container-infra-exit" });
+	assert.deepEqual(observed, [failure], "the connection's quota state is written from the signed code");
+	assert.deepEqual(await readModelAttempt(fixture.redis, modelAttemptIdOf("pi-jobs", "j")), { ref: primary, safe: true, failure, modelWhy: "primary" });
+	assert.deepEqual(await readModelCooldown(fixture.redis, primary, { now: () => NOW }), { ref: primary, kind: "quota-exhausted", until: NOW + MODEL_COOLDOWN_MAX_MS });
+	assert.deepEqual(fixture.records[0].error.providerFailure, failure);
+	fixture.queueJob.attemptsMade = 1;
+	assert.equal((await fixture.run()).outcome, "completed");
+	assert.deepEqual(fixture.seen.filter((entry) => typeof entry === "object").map((entry) => `${entry.provider}/${entry.model}`), [primary, fallback]);
+	// The primary's connection now refuses admission (as well as its model cooling down), so the fallback runs as the
+	// primary being unavailable.
+	assert.equal(fixture.records[1].result.modelWhy, "fallback-unavailable");
+});
+
+test("the retry after a ChatGPT usage limit skips an API-key fallback behind the subscription primary and waits (issue #960)", async () => {
+	const failure = { kind: "quota-exhausted", subscriptionCode: "subscription_sharing_usage_limit_exceeded", subscriptionProvider: "openai" };
+	let blocked = false;
+	const runtime = {
+		inspectPolicy: async () => ({ ok: true }),
+		check: async (candidate) => candidate.provider === "openai" ? (blocked ? { ok: false, managed: true, wait: "subscription-quota", until: null } : { ok: true, managed: [{ id: "chatgpt", provider: "openai" }] }) : { ok: true, managed: [] },
+		prepare: async () => ({ ok: true, snapshots: [] }), validate: async () => true,
+		observe: async () => { blocked = true; return { quotaExhausted: true }; },
+	};
+	const fixture = pickupFixture({ extraDeps: { subscriptionRuntime: runtime }, container: async () => ({ code: 1, exitLineCode: 1, exitAuth: "verified", aborted: false, providerFailure: failure, toolsStarted: false, replaySafe: true }) });
+	await assert.rejects(fixture.run, { name: "InfraRetry" });
+	fixture.queueJob.attemptsMade = 1;
+	await assert.rejects(fixture.run, { name: "DelayedError" });
+	assert.deepEqual(fixture.seen.filter((entry) => typeof entry === "object").map((entry) => entry.model), ["primary"], "the API-key fallback never ran");
+	assert.equal(fixture.seen.at(-1), "defer");
+});
+
+test("a verified exit hands the trial's attempt to settleTrial after observe; other exits, and a failed settlement, change nothing (issue #960)", async () => {
+	const snapshot = { provider: "openai", connectionId: "chatgpt", ownerHost: "worker-one", accountGroup: "group", generation: 1, adapter: "openai-chatgpt" };
+	const clean = { code: 0, exitLineCode: 0, exitAuth: "verified", aborted: false, tokens: { metered: true, calls: 1, output: 3 }, usage: { v: 1, models: [{ provider: "openai", model: "primary", calls: 1, output: 3 }] } };
+	const overloaded = { ...clean, code: 1, exitLineCode: 1, toolsStarted: true, replaySafe: false, providerFailure: { kind: "overloaded" } };
+	for (const [result, expected] of [[clean, 1], [{ ...clean, code: 2, exitLineCode: 2 }, 1], [overloaded, 1], [{ ...clean, exitAuth: "unverified" }, 0], [{ ...clean, exitLineCode: 1 }, 0], [{ ...clean, aborted: true }, 0], [{ ...clean, code: 137, exitLineCode: 137 }, 0]]) {
+		const settled = [];
+		const logs = [];
+		const order = [];
+		const runtime = {
+			inspectPolicy: async () => ({ ok: true }), check: async () => ({ ok: true, managed: [{ id: "chatgpt", provider: "openai" }] }),
+			prepare: async () => ({ ok: true, snapshots: [snapshot] }), validate: async () => true, observe: async () => { order.push("observe"); },
+			settleTrial: async (job, r, snapshots, options) => { order.push("settle"); settled.push({ job: `${job.provider}/${job.model}`, code: r.code, snapshots, options }); if (expected && settled.length === 1 && result === clean) throw Object.assign(new Error("store offline"), { code: "subscription-store-conflict" }); return []; },
+		};
+		const fixture = pickupFixture({ data: { fallbackModels: undefined }, extraDeps: { subscriptionRuntime: runtime, log: (event, fields) => logs.push({ event, fields }) }, container: async () => result });
+		const outcome = await fixture.run().then((value) => value, (error) => error);
+		assert.equal(settled.length, expected, JSON.stringify(result));
+		if (!expected) continue;
+		assert.deepEqual(settled[0], { job: primary, code: result.code, snapshots: [snapshot], options: { attemptId: `${modelAttemptIdOf("pi-jobs", "j")}:0:0` } });
+		if (result === overloaded) {
+			assert.deepEqual(order, ["observe", "settle"], "a refusal the code-1 branch records drops the trial before it is settled");
+			assert.equal(outcome.name, "InfraRetry", "an exit 1 is retried as before");
+		}
+		if (result === clean) {
+			assert.equal(outcome.outcome, "completed", "a settlement that threw never fails a run that ended well");
+			assert.deepEqual(logs.filter((row) => row.event === "subscription_trial_settle_failed"), [{ event: "subscription_trial_settle_failed", fields: { jobId: "j", reason: "subscription-store-conflict" } }]);
+		}
+	}
 });

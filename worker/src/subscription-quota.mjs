@@ -1,10 +1,21 @@
 import { SUBSCRIPTION_QUOTA_BYTES } from "./subscription-limits.mjs";
+import { SUBSCRIPTION_QUOTA_CODES } from "./model-failover-protocol.mjs";
+import { MODEL_COOLDOWN_MAX_MS } from "./model-cooldowns.mjs";
 /** Subscription evidence is account policy, separate from model cooldowns and dollar reservations. */
 import { createHash, randomUUID } from "node:crypto";
 
-export const SUBSCRIPTION_QUOTA_CODES = Object.freeze(["usage_limit_reached", "usage_not_included", "rate_limit_exceeded", "quota_exhausted"]);
+// One list with the signed wire's validator, so a code the protocol carries is always a code this store records.
+export { SUBSCRIPTION_QUOTA_CODES };
 export const SUBSCRIPTION_QUOTA_REASONS = Object.freeze(["subscription-unknown", "subscription-available", "subscription-trial", "subscription-quota", "subscription-extra-usage", "subscription-stale-evidence", "subscription-stale-state", "subscription-stale-binding", "subscription-observation-required"]);
 export const SUBSCRIPTION_QUOTA_LIMITS = Object.freeze({ payloadBytes: SUBSCRIPTION_QUOTA_BYTES, windows: 64, limits: 32, freshMs: 300_000, casAttempts: 8, resetFutureMs: 32 * 86_400_000 });
+/**
+ * How long after an exhaustion that named no reset the connection is tried again with one job (issue #960). Before it,
+ * such a block lasted until a person's `auth trial` or a usage read. Equal to the model cooldown's ceiling on purpose:
+ * the same refusal cools the model down for exactly that long (model-failover.mjs), so the retest falls due when the
+ * model's cooldown ends (the worker records the refusal a moment before it writes the cooldown, index.mjs, so the retest
+ * is due at most that moment earlier).
+ */
+export const SUBSCRIPTION_RETEST_MS = MODEL_COOLDOWN_MAX_MS;
 const WINDOWS = ["five-hour", "seven-day", "other"];
 const SOURCES = ["claude-community", "openai", "provider-error"];
 const hash = value => createHash("sha256").update(value).digest("hex");
@@ -134,6 +145,41 @@ function cleanObservation(value) {
 	if (parsed.complete !== normalized.complete) throw quotaError("subscription-invalid-observation");
 	return { ...normalized, ...(parsed.source === "provider-error" && SUBSCRIPTION_QUOTA_CODES.includes(parsed.code) ? { code: parsed.code } : {}) };
 }
+/**
+ * A stored trial: a person's grant `{ id, usedBy }` (usedBy null until a pickup claims it), or, since issue #960, an
+ * automatic retest `{ id, usedBy, auto: true, claimedAt }`. A claim by this build stamps `claimedAt` on a person's trial
+ * too; a used trial without it was claimed by an older build and reads as a person's, whose claim time is not known.
+ */
+function trialOf(value) {
+	if (value === null) return null;
+	if (!object(value) || !/^[a-f0-9-]{36}$/.test(value.id) || value.usedBy !== null && !/^[a-f0-9]{64}$/.test(value.usedBy)) throw new Error();
+	if (value.auto !== undefined && value.auto !== true || value.claimedAt !== undefined && (!instant(value.claimedAt) || value.usedBy === null) || value.auto === true && value.claimedAt === undefined) throw new Error();
+	return { id: value.id, usedBy: value.usedBy, ...(value.auto === true ? { auto: true } : {}), ...(value.claimedAt !== undefined ? { claimedAt: value.claimedAt } : {}) };
+}
+/**
+ * When an exhaustion with no reset admits its one retest (issue #960), or null when it never does on its own. Only rows
+ * a provider's refusal wrote (`provider-error`, the id normalizeSubscriptionQuotaError gives a row with no window) and
+ * none with a reset: a usage read's exhausted row, Claude's included, keeps blocking until its reset or a newer read. Not
+ * while a person's trial waits unused (that trial admits the next pickup itself), nor while a probe is required. Six
+ * hours after the newest such refusal or the last trial's claim, whichever is later, so a retest that failed for another
+ * cause is tried again six hours on, and one that met the limit again re-latches through `record`.
+ */
+function retestAtOf(state, blocked) {
+	if (state.probeRequired || blocked.length === 0 || !blocked.every(row => row.id === "provider-error" && row.resetAt === null)) return null;
+	if (state.trial !== null && state.trial.usedBy === null) return null;
+	return Math.max(...blocked.map(row => row.observedAt), state.trial?.claimedAt ?? 0) + SUBSCRIPTION_RETEST_MS;
+}
+function trialClaimant(attemptId) {
+	if (typeof attemptId !== "string" || attemptId.length === 0 || attemptId.length > 256) throw quotaError("subscription-invalid-trial");
+	return hash(attemptId);
+}
+/** Why a settlement of the trial `usedBy` names may not touch it, or null: the guards the clear and the release share. */
+function heldTrialRefusal(state, status, usedBy) {
+	const trial = state.trial;
+	if (trial === null || trial.usedBy !== usedBy || trial.claimedAt === undefined || state.probeRequired) return { ok: false, reason: "subscription-stale-state", status };
+	if (state.windows.some(row => row.id === "provider-error" && row.resetAt === null && row.observedAt > trial.claimedAt)) return { ok: false, reason: "subscription-stale-evidence", status };
+	return null;
+}
 function emptyState(identity) { return { version: 0, identity, source: null, observedAt: null, windows: [], extraUsage: emptyExtra(), trial: null, probeRequired: false, invalidatedAt: null }; }
 function parseState(raw, identity) {
 	if (raw === null || raw === undefined) return emptyState(identity);
@@ -148,16 +194,16 @@ function parseState(raw, identity) {
 			if (!instant(value.windows[index].observedAt) || value.windows[index].observedAt > value.observedAt) throw new Error();
 			return { ...row, observedAt: value.windows[index].observedAt };
 		});
-		if (value.trial !== null && (!object(value.trial) || !/^[a-f0-9-]{36}$/.test(value.trial.id) || value.trial.usedBy !== null && !/^[a-f0-9]{64}$/.test(value.trial.usedBy))) throw new Error();
+		const trial = trialOf(value.trial);
 		if (value.probeRequired !== undefined && typeof value.probeRequired !== "boolean" || value.probeRequired === true && !instant(value.invalidatedAt)) throw new Error();
-		return { version: value.version, identity: bound, source: value.source, observedAt: value.observedAt, windows, extraUsage: clean.extraUsage, trial: value.trial === null ? null : { id: value.trial.id, usedBy: value.trial.usedBy }, probeRequired: value.probeRequired === true, invalidatedAt: value.probeRequired === true ? value.invalidatedAt : null };
+		return { version: value.version, identity: bound, source: value.source, observedAt: value.observedAt, windows, extraUsage: clean.extraUsage, trial, probeRequired: value.probeRequired === true, invalidatedAt: value.probeRequired === true ? value.invalidatedAt : null };
 	} catch { throw quotaError("subscription-store-invalid"); }
 }
 function bindingValid(state, identity) { return identity.generation > state.identity.generation || identity.generation === state.identity.generation && identity.owner === state.identity.owner; }
 function statusOf(state, identity, at) {
 	const windows = state.windows.map(value => ({ ...value, fresh: !state.probeRequired && at - value.observedAt <= SUBSCRIPTION_QUOTA_LIMITS.freshMs && value.observedAt <= at, state: value.state === "exhausted" && (value.resetAt === null || value.resetAt > at) ? "exhausted" : !state.probeRequired && value.state === "available" && value.observedAt <= at && at - value.observedAt <= SUBSCRIPTION_QUOTA_LIMITS.freshMs && (value.resetAt === null || value.resetAt > at) ? "available" : "unknown" }));
 	const blocked = windows.filter(value => value.state === "exhausted");
-	return { connectionId: identity.connectionId, accountDigest: identity.accountDigest, bucket: identity.bucket, generation: state.identity.generation, version: state.version, observedAt: state.observedAt, source: state.source, fresh: !state.probeRequired && state.observedAt !== null && at - state.observedAt <= SUBSCRIPTION_QUOTA_LIMITS.freshMs, bindingValid: bindingValid(state, identity), state: blocked.length ? "exhausted" : windows.length && windows.every(value => value.state === "available") ? "available" : "unknown", until: blocked.length && blocked.every(value => value.resetAt !== null) ? Math.max(...blocked.map(value => value.resetAt)) : null, blockedUnknownReset: blocked.some(value => value.resetAt === null), trialAvailable: state.trial !== null && state.trial.usedBy === null, probeRequired: state.probeRequired, invalidatedAt: state.invalidatedAt, windows, extraUsage: state.probeRequired ? emptyExtra() : state.extraUsage };
+	return { connectionId: identity.connectionId, accountDigest: identity.accountDigest, bucket: identity.bucket, generation: state.identity.generation, version: state.version, observedAt: state.observedAt, source: state.source, fresh: !state.probeRequired && state.observedAt !== null && at - state.observedAt <= SUBSCRIPTION_QUOTA_LIMITS.freshMs, bindingValid: bindingValid(state, identity), state: blocked.length ? "exhausted" : windows.length && windows.every(value => value.state === "available") ? "available" : "unknown", until: blocked.length && blocked.every(value => value.resetAt !== null) ? Math.max(...blocked.map(value => value.resetAt)) : null, blockedUnknownReset: blocked.some(value => value.resetAt === null), trialAvailable: state.trial !== null && state.trial.usedBy === null, trialClaimedAt: state.trial?.claimedAt ?? null, retestAt: retestAtOf(state, blocked), probeRequired: state.probeRequired, invalidatedAt: state.invalidatedAt, windows, extraUsage: state.probeRequired ? emptyExtra() : state.extraUsage };
 }
 // Reviewed provider evidence: Fable has a separate weekly allowance; other models remain usable.
 // https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan
@@ -245,7 +291,7 @@ export function makeSubscriptionQuotaStore({ redis, now = Date.now } = {}) {
 		},
 		async admit(value, { modelRef = null, windows = ["five-hour", "seven-day"], attemptId, consumeTrial = true, allowExtraUsage = false, maxCreditMicros = null, requireExtraUsageKnownDisabled = false } = {}) {
 			if (!Array.isArray(windows) || windows.some(value => !["five-hour", "seven-day"].includes(value)) || new Set(windows).size !== windows.length || allowExtraUsage && (!Number.isSafeInteger(maxCreditMicros) || maxCreditMicros <= 0)) throw quotaError("subscription-invalid-policy");
-			const result = await mutate(value, (state, fullStatus) => {
+			const result = await mutate(value, (state, fullStatus, at) => {
 				const status = statusForModel(fullStatus, modelRef);
 				if (state.probeRequired) {
 					if (status.state === "exhausted") return { ok: false, reason: "subscription-quota", until: status.until, status };
@@ -256,17 +302,65 @@ export function makeSubscriptionQuotaStore({ redis, now = Date.now } = {}) {
 				const blocked = status.windows.filter(row => row.state === "exhausted");
 				if (blocked.length === 0) return { ok: true, reason: status.state === "unknown" ? "subscription-unknown" : "subscription-available", ...(allowExtraUsage ? { creditCapMicros: maxCreditMicros } : {}), status };
 				if (allowExtraUsage && status.extraUsage.enabled === true) return { ok: true, reason: "subscription-available", creditCapMicros: maxCreditMicros, status };
+				const claimant = () => trialClaimant(attemptId);
 				if (blocked.every(row => row.resetAt === null) && state.trial !== null) {
-					if (consumeTrial === false && state.trial.usedBy === null) return { ok: true, reason: "subscription-trial", status };
-					if (typeof attemptId !== "string" || attemptId.length === 0 || attemptId.length > 256) throw quotaError("subscription-invalid-trial");
-					const usedBy = hash(attemptId);
-					if (state.trial.usedBy === usedBy) return { ok: true, reason: "subscription-trial", status };
-					if (state.trial.usedBy === null) return { ok: true, reason: "subscription-trial", next: { ...state, trial: { ...state.trial, usedBy } } };
+					// A preview claims nothing. A trial another attempt already holds refuses it below, like any block,
+					// rather than asking a preview, which names no attempt, for one.
+					if (consumeTrial === false) {
+						if (state.trial.usedBy === null) return { ok: true, reason: "subscription-trial", status };
+					} else {
+						const usedBy = claimant();
+						if (state.trial.usedBy === usedBy) return { ok: true, reason: "subscription-trial", status };
+						// The claim time lets a clean run of this trial clear the block (clearTrialEvidence).
+						if (state.trial.usedBy === null) return { ok: true, reason: "subscription-trial", next: { ...state, trial: { ...state.trial, usedBy, claimedAt: at } } };
+					}
+				}
+				// Issue #960: an exhaustion that named no reset is tried again by ONE attempt once SUBSCRIPTION_RETEST_MS has
+				// passed. The claim is this compare-and-set, so of two hosts reading the same state one writes and the other
+				// reads the claim on its retry and is refused; until the trial records again or clears, it holds.
+				// The connection's retest, the one `auth status` and the console show (provider refusals are connection-wide).
+				if (fullStatus.retestAt !== null && at >= fullStatus.retestAt) {
+					if (consumeTrial === false) return { ok: true, reason: "subscription-trial", status };
+					return { ok: true, reason: "subscription-trial", next: { ...state, trial: { id: randomUUID(), usedBy: claimant(), auto: true, claimedAt: at } } };
 				}
 				return { ok: false, reason: "subscription-quota", until: blocked.every(row => row.resetAt !== null) ? Math.max(...blocked.map(row => row.resetAt)) : null, status };
 			}, { bind: consumeTrial !== false });
 			// A selected admission may publish a newer binding through CAS, which returns the full connection view.
 			return result.status ? { ...result, status: statusForModel(result.status, modelRef) } : result;
+		},
+		/**
+		 * A trial whose run reached the provider and was answered clears the refusals it was trying (issue #960): without
+		 * this, a connection whose limit reset would run one job per SUBSCRIPTION_RETEST_MS. Only the attempt holding the
+		 * trial (`attemptId`, hashed as admit hashed it), only `provider-error` rows with no reset (a usage read's rows,
+		 * Claude's, stay), and only when none is newer than the trial's claim: a refusal recorded after the claim drops
+		 * the trial (`record`), so its rows are never cleared by an older answer. A used trial with no claim time (claimed
+		 * by an older build) clears nothing, since nothing says its rows predate the run; the next retest or a person's
+		 * trial settles it. Probe-required state is left alone, and `observedAt` must lie between the claim and now.
+		 */
+		async clearTrialEvidence(value, { attemptId, observedAt } = {}) {
+			if (!instant(observedAt)) throw quotaError("subscription-invalid-observation");
+			const usedBy = trialClaimant(attemptId);
+			return mutate(value, (state, status, at) => {
+				const refused = heldTrialRefusal(state, status, usedBy);
+				if (refused) return refused;
+				if (observedAt > at || observedAt < state.trial.claimedAt) return { ok: false, reason: "subscription-stale-state", status };
+				const rows = state.windows.filter(row => row.id === "provider-error" && row.resetAt === null);
+				return { ok: true, next: { ...state, windows: state.windows.filter(row => !rows.includes(row)), trial: null } };
+			});
+		},
+		/**
+		 * A trial whose run never reached the provider gives the trial back (issue #960): the run proved nothing about the
+		 * limit, so it must not hold the connection shut for another SUBSCRIPTION_RETEST_MS. Under the same guards as the
+		 * clear. An automatic trial is dropped, so the retest is due again at once (`retestAtOf` then reads only the
+		 * refusals); a person's trial is unused again, so the next pickup takes it, as the person authorized.
+		 */
+		async releaseTrial(value, { attemptId } = {}) {
+			const usedBy = trialClaimant(attemptId);
+			return mutate(value, (state, status) => {
+				const refused = heldTrialRefusal(state, status, usedBy);
+				if (refused) return refused;
+				return { ok: true, next: { ...state, trial: state.trial.auto === true ? null : { id: state.trial.id, usedBy: null } } };
+			});
 		},
 		async grantOneTrial(value, { expectedVersion, actorKind } = {}) {
 			if (actorKind !== "person" || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) throw quotaError("subscription-trial-person-required");

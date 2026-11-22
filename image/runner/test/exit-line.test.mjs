@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { createExitWriter, drainStdin, EXIT_LINE_LOADED_MAX_BYTES, EXIT_LINE_MAX_BYTES, EXIT_MESSAGE_MAX_BYTES, EXIT_TAIL_BYTES, EXIT_TERMINATED, exitLineJson, exitLineMac, exitLineMaxBytes, readExitKey, signExitLine, SUPERVISOR_LINE_BYTES, writeAllSync } from "../src/exit-line.mjs";
 import { buildLoaded, fitLoaded } from "../src/loaded.mjs";
 import { capExitMessage } from "../src/outcome.mjs";
+import { SUBSCRIPTION_QUOTA_CODES } from "../src/provider-failure.mjs";
 import { longestNames, maximalLoaded } from "./helpers/maximal-loaded.mjs";
 import { deathFields, BY_SUPERVISOR } from "../src/supervise.mjs";
 import { dollarSettlement } from "../../../worker/src/dollar-budget.mjs";
@@ -319,7 +320,8 @@ function worstFields(message = `403 ${"\u0001".repeat(16000)}`) {
 		session: { resumed: false, reason: "resume-chain-too-long" },
 		replaySafe: false,
 		toolsStarted: true,
-		providerFailure: { kind: "quota-exhausted", resetAt: 253402300799999, subscriptionCode: "usage_limit_reached", subscriptionProvider: "anthropic" },
+		// The longest closed code (issue #960 added a ChatGPT workplace limit that is the longest).
+		providerFailure: { kind: "quota-exhausted", resetAt: 253402300799999, subscriptionCode: [...SUBSCRIPTION_QUOTA_CODES].reduce((a, b) => (b.length > a.length ? b : a)), subscriptionProvider: "anthropic" },
 		recovery: { orphans: N, replayed: N, interrupted: N, notStarted: N },
 		steer: { delivered: N, pending: N, deliveredIds: Array.from({ length: 16 }, () => "a".repeat(32)) },
 	};
@@ -403,9 +405,9 @@ test("the numbers INT-RUNNER-EXIT-CODE-PROTOCOL states are measured here: every 
 	// new field moves these, and the spec's sentence with them.
 	const fields = { ...worstFields(), reason: "error" };
 	const line = `\n${signExitLine(JSON.stringify({ event: "exit", jobId: JOB_ID, ...fields, resources: LONGEST_RESOURCES }), KEY)}\n`;
-	assert.equal(line.length, 7961);
+	assert.equal(line.length, 8004);
 	const withSupervisor = line.length + SUPERVISOR_LINE_BYTES + JOB_ID.length;
-	assert.equal(withSupervisor, 8454);
+	assert.equal(withSupervisor, 8497);
 	assert.ok(withSupervisor > EXIT_TAIL_BYTES);
 	const spec = readFileSync(new URL("../../../specs/interfaces.md", import.meta.url), "utf8");
 	const section = spec.slice(spec.indexOf("**The whole line has a limit of its own (issue #800)"), spec.indexOf("**The job user cannot read its own inputs (issue #341)**"));
@@ -428,6 +430,7 @@ test("a maximal line stays at or under 7,680 bytes and verifies, with the code, 
 	assert.equal(read.tokens.total, 99_999_999);
 	const parsed = JSON.parse(authenticExitLines(line, KEY));
 	assert.deepEqual(parsed.steer, fields.steer, "every other field survives whole: only the message was cut");
+	assert.deepEqual(parsed.providerFailure, fields.providerFailure, "the longest quota code is signed whole");
 	assert.deepEqual(parsed.usage.models.length, 9);
 	assert.match(parsed.message, /\.\.\. \[truncated \d+ chars\]$/);
 });

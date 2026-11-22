@@ -20,7 +20,7 @@ import { makeWatchRuntime } from "./watch-runtime.mjs";
 import { makeWatchDrainer } from "./watch-drainer.mjs";
 import { makeWatchIssuePublisher } from "./watch-issue.mjs";
 import { makeWatchIssueAdapter } from "./watch-issue-adapter.mjs";
-import { checkFailoverCandidate, failoverEgressRequired } from "./model-failover.mjs";
+import { checkFailoverCandidate, failoverEgressRequired, providerFailureOf } from "./model-failover.mjs";
 import { parseTriggers, parseTriggersDocument, TRIGGERS_FILE_VERSION } from "./triggers.mjs";
 import { watchDurationMs } from "./watch-contract.mjs";
 import { makeApprovalSessionCheck } from "./approval-session.mjs";
@@ -45,7 +45,8 @@ import { reconcileGated, reloadSchedules } from "./cron.mjs";
 import { makeGitHubAuth } from "./get-token.mjs";
 import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, checkDraftAnswerSource } from "./processor.mjs";
 import { consoleDraftOf } from "./console-answer.mjs";
-import { FAILED_COMMENT, FAILED_COMMENT_BY_REASON, RECOVERY_HOST_LOST_COMMENT } from "./comment-tables.mjs";
+import { FAILED_COMMENT, FAILED_COMMENT_BY_PROVIDER_FAILURE, FAILED_COMMENT_BY_REASON, RECOVERY_HOST_LOST_COMMENT } from "./comment-tables.mjs";
+import { CONTAINER_INFRA_EXIT } from "./record-reason.mjs";
 import { transientError } from "./transient.mjs";
 import { makeGitHubHost } from "./github-host.mjs";
 import { githubFailureFields } from "./octokit-log.mjs";
@@ -3104,6 +3105,14 @@ export async function startWorker(
 	const pagesAsReturnedFailure = (result) => Boolean(onFailure) && result?.outcome === "failed" && result.reason === "recovery-failed";
 	// The infra-terminal sentences (FAILED_COMMENT, FAILED_COMMENT_BY_REASON, issue #288) and the host-lost one
 	// (RECOVERY_HOST_LOST_COMMENT, issue #645) are module constants in comment-tables.mjs since issue #710, with why each is fixed.
+	// Which one a terminal failure posts: its reason's row, else (issue #960) for a `container-infra-exit` the row of the
+	// signed provider failure the processor carried onto the error (index.mjs `carryLiveSkip`), validated again here, else
+	// the generic sentence. A reason row always wins, so a cause-keyed row can never hide a fixed reason's own words.
+	const failedComment = (err) => {
+		if (typeof err?.reason === "string" && Object.hasOwn(FAILED_COMMENT_BY_REASON, err.reason)) return FAILED_COMMENT_BY_REASON[err.reason];
+		const kind = err?.reason === CONTAINER_INFRA_EXIT ? providerFailureOf(err.providerFailure)?.kind : undefined;
+		return typeof kind === "string" && Object.hasOwn(FAILED_COMMENT_BY_PROVIDER_FAILURE, kind) ? FAILED_COMMENT_BY_PROVIDER_FAILURE[kind] : FAILED_COMMENT;
+	};
 	// Fleet-wide, on every host: whichever host's sweep claims a due recovery first tells its run. The record says it too,
 	// so the panel's history shows the run ended rather than a recovery that vanished.
 	const sweepHostLost = makeHostLostSweepFn({
@@ -3775,7 +3784,7 @@ export async function startWorker(
 					// a second close (the processor settled first) acts on nothing.
 					if (job.data?.awaitInput === true) void heldSettle({ job, error: { reason: typeof err?.reason === "string" ? err.reason : "infra" } });
 				}
-				if (!settledElsewhere) void comment({ ...job.data, id: job.id }, (typeof err?.reason === "string" && Object.hasOwn(FAILED_COMMENT_BY_REASON, err.reason) ? FAILED_COMMENT_BY_REASON[err.reason] : null) ?? FAILED_COMMENT);
+				if (!settledElsewhere) void comment({ ...job.data, id: job.id }, failedComment(err));
 				onFailure?.({ jobId: job?.id, outcome: "failed", reason: typeof err?.reason === "string" ? err.reason : "infra" });
 			}
 		};

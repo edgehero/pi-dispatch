@@ -638,8 +638,15 @@ inside the container. The worker counted the attempt as an infrastructure fault 
 left. The container ran, so its spend is counted and partial work may exist. A run armed for recovery (`run.recover`)
 that has a checkpoint continues from it instead, and that attempt's record says `recovery-enqueued`.
 
+When the runner read a closed failure from the provider, the record's `providerFailure` names its kind. A used-up
+quota (`quota-exhausted`), such as a ChatGPT subscription past its plan's usage limit, cools the model down, and a
+listed fallback model on another connection runs the retry ([model-failover.md](model-failover.md)). When no attempt
+is left, the issue's comment says the provider refused the job's model because the account's usage limit or quota is
+used up; every other kind posts the general failure comment.
+
 What to do: read the `exit` line in the job log for what the runner met, then run the job again if every attempt was
-used. See [durable-runs.md](durable-runs.md).
+used. For a used-up quota, wait for the limit to reset or list a fallback model for the trigger
+([subscription-auth.md](subscription-auth.md)). See [durable-runs.md](durable-runs.md).
 
 ### container-exit-unknown
 
