@@ -3,7 +3,7 @@
 // DEVELOPER'S real Valkey on 127.0.0.1:6379, so a governed split there turned a hundred unrelated tests red. Here the
 // seam defaults to "no split"; a test that wants one passes its own `readAppliedSplit`. A bolt in doctor.test.mjs
 // refuses a test file that imports `runDoctor` or `collectChecks` from the source module instead of from here.
-import { collectChecks as realCollectChecks, forbidDefaultCapacityRead, forbidDefaultDollarWindowRead, runDoctor as realRunDoctor } from "../../src/doctor.mjs";
+import { collectChecks as realCollectChecks, forbidDefaultCapacityRead, forbidDefaultDollarWindowRead, forbidDefaultSubscriptionQuotaRead, runDoctor as realRunDoctor } from "../../src/doctor.mjs";
 
 const NO_SPLIT = async () => null;
 // Issue #596, phase 3: the size suggestions read run records, and the default reader reads the logs directory the
@@ -28,7 +28,12 @@ forbidDefaultDollarWindowRead();
 export const NO_DOLLAR_RECORDS = async () => ({ records: [] });
 export const NO_DOLLAR_COUNTERS = async () => null;
 export const NO_OLDER_STATE = async () => [];
-const QUIET = { readDollarRecords: NO_DOLLAR_RECORDS, readDollarCounters: NO_DOLLAR_COUNTERS, olderStateFindings: NO_OLDER_STATE };
+// Issue #1008: the quota reserve's lines read a connection's quota off the deployment's Valkey, the DEVELOPER'S real one
+// without the seam. Here it defaults to "could not be read"; a test that wants a reading passes its own, and the default
+// read is refused.
+forbidDefaultSubscriptionQuotaRead();
+export const NO_SUBSCRIPTION_QUOTA = async () => null;
+const QUIET = { readDollarRecords: NO_DOLLAR_RECORDS, readDollarCounters: NO_DOLLAR_COUNTERS, olderStateFindings: NO_OLDER_STATE, readSubscriptionQuota: NO_SUBSCRIPTION_QUOTA };
 
 export function runDoctor(shellVars, deps = {}) {
 	return realRunDoctor(shellVars, { readModelCooldowns: async () => [], readAppliedSplit: NO_SPLIT, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...QUIET, ...deps });

@@ -94,6 +94,10 @@ export async function selectFailoverJob(job, { redis, id, retry = false, recover
 	const largerThan = needsLarger ? modelView(previous.ref)?.contextWindow : null;
 	let why = previous?.failure?.kind === "context-overflow" ? "fallback-context" : "fallback-unavailable";
 	let wait = null;
+	// The earliest known reset among the candidates a subscription wait blocked (an exhausted window's, or the quota
+	// reserve's holding windows', issue #1008), carried to the defer record as the random pool's `waiting` carries it.
+	// An alternative with no known reset may clear sooner, but cannot erase another's observed one.
+	const resets = [];
 	const primaryAuth = subscriptionCheck ? await subscriptionCheck({ ...job, models: [...new Set([primary, ...(job.auxiliaryModels ?? [])])] }) : null;
 	// Changing models cannot make a local mount stop exposing the host's refresh store.
 	if (primaryAuth?.reason === LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH) return { refused: LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH };
@@ -111,6 +115,8 @@ export async function selectFailoverJob(job, { redis, id, retry = false, recover
 				continue;
 			}
 			if (!subscription.ok) {
+				const known = subscription.wait ? subscription.status?.until ?? subscription.resetAt : null;
+				if (Number.isSafeInteger(known) && known > now()) resets.push(known);
 				if (subscription.wait) wait ??= subscription.wait;
 				log("model_candidate_skipped", { model: ref, reason: subscription.wait ?? subscription.reason ?? "auth-unavailable" });
 				continue;
@@ -130,5 +136,5 @@ export async function selectFailoverJob(job, { redis, id, retry = false, recover
 		if (!(await acquireEndpoints(candidate))) { wait ??= "endpoint"; log("model_candidate_skipped", { model: ref, reason: "endpoint-busy" }); continue; }
 		return { job: { ...candidate, modelWhy: ref === primary ? "primary" : locked ? previous?.modelWhy ?? "fallback-unavailable" : why }, ref };
 	}
-	return wait ? { wait, until: now() + MODEL_RECHECK_MS } : { refused: "model-failover-no-candidate" };
+	return wait ? { wait, until: now() + MODEL_RECHECK_MS, ...(resets.length ? { resetAt: Math.min(...resets) } : {}) } : { refused: "model-failover-no-candidate" };
 }

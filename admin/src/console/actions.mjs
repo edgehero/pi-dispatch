@@ -1227,7 +1227,7 @@ export function waitingLine(row) {
     const line = filledLine(DEFER_WHYS[why].sentence, row);
     if (line !== null) {
       const reset = subscriptionResetSentence(row.resetAt);
-      return why === "subscription-quota" ? { text: `${line.text}. ${reset}`, bar: html`${line.bar}. ${reset}` } : line;
+      return why === "subscription-quota" || why === "subscription-reserve" ? { text: `${line.text}. ${reset}`, bar: html`${line.bar}. ${reset}` } : line;
     }
   } else if (why !== null && row.known === false) {
     return { text: `Recorded reason: ${why}, ${NO_EXPLANATION}`, bar: html`Recorded reason: <span class="code">${why}</span>, ${NO_EXPLANATION}` };

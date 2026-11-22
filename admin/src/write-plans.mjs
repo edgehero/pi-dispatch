@@ -344,6 +344,22 @@ export function wideningFieldRefusal(params, tool) {
   };
   const privateAt = privatePath(params);
   if (privateAt !== null) return `${tool} cannot set run.privateEndpoints (sent as ${privateAt}): which private endpoints a trigger's jobs may reach is set by hand in the reviewed triggers file, never by a tool`;
+  // Issue #1008: run.quotaReserve lets a trigger's jobs spend the subscription quota the deployment holds back, so no tool
+  // call may carry it either, in its own spelling or one folded the same way (case, `_`, `-`, `.`, a space, a plural, a
+  // leading `use`), at any depth. The edit tool spreads the entry's own run object, so a value written by hand survives.
+  const reserveSeen = new Set();
+  const reservePath = (value, path = "") => {
+    if (!value || typeof value !== "object" || reserveSeen.has(value)) return null;
+    reserveSeen.add(value);
+    for (const [key, entry] of Object.entries(value)) {
+      if (/^(?:use)?quotareserves?$/.test(key.toLowerCase().replace(/[_\-. ]/g, ""))) return path + key;
+      const nested = reservePath(entry, path + key + ".");
+      if (nested !== null) return nested;
+    }
+    return null;
+  };
+  const reserveAt = reservePath(params);
+  if (reserveAt !== null) return `${tool} cannot set run.quotaReserve (sent as ${reserveAt}): whether a trigger's jobs may use the subscription quota reserve is set by hand in the reviewed triggers file, never by a tool`;
   if (answerField === "run.mayMerge") return `${tool} cannot set run.mayMerge or its policy reference: merge permission is set by hand in the reviewed triggers file, never by a tool`;
   if (answerField) return `${tool} cannot set ${answerField}: answer rules are hand-written and standing answers are adopted only by a person in the console`;
   const seen = new Set();

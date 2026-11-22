@@ -946,7 +946,7 @@ A fresh run draws uniformly among candidates that pass the current free gates. I
 
 An exhausted subscription excludes all candidates sharing that account/application allowance. If every candidate is temporarily blocked, the job waits without starting a container. A displayed recheck time is not a promise that the provider has reset the allowance; an unknown reset stays unknown. One model name never creates another account allowance. A pool never switches accounts or enables paid extra usage on its own.
 
-A pool may hold subscription models and API-key models together. Which class a candidate is in depends on the worker's host: a model whose provider is bound to a [subscription connection](subscription-auth.md) there is a subscription candidate, also while that connection cannot sign in, and every other model spends an API key. Each draw bills its own candidate's class: a job that draws the subscription model runs on the subscription, and one that draws the API-key model runs on the key. The first draw passes over a subscription model that cannot take the job now (its allowance exhausted, its connection signed out, or its paid extra usage below the cap) and may land on an API-key model. After that the class never changes: a retry, a parked answer, an approval or a recovery stays on it, and a replacement after a subscription limit picks only another subscription model, or waits when all of them are blocked.
+A pool may hold subscription models and API-key models together. Which class a candidate is in depends on the worker's host: a model whose provider is bound to a [subscription connection](subscription-auth.md) there is a subscription candidate, also while that connection cannot sign in, and every other model spends an API key. Each draw bills its own candidate's class: a job that draws the subscription model runs on the subscription, and one that draws the API-key model runs on the key. The first draw passes over a subscription model that cannot take the job now (its allowance exhausted or at or above the [quota reserve](#using-the-subscription-quota-reserve), its connection signed out, or its paid extra usage below the cap) and may land on an API-key model. After that the class never changes: a retry, a parked answer, an approval or a recovery stays on it, and a replacement after a subscription limit picks only another subscription model, or waits when all of them are blocked.
 
 A pool that mixes the two classes on a host needs a positive `run.maxCostUsd` on its own trigger; the deployment's `maxCostUsd` alone does not count. Without one, every job of the trigger is refused as `auth-route-unbounded` when a worker picks it up, before anything is drawn or spent, and `pi-dispatch doctor` names the trigger on that host. The cap bounds every draw, a subscription one too: the runner prices each call from pi's model catalog and the overlay `models.json` as they were when the job started, whatever credential carries it, so a long subscription run can stop as `cost-cap`. A model priced at zero there is not bounded by the cap; pi's own Claude and OpenAI models are all priced. A pool of API-key models alone, or of subscription models alone, needs no cap. That is judged on each host at each pickup: if a host later binds one candidate's provider to a connection, the pool becomes mixed there, and its jobs, retries and continuations included, are refused as `auth-route-unbounded` until the trigger sets a cap.
 
@@ -1191,6 +1191,37 @@ of this once when a trigger sets `maxCostUsd`, as it does for `models`.
   list (or `PI_ALLOWED_MODELS`) decides which model windows its jobs hold their cap in: the listed models only.
   A job with no list holds its cap in every model window, since it may switch to any model. See
   [scoped limits](scoped-limits.md#dollar-windows-and-model-rows-version-2).
+
+## Using the subscription quota reserve
+
+A deployment can hold back the top of a Claude subscription window with `PI_QUOTA_RESERVE_PERCENT` on the host that
+owns the connection ([the quota reserve](subscription-auth.md#quota-reserve)). At or above it, only jobs whose
+trigger sets `quotaReserve` start:
+
+```json
+{ "on": { "type": "label", "any": ["pi:deploy"] },
+  "run": { "kind": "github", "flow": "deploy", "quotaReserve": true } }
+```
+
+- Use it on the triggers that finish work already under way (the next pass on an open pull request, a fix, a deploy),
+  so new first jobs wait while those still run.
+- It is `true` or `false`; anything else, such as `"true"`, is refused when the file loads. Absent is `false`.
+- Every trigger type takes it but a watch rule, which refuses it when the file loads.
+- Every other job waits, and is never refused: it shows as `subscription-reserve` on the console's waitlists and starts
+  when the window drops below the reserve or resets. It asks again at the reset or after five minutes, whichever is
+  sooner, or after a minute when a random pool's or a fallback list's choice found every candidate held (the waitlist
+  then names the earliest reset any blocked candidate knows, and the first blocked candidate's reason). A job of a
+  trigger you mark meanwhile starts at its next ask; one of a trigger you unmark waits, even if it was queued before.
+- A job with no trigger never passes the reserve: an ad hoc `pi-dispatch run` job, a job a run chains through its
+  outbox, a watch investigation and an answer draft always wait above it.
+- The worker on the host that owns the connection reads it from its own triggers file (`PI_TRIGGERS_FILE`, else
+  `./triggers.json` where it runs) when the reserve would hold a job, so that host needs the file. Without it, or when
+  the trigger that queued the job has changed or is gone, the job waits as if unmarked.
+- No receiver carries it, so receivers and pollers of any release are fine. A worker from before this release holds no
+  job on the reserve at all, so upgrade every host that owns a connection ([upgrading](upgrading.md)).
+- It only matters for jobs on a Claude subscription. A ChatGPT connection publishes no percentages and is never held.
+- No tool can set it: `dispatch_trigger_add` and `dispatch_trigger_edit` refuse a call that carries it, and an edit
+  leaves it as it is. The trigger's page has no field for it. Write it in the file by hand.
 
 ## Flows in detail
 

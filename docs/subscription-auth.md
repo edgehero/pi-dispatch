@@ -361,6 +361,55 @@ and gets it only when that attempt gave it back unasked. A known reset,
 newer evidence or stale state prevents the corresponding stale trial grant. The trial bypasses no model,
 credential, replay, recovery, count, token or dollar check.
 
+## Quota reserve
+
+One long job can use the rest of an account's seven-day window and stop every job until it resets. A quota reserve
+keeps the top of a Claude window for the work you choose. Set it on the host that owns the connection:
+
+```sh
+PI_QUOTA_RESERVE_PERCENT=85
+```
+
+It is a whole percent from 1 to 99; unset (the default) is off, and any other value stops the worker at boot. It is
+read from the environment only, and only by the owner host, so set it on every host that owns a Claude connection.
+
+When a window the job's Claude model is checked against stands at or above the reserve, only jobs whose trigger sets
+`run.quotaReserve: true` start ([triggers](triggers.md#using-the-subscription-quota-reserve)). Every other job waits.
+It is not refused: it waits, at no cost, with the reason `subscription-reserve` on the console's waitlists ("The
+subscription account is at or above its quota reserve"), and asks again at the window's reset or after five minutes,
+whichever is sooner. When a random pool's or a fallback list's choice of model finds every candidate held, the job
+asks again after a minute instead (for a random pool, at a reset that comes sooner). The waitlist names a reset: the
+latest reset of the windows holding the job, when every one of them has one; or, when a random pool's or a fallback
+list's choice found every candidate held, the earliest reset any blocked candidate knows, while the reason stays the
+first blocked candidate's. A job of a trigger you mark in the meantime starts at its next ask.
+
+The owner host's worker reads `run.quotaReserve` from its own triggers file (`PI_TRIGGERS_FILE`, else
+`./triggers.json` where the worker runs), when the reserve would hold a job. So that host needs the file: where it is
+missing, does not load or was written by a newer pi-dispatch, no trigger can use the reserve and every job waits above
+it. A job with no trigger never passes the reserve either: an ad hoc `pi-dispatch run` job, a job a run chains through
+its outbox, a watch investigation and an answer draft always wait above it.
+
+- A reading counts only with a measured percentage. Usage only grows inside a window until it resets, so a reading at or
+  above the reserve counts until its reset even when it is older than five minutes. A reading with no reset time counts
+  only while it is fresh; an older one is read again before a job starts.
+- Unknown usage never holds a job. Neither does a ChatGPT connection: it publishes no percentages, so the reserve does
+  not apply to it.
+- A window at 100% is exhausted, and its own wait applies first ([quota admission](#quota-admission)), marked trigger or
+  not. The one exception is a connection authorized for [paid extra usage](#paid-extra-usage) whose extra usage is
+  enabled: admission lets its jobs past an exhausted window to spend paid credit, and the reserve then holds every
+  unmarked job, so only jobs of marked triggers start and spend that credit.
+- The windows are the ones admission counts for the job's model: the reviewed Fable weekly scope does not hold an
+  `anthropic/claude-opus-5-5` job.
+- In a random model pool, the first draw passes over a Claude candidate the reserve holds, as it passes over an
+  exhausted one, and may draw another candidate. A job that has already drawn its model waits.
+- An auxiliary Claude model the reserve holds holds the whole job, as an exhausted one does.
+
+`pi-dispatch doctor` names the triggers file the worker reads the flag from and how many triggers set it, and warns
+when the file cannot be used. It then prints a line for each connection the host owns, comparing its windows with the
+reserve. `pi-dispatch auth status` prints the reserve as `reservePercent` on each Claude connection the host owns. The
+Models page shows it, marks each window that holds jobs, and says so in the connection's badge and Pickup line. A host
+from before this release publishes no reserve and holds no job on one.
+
 ## Paid extra usage
 
 Claude `extra_usage` that is enabled or unknown refuses by default. To authorize paid overage explicitly, put a
@@ -384,9 +433,9 @@ venues and subscription canaries refuse before spending. A resurrected sandbox r
 Recovery retains its checkpoint's physical model and rechecks current authentication and policy.
 
 Connections shows the configured owner, selected profile, compatibility, credential state and expiry.
-Models shows typed quota windows, observation age, exhausted/unknown state and paid-overage facts. Operator
-terminal commands are offered where applicable; viewers receive no credential management controls. Missing
-host publication remains unknown. Raw credentials, account/profile identities and provider errors are absent
+Models shows typed quota windows, observation age, exhausted/unknown state, paid-overage facts and a published
+quota reserve. Operator terminal commands are offered where applicable; viewers receive no credential management
+controls. Missing host publication remains unknown. Raw credentials, account/profile identities and provider errors are absent
 from both browser and machine projections.
 
 The behavioral contracts are `REQ-SUBSCRIPTION-AUTHENTICATION`, `DES-HOST-OWNED-SUBSCRIPTION-AUTH`,

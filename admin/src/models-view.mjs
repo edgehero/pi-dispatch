@@ -24,6 +24,8 @@ import { doctorStale } from "./doctor-view.mjs";
 import { meteredRunMicros } from "./costs.mjs";
 import { newerSkippedSentence, readableRecords } from "./newer-release.mjs";
 
+/** The waits the Models page lists beside cooldowns, issue #1008's quota reserve among them. */
+const MODEL_WAIT_REASONS = Object.freeze(["model-cooldown", "model-window", "subscription-quota", "subscription-reserve"]);
 export const MODELS_LIMITS = Object.freeze({ fileBytes: 1024 * 1024, records: 1000, days: 30, hosts: 64, proposals: 256, waits: 200, canarySources: 64, timeoutMs: 2500 });
 const DAY = 86400_000;
 const sha = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -191,7 +193,7 @@ export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], dep
   const retained = [...dedup.values()].slice(0, MODELS_LIMITS.records);
   const recentFallbacks = retained.filter(record => MODEL_WHY.includes(record.modelWhy) && record.modelWhy.startsWith("fallback-") && atOf(record) >= now - MODELS_LIMITS.days * DAY).map(record => ({ jobId: record.jobId, ...fields(record, ["provider", "model", "modelRole", "modelWhy"]), providerFailure: providerFailureOf(record.providerFailure) })).slice(0, 20);
   const recentRandom = retained.filter(record => ["random", "random-subscription-limit"].includes(record.modelWhy) && atOf(record) >= now - MODELS_LIMITS.days * DAY).map(record => ({ jobId: record.jobId, ...fields(record, ["provider", "model", "modelWhy"]) })).slice(0, 20);
-  const waiting = (snapshot?.waiting?.rows ?? []).filter(row => ["model-cooldown", "model-window", "subscription-quota"].includes(row.why ?? row.reason)).slice(0, MODELS_LIMITS.waits).map(row => ({ jobId: safeId(row.jobId), queue: safeId(row.queue), reason: row.why ?? row.reason, resetAt: integer(row.resetAt) })).filter(row => row.jobId);
+  const waiting = (snapshot?.waiting?.rows ?? []).filter(row => MODEL_WAIT_REASONS.includes(row.why ?? row.reason)).slice(0, MODELS_LIMITS.waits).map(row => ({ jobId: safeId(row.jobId), queue: safeId(row.queue), reason: row.why ?? row.reason, resetAt: integer(row.resetAt) })).filter(row => row.jobId);
   const notes = ["Comparisons and fallback history use at most 1,000 retained local and mirrored run records over 30 days. Missing remote or expired records are unknown.", "A candidate shown next has not reserved a dollar window or endpoint. Credentials, egress, windows and slots are checked again at pickup.", "Repository agents' role declarations are not readable from this page."];
   if (facts.runs.some(run => run.projectUnknown) || facts.checks.some(check => check.projectUnknown)) notes.push("A local folder could not be resolved on this console host. The possible project scopes are shown; the owning worker resolves its actual folder at pickup.");
   if (records === null) notes.push("Run records could not be read; comparison and fallback history are unknown.");
@@ -333,7 +335,7 @@ export function modelsForAgent(view) {
     canaries: (view?.canaries ?? []).map(row => ({ id: safeId(row.id), digest: /^[a-f0-9]{64}$/.test(row.digest ?? "") ? row.digest : null, role: roleValid(row.role) ? row.role : null, candidate: model(row.candidate), flow: safeId(row.flow),
       candidateStats: metrics(row.candidateStats), sourceStats: metrics(row.sourceStats), partial: row.partial === true,
       rows: (row.rows ?? []).map(pair => ({ jobId: safeId(pair.jobId), sourceJobId: safeId(pair.sourceJobId), candidate: { model: model(pair.candidate?.model), outcome: safeId(pair.candidate?.outcome), cost: finite(pair.candidate?.cost), turns: integer(pair.candidate?.turns), tokens: integer(pair.candidate?.tokens) }, source: pair.source ? { model: model(pair.source.model), outcome: safeId(pair.source.outcome), cost: finite(pair.source.cost), turns: integer(pair.source.turns), tokens: integer(pair.source.tokens) } : null })) })),
-    waiting: (view?.waiting ?? []).map(row => ({ jobId: safeId(row.jobId), reason: ["model-cooldown", "model-window", "subscription-quota"].includes(row.reason) ? row.reason : null, resetAt: integer(row.resetAt) })),
+    waiting: (view?.waiting ?? []).map(row => ({ jobId: safeId(row.jobId), reason: MODEL_WAIT_REASONS.includes(row.reason) ? row.reason : null, resetAt: integer(row.resetAt) })),
     recentFallbacks: (view?.recentFallbacks ?? []).map(row => ({ jobId: runId(row.jobId), provider: providerIdProblem(row.provider) === null ? row.provider : null, model: modelIdProblem(row.model) === null ? row.model : null, modelRole: roleValid(row.modelRole) ? row.modelRole : null, modelWhy: MODEL_WHY.includes(row.modelWhy) ? row.modelWhy : null, providerFailure: providerFailureOf(row.providerFailure) })),
     banners: (view?.banners ?? []).map(row => ({ kind: Object.hasOwn(bannerReasons, row.kind) ? row.kind : "unknown", reason: Object.hasOwn(bannerReasons, row.kind) && bannerReasons[row.kind].includes(row.reason) ? row.reason : null, index: integer(row.index), project: safeId(row.project), projectUnknown: row.projectUnknown === true })),
     coverage: { complete: false, partial: true, records: integer(view?.coverage?.records), days: MODELS_LIMITS.days, truncated: view?.coverage?.truncated === true } };

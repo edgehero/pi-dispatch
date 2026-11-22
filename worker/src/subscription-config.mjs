@@ -28,7 +28,11 @@ export function readAuthPolicy(path, { uid = process.getuid?.(), fs = realFs } =
 	}
 }
 
-export function configuredSubscriptions({ config, redis, now = Date.now, adapters, fetch } = {}) {
+/**
+ * `reserveGranted(job)` is the worker's read of a job's `run.quotaReserve` (issue #1008, triggers-file.mjs
+ * `makeCheckQuotaReserve`); the reserve itself is `config.quotaReservePercent`. Without the read nothing is granted.
+ */
+export function configuredSubscriptions({ config, redis, now = Date.now, adapters, fetch, reserveGranted } = {}) {
 	if (!config.authConnectionsFile) return null;
 	const storeDir = config.authStoreDir ?? resolve(dirname(config.settingsFile), "subscription-auth");
 	for (const root of [config.globalPiDir, config.jobsDir, config.sandboxDir]) if (root && privateStoreExposed(root, storeDir)) throw Object.assign(new Error("the private subscription store must be outside every job or overlay root"), { code: "auth-store-location" });
@@ -37,7 +41,7 @@ export function configuredSubscriptions({ config, redis, now = Date.now, adapter
 	const auth = createAuthService({ readPolicy, storeDir, host: config.workerName, now, ...(adapters ? { adapters } : {}), ...(fetch ? { fetch } : {}) });
 	if (!redis) return { auth, quota: null, runtime: null, storeDir };
 	const quota = makeSubscriptionQuotaStore({ redis, now });
-	const runtime = makeSubscriptionRuntime({ auth, quota, now, defaultBackend: config.defaultBackend, isPrivateStoreExposed: (job) => job.kind === "local" && privateStoreExposed(job.folder, storeDir), lookup: (provider, id) => failoverModelView(`${provider}/${id}`, { models: readOverlayModels(config.globalPiDir) }), packageRootFor: (adapter) => {
+	const runtime = makeSubscriptionRuntime({ auth, quota, now, defaultBackend: config.defaultBackend, quotaReservePercent: config.quotaReservePercent ?? null, ...(reserveGranted ? { reserveGranted } : {}), isPrivateStoreExposed: (job) => job.kind === "local" && privateStoreExposed(job.folder, storeDir), lookup: (provider, id) => failoverModelView(`${provider}/${id}`, { models: readOverlayModels(config.globalPiDir) }), packageRootFor: (adapter) => {
 		const row = readPolicy().connections.find((entry) => entry.adapter === adapter && entry.ownerHost === config.workerName);
 		if (!row?.root || !config.globalPiDir || !inside(resolve(config.globalPiDir, "packages"), row.root)) return null;
 		const root = `${CONTAINER_GLOBAL_PI_DIR}/${relative(config.globalPiDir, row.root).split("\\").join("/")}`;

@@ -416,9 +416,11 @@ test("the audit chain with a reaped start and rows a newer console wrote: still 
 const INT_CASES = {
 	PI_CONSOLE_AUDIT_RETENTION_DAYS: { accepted: [undefined, "", "0", "1", "365", " 30 ", "100000"], refused: ["-1", "abc", "1.5", "030", "1e3", " ", "+5"] },
 	PI_RUN_MIRROR_MAX_RUNS: { accepted: [undefined, "", "1000", "5000", "20000", " 2000 "], refused: ["999", "20001", "0", "abc", "1.5", "-1", "05000", " ", "1e4"] },
+	// Issue #1008: optional, so unset or empty is off, never a default.
+	PI_QUOTA_RESERVE_PERCENT: { accepted: [undefined, "", "1", "85", "99", " 85 "], refused: ["0", "100", "-1", "abc", "85.5", "085", " ", "1e1", "+5"] },
 };
 
-test("a bad PI_CONSOLE_AUDIT_RETENTION_DAYS or PI_RUN_MIRROR_MAX_RUNS fails doctor, naming the boot refusal", () => {
+test("a bad PI_CONSOLE_AUDIT_RETENTION_DAYS, PI_RUN_MIRROR_MAX_RUNS or PI_QUOTA_RESERVE_PERCENT fails doctor, naming the boot refusal", () => {
 	assert.deepEqual(Object.keys(INT_CASES).sort(), Object.keys(WORKER_INT_SETTINGS).sort(), "every judged setting has its cases");
 	for (const [key, { accepted, refused }] of Object.entries(INT_CASES)) {
 		for (const value of accepted) assert.deepEqual(workerIntSettingChecks({ [key]: value }), [], `${key}=${JSON.stringify(value)}`);
@@ -434,10 +436,13 @@ test("a bad PI_CONSOLE_AUDIT_RETENTION_DAYS or PI_RUN_MIRROR_MAX_RUNS fails doct
 		['PI_CONSOLE_AUDIT_RETENTION_DAYS is "-1", which is not a non-negative integer: the worker refuses to boot on it (exit 2)', "set it to a whole number of days (0 keeps the console audit trail forever), or delete the line so the trail is kept as long as PI_LOG_RETENTION_DAYS keeps run history"],
 		['PI_RUN_MIRROR_MAX_RUNS is "999", which is not an integer 1000-20000: the worker refuses to boot on it (exit 2)', "set it to a whole number from 1000 to 20000, or delete the line for the default (5000)"],
 	]);
+	assert.deepEqual(workerIntSettingChecks({ PI_QUOTA_RESERVE_PERCENT: "100" }).map((c) => [c.label, c.fix]), [
+		['PI_QUOTA_RESERVE_PERCENT is "100", which is not an integer 1-99: the worker refuses to boot on it (exit 2)', "set it to a whole percent from 1 to 99, or delete the line to turn the quota reserve off"],
+	]);
 });
 
-test("doctor fails exactly the values of PI_CONSOLE_AUDIT_RETENTION_DAYS and PI_RUN_MIRROR_MAX_RUNS the worker refuses to boot on", () => {
-	// The worker's own loader is the oracle (config.mjs reads both keys, issue #761): a configuration error naming the key
+test("doctor fails exactly the values of PI_CONSOLE_AUDIT_RETENTION_DAYS, PI_RUN_MIRROR_MAX_RUNS and PI_QUOTA_RESERVE_PERCENT the worker refuses to boot on", () => {
+	// The worker's own loader is the oracle (config.mjs reads every key, issues #761 and #1008): a configuration error naming the key
 	// for every value doctor fails, and a boot for every value it passes.
 	const base = { HOME: "/home/u", PATH: "/usr/bin", ANTHROPIC_API_KEY: "x", WEBHOOK_SECRET: "s", PI_TRIGGERS_FILE: "/d/triggers.json" };
 	const fileExists = (p) => typeof p === "string" && p.startsWith("/");
