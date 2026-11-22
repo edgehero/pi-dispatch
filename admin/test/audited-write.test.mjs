@@ -17,7 +17,9 @@ const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-a
 const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const indexMod = await jiti.import(fileURLToPath(new URL("../src/index.ts", import.meta.url)));
-const { makeDashboard, withAuditedWrites, switchCommandLost, switchFailure, switchUnconfirmed } = await jiti.import(fileURLToPath(new URL("../src/dashboard.ts", import.meta.url)));
+const { createDashboardDeps, makeDashboard, withAuditedWrites, switchCommandHalf, switchCommandLost, switchFailure, switchUnconfirmed } = await jiti.import(fileURLToPath(new URL("../src/dashboard.ts", import.meta.url)));
+const { keyedRedis, quietQueue } = await import("./helpers/fleet-reader-fakes.mjs");
+const { switchShortNote } = await import("../src/words.mjs");
 
 const ACTOR = { name: "rob", role: "panel", session: null };
 /** Every row in `logsDir`'s audit chain, oldest first (the month follows the wall clock here, so every file is read). */
@@ -285,6 +287,55 @@ test("the TUI's writes: pause, resume and both cancels go through the injected w
   assert.match(out, /resume refused: the audit log could not be written, so nothing was changed; check PI_LOGS_DIR/);
 });
 
+// Issue #964: a write that landed with something still to say gets a second `ok` row on its ticket, after the first and
+// before an agent's receipt; a write that did not land gets none, and a note row that cannot be written stops nothing.
+test("auditedWrite's note: a second ok row with the reason on the same ticket, only for a write that landed", async () => {
+  const rows = [];
+  const audit = { append: (row) => (rows.push(row), row) };
+  const note = (r) => (r?.short ? "the list may be short" : null);
+  const said = (list) => list.map((r) => [r.action, r.outcome, r.reason ?? null]);
+  assert.deepEqual(auditedWrite({ audit, actor: ACTOR, kind: "fleet-pause", target: "fleet", note }, () => ({ ok: true, short: true })), { ok: true, short: true });
+  assert.deepEqual(said(rows), [["write", "ok", null], ["write", "ok", "the list may be short"]]);
+  assert.equal(rows[0].ticket, rows[1].ticket);
+  rows.length = 0;
+  await auditedWrite({ audit, actor: { ...ACTOR, role: "agent" }, kind: "fleet-pause", target: "fleet", note }, async () => ({ ok: true, short: true }));
+  assert.deepEqual(said(rows), [["write", "ok", null], ["write", "ok", "the list may be short"], ["write-applied", "ok", null]]);
+  rows.length = 0;
+  auditedWrite({ audit, actor: ACTOR, kind: "fleet-pause", target: "fleet", note }, () => ({ ok: true }));
+  auditedWrite({ audit, actor: ACTOR, kind: "fleet-pause", target: "fleet", note }, () => ({ invalid: "refused", short: true }));
+  assert.deepEqual(said(rows), [["write", "ok", null], ["write", "ok", null], ["write", "failed", "refused"]]);
+  // The note's row fails: logged, and the write's own answer is what the caller sees.
+  const logs = [];
+  let n = 0;
+  const flaky = { append: (row) => { n += 1; if (n === 2) throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); return row; } };
+  assert.deepEqual(auditedWrite({ audit: flaky, actor: ACTOR, kind: "fleet-pause", target: "fleet", note, log: (l) => logs.push(l) }, () => ({ ok: true, short: true })), { ok: true, short: true });
+  assert.match(logs.join("\n"), /^panel: audit append failed \(ENOSPC\) for what a fleet-pause write that landed had to say; the log's rows for ticket [0-9a-f]{12} say ok without it$/);
+});
+
+test("the TUI's p and r over a real fleet reader whose registry does not answer: the note says the list of queues may be short, and so does a second ok row (#964)", async () => {
+  const logsDir = tempDir("pd-964-tui-");
+  const audit = makeConsoleAudit({ logsDir });
+  const make = quietQueue();
+  const paths = { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") };
+  // The real reader through the panel's own factory: queues that answer a pause, and a host registry whose SMEMBERS rejects.
+  const real = createDashboardDeps(paths, { makeQueueFn: (c, o) => ({ ...make(c, o), pause: async () => {}, resume: async () => {} }), parseConnectionFn: () => ({}), redisFn: () => keyedRedis({}, { registryDown: () => true }), readOnly: true });
+  const deps = withAuditedWrites({ ...real, now: () => Date.UTC(2026, 10, 21) }, (opts, fn) => auditedWrite({ ...opts, audit, actor: ACTOR }, fn));
+  const comp = makeDashboard({ paths: {}, done() {}, tui: { requestRender() {} }, intervalMs: 100000, deps });
+  try {
+    await new Promise((r) => setImmediate(r));
+    const said = async (key) => {
+      comp.handleInput(key);
+      await new Promise((r) => setTimeout(r, 50));
+      return comp.render(400).map(stripAnsi).join("\n");
+    };
+    assert.ok((await said("p")).includes(`paused the fleet, but ${switchShortNote(true)}`));
+    assert.ok((await said("r")).includes(`resumed the fleet, but ${switchShortNote(false)}`));
+    assert.deepEqual(rowsOf(logsDir).map((r) => [r.kind, r.outcome, r.reason ?? null]), [["fleet-pause", "ok", null], ["fleet-pause", "ok", switchShortNote(true)], ["fleet-resume", "ok", null], ["fleet-resume", "ok", switchShortNote(false)]]);
+  } finally {
+    await comp.dispose();
+  }
+});
+
 test("the TUI's pause note renders a kill-switch refusal the reader returns, and stays silent on a plain resolve", async () => {
   const base = {
     fetchSnapshot: async () => ({ queue: { pausedState: false, counts: {}, workers: 0 }, runs: [] }),
@@ -394,12 +445,15 @@ test("the TUI's switch note reads killSwitchSet's results shape: a half switch a
   const words = "NOT CONFIRMED for q2: the switch may or may not have been made there; not tried: q3; known switched: q1";
   assert.equal(switchUnconfirmed(lost.partial), words);
   assert.equal(switchFailure({ results: [{ shown: "redis://a:6379", res: lost }] }), `${words} on redis://a:6379`);
-  // The console confirm's four, and whether the list itself may be short (the registry or the scan was not read whole).
+  // The console confirm's four, and whether the list itself may be short (the registry or the scan was not read whole):
+  // said FIRST (issue #964), since the audit row keeps the start of the sentence and a person reads it first.
   const four = { done: ["q1"], failed: "q2", unconfirmed: ["q2"], refused: ["q4"], notTried: ["q3"] };
   const fourWords = "NOT CONFIRMED for q2: the switch may or may not have been made there; not switched: q4; not tried: q3; known switched: q1";
+  const shortLead = "the list of queues may be short, so other queues may exist and were not switched; ";
   assert.equal(switchUnconfirmed(four), fourWords);
   for (const short of [{ blind: "registry down" }, { incomplete: "the scan did not finish" }]) {
-    assert.equal(switchFailure({ results: [{ shown: "redis://a:6379", res: { unreachable: "x", partial: four, ...short } }] }), `${fourWords}; the list of queues may be short on redis://a:6379`);
+    assert.equal(switchFailure({ results: [{ shown: "redis://a:6379", res: { unreachable: "x", partial: four, ...short } }] }), `${shortLead}${fourWords} on redis://a:6379`);
+    assert.equal(switchFailure({ results: [{ shown: "redis://a:6379", res: { ...shapes.p.results[0].res, ...short } }] }), `${shortLead}FAILED at q2 on redis://a:6379, so the deployment is half switched`);
   }
   assert.equal(switchUnconfirmed({ done: [], failed: "q1", unconfirmed: ["q1"], refused: [], notTried: [] }), "NOT CONFIRMED for q1: the switch may or may not have been made there; known switched: none");
   assert.equal(switchUnconfirmed(shapes.p.results[0].res.partial), null, "a switch that lost no answer keeps its own sentence");
@@ -413,8 +467,11 @@ test("the TUI's switch note reads killSwitchSet's results shape: a half switch a
   assert.doesNotMatch(words, /took it|did not answer/);
   // The `/dispatch pause` and `resume` command's line: the same words behind the verb and the Valkey it names.
   assert.equal(switchCommandLost(true, "", lost), `pause: ${words}`);
-  assert.equal(switchCommandLost(false, " at redis://b:6379", { partial: four, blind: "registry down" }), `resume at redis://b:6379: ${fourWords}; the list of queues may be short`);
+  assert.equal(switchCommandLost(false, " at redis://b:6379", { partial: four, blind: "registry down" }), `resume at redis://b:6379: ${shortLead}${fourWords}`);
   assert.equal(switchCommandLost(true, "", shapes.p.results[0].res), null, "a half switch that lost no answer keeps the command's own line");
+  // That line (issue #964): led by the list that may be short where it may, as the other fail lines are.
+  assert.equal(switchCommandHalf(true, "", shapes.p.results[0].res), "paused q1 but FAILED at q2: the deployment is half paused");
+  assert.equal(switchCommandHalf(false, " at redis://b:6379", { ...shapes.p.results[0].res, incomplete: "the scan did not finish" }), `${shortLead}resumed q1 at redis://b:6379 but FAILED at q2: the deployment is half resumed`);
   assert.equal(switchCommandLost(true, "", { unreachable: "ECONNREFUSED" }), null);
   shapes.p = { results: [{ shown: "redis://a:6379", res: lost }] };
   comp.handleInput("p");

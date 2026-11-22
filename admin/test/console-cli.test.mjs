@@ -11,7 +11,7 @@ import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
 import * as realPages from "../src/console/pages.mjs";
 import * as server from "../src/console/server.mjs";
 import * as sandboxData from "../src/sandbox-data.mjs";
-import { readTriggerEditor, configLocationsOf, panelEnv, PANEL_SERVICE_KEYS } from "../src/read-model.mjs";
+import { readTriggerEditor, configLocationsOf, deploymentOwnQueue, panelEnv, PANEL_SERVICE_KEYS } from "../src/read-model.mjs";
 import * as realWhatif from "../src/console/whatif.mjs";
 import { RESTART_CLEARED, RESTART_RECHECK_MS, RESTART_TITLE } from "../src/console/restart-notice.mjs";
 import { VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
@@ -696,6 +696,35 @@ function http(port, { method = "GET", path, headers = {}, body = null }) {
     req.end(body ?? undefined);
   });
 }
+
+// Issue #964: the kill switch's own queue is the deployment .env's PI_WORKER_NAME alone, read at each press: never the
+// value the console's own environment sets in its place, and none when that environment names another.
+test("serve hands its reader this host's queue from the deployment's .env, none when the console's environment names another, and its actions why (#964)", async (t) => {
+  for (const [shell, want, why] of [[undefined, ["pi-jobs@hosta"], null], ["hosta", ["pi-jobs@hosta"], null], ["hostz", [], "PI_WORKER_NAME in this environment is not the one in the deployment's .env, which the service runs"]]) {
+    const dep = deployment(shell === undefined ? {} : { PI_WORKER_NAME: shell });
+    writeFileSync(join(dep.dir, ".env"), "PI_WORKER_NAME=hosta\n");
+    let stop;
+    const until = new Promise((resolve) => (stop = resolve));
+    t.after(() => stop());
+    let listening;
+    const up = new Promise((resolve) => (listening = resolve));
+    const modules = fakeModules();
+    modules.readModel.deploymentOwnQueue = deploymentOwnQueue;
+    let captured = null;
+    modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+    const err = [];
+    const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening });
+    await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
+    const { seams } = modules.fleet.built[0];
+    assert.deepEqual(seams.ownQueueNamesFn(), want, `the console's environment: ${shell}`);
+    assert.equal(captured.actionDeps.ownQueueProblemFn(), why, "and the switch's preview is told why it is left out");
+    // Read at each call: an edit to the .env reaches the next press, as the kill switch's VALKEY_URL does.
+    writeFileSync(join(dep.dir, ".env"), "# none\n");
+    assert.deepEqual(seams.ownQueueNamesFn(), []);
+    stop();
+    assert.equal(await running, 0);
+  }
+});
 
 test("serve wires one fleet reader on the deployment, answers /api/state and a live stream, and disposes reader, hub and context on stop", async (t) => {
   const dep = deployment();

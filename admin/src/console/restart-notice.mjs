@@ -141,7 +141,9 @@ export function restartReasons({ start, now, refused = [], declined = [] }) {
     const one = changed.length === 1;
     // Except the kill switch, which reads VALKEY_URL from the `.env` at each use (`killSwitchPlan`), so the service's own
     // Valkey is paused whatever this console was started with; the sentence says so rather than claiming every use waits.
-    const killSwitch = changed.includes("VALKEY_URL") ? " Pause the fleet and Resume the fleet already use the `VALKEY_URL` the .env names now; the pages read the one the console started with." : "";
+    // Issue #964: and this host's own queue, which it names from the `.env`'s PI_WORKER_NAME at each use
+    // (`deploymentOwnQueues`); every other reader of PI_WORKER_NAME here (the pages' own host, a local run's queue) took it at start.
+    const killSwitch = `${changed.includes("VALKEY_URL") ? " Pause the fleet and Resume the fleet already use the `VALKEY_URL` the .env names now; the pages read the one the console started with." : ""}${changed.includes("PI_WORKER_NAME") ? " Pause the fleet and Resume the fleet already take this host's queue from the `PI_WORKER_NAME` the .env names now; everything else reads the one the console started with." : ""}`;
     reasons.push({ kind: "settings", keys: changed, sentence: `${keyList(changed)} ${one ? "has" : "have"} changed in the deployment's .env since this console started, and the console keeps the ${one ? "value" : "values"} it started with until it is restarted.${killSwitch}` });
   }
   if (fresh !== null) {

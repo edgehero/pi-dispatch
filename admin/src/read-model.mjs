@@ -478,6 +478,55 @@ function switchOutcome({ paused, names, steps, blind = null, incomplete = null }
 }
 
 /**
+ * This host's own queue (issue #964): `pi-jobs@<name>` when `env` DECLARES `PI_WORKER_NAME`, by the worker's own rule
+ * (`workerName`, so a name it refuses at boot is no name here), else none. A console started while Valkey does not
+ * answer knows the shared queue alone, and this is the one other queue its own deployment names (the projects and
+ * triggers files name no worker host). Never the hostname a worker with no name falls back to: that worker drains the
+ * shared queue only, and a pause of `pi-jobs@<hostname>` would write a meta key that every later scan lists as a queue.
+ */
+export function ownQueueNamesOf(env) {
+  const declared = env?.PI_WORKER_NAME;
+  if (typeof declared !== "string" || declared === "") return [];
+  try {
+    return [hostQueueName(workerName({ PI_WORKER_NAME: declared }))];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * This host's own queue as the deployment's `.env` in `dir` names it (issue #964), for the kill switch of every surface:
+ * the worker service reads that file, and its value beats one injected around it, so a name only this shell sets (or a
+ * pointer layered in, `owned`) is not the queue the worker drains. The file's PI_WORKER_NAME alone, read through the one
+ * reader (`deploymentServiceEnv`); none when the file names none, cannot be read or trusted, has a line for the key the
+ * service's loader may read otherwise, or when this shell sets PI_WORKER_NAME to anything else (which name runs is then
+ * not known here). A pause of a queue nobody drains writes its meta key, which every later scan lists as a queue.
+ */
+export function deploymentOwnQueues(args = {}) {
+  return deploymentOwnQueue(args).names;
+}
+
+/**
+ * `deploymentOwnQueues` with why it names none where a name may have been meant (`problem`, a sentence with no value or
+ * path in it, for the kill switch's preview, as the CLI's line says it), or null: `{ names, problem }`.
+ */
+export function deploymentOwnQueue({ env = {}, dir = null, owned = [], fs = nodeFs, platform = process.platform, uid = process.geteuid?.() } = {}) {
+  if (typeof dir !== "string" || dir === "") return { names: [], problem: null };
+  const res = deploymentServiceEnv({ env: {}, dir, keys: ["PI_WORKER_NAME"], platform, fs, uid });
+  // `env` is the surface's own environment (the console's, pi's, the shell's), never one the `.env` filled in.
+  const shell = owned.includes("PI_WORKER_NAME") ? undefined : env?.PI_WORKER_NAME;
+  const none = (problem) => ({ names: [], problem });
+  if (res.untrusted) return none("another account can change the deployment's .env, so PI_WORKER_NAME cannot be told");
+  if (res.unreadable) return none(`the deployment's .env could not be read (${String(res.unreadable).replace(/[^A-Z0-9_]/gi, "")}), so PI_WORKER_NAME cannot be told`);
+  if (res.unread.length > 0 || res.hazardSkipped.length > 0) return none("the deployment's .env has a line for PI_WORKER_NAME that the service's loader may read differently, so it cannot be told");
+  const file = res.fromFile.PI_WORKER_NAME;
+  if (typeof file !== "string" || file === "") return none(typeof shell === "string" && shell !== "" ? "PI_WORKER_NAME is set in this environment and not in the deployment's .env, which the service reads" : null);
+  if (typeof shell === "string" && shell !== file) return none("PI_WORKER_NAME in this environment is not the one in the deployment's .env, which the service runs");
+  const names = ownQueueNamesOf({ PI_WORKER_NAME: file });
+  return names.length > 0 ? { names, problem: null } : none("the deployment's .env names a PI_WORKER_NAME the worker does not take");
+}
+
+/**
  * What a ONE-queue pause or resume says when it was sent and not answered (issue #842): the outcome first, never
  * "nothing was changed", and no client's words (they can name a host).
  */
@@ -612,23 +661,30 @@ export function installPanelValkeyContext({ env = process.env } = {}) {
  * disagreement }` with each URL as `urlShown` prints it, never with its userinfo; every client sends the deployment's
  * password by that same context.
  */
-export async function killSwitchSet({ paused, env = process.env, setFn = setQueuePaused, resolveFn = killSwitchValkeyUrls, stateFn = pointerState, fs = nodeFs, uid = process.geteuid?.(), plan = null } = {}) {
+export async function killSwitchSet({ paused, env = process.env, setFn = setQueuePaused, resolveFn = killSwitchValkeyUrls, stateFn = pointerState, fs = nodeFs, uid = process.geteuid?.(), plan = null, alsoNames = [] } = {}) {
   const picked = plan ?? killSwitchPlan({ paused, env, resolveFn, stateFn, fs, uid });
   if (picked.refused) return { refused: picked.refused };
   const context = picked.context ?? null;
   const conn = context
     ? { parseConnectionFn: (u, o = {}) => parseConnection(u, { ...o, context }), redisFn: (u, o = {}) => makeRedisClient(u, { ...o, context }) }
     : {};
+  // `alsoNames` (issue #964, this host's own queue, `ownQueueNamesOf`) go to the deployment's Valkey alone: on a
+  // disagreement the other is not where this host's worker drains, and a pause there would write a meta key every
+  // later scan of it lists.
+  // A plan with no `deploymentUrl` (a caller's own) names it by `killSwitchPlan`'s rule: the second on a disagreement.
+  const deploymentUrl = picked.deploymentUrl ?? (picked.urls.length > 1 ? picked.urls[1] : picked.urls[0]);
+  const also = (url) => (Array.isArray(alsoNames) && alsoNames.length > 0 && url === deploymentUrl ? { alsoNames } : {});
   // Every Valkey at once (issue #842; only a pause ever names two): one that stopped answering must not hold the pause
   // of the other for its bound. The results keep the plan's order.
-  const results = await Promise.all(picked.urls.map(async (url) => ({ url, shown: urlShown(url), res: await setFn({ url, paused, ...conn }) })));
+  const results = await Promise.all(picked.urls.map(async (url) => ({ url, shown: urlShown(url), res: await setFn({ url, paused, ...conn, ...also(url) }) })));
   return { results, disagreement: picked.urls.length > 1 ? picked.disagreement : null };
 }
 
 /**
  * The kill switch's DECISION, without acting (issue #642): which Valkeys a pause or resume reaches, or why it refuses.
- * `{ refused }`, or `{ urls, disagreement, context }` with `context` the `panelValkeyContext` every client of it must
- * take (the deployment's password). Split out of `killSwitchSet` so every surface that pauses (the tools, the TUI's
+ * `{ refused }`, or `{ urls, deploymentUrl, disagreement, context }` with `context` the `panelValkeyContext` every client
+ * of it must take (the deployment's password) and `deploymentUrl` the one of `urls` the service reads (the `.env`'s on a
+ * disagreement). Split out of `killSwitchSet` so every surface that pauses (the tools, the TUI's
  * `p`/`r` through the fleet reader, the console) refuses the same resume on the same two-Valkey disagreement, by one
  * rule rather than one copy each. `stateFn` names the deployment folder: the pi extension's pointer by default, the
  * console's own deployment folder when it passes one.
@@ -644,7 +700,7 @@ export function killSwitchPlan({ paused, env = process.env, resolveFn = killSwit
   if (picked.urls.length > 1 && !paused) {
     return { disagreement: picked.disagreement, resumeCommand, resumeArgv, refused: `${picked.disagreement}: resume would start jobs on one of them, so it resumes neither. Make them agree (the .env is what the service reads), or run: ${resumeCommand}` };
   }
-  return { urls: picked.urls, disagreement: picked.urls.length > 1 ? picked.disagreement : null, context, resumeCommand, resumeArgv };
+  return { urls: picked.urls, deploymentUrl, disagreement: picked.urls.length > 1 ? picked.disagreement : null, context, resumeCommand, resumeArgv };
 }
 
 /**
@@ -690,7 +746,7 @@ export async function setQueuePausedOne({ url, queue, paused, makeQueueFn = make
  * `{ unreachable }` when nothing was sent at all. Each queue is one bounded step (`flipQueues`, issue #842): a pause
  * to all at once, a resume in turn, stopping at the first lost answer.
  */
-export async function setQueuePaused({ url, paused, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500, stepTimeoutMs = SWITCH_STEP_TIMEOUT_MS, closeTimeoutMs = QUEUE_CLOSE_TIMEOUT_MS } = {}) {
+export async function setQueuePaused({ url, paused, alsoNames = [], makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500, stepTimeoutMs = SWITCH_STEP_TIMEOUT_MS, closeTimeoutMs = QUEUE_CLOSE_TIMEOUT_MS } = {}) {
   const opened = [];
   try {
     // EVERY queue in the fleet (issue #57). This is the kill switch: pausing only `pi-jobs` would stop
@@ -701,7 +757,14 @@ export async function setQueuePaused({ url, paused, makeQueueFn = makeQueue, par
     // `readHosts` RETURNS `{unreachable}` and never rejects, so the fallback is a branch, not a `.catch`.
     // It matters which: an unreadable registry means we are acting on the shared queue alone, and the
     // caller has to be able to say so rather than print a success line identical to a single-host one.
-    const { names, blind } = await readFleetQueues({ url, redisFn, timeoutMs });
+    // Issue #964: with this host's own queue (`alsoNames`, `killSwitchSet` passes it for the deployment's Valkey), which
+    // a discovery that did not answer cannot name, and the scan's `incomplete` beside `blind`, which this dropped, so
+    // every surface over it can say the set may be short.
+    const found = await readFleetQueues({ url, redisFn, timeoutMs });
+    const { blind, incomplete } = found;
+    // A resume takes none of them: a queue discovery did not find does not exist, has nothing to resume, and a queue built
+    // to resume it would write its meta key.
+    const names = paused ? unionQueueNames(found.names, (Array.isArray(alsoNames) ? alsoNames : []).filter((n) => typeof n === "string" && n !== "")) : found.names;
     // Track what actually landed. A switch that fails halfway leaves the deployment HALF paused, and
     // returning a bare `{ unreachable }` for that would be the worst answer available: the operator would
     // read it as "nothing happened" and walk away from a fleet where one host is stopped and another is
@@ -717,7 +780,7 @@ export async function setQueuePaused({ url, paused, makeQueueFn = makeQueue, par
         return q;
       },
     });
-    return switchOutcome({ paused, names, steps, blind });
+    return switchOutcome({ paused, names, steps, blind, incomplete });
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
@@ -4561,6 +4624,10 @@ export function createFleetReader(
     // pointer reads the deployment's `.env`. Empty by default, so a test or a caller that passes none sees the
     // overlay's caps alone.
     dollarEnvFn = () => ({}),
+    // Issue #964: this host's own queue for the kill switch (`deploymentOwnQueues` over the deployment's `.env`, which
+    // each surface passes), none by default. Read at each press and each switch read; never the merged env above, whose
+    // PI_WORKER_NAME can be this shell's rather than the one the worker service runs.
+    ownQueueNamesFn = () => [],
     scanRecordsFn = scanRunRecords,
     nowFn = () => Date.now(),
     fs = nodeFs,
@@ -4724,13 +4791,42 @@ export function createFleetReader(
   // for a reader that runs every second and entirely affordable for a keypress. `{ names, incomplete }`: the union's
   // names, and whether the scan behind them read the whole keyspace (issue #737: `SWITCH_SCAN_INCOMPLETE`, or null).
   // Names only: a queue is built for a name when it is flipped or read, never for every name a scan returns.
+  //
+  // With this host's own queue (issue #964, `ownQueueNamesFn`, the deployment `.env`'s PI_WORKER_NAME, read at each
+  // call): a console started while Valkey did not answer knows `pi-jobs` alone, and its kill switch paused that queue
+  // and no other. Only on the Valkey the kill switch's plan names as the deployment's (`ownHere`): on a disagreement
+  // this reader's may be the shell's, where no worker of this host drains, and the `.env`'s gets it through
+  // `setQueuePaused`. Kept out of `lastNames`, which every snapshot reads: the switch's set gains it, the per-tick reads
+  // do not. `found` is what discovery itself named, the only names a switch read builds a queue for.
+  const ownQueueNames = () => {
+    try {
+      const names = ownQueueNamesFn();
+      return Array.isArray(names) ? names.filter((n) => typeof n === "string" && n.startsWith(`${QUEUE}@`)) : [];
+    } catch {
+      return [];
+    }
+  };
+  // The kill switch's plan: the surface's (`killSwitchPlanFn`), else this reader's own Valkey alone.
+  const planOf = (paused) => (killSwitchPlanFn ? killSwitchPlanFn({ paused }) : { urls: [paths.valkeyUrl], deploymentUrl: paths.valkeyUrl, disagreement: null, context: null });
+  const ownHere = () => {
+    let plan;
+    try {
+      plan = planOf(true);
+    } catch {
+      return [];
+    }
+    if (!plan || plan.refused || !Array.isArray(plan.urls)) return [];
+    const deploymentUrl = plan.deploymentUrl ?? (plan.urls.length > 1 ? plan.urls[1] : plan.urls[0]);
+    return deploymentUrl === paths.valkeyUrl ? ownQueueNames() : [];
+  };
   const killSwitchNames = async () => {
     // The seam answers `discoverHostQueuesReporting`'s shape or a bare list, which reads as whole (`fleetQueuesOn`'s
     // reading); a part-read keyspace still pauses what it read, and the preview says the set may be short.
     const got = await discoverHostQueuesFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS });
     const existing = Array.isArray(got) ? got : Array.isArray(got?.names) ? got.names : [];
     const whole = Array.isArray(got) || (Array.isArray(got?.names) && (got.incomplete === null || got.incomplete === undefined));
-    return { names: unionQueueNames(lastNames, existing), incomplete: whole ? null : SWITCH_SCAN_INCOMPLETE };
+    const found = unionQueueNames(lastNames, existing);
+    return { names: unionQueueNames([...found, ...ownHere()], []), incomplete: whole ? null : SWITCH_SCAN_INCOMPLETE, found: new Set(found) };
   };
 
   const queuesNamed = (names) => names.map(queueNamed);
@@ -4755,15 +4851,21 @@ export function createFleetReader(
   // jobs, on every call): the by-id lookup's bound instead (`lookupSetOf`), the registry's queues never cut and at most
   // as many others as fit beside them in `WAITING_QUEUES_MAX`, since each queue read is a client of its own and a SCAN
   // finds any meta key a writer plants. The kill switch's previews keep `SWITCH_PREVIEW_QUEUES_MAX`.
+  //
+  // `unread` (issue #964): this host's own queue where discovery did not name it, which the switch flips and this never
+  // reads: building a BullMQ queue for a name writes that queue's meta key, which every later scan lists as a queue, and
+  // a preview, or the agent's failed read on every call, writes nothing. A queue no whole scan found holds no job.
   const switchPreviewQueues = async (queue, { lookupBound = false } = {}) => {
-    const { names, incomplete } = await switchQueueNames();
-    const flipped = new Set(names);
-    const ordered = [...new Set([...lastNames, ...names])].filter((n) => flipped.has(n));
+    const { names, incomplete, found } = await switchQueueNames();
+    const readable = names.filter((n) => found.has(n));
+    const unread = names.filter((n) => !found.has(n));
+    const flipped = new Set(readable);
+    const ordered = [...new Set([...lastNames, ...readable])].filter((n) => flipped.has(n));
     const bound = lookupBound ? Math.max(new Set(lastNames).size, WAITING_QUEUES_MAX) : SWITCH_PREVIEW_QUEUES_MAX;
     const chosen = new Set(ordered.slice(0, bound));
     if (typeof queue === "string" && flipped.has(queue)) chosen.add(queue);
-    const read = names.filter((n) => chosen.has(n));
-    return { queues: queuesNamed(read), total: names.length, truncated: read.length < names.length, incomplete };
+    const read = readable.filter((n) => chosen.has(n));
+    return { queues: queuesNamed(read), total: names.length, truncated: read.length < readable.length, incomplete, unread };
   };
 
   // Flip every kill-switch queue on THIS reader's Valkey through the held pool, `setQueuePaused`'s result shape
@@ -4774,7 +4876,7 @@ export function createFleetReader(
   // the last thing that should wait for them. What discovery then names beyond the held queues is paused too.
   // A RESUME discovers first and walks the queues in turn (`flipQueues`). A queue that was not connected within its
   // step is closed on a resume, so its resume is not sent whenever the connection comes up; a pause is left to land.
-  const poolSet = async (paused) => {
+  const poolSet = async (paused, own = []) => {
     const steps = new Map();
     const lateResume = (q) => {
       endedQueues.add(q);
@@ -4783,12 +4885,16 @@ export function createFleetReader(
     const flip = (names) => flipQueues({ paused, names, queueOf: queueNamed, stepMs: switchStepTimeoutMs, steps, late: paused ? undefined : lateResume });
     // A discovery that throws, or outlives the step's own bound (its reads have theirs, well inside it), is a set that
     // may be short, never a switch that did nothing or one that waits.
-    const unread = () => ({ names: [...lastNames], incomplete: SWITCH_SCAN_INCOMPLETE });
+    // This host's own queue (`own`, issue #964, given only when this is the deployment's Valkey) is in the first set a pause
+    // flips and in its fallback: on a Valkey that does not answer, discovery never names it. A resume reaches it only where
+    // discovery found it (`found`): a queue that does not exist has nothing to resume, and one built to resume it writes
+    // its meta key.
+    const unread = () => ({ names: paused ? [...new Set([...lastNames, ...own])] : [...lastNames], incomplete: SWITCH_SCAN_INCOMPLETE });
     const discover = () => withTimeout(switchQueueNames().catch(unread), switchStepTimeoutMs, null).then((found) => found ?? unread());
     let names;
     let incomplete;
     if (paused) {
-      const held = [...new Set([...lastNames, ...pool.keys()])];
+      const held = [...new Set([...lastNames, ...pool.keys(), ...own])];
       const first = flip(held);
       const found = await discover();
       await Promise.all([first, flip(found.names.filter((n) => !held.includes(n)))]);
@@ -4796,17 +4902,20 @@ export function createFleetReader(
       incomplete = found.incomplete;
     } else {
       const found = await discover();
+      const named = found.found instanceof Set ? found.names.filter((n) => found.found.has(n)) : found.names;
       // A discovery that was short (the registry or the scan unread) is filled from the queues this reader holds,
       // each named by an earlier discovery: they are resumed after the ones it did name, or named as not tried.
-      names = found.incomplete || fleetDegraded ? [...found.names, ...[...pool.keys()].filter((n) => !found.names.includes(n))] : found.names;
+      names = found.incomplete || fleetDegraded ? [...named, ...[...pool.keys()].filter((n) => !named.includes(n))] : named;
       incomplete = found.incomplete;
       await flip(names);
     }
     return switchOutcome({ paused, names, steps, blind: fleetDegraded, incomplete });
   };
+  // This host's own queue goes with the plan's deployment Valkey alone (`killSwitchSet`'s `alsoNames`, issue #964): to the
+  // pool when that is this reader's, else to the one-shot switch of the other.
   const killSwitch = async (paused) => {
-    const plan = killSwitchPlanFn ? killSwitchPlanFn({ paused }) : { urls: [paths.valkeyUrl], disagreement: null, context: null };
-    return killSwitchSet({ paused, plan, setFn: (args) => (args.url === paths.valkeyUrl ? poolSet(paused) : setQueuePaused({ ...args, stepTimeoutMs: switchStepTimeoutMs, closeTimeoutMs })) });
+    const plan = planOf(paused);
+    return killSwitchSet({ paused, plan, alsoNames: ownQueueNames(), setFn: (args) => (args.url === paths.valkeyUrl ? poolSet(paused, args.alsoNames ?? []) : setQueuePaused({ ...args, stepTimeoutMs: switchStepTimeoutMs, closeTimeoutMs })) });
   };
 
   // The last records scan for the dollar windows, `{ at, sinceMs, records }`, reused for DOLLAR_RECORDS_TTL_MS.
@@ -5445,7 +5554,8 @@ export function createFleetReader(
         // `queuesShort: true` when the queues read may not be all of them (`waitingOf`, issue #963).
         ...(waitingJobs !== null ? { waiting: waitingJobs } : {}),
         // Issue #737: what a switch preview's `queueCounts` cover, only on a call that asked for the switch's queues.
-        ...(preview !== null ? { switchTotal: preview.total, switchTruncated: preview.truncated, switchIncomplete: preview.incomplete } : {}),
+        // `switchUnread` (issue #964): the queues the switch flips that it did not read, this host's own where no discovery named it.
+        ...(preview !== null ? { switchTotal: preview.total, switchTruncated: preview.truncated, switchIncomplete: preview.incomplete, switchUnread: preview.unread } : {}),
       };
     },
     /**

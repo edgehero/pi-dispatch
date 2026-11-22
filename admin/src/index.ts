@@ -108,7 +108,9 @@ import {
   createFleetReader,
   planParkedAnswer,
   enqueueParkedAnswer,
+  deploymentOwnQueues,
 } from "./read-model.mjs";
+import { switchListShort, switchShortNote } from "./words.mjs";
 import { sandboxRetentionOf } from "./sandbox-verdict.mjs";
 import { readConfigTool } from "./config-tools.mjs";
 export { setConfigToolReadsForTest } from "./config-tools.mjs";
@@ -175,7 +177,7 @@ import { gateDialogs } from "./dialog-gate.mjs";
 import { grantsDirOf, openSandbox, sandboxEgress, sandboxVenuePolicy } from "@edgehero/pi-dispatch/sandbox";
 import { makeSandboxMonitor } from "@edgehero/pi-dispatch/sandbox-session-watch";
 import { sizeBits, renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderAllocations } from "./render.mjs";
-import { makeDashboard, createDashboardDeps, switchCommandLost, switchFailure, withAuditedWrites } from "./dashboard.ts";
+import { makeDashboard, createDashboardDeps, switchCommandHalf, switchCommandLost, switchFailure, switchShortRow, withAuditedWrites } from "./dashboard.ts";
 // `/dispatch chat` (issue #647, part 2): pi-free, so its tests drive it with fakes; `chatIo` below wires it.
 import { CHAT_USAGE, dispatchChat } from "./dispatch-chat.mjs";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
@@ -282,6 +284,15 @@ function deploymentEnv(): any {
   const { env, notice } = panelEnv({ env: process.env, pointerDir: deploymentDir, owned });
   if (notice && notice !== serviceEnvNoticeShown) serviceEnvNoticePending = notice;
   return env;
+}
+
+/**
+ * This host's own queue for the kill switch (issue #964): the deployment `.env`'s PI_WORKER_NAME only, never a value pi's
+ * environment or the pointer supplies, and none when pi's environment sets another (`deploymentOwnQueues`). Read per call.
+ */
+function panelOwnQueues(): string[] {
+  const { deploymentDir, owned } = pointerState();
+  return deploymentOwnQueues({ env: process.env, dir: deploymentDir, owned });
 }
 
 /** This host's worker name, the way the worker resolves its own: the deployment's PI_WORKER_NAME, else the sanitized hostname. */
@@ -561,7 +572,7 @@ function registerTools(pi: ExtensionAPI): void {
       try {
         const env = deploymentEnv();
         const paths = resolvePaths(env);
-        return toolText(JSON.stringify(await executeToolAction(definition.name, params, ctx, { paths, env, grantsEnv, granted, deploymentDir: pointerState().deploymentDir ?? null, sizingNoteFn: (scope: string) => sizingNote(paths, scope, Date.now()) })));
+        return toolText(JSON.stringify(await executeToolAction(definition.name, params, ctx, { paths, env, grantsEnv, granted, deploymentDir: pointerState().deploymentDir ?? null, sizingNoteFn: (scope: string) => sizingNote(paths, scope, Date.now()), ownQueueNamesFn: panelOwnQueues })));
       } catch (error) {
         // Planner diagnostics can contain existing private paths or job text. Only the local operator
         // receives them. The model gets a fixed refusal unless the producing path marked its own text safe.
@@ -705,7 +716,8 @@ function registerTools(pi: ExtensionAPI): void {
     name: "dispatch_pause",
     label: "pi-dispatch pause",
     description:
-      "Durably pauses pi-dispatch job processing: NEW jobs stop starting; running containers finish; jobs still enqueue. Survives worker restart. Reversible via dispatch_resume.",
+      "Durably pauses pi-dispatch job processing: NEW jobs stop starting; running containers finish; jobs still enqueue. Survives worker restart. Reversible via dispatch_resume. " +
+      "queuesMayBeShort true in the answer means the host registry or the look for queues could not be read, so other queues may exist and were not paused: pause again once Valkey answers.",
     executionMode: "sequential",
     parameters: Type.Object({ queue: Type.Optional(Type.String()) }),
   });
@@ -713,7 +725,9 @@ function registerTools(pi: ExtensionAPI): void {
   registerTool({
     name: "dispatch_resume",
     label: "pi-dispatch resume",
-    description: "Re-enables PAID job processing after a pause. Only call when the user explicitly asks to resume.",
+    description:
+      "Re-enables PAID job processing after a pause. Only call when the user explicitly asks to resume. " +
+      "queuesMayBeShort true in the answer means the host registry or the look for queues could not be read, so other queues may exist and were not resumed.",
     executionMode: "sequential",
     parameters: Type.Object({ queue: Type.Optional(Type.String()) }),
   });
@@ -1742,7 +1756,9 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       const paused = sub === "pause";
       // The CLI's kill-switch rule (PR #475's review, round 3): a pause pauses BOTH Valkeys when this process's
       // VALKEY_URL and the deployment .env's disagree, a resume refuses then, and every URL is shown without userinfo.
-      const set: any = await panelWrite(paths.logsDir, { kind: paused ? "fleet-pause" : "fleet-resume", target: "fleet", failure: switchFailure }, async () => await killSwitchSet({ paused }));
+      // With this host's own queue on the deployment's Valkey (issue #964, `panelOwnQueues`), which a discovery that did
+      // not answer cannot name; a switch that landed over a set that may be short gets its second `ok` row.
+      const set: any = await panelWrite(paths.logsDir, { kind: paused ? "fleet-pause" : "fleet-resume", target: "fleet", failure: switchFailure, note: switchShortRow(paused) }, async () => await killSwitchSet({ paused, alsoNames: panelOwnQueues() }));
       if (set.refused) {
         notify?.(set.refused, "error");
         return;
@@ -1760,18 +1776,21 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
             lost !== null
               ? lost
               : res.partial
-                ? `${paused ? "paused" : "resumed"} ${res.partial.done.join(", ")}${at} but FAILED at ${res.partial.failed}: the deployment is half ${paused ? "paused" : "resumed"}`
+                ? switchCommandHalf(paused, at, res)
                 : `could not reach Valkey at ${shown}: ${valkeyDownHint(shown)}`,
             "error",
           );
           continue;
         }
-        const span = res.blind ? ` (fleet unknown: ${res.blind}, only ${res.queues[0]})` : res.queues.length > 1 ? ` (${res.queues.length} queues)` : "";
+        // Issue #964: a set that may be short is said with what it means and what to do. It said "only pi-jobs" on an
+        // unread registry, which was not so when the keyspace scan had named more, and nothing on a scan that did not finish.
+        const span = res.queues.length > 1 ? ` (${res.queues.length} queues)` : "";
+        const short = switchListShort(res) ? `, but ${switchShortNote(paused)}` : "";
         notify?.(
           paused
-            ? `paused${at}: worker will stop taking new jobs (jobs still enqueue; durable, survives restart)${span}`
-            : `resumed${at}${span}`,
-          "info",
+            ? `paused${at}: worker will stop taking new jobs (jobs still enqueue; durable, survives restart)${span}${short}`
+            : `resumed${at}${span}${short}`,
+          short ? "warning" : "info",
         );
       }
       return;
@@ -1919,7 +1938,7 @@ async function openDashboard(paths: any, ctx: any, notify: Notify, { initialTail
         // writes (pause, resume, both cancels) go through the console's audit chain as the panel (issue #642).
         // The kill switch's plan (issue #642) is the CLI's and the tools' (`killSwitchPlan`): both Valkeys on a pause when this
         // process's and the deployment's disagree, and a resume refused then, so the TUI cannot resume one and strand the other.
-        ...withAuditedWrites(createDashboardDeps(paths, { dollarEnvFn: deploymentEnv, killSwitchPlanFn: ({ paused }: any) => killSwitchPlan({ paused }) }), (opts: any, fn: () => any) => panelWrite(auditDir(), opts, fn)),
+        ...withAuditedWrites(createDashboardDeps(paths, { dollarEnvFn: deploymentEnv, killSwitchPlanFn: ({ paused }: any) => killSwitchPlan({ paused }), ownQueueNamesFn: panelOwnQueues }), (opts: any, fn: () => any) => panelWrite(auditDir(), opts, fn)),
         // log read stays here; overlay-only, returns readLogTail's result verbatim. The live transcript (issue #643) comes
         // through `createDashboardDeps` above, off the fleet reader's held client; this is the fallback for a run with no
         // stream. `host` (the registry's host for the job) and `self` (this host's worker name, as the worker resolves it:

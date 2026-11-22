@@ -761,7 +761,13 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     // `/api/state`, so the overview's load asks for them per call (`pages.mjs` `PAGE_READS`), and a page that draws no
     // waiting job pays no read for one.
     const killSwitchPlanFn = ({ paused }) => m.readModel.killSwitchPlan({ paused, env: shellEnv, stateFn: () => ({ deploymentDir: config.dir, owned: [] }), fs, uid });
-    fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, ...(m.sandboxData?.SANDBOX_READ_DEPS ?? {}), sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
+    // Issue #964: this host's own queue for the kill switch, from the deployment's `.env` alone at each press (the worker
+    // service reads that file; a PI_WORKER_NAME this shell sets otherwise names no queue), as its VALKEY_URL is, and why
+    // it is left out where it is (`ownQueueProblemFn`, for the switch's preview).
+    const ownQueueOf = () => m.readModel.deploymentOwnQueue?.({ env: shellEnv, dir: config.dir, fs, platform: io.platform ?? process.platform, uid }) ?? { names: [], problem: null };
+    const ownQueueNamesFn = () => ownQueueOf().names;
+    const ownQueueProblemFn = () => ownQueueOf().problem;
+    fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, ownQueueNamesFn, ...(m.sandboxData?.SANDBOX_READ_DEPS ?? {}), sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
     // Issue #845: what this console read at start and keeps for its life (its settings and the read side's, `layered` and
     // `side` above) against what the same reads give now, the databases its two held clients were refused, and whether
     // either declined a changed password. Every page
@@ -1005,6 +1011,7 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     grantsEnv: shellEnv,
     fleet,
     killSwitchPlanFn,
+    ownQueueProblemFn,
     urlShown: m.connection?.urlShown,
     envelopeProblem: m.insights?.envelopeProblem,
     host: hostname(),

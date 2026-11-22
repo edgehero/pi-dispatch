@@ -2393,6 +2393,82 @@ test("createFleetReader: a fleet pause also pauses what discovery names beyond t
   await reader.dispose();
 });
 
+// Issue #964: a console started while Valkey does not answer knows `pi-jobs` alone. Its kill switch also flips this
+// host's own queue, which the surface hands it (`ownQueueNamesFn`, the deployment `.env`'s PI_WORKER_NAME), on the Valkey
+// the kill switch's plan names as the deployment's and on no other.
+test("createFleetReader: a fleet pause and resume on a Valkey that does not answer also reach this host's own queue, at once (#964)", async () => {
+  const { asked, mk } = switchQueues();
+  const frozenReader = (names, make = mk, seams = {}) => endingReader(make, [], { ownQueueNamesFn: () => names, readLiveHostsFn: never, discoverHostQueuesFn: never, switchStepTimeoutMs: 80, closeTimeoutMs: 30, ...seams });
+  const reader = frozenReader(["pi-jobs@hosta"]);
+  const pending = reader.pause();
+  await settle();
+  assert.deepEqual(asked, ["pause pi-jobs", "pause pi-jobs@hosta"], "the own queue is in the first set a pause flips, sent before discovery could answer");
+  const paused = await orHung(pending);
+  assert.deepEqual(paused.results[0].res, { ok: true, paused: true, queues: ["pi-jobs", "pi-jobs@hosta"], incomplete: SWITCH_SCAN_INCOMPLETE }, "and the set is said to be possibly short");
+  asked.length = 0;
+  const resumed = await orHung(reader.resume());
+  assert.deepEqual(resumed.results[0].res, { ok: true, paused: false, queues: ["pi-jobs", "pi-jobs@hosta"], incomplete: SWITCH_SCAN_INCOMPLETE });
+  assert.deepEqual(asked, ["resume pi-jobs", "resume pi-jobs@hosta"]);
+  await reader.dispose();
+  // A resume first, on a console that never paused, whose discovery does not answer: the own queue is left alone, since a
+  // queue nobody found may not exist, has then nothing to resume, and a queue built to resume it writes its meta key.
+  const fresh = switchQueues();
+  const resumer = frozenReader(["pi-jobs@hosta"], fresh.mk);
+  assert.deepEqual((await orHung(resumer.resume())).results[0].res.queues, ["pi-jobs"]);
+  assert.deepEqual(fresh.asked, ["resume pi-jobs"]);
+  assert.ok(!fresh.built.some((q) => q.name === "pi-jobs@hosta"), "no queue was built for it");
+  await resumer.dispose();
+  // Where discovery found it, a resume reaches it.
+  const known = switchQueues();
+  const awakeResumer = endingReader(known.mk, [], { ownQueueNamesFn: () => ["pi-jobs@hosta"], discoverHostQueuesFn: async () => ["pi-jobs@hosta"] });
+  assert.deepEqual((await awakeResumer.resume()).results[0].res.queues, ["pi-jobs", "pi-jobs@hosta"]);
+  await awakeResumer.dispose();
+  // No own queue handed in, or a name that is not a host queue's, adds none.
+  for (const names of [[], ["pi-jobs-other"], null]) {
+    const other = switchQueues();
+    const plain = frozenReader(names, other.mk);
+    assert.deepEqual((await orHung(plain.pause())).results[0].res.queues, ["pi-jobs"], JSON.stringify(names));
+    assert.deepEqual(other.asked, ["pause pi-jobs"]);
+    await plain.dispose();
+  }
+  // The plan names another Valkey as the deployment's (this reader's is the shell's, on a disagreement): the own queue is
+  // not flipped here, neither at once nor by the fallback.
+  const shell = switchQueues();
+  const onShell = frozenReader(["pi-jobs@hosta"], shell.mk, { killSwitchPlanFn: () => ({ urls: ["redis://unused"], deploymentUrl: "redis://the-env-one/0", disagreement: null, context: null }) });
+  assert.deepEqual((await orHung(onShell.pause())).results[0].res.queues, ["pi-jobs"]);
+  assert.deepEqual(shell.asked, ["pause pi-jobs"]);
+  await onShell.dispose();
+  // Nor by a discovery that answers: neither the switch's set, its preview, nor one queue's pause names it here.
+  const answered = switchQueues();
+  const awake = endingReader(answered.mk, [], { ownQueueNamesFn: () => ["pi-jobs@hosta"], killSwitchPlanFn: () => ({ urls: ["redis://unused"], deploymentUrl: "redis://the-env-one/0", disagreement: null, context: null }) });
+  assert.deepEqual((await awake.snapshot({ switchQueues: true })).switchUnread, []);
+  assert.deepEqual((await awake.pause()).results[0].res.queues, ["pi-jobs"]);
+  assert.match((await awake.pauseQueue({ queue: "pi-jobs@hosta", paused: true })).invalid, /is not a queue this deployment drains/);
+  assert.deepEqual(answered.asked, ["pause pi-jobs"]);
+  await awake.dispose();
+});
+
+test("createFleetReader: this host's own queue is in the switch's set by name, never read where no discovery named it, and never in a plain snapshot (#964)", async () => {
+  const { built, asked, mk } = switchQueues();
+  const reader = endingReader(mk, [], { ownQueueNamesFn: () => ["pi-jobs@hosta"] });
+  await reader.snapshot();
+  await settle();
+  assert.deepEqual(built.map((q) => q.name), ["pi-jobs"], "every snapshot reads `lastNames`, and the own queue is not one of them");
+  const preview = await reader.snapshot({ switchQueues: true });
+  // A queue built to read it would write its meta key: named, flipped, not read.
+  assert.deepEqual([preview.queueCounts.map((q) => q.queue), preview.switchUnread, preview.switchTotal, preview.switchTruncated], [["pi-jobs"], ["pi-jobs@hosta"], 2, false]);
+  assert.deepEqual(built.map((q) => q.name), ["pi-jobs"], "no queue was built for it");
+  assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@hosta", paused: true }), { ok: true, paused: true, queue: "pi-jobs@hosta" }, "a press for it is a queue this deployment drains");
+  assert.deepEqual(asked, ["pause pi-jobs@hosta"]);
+  await reader.dispose();
+  // Where discovery names it, it is read like any other.
+  const named = switchQueues();
+  const found = endingReader(named.mk, [], { ownQueueNamesFn: () => ["pi-jobs@hosta"], discoverHostQueuesFn: async () => ["pi-jobs@hosta"] });
+  const read = await found.snapshot({ switchQueues: true });
+  assert.deepEqual([read.queueCounts.map((q) => q.queue), read.switchUnread], [["pi-jobs", "pi-jobs@hosta"], []]);
+  await found.dispose();
+});
+
 test("createFleetReader: a fleet resume stops at the first queue that does not answer, names the rest not tried, and closes a queue that was not connected in time (#842)", async () => {
   let frozen = false;
   const { built, asked, mk } = switchQueues((name) => (frozen && name === "pi-jobs@hostb" ? never() : Promise.resolve()));

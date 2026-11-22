@@ -3,7 +3,7 @@ import { makeSandboxService, SANDBOX_END_TIMEOUT, SANDBOX_END_UNCONFIRMED } from
 import { sandboxFixture } from "./helpers/sandbox-goldens.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import * as nodeFs from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
@@ -19,13 +19,14 @@ import { enqueueForgeJob, forgeDeliveryJobId, makeQueue } from "@edgehero/pi-dis
 import { buildRecord, makeRecordWriter, sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
 import { PACKAGE_MOVED_SENTENCE, PACKAGE_NOT_TAKEN_SENTENCE, UPDATES_UNREAD_SENTENCE } from "../src/console/actions.mjs";
-import { switchPartialWords, actionNamed, agentFailure, AGENT_REFUSED, AGENT_UNCONFIRMED, PAUSE_SNAPSHOT_TIMEOUT_MS, START_USED } from "../src/console/actions.mjs";
-import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
+import { switchPartialWords, actionNamed, agentFailure, AGENT_QUEUES_SHORT, AGENT_REFUSED, AGENT_UNCONFIRMED, PAUSE_SNAPSHOT_TIMEOUT_MS, START_USED } from "../src/console/actions.mjs";
+import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, SWITCH_UNREAD_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { CONFIRM_SLOT_ID, doneBannerHtml, PARTIAL_NOTE } from "../src/console/confirm-view.mjs";
 import { html } from "../src/console/html.mjs";
-import { fieldNamed, UNNAMED_FIELD } from "../src/words.mjs";
+import { fieldNamed, switchShortNote, UNNAMED_FIELD } from "../src/words.mjs";
+import { keyedRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
 import { FLASH_MAX_BYTES, makeSessionStore } from "../src/console/sessions.mjs";
 import { makeLoginLimiter } from "../src/console/guards.mjs";
 import { readJobsData } from "../src/console/job-data.mjs";
@@ -1382,12 +1383,17 @@ test("a confirm whose write was sent and not answered names what is known and wh
   // A pause: one queue answered, one was sent and not answered, one was refused before it was sent.
   answer = { results: [{ shown: "redis://a/0", res: { unreachable: "Command timed out", partial: { done: ["pi-jobs"], failed: "pi-jobs@m1", error: "Command timed out", unconfirmed: ["pi-jobs@m1"], refused: ["pi-jobs@m2"], notTried: [] }, incomplete: "the scan for the deployment's queues did not finish" } }] };
   const paused = (await c.both("fleet-pause", {})).confirm;
-  assert.equal(paused.json().error, "the kill switch did not reach every queue: redis://a/0 not confirmed for pi-jobs@m1 (the pause may or may not have been made); not paused: pi-jobs@m2; paused: pi-jobs (the list of queues may be short). Look at the fleet and try again");
+  assert.equal(paused.json().error, "the kill switch did not reach every queue, a pause was sent that may or may not have been made, and the list of queues may be short: redis://a/0 not confirmed for pi-jobs@m1 (the pause may or may not have been made); not paused: pi-jobs@m2; paused: pi-jobs. Other queues may exist and were not paused: pause the fleet again once Valkey answers");
   mayHave(paused);
   assert.ok(!paused.json().error.includes("Command timed out"), "queue names only, never a client's words");
-  // The audit row keeps the start of the sentence, which is why the queues not known come first.
+  // The audit row keeps the start of the sentence, which is why a switch that may or may not have been made and the list
+  // that may be short (issue #964), and then the queues not known, come first.
   const row = c.audit.rows.at(-1);
-  assert.deepEqual([row.outcome, paused.json().error.startsWith(row.reason), row.reason.includes("not confirmed for pi-jobs@m1 (the pause may or may not have been made)")], ["failed", true, true], row.reason);
+  assert.deepEqual([row.outcome, paused.json().error.startsWith(row.reason), row.reason.includes("a pause was sent that may or may not have been made"), row.reason.includes("may be short"), row.reason.includes("not confirmed for pi-jobs@m1")], ["failed", true, true, true, true], row.reason);
+  // Issue #964: over a set that may be short with nothing sent and unanswered, the sentence does not say a pause may or
+  // may not have been made.
+  answer = { results: [{ shown: "redis://a/0", res: { unreachable: "refused", partial: { done: ["pi-jobs"], failed: "pi-jobs@m2", error: "refused", unconfirmed: [], refused: ["pi-jobs@m2"], notTried: [] }, blind: "registry down" } }] };
+  assert.equal((await c.both("fleet-pause", {})).confirm.json().error, "the kill switch did not reach every queue, and the list of queues may be short: redis://a/0 not paused: pi-jobs@m2; paused: pi-jobs. Other queues may exist and were not paused: pause the fleet again once Valkey answers");
   // A resume stops at the first lost answer: nothing known resumed, one not known, the rest not tried.
   answer = { results: [{ shown: "redis://a/0", res: { unreachable: "Command timed out", partial: { done: [], failed: "pi-jobs", error: "Command timed out", unconfirmed: ["pi-jobs"], refused: [], notTried: ["pi-jobs@m1", "pi-jobs@m2"] } } }] };
   const resumed = (await c.both("fleet-resume", {})).confirm;
@@ -1605,7 +1611,10 @@ test("a preview that reads the fleet snapshot answers within its bound when the 
     const unread = await failing.act("fleet-resume", {});
     assert.ok(unread.json().summary.includes(RESUME_WAITING_UNKNOWN.unread), unread.text);
     assert.ok(!unread.json().summary.includes(RESUME_WAITING_UNKNOWN.timeout), "a failed read is not said to have timed out");
+    // Issue #964: and that the switch still reaches every queue it finds, its answer saying when that list may be short.
+    assert.ok(unread.json().summary.includes(SWITCH_UNREAD_LINES.resume), unread.text);
   }
+  assert.equal(SWITCH_UNREAD_LINES.resume, "The queues could not be read; a resume still reaches every queue the kill switch finds, and its answer says when the list of queues may be short");
 });
 
 // Issue #737: a bulk cancel's row whose answer is partial keeps the mark, and its line says it did not finish.
@@ -3157,7 +3166,7 @@ test("the kill switch on a Valkey that stops answering: fleet-pause, fleet-resum
     const paused = await clocked(c.confirm("fleet-pause", ticket));
     assert.equal(paused.res.status, 409, paused.res.text);
     assert.ok(paused.ms < FROZEN_STEP_MS + 2_000, `${paused.ms} ms: at the bound, not at wake`);
-    assert.equal(paused.res.json().error, `the kill switch did not reach every queue: ${paths.valkeyUrl} not confirmed for pi-jobs, pi-jobs@beta (the pause may or may not have been made); paused: none (the list of queues may be short). Look at the fleet and try again`);
+    assert.equal(paused.res.json().error, `the kill switch did not reach every queue, a pause was sent that may or may not have been made, and the list of queues may be short: ${paths.valkeyUrl} not confirmed for pi-jobs, pi-jobs@beta (the pause may or may not have been made); paused: none. Other queues may exist and were not paused: pause the fleet again once Valkey answers`);
     assert.ok(paused.res.json().html.includes("The change did not finish") && !/nothing was changed/i.test(paused.res.json().html), paused.res.json().html);
     assert.deepEqual([await shared.isPaused(), await beta.isPaused()], [false, false], "nothing has reached Valkey yet");
     proxy.thaw();
@@ -3170,7 +3179,7 @@ test("the kill switch on a Valkey that stops answering: fleet-pause, fleet-resum
     const resumed = await clocked(c.confirm("fleet-resume", ticket));
     assert.equal(resumed.res.status, 409, resumed.res.text);
     assert.ok(resumed.ms < 2 * FROZEN_STEP_MS + 2_000, `${resumed.ms} ms`);
-    assert.equal(resumed.res.json().error, `the kill switch did not reach every queue: ${paths.valkeyUrl} not confirmed for pi-jobs (the resume may or may not have been made); not tried: pi-jobs@beta; resumed: none (the list of queues may be short). Look at the fleet and try again`);
+    assert.equal(resumed.res.json().error, `the kill switch did not reach every queue, a resume was sent that may or may not have been made, and the list of queues may be short: ${paths.valkeyUrl} not confirmed for pi-jobs (the resume may or may not have been made); not tried: pi-jobs@beta; resumed: none. Other queues may exist and were not resumed: resume the fleet again once Valkey answers`);
     assert.ok(!/nothing was changed/i.test(resumed.res.json().html));
     proxy.thaw();
     await until(async () => !(await shared.isPaused()));
@@ -3194,6 +3203,163 @@ test("the kill switch on a Valkey that stops answering: fleet-pause, fleet-resum
     await Promise.race([fleet.dispose(), sleep(3_000)]);
     proxy.close();
     await v.done();
+  }
+});
+
+// Issue #964: the console reported a flat "Paused the fleet" for a switch that reached every queue it knew over a set of
+// queues the registry or the keyspace scan had not read whole, and a console started during a freeze paused `pi-jobs`
+// alone, saying so in a parenthesis at the end.
+test("a fleet pause or resume that switched every queue it knew over a set that may be short says so in its banner and in a second ok row: a person's sentence, an agent's word (#964)", live, async () => {
+  const v = await freshValkey();
+  const { paths } = deployment(URL13);
+  // The real reader, with a host registry that does not answer: it switches every queue the keyspace names and cannot
+  // say that no other queue exists.
+  let registry = { unreachable: "registry down" };
+  const fleet = RM.createFleetReader(paths, { readOnly: true, readLiveHostsFn: async () => registry });
+  try {
+    const shared = await v.q("pi-jobs");
+    const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: [paths.valkeyUrl], disagreement: null, context: null }) } });
+    const rowsOf = async (act) => {
+      const before = c.audit.rows.length;
+      const res = await act();
+      const rows = c.audit.rows.slice(before).filter((r) => r.action !== "refused" && r.kind?.startsWith("fleet-"));
+      assert.equal(new Set(rows.map((r) => r.ticket)).size, 1, "one ticket");
+      return { res, rows: rows.map((r) => [r.action, r.outcome, r.reason ?? null]) };
+    };
+    const paused = await rowsOf(() => c.both("fleet-pause", {}));
+    assert.equal(paused.res.confirm.status, 200, paused.res.confirm.text);
+    assert.equal(paused.res.confirm.json().change.summary, "Paused the fleet, but the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not paused. Pause the fleet again once Valkey answers");
+    assert.deepEqual(paused.rows, [["write", "ok", null], ["write", "ok", switchShortNote(true)]]);
+    assert.equal(await shared.isPaused(), true);
+    const resumed = await rowsOf(() => c.both("fleet-resume", {}));
+    assert.equal(resumed.res.confirm.json().change.summary, "Resumed the fleet, but the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not resumed. Resume the fleet again once Valkey answers");
+    assert.deepEqual(resumed.rows, [["write", "ok", null], ["write", "ok", switchShortNote(false)]]);
+    // An agent session's row carries the closed word, and its answer the machine fact.
+    const agent = await c.cookieFor(AGENT_TOKEN);
+    const byAgent = await rowsOf(async () => c.confirm("fleet-pause", (await c.act("fleet-pause", {}, agent)).json().ticket, agent));
+    assert.equal(byAgent.res.status, 200, byAgent.res.text);
+    assert.equal(byAgent.res.json().queuesMayBeShort, true);
+    assert.deepEqual(byAgent.rows, [["write", "ok", null], ["write", "ok", AGENT_QUEUES_SHORT], ["write-applied", "ok", null]]);
+    // A whole read is the flat success it always was, with its one row.
+    registry = { hosts: [] };
+    const whole = await rowsOf(() => c.both("fleet-pause", {}));
+    assert.equal(whole.res.confirm.json().change.summary, "Paused the fleet");
+    assert.deepEqual(whole.rows, [["write", "ok", null]]);
+  } finally {
+    await fleet.dispose();
+    await v.done();
+  }
+});
+
+test("a console started on a Valkey that does not answer: its pause says first that the list of queues may be short and also reaches this host's own queue, and once Valkey answers a second pause reaches every queue (#964)", live, async () => {
+  const v = await freshValkey();
+  // Three queues exist and no registry row names them, so only the keyspace scan can (rows that expired, a stopped fleet).
+  const queues = [await v.q("pi-jobs"), await v.q("pi-jobs@hosta"), await v.q("pi-jobs@hostb")];
+  const proxy = await freezingProxy(URL13);
+  const { paths } = deployment(proxy.url);
+  proxy.freeze();
+  // Built WHILE frozen, as `serve` builds it when it starts during the freeze, with this host's own queue (the deployment
+  // `.env`'s PI_WORKER_NAME, which `serve` reads through `deploymentOwnQueues`).
+  const fleet = RM.createFleetReader(paths, { readOnly: true, parseConnectionFn: boundedHere, switchStepTimeoutMs: FROZEN_STEP_MS, ownQueueNamesFn: () => ["pi-jobs@hosta"] });
+  try {
+    const c = await start({ paths, a: { fleet, pauseSnapshotTimeoutMs: 300, killSwitchPlanFn: () => ({ urls: [paths.valkeyUrl], disagreement: null, context: null }) } });
+    const preview = await c.act("fleet-pause", {});
+    assert.equal(preview.status, 200, preview.text);
+    const paused = await clocked(c.confirm("fleet-pause", preview.json().ticket));
+    assert.equal(paused.res.status, 409, paused.res.text);
+    assert.ok(paused.ms < FROZEN_STEP_MS + 2_000, `${paused.ms} ms: at the bound, not at wake`);
+    assert.equal(paused.res.json().error, `the kill switch did not reach every queue, a pause was sent that may or may not have been made, and the list of queues may be short: ${paths.valkeyUrl} not confirmed for pi-jobs, pi-jobs@hosta (the pause may or may not have been made); paused: none. Other queues may exist and were not paused: pause the fleet again once Valkey answers`);
+    assert.ok(!paused.res.json().error.includes("hostb"), "a queue nothing could name is not named");
+    proxy.thaw();
+    // Once Valkey answers, the next press: the scan names all three, and the answer is the flat success. Whether the first
+    // pause landed at the thaw is not asserted: it was sent and not confirmed, and may or may not have been made.
+    const again = (await c.both("fleet-pause", {})).confirm;
+    assert.equal(again.status, 200, again.text);
+    assert.equal(again.json().change.summary, "Paused the fleet");
+    // Read through a client of the test's own, never `fleet.snapshot()`: a reader whose first read ran during a freeze
+    // can stay unable to read a queue's schedulers after it (issue #986), while its kill switch works.
+    assert.deepEqual(await Promise.all(queues.map((q) => q.isPaused())), [true, true, true]);
+  } finally {
+    proxy.thaw();
+    await Promise.race([fleet.dispose(), sleep(3_000)]);
+    proxy.close();
+    await v.done();
+  }
+});
+
+test("a part-way fleet pause over a set that may be short keeps both leading clauses in its audit row, which the log cuts at 200 code points, with a realistic or a long Valkey address (#964)", async () => {
+  for (const url of ["redis://127.0.0.1:6483/8", `redis://${"valkey-".repeat(12)}primary.example.internal:6379/0`]) {
+    const { paths } = deployment(url);
+    // The real reader over fakes that dial nothing: the registry's SMEMBERS rejects, a registry-named host queue and this
+    // host's own make three, and a pause is sent and never answered.
+    const make = quietQueue();
+    const fleet = RM.createFleetReader(paths, {
+      makeQueueFn: (conn, opts) => ({ ...make(conn, opts), pause: () => new Promise(() => {}), resume: () => new Promise(() => {}) }),
+      parseConnectionFn: () => ({}),
+      redisFn: () => keyedRedis({}, { registryDown: () => true }),
+      discoverHostQueuesFn: async () => ["pi-jobs@hostb"],
+      ownQueueNamesFn: () => ["pi-jobs@hosta"],
+      readOnly: true,
+      switchStepTimeoutMs: 80,
+      closeTimeoutMs: 30,
+    });
+    try {
+      const c = await start({ paths, a: { fleet, pauseSnapshotTimeoutMs: 300, killSwitchPlanFn: () => ({ urls: [paths.valkeyUrl], disagreement: null, context: null }) } });
+      const res = (await c.both("fleet-pause", {})).confirm;
+      assert.equal(res.status, 409, res.text);
+      const said = res.json().error;
+      assert.equal(said, `the kill switch did not reach every queue, a pause was sent that may or may not have been made, and the list of queues may be short: ${url} not confirmed for pi-jobs, pi-jobs@hosta, pi-jobs@hostb (the pause may or may not have been made); paused: none. Other queues may exist and were not paused: pause the fleet again once Valkey answers`);
+      assert.ok([...said].length > 200, "the sentence is longer than the row keeps");
+      const row = c.audit.rows.at(-1);
+      assert.deepEqual([row.outcome, row.reason], ["failed", [...said].slice(0, 200).join("")]);
+      assert.ok(row.reason.includes("may or may not") && row.reason.includes("may be short"), row.reason);
+    } finally {
+      await fleet.dispose();
+    }
+  }
+});
+
+test("this host's own queue that does not exist yet: a fleet preview and a resume write nothing for it, one queue's preview says so, and the fleet pause reaches it (#964)", live, async () => {
+  const v = await freshValkey();
+  const { paths } = deployment(URL13);
+  const fleet = RM.createFleetReader(paths, { readOnly: true, ownQueueNamesFn: () => ["pi-jobs@hostq"] });
+  try {
+    await v.q("pi-jobs");
+    const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: [paths.valkeyUrl], disagreement: null, context: null }) } });
+    // A resume: a queue that does not exist has nothing to resume, and one built to resume it writes its meta key.
+    assert.equal((await c.both("fleet-resume", {})).confirm.status, 200);
+    assert.equal(await v.redis.exists("bull:pi-jobs@hostq:meta"), 0, "the resume wrote nothing for it");
+    // One queue's preview: this host's worker drains it once it starts, so it is not "not a queue this deployment drains".
+    assert.equal((await c.act("queue-pause", { queue: "pi-jobs@hostq" })).json().error, "pi-jobs@hostq does not exist yet (this host's worker creates it when it starts); pause the fleet to reach it, and nothing was changed");
+    assert.equal((await c.act("queue-resume", { queue: "pi-jobs@hostq" })).json().error, "pi-jobs@hostq does not exist yet (this host's worker creates it when it starts); there is nothing to resume, and nothing was changed");
+    assert.match((await c.act("queue-pause", { queue: "pi-jobs@ghost" })).json().error, /^"pi-jobs@ghost" is not a queue this deployment drains/);
+    const preview = await c.act("fleet-pause", {});
+    assert.equal(preview.status, 200, preview.text);
+    assert.ok(preview.json().summary.includes("Queues: pi-jobs, pi-jobs@hostq"), preview.text);
+    assert.ok(preview.json().summary.includes("Not read, so not in these counts: pi-jobs@hostq, this host's own queue, which the look for queues did not find"), preview.text);
+    // A BullMQ queue built to read it would have written its meta key, which every later scan lists as a queue.
+    assert.equal(await v.redis.exists("bull:pi-jobs@hostq:meta"), 0, "the preview wrote nothing");
+    assert.equal((await c.confirm("fleet-pause", preview.json().ticket)).status, 200);
+    assert.equal(await v.redis.hget("bull:pi-jobs@hostq:meta", "paused"), "1", "the switch itself reaches it");
+  } finally {
+    await fleet.dispose();
+    await v.done();
+  }
+});
+
+test("a fleet switch preview says when this host's queue is left out, as the CLI does: an unreadable .env (#964)", async () => {
+  const { dir, paths } = deployment();
+  writeFileSync(join(dir, ".env"), "PI_WORKER_NAME=hosta\n");
+  chmodSync(join(dir, ".env"), 0o000);
+  try {
+    const fleet = { snapshot: async () => ({ queueCounts: [{ queue: "pi-jobs", paused: true, counts: {} }], held: { rows: [] } }) };
+    const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }), ownQueueProblemFn: () => RM.deploymentOwnQueue({ dir }).problem } });
+    const line = "This host's queue is not added: the deployment's .env could not be read (EACCES), so PI_WORKER_NAME cannot be told";
+    for (const name of ["fleet-pause", "fleet-resume"]) assert.ok((await c.act(name, {})).json().summary.includes(line), name);
+    chmodSync(join(dir, ".env"), 0o600);
+    assert.ok(!(await c.act("fleet-pause", {})).json().summary.some((l) => l.startsWith("This host's queue")), "none where its name was read");
+  } finally {
+    chmodSync(join(dir, ".env"), 0o600);
   }
 });
 
@@ -4517,7 +4683,8 @@ test("the pause preview waits six seconds for its snapshot, the resume ten (#961
   const p = await c.act("fleet-pause", {});
   assert.equal(p.status, 200, p.text);
   assert.ok(Date.now() - t0 < 3000, `${Date.now() - t0} ms`);
-  assert.match(p.json().html, /The queues and running, delayed and held counts could not be read; a pause still reaches every queue the kill switch discovers/);
+  assert.ok(p.json().summary.includes(SWITCH_UNREAD_LINES.pause), p.text);
+  assert.equal(SWITCH_UNREAD_LINES.pause, "The queues and running, delayed and held counts could not be read; a pause still reaches every queue the kill switch finds, and its answer says when the list of queues may be short");
 });
 
 test("a paid preview says in its own text that a run like it is already queued or running, or that it could not look, and nothing when none is (#961)", async () => {

@@ -29,6 +29,10 @@ import {
   listRunIds,
   setQueuePaused,
   setQueuePausedOne,
+  ownQueueNamesOf,
+  deploymentOwnQueues,
+  deploymentOwnQueue,
+  killSwitchPlan,
   queueSwitchUnconfirmed,
   SWITCH_STEP_TIMEOUT_MS,
   killSwitchSet,
@@ -1091,7 +1095,7 @@ test("setQueuePaused pauses through one queue and closes it in finally", async (
       closed = true;
     },
   });
-  const res = await setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => ({ smembers: async () => [], disconnect() {} }) });
+  const res = await setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => ({ smembers: async () => [], scan: async () => ["0", []], disconnect() {} }) });
   assert.deepEqual(res, { ok: true, paused: true, queues: ["pi-jobs"] });
   assert.deepEqual(calls, ["pause"], "pause, never resume");
   assert.equal(closed, true, "closed in finally");
@@ -1108,7 +1112,7 @@ test("setQueuePaused resumes when paused is false", async () => {
     },
     async close() {},
   });
-  const res = await setQueuePaused({ url: "redis://x", paused: false, makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => ({ smembers: async () => [], disconnect() {} }) });
+  const res = await setQueuePaused({ url: "redis://x", paused: false, makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => ({ smembers: async () => [], scan: async () => ["0", []], disconnect() {} }) });
   assert.deepEqual(res, { ok: true, paused: false, queues: ["pi-jobs"] });
   assert.deepEqual(calls, ["resume"]);
 });
@@ -2802,6 +2806,78 @@ test("the kill switch goes to both Valkeys at once: one that never answers does 
   releaseFirst();
   const res = await pending;
   assert.deepEqual(res.results.map((r) => r.url), ["redis://a/0", "redis://b/0"], "in the plan's order");
+});
+
+// Issue #964: this host's own queue, and a set of queues that may be short, on the kill switch's one-shot path (the
+// `/dispatch pause` and `resume` command, and a second Valkey of the plan).
+test("ownQueueNamesOf names this host's queue only for a PI_WORKER_NAME the worker would take, never a hostname (#964)", () => {
+  assert.deepEqual(ownQueueNamesOf({ PI_WORKER_NAME: "hosta" }), ["pi-jobs@hosta"]);
+  for (const env of [{}, { PI_WORKER_NAME: "" }, { PI_WORKER_NAME: "bad name" }, { PI_WORKER_NAME: "runs.json" }, { PI_WORKER_NAME: 7 }, null, undefined]) {
+    assert.deepEqual(ownQueueNamesOf(env), [], JSON.stringify(env));
+  }
+});
+
+test("deploymentOwnQueues takes the name from the deployment's .env alone, and none when this shell sets another or the file none (#964)", () => {
+  const dir = tempDir("pd-964-own-");
+  const own = (envFile, env = {}, owned = []) => {
+    writeFileSync(join(dir, ".env"), envFile);
+    return deploymentOwnQueues({ env, dir, owned });
+  };
+  assert.deepEqual(own("PI_WORKER_NAME=hosta\n"), ["pi-jobs@hosta"]);
+  assert.deepEqual(own("PI_WORKER_NAME=hosta\n", { PI_WORKER_NAME: "hosta" }), ["pi-jobs@hosta"], "the shell agrees");
+  // The worker service runs the file's name: a shell that says another leaves which one runs not known here.
+  assert.deepEqual(own("PI_WORKER_NAME=hosta\n", { PI_WORKER_NAME: "hostz" }), []);
+  assert.deepEqual(own("PI_WORKER_NAME=hosta\n", { PI_WORKER_NAME: "" }), []);
+  // A value the pointer layered in is not the shell's.
+  assert.deepEqual(own("PI_WORKER_NAME=hosta\n", { PI_WORKER_NAME: "hostz" }, ["PI_WORKER_NAME"]), ["pi-jobs@hosta"]);
+  // No name in the file: none, whatever this shell sets.
+  assert.deepEqual(own("# none\n", { PI_WORKER_NAME: "hostz" }), []);
+  assert.deepEqual(own("PI_WORKER_NAME=runs.json\n"), [], "a name the worker refuses");
+  assert.deepEqual(own('PI_WORKER_NAME="hosta\n'), [], "a line the service's loader may read otherwise");
+  assert.deepEqual([deploymentOwnQueues({ dir: null }), deploymentOwnQueues({ dir: join(dir, "absent") })], [[], []]);
+  // Why none, where a name may have been meant, in words with no value or path, for the kill switch's preview.
+  const why = (envFile, env = {}) => {
+    writeFileSync(join(dir, ".env"), envFile);
+    return deploymentOwnQueue({ env, dir }).problem;
+  };
+  assert.deepEqual([why("PI_WORKER_NAME=hosta\n"), why("# none\n")], [null, null]);
+  assert.equal(why("PI_WORKER_NAME=hosta\n", { PI_WORKER_NAME: "hostz" }), "PI_WORKER_NAME in this environment is not the one in the deployment's .env, which the service runs");
+  assert.equal(why("# none\n", { PI_WORKER_NAME: "hostz" }), "PI_WORKER_NAME is set in this environment and not in the deployment's .env, which the service reads");
+  assert.equal(why('PI_WORKER_NAME="hosta\n'), "the deployment's .env has a line for PI_WORKER_NAME that the service's loader may read differently, so it cannot be told");
+  assert.equal(why("PI_WORKER_NAME=runs.json\n"), "the deployment's .env names a PI_WORKER_NAME the worker does not take");
+  writeFileSync(join(dir, ".env"), "PI_WORKER_NAME=hosta\n");
+  chmodSync(join(dir, ".env"), 0o000);
+  try {
+    assert.deepEqual(deploymentOwnQueue({ dir }), { names: [], problem: "the deployment's .env could not be read (EACCES), so PI_WORKER_NAME cannot be told" });
+  } finally {
+    chmodSync(join(dir, ".env"), 0o600);
+  }
+});
+
+test("setQueuePaused flips alsoNames beside what discovery names, and keeps a scan that did not finish as incomplete (#964)", async () => {
+  const paused = [];
+  const makeQueueFn = (_c, opts) => ({ async pause() { paused.push(opts?.name ?? "pi-jobs"); }, async resume() {}, async close() {} });
+  // A registry that answers and a keyspace scan that rejects: the set the switch acted on may be short.
+  const redisFn = () => ({ ...fakeFleetRedis(["mini1"])(), async scan() { throw new Error("ETIMEDOUT"); } });
+  const res = await setQueuePaused({ url: "redis://x", paused: true, alsoNames: ["pi-jobs@hosta"], makeQueueFn, parseConnectionFn: () => ({}), redisFn });
+  assert.deepEqual({ ...res, incomplete: typeof res.incomplete }, { ok: true, paused: true, queues: ["pi-jobs", "pi-jobs@hosta", "pi-jobs@mini1"], incomplete: "string" });
+  assert.deepEqual(paused.sort(), ["pi-jobs", "pi-jobs@hosta", "pi-jobs@mini1"]);
+});
+
+test("killSwitchSet hands alsoNames to the deployment's Valkey alone, which killSwitchPlan names (#964)", async () => {
+  const asked = [];
+  const setFn = async ({ url, alsoNames }) => (asked.push([url, alsoNames ?? null]), { ok: true, paused: true, queues: ["pi-jobs"] });
+  await killSwitchSet({ paused: true, plan: { urls: ["redis://shell/0", "redis://file/0"], deploymentUrl: "redis://file/0", disagreement: "they disagree", context: null }, setFn, alsoNames: ["pi-jobs@hosta"] });
+  assert.deepEqual(asked, [["redis://shell/0", null], ["redis://file/0", ["pi-jobs@hosta"]]]);
+  // A plan that does not name it is read by the same rule: the second on a disagreement.
+  asked.length = 0;
+  await killSwitchSet({ paused: true, plan: { urls: ["redis://shell/0", "redis://file/0"], disagreement: "they disagree", context: null }, setFn, alsoNames: ["pi-jobs@hosta"] });
+  assert.deepEqual(asked, [["redis://shell/0", null], ["redis://file/0", ["pi-jobs@hosta"]]]);
+  // The plan names it: the .env's on a disagreement (what the service reads), the one URL otherwise.
+  const stateFn = () => ({ deploymentDir: null, owned: [] });
+  const two = killSwitchPlan({ paused: true, env: {}, stateFn, resolveFn: () => ({ urls: ["redis://shell/0", "redis://file/0"], disagreement: "they disagree" }) });
+  const one = killSwitchPlan({ paused: false, env: {}, stateFn, resolveFn: () => ({ urls: ["redis://only/0"], disagreement: null }) });
+  assert.deepEqual([two.deploymentUrl, one.deploymentUrl], ["redis://file/0", "redis://only/0"]);
 });
 
 test("a ONE-host deployment shows a bare count, exactly as it always did", () => {

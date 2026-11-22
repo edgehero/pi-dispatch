@@ -14,6 +14,8 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { fakeAllocRedis } from "./helpers/fake-alloc-redis.mjs";
 import { CONSOLE_AUDIT_FIELD_MAX } from "@edgehero/pi-dispatch/console-audit";
 import { escapeControls } from "@edgehero/pi-dispatch/projects";
+import { HOST_SET } from "@edgehero/pi-dispatch/host-registry";
+import { switchShortNote } from "../src/words.mjs";
 
 // Issue #642's review: EVERY panel write surface, driven through the real extension the way pi drives it, appends its
 // audit row (actor role `panel`) before its write lands, and a `failed` row after one that did not land. One table row
@@ -531,17 +533,167 @@ test("/dispatch pause on a Valkey that answers nothing says the pause is not con
   await new Promise((resolve) => silent.listen(0, "127.0.0.1", resolve));
   const fx = deployment({ valkey: `redis://127.0.0.1:${silent.address().port}` });
   try {
+    // This host's own queue is the deployment .env's PI_WORKER_NAME (issue #964); the shell says the same (mini1).
+    writeFileSync(ENV_FILE, "PI_WORKER_NAME=mini1\n");
     const notes = await command("pause");
-    const said = "pause: NOT CONFIRMED for pi-jobs: the switch may or may not have been made there; known switched: none; the list of queues may be short";
+    // Issue #964: the list that may be short is said first, and this host's own queue (the .env's PI_WORKER_NAME, mini1)
+    // was sent its pause beside the shared one, though no discovery answered.
+    const said = "pause: the list of queues may be short, so other queues may exist and were not switched; NOT CONFIRMED for pi-jobs, pi-jobs@mini1: the switch may or may not have been made there; known switched: none";
     assert.ok(notes.includes(said), JSON.stringify(notes));
     const rows = rowsOf(fx.files.logs).filter((r) => r.kind === "fleet-pause");
     assert.deepEqual(rows.map((r) => r.outcome), ["ok", "failed"]);
-    assert.match(rows[1].reason, /^NOT CONFIRMED for pi-jobs: the switch may or may not have been made there; known switched: none; the list of queues may be short on redis:\/\/127\.0\.0\.1:\d+$/);
+    // The row keeps the sentence's first 200 code points: the Valkey's address at its end is what the cut takes.
+    assert.equal(rows[1].reason, [...`${said.slice("pause: ".length)} on redis://127.0.0.1:${silent.address().port}`].slice(0, 200).join(""));
   } finally {
     fx.restore();
     for (const socket of sockets) socket.destroy();
     silent.close();
   }
+});
+
+// Issue #964: `/dispatch pause` and `resume` on a Valkey that answers, with a host registry it cannot read (the registry
+// key holds a string, so SMEMBERS is refused): every queue it found is switched, this host's own among them, and the line
+// and a second audit row say the list may be short. The line said "only pi-jobs" here, which the scan had made untrue.
+test("/dispatch pause and resume over an unreadable registry switch this host's queue too and say the list of queues may be short (#964)", { timeout: 30_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  const fx = deployment({ valkey: LIVE });
+  const { default: IORedis } = await import("ioredis");
+  const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  try {
+    writeFileSync(ENV_FILE, "PI_WORKER_NAME=mini1\n");
+    await r.set(HOST_SET, "not a set");
+    const paused = await command("pause");
+    assert.ok(paused.includes(`paused: worker will stop taking new jobs (jobs still enqueue; durable, survives restart) (2 queues), but ${switchShortNote(true)}`), JSON.stringify(paused));
+    assert.equal(await r.hget("bull:pi-jobs@mini1:meta", "paused"), "1", "this host's own queue (the .env's PI_WORKER_NAME, mini1) was paused");
+    const resumed = await command("resume");
+    assert.ok(resumed.includes(`resumed (2 queues), but ${switchShortNote(false)}`), JSON.stringify(resumed));
+    const rows = rowsOf(fx.files.logs).filter((row) => row.kind?.startsWith("fleet-")).map((row) => [row.kind, row.outcome, row.reason ?? null]);
+    assert.deepEqual(rows, [["fleet-pause", "ok", null], ["fleet-pause", "ok", switchShortNote(true)], ["fleet-resume", "ok", null], ["fleet-resume", "ok", switchShortNote(false)]]);
+  } finally {
+    await r.del(HOST_SET, "bull:pi-jobs@mini1:meta", "bull:pi-jobs@mini1:events").catch(() => {});
+    r.disconnect();
+    fx.restore();
+  }
+});
+
+// Issue #964: this host's own queue is the deployment .env's PI_WORKER_NAME, which the worker service runs. Pi's own
+// environment (the "shell" here) naming another, or a .env naming none, adds no own queue on the /dispatch command, the
+// tools or the panel's p, where a pause of pi-jobs@hostz wrote a meta key for a queue nobody drains.
+test("the /dispatch command, the tools and the panel take this host's queue from the .env alone, and none when pi's environment names another (#964)", { timeout: 60_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  const fx = deployment({ valkey: LIVE });
+  const { default: IORedis } = await import("ioredis");
+  const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  const metas = ["bull:pi-jobs@mini1:meta", "bull:pi-jobs@hostz:meta", "bull:pi-jobs@mini1:events", "bull:pi-jobs@hostz:events"];
+  const created = async () => (await Promise.all(["mini1", "hostz"].map(async (n) => ((await r.exists(`bull:pi-jobs@${n}:meta`)) ? n : null)))).filter(Boolean);
+  const surfaces = {
+    command: () => command("pause"),
+    tool: () => tool("dispatch_pause", {}),
+    panel: () => withPanel(async (comp) => {
+      comp.handleInput("p");
+      await until(() => rowsOf(fx.files.logs).filter((row) => row.kind === "fleet-pause").length > 0, "the panel's pause row");
+      await settle(100);
+    }),
+  };
+  try {
+    // A resume first, with the queue absent: one that does not exist has nothing to resume, and none is built for it.
+    writeFileSync(ENV_FILE, "PI_WORKER_NAME=mini1\n");
+    for (const resume of [() => command("resume"), () => tool("dispatch_resume", {})]) {
+      await r.del(...metas);
+      await resume();
+      assert.deepEqual(await created(), [], "a resume wrote nothing for this host's absent queue");
+    }
+    for (const [surface, run] of Object.entries(surfaces)) {
+      for (const [envFile, shell, want] of [["PI_WORKER_NAME=mini1\n", "hostz", []], [QUIET_ENV, "mini1", []], ["PI_WORKER_NAME=mini1\n", "mini1", ["mini1"]]]) {
+        await r.del(...metas);
+        rmSync(join(fx.files.logs, "console-audit"), { recursive: true, force: true });
+        writeFileSync(ENV_FILE, envFile);
+        process.env.PI_WORKER_NAME = shell;
+        await run();
+        assert.deepEqual(await created(), want, `${surface}: .env ${JSON.stringify(envFile)}, pi's environment ${shell}`);
+      }
+    }
+  } finally {
+    // The shared queue these pauses left paused, back as the other cases on this database expect it (it holds no job).
+    await r.hdel("bull:pi-jobs:meta", "paused").catch(() => {});
+    await r.del(...metas).catch(() => {});
+    r.disconnect();
+    fx.restore();
+  }
+});
+
+// Issue #964: on a VALKEY_URL disagreement (pi's environment names database 9, the deployment .env database 8) a pause
+// reaches both Valkeys, and this host's own queue only the .env's, the one its worker drains: from the /dispatch command,
+// the tools and the panel's p alike. The reader's own Valkey here is pi's.
+test("on a VALKEY_URL disagreement the /dispatch command, the tools and the panel pause this host's queue on the .env's Valkey only (#964)", { timeout: 60_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  const fx = deployment({ valkey: LIVE });
+  const { default: IORedis } = await import("ioredis");
+  const envUrl = LIVE.replace(/\/9$/, "/8");
+  const shellSide = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  const envSide = new IORedis(envUrl, { maxRetriesPerRequest: 1 });
+  // Only the keys these pauses make on database 8, never the database whole.
+  const drop = async () => {
+    for (const r of [shellSide, envSide]) {
+      const keys = [];
+      let cursor = "0";
+      do {
+        const [next, found] = await r.scan(cursor, "MATCH", r === envSide ? "bull:pi-jobs*" : "bull:pi-jobs@mini1:*", "COUNT", 100);
+        cursor = next;
+        keys.push(...found);
+      } while (cursor !== "0");
+      if (keys.length > 0) await r.del(...keys);
+    }
+    await shellSide.hdel("bull:pi-jobs:meta", "paused");
+  };
+  const surfaces = {
+    command: () => command("pause"),
+    tool: () => tool("dispatch_pause", {}),
+    panel: () => withPanel(async (comp) => {
+      comp.handleInput("p");
+      await until(() => rowsOf(fx.files.logs).filter((row) => row.kind === "fleet-pause").length > 0, "the panel's pause row");
+      await settle(100);
+    }),
+  };
+  try {
+    writeFileSync(ENV_FILE, `VALKEY_URL=${envUrl}\nPI_WORKER_NAME=mini1\n`);
+    for (const [surface, run] of Object.entries(surfaces)) {
+      await drop();
+      rmSync(join(fx.files.logs, "console-audit"), { recursive: true, force: true });
+      await run();
+      assert.deepEqual([await envSide.hget("bull:pi-jobs:meta", "paused"), await shellSide.hget("bull:pi-jobs:meta", "paused")], ["1", "1"], `${surface}: both Valkeys paused`);
+      assert.deepEqual([await envSide.hget("bull:pi-jobs@mini1:meta", "paused"), await shellSide.exists("bull:pi-jobs@mini1:meta")], ["1", 0], `${surface}: this host's queue on the .env's Valkey only`);
+    }
+  } finally {
+    await drop().catch(() => {});
+    shellSide.disconnect();
+    envSide.disconnect();
+    fx.restore();
+  }
+});
+
+// Issue #964: a part-way switch with no lost answer (a queue Valkey refused) over a set that may be short, through the
+// command: its line leads with that. The registry key and this host's queue's meta key hold strings, so Valkey answers the
+// registry read and the queue's pause with WRONGTYPE.
+test("/dispatch pause refused part-way over an unreadable registry says first that the list of queues may be short (#964)", { timeout: 30_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  const fx = deployment({ valkey: LIVE });
+  const { default: IORedis } = await import("ioredis");
+  const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  try {
+    writeFileSync(ENV_FILE, "PI_WORKER_NAME=mini1\n");
+    await r.set(HOST_SET, "not a set");
+    await r.set("bull:pi-jobs@mini1:meta", "not a hash");
+    const notes = await command("pause");
+    assert.ok(notes.includes("the list of queues may be short, so other queues may exist and were not switched; paused pi-jobs but FAILED at pi-jobs@mini1: the deployment is half paused"), JSON.stringify(notes));
+  } finally {
+    await r.del(HOST_SET, "bull:pi-jobs@mini1:meta", "bull:pi-jobs@mini1:events").catch(() => {});
+    await r.hdel("bull:pi-jobs:meta", "paused").catch(() => {});
+    r.disconnect();
+    fx.restore();
+  }
+});
+
+test("the pause and resume tools tell a model what queuesMayBeShort means in the words the surfaces say (#964)", () => {
+  const t = tools();
+  assert.match(t.dispatch_pause.description, /queuesMayBeShort true in the answer means the host registry or the look for queues could not be read, so other queues may exist and were not paused: pause again once Valkey answers\./);
+  assert.match(t.dispatch_resume.description, /queuesMayBeShort true in the answer means the host registry or the look for queues could not be read, so other queues may exist and were not resumed\./);
 });
 
 test("the table has exactly one row per audited call site in index.ts, secrets-command.ts and dashboard.ts", () => {

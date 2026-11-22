@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { stripAnsi } from "../src/style.mjs";
-import { DOCS_ROOT, capitalised, listed, HELD_LABEL, NO_EXPLANATION, NO_REASON_FAILED, OUTCOME_KEYS, OUTCOME_KEY_WORDS, RECORD_REASON_RE, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, UNNAMED_FIELD, VENUE_LABEL, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence } from "../src/words.mjs";
+import { DOCS_ROOT, capitalised, listed, HELD_LABEL, NO_EXPLANATION, NO_REASON_FAILED, OUTCOME_KEYS, OUTCOME_KEY_WORDS, RECORD_REASON_RE, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, UNNAMED_FIELD, VENUE_LABEL, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence, switchListShort, switchShortNote } from "../src/words.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { NESTED_REASONS, REASONS, explainReason } from "../../worker/src/reason-catalog.mjs";
 import { RECOVERY_COMMENTS } from "../../worker/src/comment-tables.mjs";
@@ -13,6 +13,7 @@ import { RUNNER_COMPLETED_REASONS } from "../../worker/src/run-history.mjs";
 import { RUN_OUTCOMES } from "../../worker/src/portfolio-snapshot.mjs";
 import { LIVE_OUTCOMES } from "../../worker/src/live-transcript.mjs";
 import { recordOutcomeEnum } from "../../worker/test/helpers/spec-enum.mjs";
+import { killSwitchShortNote } from "../../worker/src/cli.mjs";
 import { loadVisibleWidth } from "./helpers/renderer.mjs";
 
 // Issue #710, PR 2: the console and the `/dispatch` panel say one vocabulary, read from admin/src/words.mjs. Each table
@@ -489,4 +490,13 @@ test("capitalised keeps an id whose word is joined to the rest by @, as written"
 test("capitalised keeps an id joined by a full stop with no space after it, as written", () => {
   assert.equal(capitalised("valkey.internal did not answer"), "valkey.internal did not answer");
   assert.equal(capitalised("done. Look again"), "Done. Look again");
+});
+
+test("a kill switch over a set of queues that may be short says one sentence on every surface, the CLI's word for word (issue #964)", () => {
+  assert.equal(switchShortNote(true), "the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not paused. Pause the fleet again once Valkey answers");
+  assert.equal(switchShortNote(false), "the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not resumed. Resume the fleet again once Valkey answers");
+  for (const paused of [true, false]) assert.equal(killSwitchShortNote(paused), switchShortNote(paused));
+  // "Once Valkey answers": a page can stay unread after Valkey answers while the switch works (issue #986).
+  assert.doesNotMatch(switchShortNote(true), /Fleet reads|once .* reads/);
+  assert.deepEqual([{ blind: "x" }, { incomplete: "y" }, { ok: true }, null].map(switchListShort), [true, true, false, false]);
 });

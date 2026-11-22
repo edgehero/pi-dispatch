@@ -44,7 +44,7 @@ import { FORGE_JOB_RETENTION_DAYS, LOCAL_JOB_KEPT_FAILED_S } from "@edgehero/pi-
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 // The one vocabulary both surfaces read (issue #710): outcome words, the venue label, the Spend and Held titles.
-import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, VENUE_LABEL, outcomeWord, reasonWords, recordReason, rowNumber } from "./words.mjs";
+import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, VENUE_LABEL, outcomeWord, reasonWords, recordReason, rowNumber, switchListShort, switchShortNote } from "./words.mjs";
 import { outcomeNote } from "./loaded-words.mjs";
 import { beatAgeOf, doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorStale } from "./doctor-view.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
@@ -268,8 +268,8 @@ export function createDashboardDeps(paths: any, seams: any = {}) {
 export function withAuditedWrites(deps: any, write: (opts: any, fn: () => any) => any) {
   return {
     ...deps,
-    pause: () => write({ kind: "fleet-pause", target: "fleet", failure: switchFailure }, () => deps.pause()),
-    resume: () => write({ kind: "fleet-resume", target: "fleet", failure: switchFailure }, () => deps.resume()),
+    pause: () => write({ kind: "fleet-pause", target: "fleet", failure: switchFailure, note: switchShortRow(true) }, () => deps.pause()),
+    resume: () => write({ kind: "fleet-resume", target: "fleet", failure: switchFailure, note: switchShortRow(false) }, () => deps.resume()),
     cancelActive: ({ jobId }: any) => write({ kind: "cancel-active", target: jobId, failure: cancelFailure }, () => deps.cancelActive({ jobId })),
     cancelHeld: ({ jobId }: any) => write({ kind: "cancel-held", target: jobId, failure: cancelFailure }, () => deps.cancelHeld({ jobId })),
     // Issue #646: the steer push, kind `steer`, its row naming the job and the message id (`steerAuditTarget`) and
@@ -298,6 +298,22 @@ function steerNote(res: any): string {
 }
 
 /**
+ * Whether a pause or resume result (`killSwitchSet`'s shape) switched over a set of queues that may be short on any
+ * Valkey (issue #964, `switchListShort`).
+ */
+function switchedShort(res: any): boolean {
+  return (Array.isArray(res?.results) ? res.results : []).some((r: any) => switchListShort(r?.res));
+}
+
+/**
+ * The reason of the second `ok` row a pause or resume that landed over a set of queues that may be short gets (issue
+ * #964, `auditedWrite`'s `note`), or null. index.ts gives the `/dispatch pause` and `resume` command's row the same.
+ */
+export function switchShortRow(paused: boolean) {
+  return (res: any): string | null => (switchedShort(res) ? switchShortNote(paused) : null);
+}
+
+/**
  * A pause or resume result's failure: a refusal it carries (`{ refused }`, the kill switch's two-Valkey disagreement on
  * a resume, or `{ invalid }`), or a Valkey in its `results` (`killSwitchSet`'s shape, which the fleet reader returns
  * since issue #642) it could not reach, whole or half. Undefined, or results that all landed, is a switch that landed.
@@ -312,19 +328,27 @@ export function switchFailure(res: any): string | null {
   // could not be reached hid a pause that was sent to the other and may have been made there.
   const words = bad.map((r: any) => {
     const at = r.shown ?? "the deployment's Valkey";
-    const lost = switchUnconfirmed(r.res.partial, Boolean(r.res.blind || r.res.incomplete));
+    const short = switchListShort(r.res);
+    const lost = switchUnconfirmed(r.res.partial, short);
     if (lost !== null) return { lost: true, text: `${lost} on ${at}` };
-    return { lost: false, text: r.res.partial ? `FAILED at ${r.res.partial.failed} on ${at}, so the deployment is half switched` : `could not reach the queue at ${at}` };
+    return { lost: false, text: r.res.partial ? `${short ? SWITCH_SHORT_LEAD : ""}FAILED at ${r.res.partial.failed} on ${at}, so the deployment is half switched` : `could not reach the queue at ${at}` };
   });
   return [...words.filter((w: any) => w.lost), ...words.filter((w: any) => !w.lost)].map((w: any) => w.text).join("; ");
 }
 
 /**
+ * What a part-way switch whose set of queues may be short says FIRST (issue #964): an audit row keeps the start of a
+ * sentence (200 code points), and at the end this was cut, or read past.
+ */
+const SWITCH_SHORT_LEAD = "the list of queues may be short, so other queues may exist and were not switched; ";
+
+/**
  * A part-way switch with a queue whose pause or resume is not known to have been made (issue #842, the read model's
- * `partial.unconfirmed`: sent and not answered, or its queue not connected within the step, which may still send it): the queues not known first, since that is what an operator must look at, then those that
- * did not change, those a resume never tried and those known switched, the console confirm's four, and `short` (the
- * registry or the scan was not read whole) says the list itself may be missing a queue. Null for a switch that lost
- * no answer. Queue names only. The `/dispatch pause` and `resume` command says the same (`switchCommandLost`).
+ * `partial.unconfirmed`: sent and not answered, or its queue not connected within the step, which may still send it):
+ * `short` (the registry or the scan was not read whole, issue #964) first, saying the list itself may be missing a
+ * queue, then the queues not known, since that is what an operator must look at, then those that did not change, those
+ * a resume never tried and those known switched, the console confirm's four. Null for a switch that lost no answer.
+ * Queue names only. The `/dispatch pause` and `resume` command says the same (`switchCommandLost`).
  */
 export function switchUnconfirmed(partial: any, short = false): string | null {
   const names = (list: any): string[] => (Array.isArray(list) ? list.map(String) : []);
@@ -332,7 +356,7 @@ export function switchUnconfirmed(partial: any, short = false): string | null {
   if (unconfirmed.length === 0) return null;
   const refused = names(partial?.refused);
   const notTried = names(partial?.notTried);
-  return `NOT CONFIRMED for ${unconfirmed.join(", ")}: the switch may or may not have been made there${refused.length > 0 ? `; not switched: ${refused.join(", ")}` : ""}${notTried.length > 0 ? `; not tried: ${notTried.join(", ")}` : ""}; known switched: ${names(partial?.done).join(", ") || "none"}${short ? "; the list of queues may be short" : ""}`;
+  return `${short ? SWITCH_SHORT_LEAD : ""}NOT CONFIRMED for ${unconfirmed.join(", ")}: the switch may or may not have been made there${refused.length > 0 ? `; not switched: ${refused.join(", ")}` : ""}${notTried.length > 0 ? `; not tried: ${notTried.join(", ")}` : ""}; known switched: ${names(partial?.done).join(", ") || "none"}`;
 }
 
 /**
@@ -340,8 +364,19 @@ export function switchUnconfirmed(partial: any, short = false): string | null {
  * for one that lost none: `at` is " at <url>" when the command names more than one Valkey, else empty.
  */
 export function switchCommandLost(paused: boolean, at: string, res: any): string | null {
-  const lost = switchUnconfirmed(res?.partial, Boolean(res?.blind || res?.incomplete));
+  const lost = switchUnconfirmed(res?.partial, switchListShort(res));
   return lost === null ? null : `${paused ? "pause" : "resume"}${at}: ${lost}`;
+}
+
+/**
+ * The `/dispatch pause` and `resume` command's line for one Valkey whose switch stopped part-way with no lost answer (a
+ * queue refused, or a loop that stopped), led by the clause that the list of queues may be short where it may (issue
+ * #964), as the panel's note and the lost-answer line are.
+ */
+export function switchCommandHalf(paused: boolean, at: string, res: any): string {
+  const verb = paused ? "paused" : "resumed";
+  const done = Array.isArray(res?.partial?.done) ? res.partial.done.map(String).join(", ") : "";
+  return `${switchListShort(res) ? SWITCH_SHORT_LEAD : ""}${verb} ${done}${at} but FAILED at ${String(res?.partial?.failed ?? "-")}: the deployment is half ${verb}`;
 }
 
 /** A cancel result's failure: a refusal, or no worker acknowledging (nothing changed). */
@@ -355,16 +390,22 @@ function cancelFailure(res: any): string | null {
 /**
  * The footer note for a pause or resume: why it was refused or failed (a half switched deployment is the one outcome
  * this switch exists to prevent, so it is said, never left to the next snapshot), the two Valkeys a pause switched when
- * this process's and the deployment's disagree, or null for a switch that simply landed (the next snapshot's paused
- * flag says that). Scrubbed: a refusal can quote a URL or a reason another process wrote.
+ * this process's and the deployment's disagree, a switch that landed over a set of queues that may be short (issue
+ * #964: the next snapshot's paused flags would show only the queues it knew, all switched), or null for a switch that
+ * simply landed (the next snapshot's paused flag says that). Scrubbed: a refusal can quote a URL or a reason another
+ * process wrote.
  */
-function switchNote(verb: string, res: any): string | null {
+export function switchNote(verb: string, res: any): string | null {
   const why = switchFailure(res);
   if (why !== null) {
     const refused = typeof res?.refused === "string" || typeof res?.invalid === "string";
     return `${verb} ${refused ? "refused" : "failed"}: ${scrubControl(why)}`;
   }
-  return typeof res?.disagreement === "string" && res.disagreement !== "" ? `${scrubControl(res.disagreement)}: ${verb}d both` : null;
+  const said = [
+    ...(typeof res?.disagreement === "string" && res.disagreement !== "" ? [`${scrubControl(res.disagreement)}: ${verb}d both`] : []),
+    ...(switchedShort(res) ? [`${verb}d the fleet, but ${switchShortNote(verb === "pause")}`] : []),
+  ];
+  return said.length > 0 ? said.join("; ") : null;
 }
 
 /**
