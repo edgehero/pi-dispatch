@@ -53,7 +53,7 @@ import { jobImageFrom, logsDirPath, settingsFilePath } from "./config.mjs";
 import { jobImageFix, pullOffered, registryQualified } from "./image-ref.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
 import { ENV_WRITER_FS, ENV_VALUE_UNWRITABLE, envKeyIsBlank, envValueShown, readEnvAssignments, updateEnvFile } from "./env-file.mjs";
-import { COMPOSE_FILE, COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, OWNER_CHECK_CONTAINER, OWNER_CHECK_EXEC, VALKEY_VOLUME_RECORD, adoptVolumeQuestion, composeArgs, ownerCheckAnswer, readVolumeRecord, valkeyOwnerCheckArgs, volumeRecordMatches, volumeRecordText, composeProjectName, foreignContainerSentence, foreignMarkerRefusal, foreignVolumeLabelRefusal, foreignVolumeRefusal, foreignVolumeUsers, isLoopbackHost, newValkeyPassword, unadoptedVolumeRefusal, valkeyContainerOwner, valkeyDockerRunArgs, valkeyPasswordDecision, valkeyPortEnvDecision, valkeyVolumeCreateArgs, valkeyVolumeOwner } from "./valkey-auth.mjs";
+import { COMPOSE_FILE, COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, OWNER_CHECK_CONTAINER, OWNER_CHECK_EXEC, VALKEY_IMAGE, VALKEY_VOLUME_RECORD, adoptVolumeQuestion, composeArgs, ownerCheckAnswer, readVolumeRecord, valkeyOwnerCheckArgs, volumeRecordMatches, volumeRecordText, composeProjectName, foreignContainerSentence, foreignMarkerRefusal, foreignVolumeLabelRefusal, foreignVolumeRefusal, foreignVolumeUsers, isLoopbackHost, newValkeyPassword, unadoptedVolumeRefusal, valkeyContainerOwner, valkeyDockerRunArgs, valkeyPasswordDecision, valkeyPortEnvDecision, valkeyVolumeCreateArgs, valkeyVolumeOwner } from "./valkey-auth.mjs";
 import { olderValkeyContainerFinding } from "./older-state.mjs";
 import { deploymentValkeyEnv, deploymentVenueEnv } from "./deployment-venue.mjs";
 import { resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
@@ -95,6 +95,19 @@ const PODMAN_EXISTS_ARGS = ["image", "exists", LOCAL_IMAGE];
 // Valkey writes its AOF out), removed, and run again from the argv above. The volume, and the queue in it, is kept.
 const VALKEY_STOP_ARGS = ["stop", "pi-dispatch-valkey"];
 const VALKEY_RM_ARGS = ["rm", "pi-dispatch-valkey"];
+
+// Issue #1021: the bounds of the docker steps a daemon that stops answering held `up` at, each for as long as it stayed
+// silent. `DOCKER_STEP_TIMEOUT_MS`, thirty seconds, for every short daemon call before a Valkey starts: `docker version`,
+// the ownership reads (`query`: the container inspect, `ps -a --filter volume=`, the volume inspect) and the Valkey owner
+// check's exec, stop (its own 10 s grace inside it) and rm. `OWNER_CHECK_RUN_TIMEOUT_MS`, two minutes, for the owner
+// check's `docker run`, which creates and starts a Valkey, and on a host that has not got `VALKEY_IMAGE` pulls it first:
+// nothing else in `up` pulls that image, so that pull falls inside this bound (a few megabytes; not measured). The run's
+// refusal names the `docker pull` that takes it out. The marker's wait is `OWNER_CHECK_WAIT_MS` of the clock in all.
+// Unbounded still: the job image steps, compose, and the Valkey and egress proxy runs, stops and removals, all long by
+// nature or streamed for the operator to watch.
+const OWNER_CHECK_RUN_TIMEOUT_MS = 120_000;
+const DOCKER_STEP_TIMEOUT_MS = 30_000;
+const OWNER_CHECK_WAIT_MS = 20_000;
 
 // deploy/docker-compose.yml's `egress` profile, reproduced as one docker run (REQ-EGRESS-ALLOWLIST):
 // same digest-pinned image, same three mounts, same host entry, same explicit container name, same restart
@@ -255,6 +268,10 @@ export async function runUp(argv = [], deps = {}) {
 		gatewayWaitMs = 30_000,
 		// How long one read of the openshell CLI may take before it is killed (review round 1 of #715).
 		openshellReadTimeoutMs = 15_000,
+		// Issue #1021: how long the Valkey owner check's `docker run`, and each short docker step before a Valkey starts, may
+		// take before it is killed (`OWNER_CHECK_RUN_TIMEOUT_MS`, `DOCKER_STEP_TIMEOUT_MS`). Seams for the tests.
+		ownerCheckRunTimeoutMs = OWNER_CHECK_RUN_TIMEOUT_MS,
+		dockerStepTimeoutMs = DOCKER_STEP_TIMEOUT_MS,
 		// Issue #708: how many operator tokens the console's tokens file holds (0 when it cannot be used), for the closing
 		// "Next:" line that offers the console as a service. A seam so a test need not make an owner-only file.
 		consoleOperators = (dir) => defaultConsoleOperators(dir, platform),
@@ -347,7 +364,14 @@ export async function runUp(argv = [], deps = {}) {
 	// (a) docker binary + daemon, before anything is offered: every mutation below runs through the
 	// docker CLI, so with the daemon down the prompts would only collect consent for failures.
 	// Distinguishes not-on-PATH from daemon-down exactly as doctor does (spawn error vs nonzero exit).
-	const dockerCode = await runCmd(spawn, "docker", ["version"]);
+	// Issue #1021: bounded, so a daemon that stops answering is said here rather than holding `up` with nothing printed.
+	const dockerVersion = await runCmdQuery(spawn, "docker", ["version"], { timeoutMs: dockerStepTimeoutMs });
+	const dockerCode = dockerVersion.code;
+	if (dockerVersion.timedOut) {
+		out(`✗ Docker daemon not answering\n    → \`docker version\` did not finish within ${Math.round(dockerStepTimeoutMs / 1000)} s: check that the daemon answers, then re-run\n`);
+		out("\nup: cannot continue without Docker: fix the above, then re-run `pi-dispatch up`.\n");
+		return 1;
+	}
 	if (dockerCode !== 0) {
 		out(dockerCode === null ? "✗ Docker not found\n    → install Docker — `docker` was not found on PATH\n" : "✗ Docker daemon not responding\n    → start Docker (the daemon is not responding)\n");
 		out("\nup: cannot continue without Docker — fix the above, then re-run `pi-dispatch up`.\n");
@@ -611,7 +635,9 @@ export async function runUp(argv = [], deps = {}) {
 		// Unresolvable: the folder as given.
 	}
 	const dirs = [deployment, cwd];
-	const query = (cmd, args) => runCmdQuery(spawn, cmd, args);
+	// Issue #1021: every ownership read bounded; one that overran reads as docker not answering (valkey-auth.mjs), which
+	// refuses the step it was asked for, as a read that failed always did.
+	const query = (cmd, args) => runCmdQuery(spawn, cmd, args, { timeoutMs: dockerStepTimeoutMs });
 	const VALKEY_RUN_ARGS = valkeyDockerRunArgs({ port: vport, deployment });
 	// Labelled with this folder when up creates it (the volume gap): a label cannot be added later.
 	const VALKEY_VOLUME_ARGS = valkeyVolumeCreateArgs(deployment);
@@ -667,20 +693,51 @@ export async function runUp(argv = [], deps = {}) {
 	};
 	// The owner check itself: `valkeyOwnerCheckArgs` (no network, no port, no password), the marker read through
 	// `docker exec`, retried while the queue loads, and the container stopped and removed whatever it answered.
+	// Issue #1021: every docker step of it is bounded (the `OWNER_CHECK_*` constants). A run that did not finish may still
+	// make the container (the daemon goes on after its CLI is killed), so one bounded `docker rm -f` follows it: nothing
+	// ever reached that Valkey (no network, no port, the marker unread), so killing it loses nothing, where a `stop` would
+	// wait out its grace on a daemon already past its bound. The command is named either way, since the daemon can still
+	// make the container after that `rm -f`. And the check's container must be confirmed gone before its answer counts: a
+	// `rm` that did not exit 0 (a `stop` that did not finish leaves it running, which `rm` refuses) fails the check, so no
+	// Valkey is started on the volume while the check's own may still be loading it.
 	const ownerPreCheck = async () => {
 		out(`checking whose queue it holds first, with a Valkey that has no network:\n  docker ${valkeyOwnerCheckArgs(deployment).join(" ")}\n  docker ${OWNER_CHECK_EXEC.join(" ")}\n`);
-		if ((await runStreamed(spawn, "docker", valkeyOwnerCheckArgs(deployment), out)) !== 0) return { error: `its docker run failed (a leftover ${OWNER_CHECK_CONTAINER}? \`docker rm -f ${OWNER_CHECK_CONTAINER}\`)` };
+		const manual = `\`docker rm -f ${OWNER_CHECK_CONTAINER}\``;
+		const secs = (ms) => Math.round(ms / 1000);
+		const ran = await runStreamedBounded(spawn, "docker", valkeyOwnerCheckArgs(deployment), out, { timeoutMs: ownerCheckRunTimeoutMs });
+		if (ran.timedOut) {
+			const removed = await runStreamedBounded(spawn, "docker", ["rm", "-f", OWNER_CHECK_CONTAINER], out, { timeoutMs: dockerStepTimeoutMs });
+			// The bound holds a pull of the Valkey image on a host that has not got it, so the way out of that is named too.
+			const pull = `; on a host without ${VALKEY_IMAGE}, \`docker pull ${VALKEY_IMAGE}\` first takes its pull out of that bound`;
+			return { error: removed.code === 0 ? `its docker run did not finish within ${secs(ownerCheckRunTimeoutMs)} s; up ran ${manual} after it, and once docker answers, run that again if \`docker ps -a\` still lists ${OWNER_CHECK_CONTAINER}${pull}` : `its docker run did not finish within ${secs(ownerCheckRunTimeoutMs)} s, and the ${manual} up ran after it did not succeed: run it once docker answers${pull}` };
+		}
+		if (ran.code !== 0) return { error: `its docker run failed (a leftover ${OWNER_CHECK_CONTAINER}? ${manual})` };
+		let answer = { error: `its Valkey did not answer within ${secs(OWNER_CHECK_WAIT_MS)} s` };
 		try {
+			const until = now() + OWNER_CHECK_WAIT_MS;
 			for (let i = 0; i < 40; i++) {
-				const a = ownerCheckAnswer(await runCmdQuery(spawn, "docker", OWNER_CHECK_EXEC));
-				if (!a.retry) return a;
+				const res = await runCmdQuery(spawn, "docker", OWNER_CHECK_EXEC, { timeoutMs: dockerStepTimeoutMs });
+				if (res.timedOut) {
+					answer = { error: `its docker exec did not finish within ${secs(dockerStepTimeoutMs)} s` };
+					break;
+				}
+				const a = ownerCheckAnswer(res);
+				if (!a.retry) {
+					answer = a;
+					break;
+				}
+				if (now() >= until) break;
 				await sleep(500);
 			}
-			return { error: "its Valkey did not answer within 20 s" };
 		} finally {
-			await runStreamed(spawn, "docker", ["stop", OWNER_CHECK_CONTAINER], out);
-			await runStreamed(spawn, "docker", ["rm", OWNER_CHECK_CONTAINER], out);
+			const stopped = await runStreamedBounded(spawn, "docker", ["stop", OWNER_CHECK_CONTAINER], out, { timeoutMs: dockerStepTimeoutMs });
+			const removed = await runStreamedBounded(spawn, "docker", ["rm", OWNER_CHECK_CONTAINER], out, { timeoutMs: dockerStepTimeoutMs });
+			if (removed.code !== 0) {
+				const why = stopped.timedOut ? `its docker stop did not finish within ${secs(dockerStepTimeoutMs)} s` : removed.timedOut ? `its docker rm did not finish within ${secs(dockerStepTimeoutMs)} s` : `its docker rm exited ${removed.code}`;
+				answer = { error: `${OWNER_CHECK_CONTAINER} was not confirmed removed afterwards (${why}), so nothing is started beside it on the volume; ${manual} removes it` };
+			}
 		}
+		return answer;
 	};
 	// The adoption's record (round-cap re-review): create-only, 0600, never over a different one.
 	const recordVolume = (v) => {
@@ -2283,6 +2340,40 @@ function runStreamed(spawn, cmd, args, out, { env } = {}) {
 }
 
 /**
+ * `runStreamed` with a bound (issue #1021): `{ code, timedOut }`, the child killed at `timeoutMs` and answering
+ * `{ code: null, timedOut: true }`, so a caller can tell a step that overran (which the daemon may still finish) from one
+ * that could not run (`{ code: null }`) or failed. Streamed like its sibling: a pull inside the owner check's run shows.
+ */
+function runStreamedBounded(spawn, cmd, args, out, { timeoutMs }) {
+	return new Promise((resolve) => {
+		let child;
+		try {
+			child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+		} catch {
+			resolve({ code: null, timedOut: false });
+			return;
+		}
+		let settled = false;
+		const done = (result) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve(result);
+		};
+		const timer = setTimeout(() => {
+			try {
+				child.kill("SIGKILL");
+			} catch {}
+			done({ code: null, timedOut: true });
+		}, timeoutMs);
+		child.stdout?.on("data", (d) => out(String(d)));
+		child.stderr?.on("data", (d) => out(String(d)));
+		child.on("error", () => done({ code: null, timedOut: false }));
+		child.on("close", (code) => done({ code, timedOut: false }));
+	});
+}
+
+/**
  * Like runCmdCapture with the streams SEPARATE, for a podman query whose answer is stdout alone (round 2, E2): podman
  * prints warnings on stderr on ordinary accounts, and a merged capture made `true` and our own label unequal.
  */
@@ -2305,7 +2396,7 @@ function runCmdQuery(spawn, cmd, args, { timeoutMs = null } = {}) {
 			try {
 				child.kill("SIGKILL");
 			} catch {}
-			resolve({ code: null, stdout, stderr, timedOut: true });
+			resolve({ code: null, stdout, stderr, timedOut: true, timeoutMs });
 		}, timeoutMs);
 		const done = (result) => {
 			if (settled) return;

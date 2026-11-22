@@ -846,6 +846,125 @@ test("stopDetached hands bin to its step runner, and defaults to docker (#354)",
 	assert.deepEqual(seen, ["docker", "docker", "docker"]);
 });
 
+// --- issue #1021: how long the runtime took to create the job's container ----------------------------------------------
+
+/** The cidfile fs above, with `statSync` answering each file's length and the mtime the test gave it (else the spawn's). */
+function statFs(files = {}, mtimes = {}) {
+	const fs = cidFs(files);
+	fs.stats = 0;
+	fs.statSync = (p) => {
+		fs.stats++;
+		if (files[p] === undefined) throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+		return { size: String(files[p]).length, mtimeMs: mtimes[p] };
+	};
+	return fs;
+}
+/** Interval timers the test fires by hand, recording what was set and cleared. */
+function handTimers() {
+	const t = { set: 0, cleared: 0, fns: [] };
+	t.setInterval = (fn) => (t.set++, t.fns.push(fn), { unref() {} });
+	t.clearInterval = () => t.cleared++;
+	t.tick = () => t.fns.forEach((fn) => fn());
+	return t;
+}
+
+test("watchCreated times the create off the cidfile's own mtime, once, and waits out docker's empty file (#1021)", { skip }, async () => {
+	const files = {};
+	const mtimes = {};
+	const fs = statFs(files, mtimes);
+	const timers = handTimers();
+	const seen = [];
+	const stop = mod.watchCreated({ cidFile: "/host/jobs/j1.cid", fs, onCreated: (ms) => seen.push(ms), now: () => 10_000, pollMs: 250, timers });
+	timers.tick();
+	assert.deepEqual(seen, [], "no file yet: the create has not returned");
+	files["/host/jobs/j1.cid"] = "";
+	mtimes["/host/jobs/j1.cid"] = 10_040;
+	timers.tick();
+	assert.deepEqual(seen, [], "docker opens the file empty before its create call: not yet");
+	files["/host/jobs/j1.cid"] = CID;
+	mtimes["/host/jobs/j1.cid"] = 94_812.6;
+	timers.tick();
+	assert.deepEqual(seen, [84_813], "the file's mtime less the spawn, whenever the poll happened to look");
+	assert.equal(timers.cleared, 1, "the poll ends once it is seen");
+	timers.tick();
+	stop();
+	assert.deepEqual(seen, [84_813], "said once");
+	// A coarse mtime that lands before the spawn reads 0, never negative.
+	const early = [];
+	mod.watchCreated({ cidFile: "/c", fs: statFs({ "/c": CID }, { "/c": 9_000 }), onCreated: (ms) => early.push(ms), now: () => 10_000, timers: handTimers() })();
+	assert.deepEqual(early, [0]);
+	// `stop()` looks once more, so a container shorter than one step is still timed; a host fs with no statSync times nothing.
+	const late = [];
+	const lateTimers = handTimers();
+	mod.watchCreated({ cidFile: "/c", fs: statFs({ "/c": CID }, { "/c": 10_120 }), onCreated: (ms) => late.push(ms), now: () => 10_000, timers: lateTimers })();
+	assert.deepEqual(late, [120]);
+	assert.equal(lateTimers.cleared, 1);
+	const bare = handTimers();
+	mod.watchCreated({ cidFile: "/c", fs: cidFs({ "/c": CID }), onCreated: () => assert.fail("timed without statSync"), timers: bare })();
+	assert.equal(bare.set, 0, "no poll at all");
+});
+
+test("a binding venue's run logs container_created { container, ms } from its cidfile (docker's as the run ends, Podman's while it runs) and container_first_output { container, ms } at its first stdout chunk, nothing without a create, without stdout or without a cidfile (#1021)", { skip }, async () => {
+	const { buildPodmanRunArgs } = await import("../src/docker-run.mjs");
+	const { CONTAINER_HOME } = await import("../src/container-spec.mjs");
+	// `out`: what the child writes while it runs, each `[channel, text, clock]` (the clock read when it is written).
+	const drive = async ({ write, poll = false, removeBeforeClose = false, buildArgs, bin, out = [] }) => {
+		let clock = 7_000;
+		const mtimes = {};
+		const fs = statFs({}, mtimes);
+		const timers = handTimers();
+		const logs = [];
+		let child;
+		const spawnFn = (_cmd, args) => {
+			child = new EventEmitter();
+			child.stdout = new EventEmitter();
+			child.stderr = new EventEmitter();
+			child.kill = () => {};
+			const cidFile = args.find((a) => a.startsWith("--cidfile="))?.slice("--cidfile=".length);
+			queueMicrotask(() => {
+				if (write && cidFile) {
+					fs.files[cidFile] = CID;
+					mtimes[cidFile] = 7_420;
+				}
+				// The poll looks while the container runs, then (Podman) `--rm` takes the file before the CLI exits.
+				if (poll) timers.tick();
+				for (const [channel, text, at] of out) {
+					clock = at;
+					child[channel].emit("data", Buffer.from(text));
+				}
+				if (removeBeforeClose && cidFile) delete fs.files[cidFile];
+				child.emit("close", 0);
+			});
+			return child;
+		};
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn, fs, log: (event, fields) => logs.push({ event, fields }), createdCheck: { now: () => clock, timers }, ...(buildArgs ? { buildArgs } : {}), ...(bin ? { bin } : {}) });
+		const result = await runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j1", signal: new AbortController().signal, ...(bin === "podman" ? { user: "1234:1234", home: CONTAINER_HOME } : {}) });
+		return { result, created: logs.filter((l) => l.event === "container_created"), first: logs.filter((l) => l.event === "container_first_output"), fs, timers };
+	};
+	// The CLI's own message on stderr is not the container's output; the runner's first stdout line is, said once.
+	const runner = `\n${JSON.stringify({ event: "activity_watch", jobId: "j1" })}\n`;
+	const docker = await drive({ write: true, out: [["stderr", "WARNING: Your kernel does not support swap limit capabilities\n", 7_300], ["stdout", runner, 9_250.4], ["stdout", "more\n", 60_000]] });
+	assert.equal(docker.result.code, 0);
+	assert.deepEqual(docker.created, [{ event: "container_created", fields: { container: "pi-job-j1", ms: 420 } }], "no poll step fired: the last look as the run ended found it, before the cidfile was removed");
+	assert.equal(docker.timers.cleared >= 1, true, "the poll ended");
+	assert.deepEqual(docker.first, [{ event: "container_first_output", fields: { container: "pi-job-j1", ms: 2_250 } }], "from the same instant before the spawn to the first stdout chunk, once");
+	const podman = await drive({ write: true, poll: true, removeBeforeClose: true, bin: "podman", buildArgs: buildPodmanRunArgs, out: [["stdout", runner, 8_000]] });
+	assert.deepEqual(podman.created, [{ event: "container_created", fields: { container: "pi-job-j1", ms: 420 } }], "seen by the poll before --rm took the file");
+	assert.deepEqual(podman.first, [{ event: "container_first_output", fields: { container: "pi-job-j1", ms: 1_000 } }]);
+	const quiet = await drive({ write: true });
+	assert.equal(quiet.created.length, 1);
+	assert.deepEqual(quiet.first, [], "a container that wrote no stdout says no first output");
+	const none = await drive({ write: false, poll: true, out: [["stderr", "docker: Error response from daemon: Conflict.\n", 7_100]] });
+	assert.deepEqual(none.created, [], "no ID written (a name conflict, a create refused): nothing said");
+	assert.deepEqual(none.first, [], "the CLI's own error on stderr is no output of the container's");
+	// An argv with no cidfile (an exec into a sandbox made at create) is never polled at all.
+	const exec = await drive({ write: true, poll: true, buildArgs: () => ["exec", "box", "true"], out: [["stdout", runner, 9_000]] });
+	assert.deepEqual(exec.created, []);
+	assert.deepEqual(exec.first, [], "an exec into a box made at create starts no container: neither number");
+	assert.equal(exec.timers.set, 0);
+	assert.equal(exec.fs.stats, 0);
+});
+
 // Issue #437: the runner's exit-2 label, through the REAL sink with raw logs off (PI_CAPTURE_JOB_LOGS unset,
 // the default). The tail is accumulated whether or not the .log is written, so the label must survive the
 // opt-in switch being off; a fake sink here would prove only that the fake returns what it was told.

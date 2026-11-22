@@ -224,6 +224,9 @@ and `pi-dispatch up` was not.
    label is used only after `up` asks (even under `--yes`), since its queue cannot be attributed to a folder; `up`
    then reads whose queue it holds with a Valkey that has no network before publishing one, and records the adoption
    in `.pi-dispatch-valkey-volume.json` (by the volume's creation time), so it does not ask about that volume again.
+   Each docker step of that check has a time bound (its `docker run` two minutes, the others thirty seconds): on a
+   daemon too slow for it, `up` publishes nothing and says which step did not finish, and where the check's own
+   container may be left it names `docker rm -f pi-dispatch-valkey-ownercheck`, to run before `up` again.
    One file for both daemons is not one file for two stacks: it fixes the proxy's container name, the egress
    network's name and Valkey's published port, so one host runs one of these stacks (true on Docker too).
 8. **Run `pi-dispatch up`, then `pi-dispatch doctor --live`.** doctor names the runtime (`local: the daemon is Podman
@@ -1419,6 +1422,12 @@ differences matter (the native venue's, which runs no API service, are in its ow
   entry rather than re-run here). The worker finds that container through the run's cidfile, stops and removes it,
   and retries the job as `container-detached` without refunding it. A service still down after 10 s cannot be asked
   to stop it, and the container then keeps its name until it exits.
+
+Each run's start is timed too, on this route and on the `podman` venue alike (issue #1021): the worker logs
+`container_created { container, ms }` for the create, read off the cidfile while the container runs (Podman deletes it
+with the container, so a run that ends within one 250 ms poll step says no create line), and `container_first_output { container, ms }` for the first chunk on the CLI's stdout, an upper
+bound on the whole start. Both count from just before the run's CLI is spawned (`docker run` here, `podman run` on the
+`podman` venue), and [backends](backends.md#exit-codes) says what each one holds.
 
 ## Measured on a real host
 
