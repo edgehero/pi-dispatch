@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { entryExitCode, killSwitchShortNote, main } from "../src/cli.mjs";
+import { entryExitCode, killSwitchShortNote, main, refusedBeforeScript } from "../src/cli.mjs";
 import { POLLER_GRACE_MS, parsePollerStatus, pollerKey, triggersDigest } from "../src/poller-status.mjs";
 import { readPollerFacts } from "../src/poller-facts.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -161,7 +161,7 @@ test("pause and resume flip this host's own queue and say when the set of queues
 	assert.deepEqual((await run(["pause", "--valkey-url", "redis://127.0.0.1:1/15"], env14)).flipped, ["15:pi-jobs"]);
 	assert.deepEqual((await run(["pause", "--valkey-url", "redis://127.0.0.1:1/14"], env14)).flipped, ["14:pi-jobs", "14:pi-jobs@hosta"]);
 	assert.deepEqual((await run(["pause", "--valkey-url", "redis://127.0.0.1:2/0"], "PI_WORKER_NAME=hosta\n")).flipped, ["0:pi-jobs"]);
-	// A pause that fails part-way over such a set says it too, under the queues it reached.
+	// A pause that fails part-way over such a set says it too, in the per-queue report (issue #1007), exit 1.
 	const said = [];
 	const write = process.stderr.write;
 	process.stderr.write = (chunk) => (said.push(String(chunk)), true);
@@ -172,7 +172,90 @@ test("pause and resume flip this host's own queue and say when the set of queues
 		process.stderr.write = write;
 	}
 	assert.equal(failed.code, 1);
-	assert.equal(said.join(""), `error: could not pause the whole deployment at redis://127.0.0.1:1/15\n  paused: pi-jobs\n  failed at: pi-jobs@hosta\n  down\n  and ${killSwitchShortNote(true)}\n`);
+	assert.equal(said.join(""), `error: could not pause the whole deployment at redis://127.0.0.1:1/15 [registry unreadable: registry boom] [queue scan incomplete]\n  pi-jobs: paused\n  pi-jobs@hosta: sent, not confirmed (down); it may still be paused when Valkey answers\n  ${killSwitchShortNote(true)}\n  run pi-dispatch status once Valkey answers to see each queue, then pi-dispatch pause again\n`);
+});
+
+// Issue #1007: a resume after a scan that did not finish looks for this host's own queue's meta key itself (EXISTS, which
+// writes nothing), so it resumes that queue where it exists and leaves it out where it does not.
+test("a resume whose queue scan did not finish resumes this host's own queue where its meta key exists, and writes nothing for it where it does not (#1007)", async () => {
+	const dir = tempDir("pd-1007-own-");
+	writeFileSync(join(dir, ".env"), "PI_WORKER_NAME=hosta\n");
+	const run = async (exists) => {
+		const built = [];
+		const asked = [];
+		let out = "";
+		const code = await main(["resume"], { VALKEY_URL: "redis://127.0.0.1:1/15" }, {
+			cwd: dir,
+			write: (text) => { out += text; },
+			valkeyRefusal: async () => null,
+			controlClients: {
+				makeRedisClient: () => ({ on() {}, disconnect() {}, async smembers() { return []; }, async scan() { throw new Error("scan refused"); }, async exists(key) { asked.push(key); return exists; } }),
+				makeQueue: (_c, { name }) => (built.push(name), { name, async resume() {}, async close() {} }),
+			},
+		});
+		return { code, built, asked, out };
+	};
+	const there = await run(1);
+	assert.deepEqual([there.code, there.built, there.asked], [0, ["pi-jobs", "pi-jobs@hosta"], ["bull:pi-jobs@hosta:meta"]]);
+	assert.equal(there.out, `resumed [2 queues] [queue scan incomplete]\n  but ${killSwitchShortNote(false)}\n`);
+	const absent = await run(0);
+	assert.deepEqual([absent.code, absent.built, absent.asked], [0, ["pi-jobs"], ["bull:pi-jobs@hosta:meta"]], "no queue is built for it, so no meta key is written");
+	assert.equal(absent.out, `resumed [queue scan incomplete]\n  but ${killSwitchShortNote(false)}\n`);
+	// The report's first line names this host's queue that could not be added, as the line of a whole switch does: here
+	// the shell's PI_WORKER_NAME is not the .env's, and the shared queue's resume fails.
+	const errs = [];
+	const origErr = process.stderr.write;
+	process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+	let torn;
+	try {
+		torn = await main(["resume"], { VALKEY_URL: "redis://127.0.0.1:1/15", PI_WORKER_NAME: "hostz" }, {
+			cwd: dir,
+			write: () => {},
+			valkeyRefusal: async () => null,
+			controlClients: {
+				makeRedisClient: () => ({ on() {}, disconnect() {}, async smembers() { return []; }, async scan() { throw new Error("scan refused"); }, async exists() { return 1; } }),
+				makeQueue: (_c, { name }) => ({ name, async resume() { throw new Error("down"); }, async close() {} }),
+			},
+		});
+	} finally {
+		process.stderr.write = origErr;
+	}
+	assert.equal(torn, 1);
+	assert.match(errs.join(""), /^error: could not resume the whole deployment at redis:\/\/127\.0\.0\.1:1\/15 \[queue scan incomplete\] \[this host's queue not added: PI_WORKER_NAME is "hostz" in this shell and "hosta" in .*\.env: make them agree \(the service runs the file's\)\]\n {2}pi-jobs: sent, not confirmed \(down\); it may still be resumed when Valkey answers\n/);
+});
+
+// Issue #1007: a resume on a Valkey that answers nothing, whose .env names this host's queue, ends at its deadline: the
+// look for that queue's meta key is bounded too, where it held the command until it was killed.
+test("a resume on a Valkey that answers nothing, with PI_WORKER_NAME in the .env, ends near its deadline with the report (#1007)", { timeout: 15_000 }, async () => {
+	const dir = tempDir("pd-1007-frozen-own-");
+	writeFileSync(join(dir, ".env"), "PI_WORKER_NAME=hosta\n");
+	const asked = [];
+	const errs = [];
+	const hang = () => new Promise(() => {});
+	const origErr = process.stderr.write;
+	process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+	const started = performance.now();
+	let code;
+	try {
+		code = await main(["resume"], { VALKEY_URL: "redis://127.0.0.1:1/15" }, {
+			cwd: dir, statusDeadlineMs: 300, write: () => {}, valkeyRefusal: async () => null,
+			controlClients: {
+				makeRedisClient: () => ({ on() {}, disconnect() {}, smembers: hang, scan: hang, exists: (key) => (asked.push(key), hang()) }),
+				makeQueue: () => { throw new Error("no queue is built once the deadline is spent"); },
+			},
+		});
+	} finally {
+		process.stderr.write = origErr;
+	}
+	const ms = performance.now() - started;
+	assert.ok(ms < 500, `ended at its 300 ms deadline (took ${Math.round(ms)} ms)`);
+	assert.deepEqual(asked, ["bull:pi-jobs@hosta:meta"]);
+	assert.equal(code, 1);
+	assert.equal(errs.join(""), "error: could not resume the whole deployment at redis://127.0.0.1:1/15 [registry unreadable: registry timeout] [queue scan incomplete]\n"
+		+ "  pi-jobs: not sent (no connection within 0.3 seconds)\n"
+		+ "  nothing changed\n"
+		+ `  ${killSwitchShortNote(false)}\n`
+		+ "  run pi-dispatch status once Valkey answers to see each queue, then pi-dispatch resume again\n");
 });
 
 // Issue #464 (gate round 3): the kill switch and status judge the Valkey before they talk to it.
@@ -724,4 +807,279 @@ test("status --target drops a queue whose Valkey stops answering after it is rea
 	assert.equal(code, 0);
 	assert.equal(line.complete, false);
 	assert.ok(line.unavailableQueues.includes("pi-jobs"));
+});
+
+// Issue #1007: `pause` and `resume` waited for as long as a Valkey that stopped answering stayed so, printed nothing, and
+// could leave the deployment half switched without saying so.
+/**
+ * `pause` or `resume` under a short deadline over fake queues, with stderr collected. `queues` maps a name to how its
+ * queue behaves: "ok" (connected, and the write answered), "slow ok" (answered after 50 ms), "silent write" (connected,
+ * the write never answered), "no connection" (never connected), "refused connection" (its connection failed), "valkey
+ * error" (Valkey refused the EVALSHA before the script ran, the measured NOPERM), "lost after send" (the connection
+ * closed under the write), and "script error, paused", "script error, running", "script error, unread" or "script
+ * error, read refused" (an error raised inside the script, in Valkey's measured words, with the queue read back as
+ * paused, as running, not answering, or answered with Valkey's own error). A probe that does not answer (`probeAnswers: false`) leaves the shared queue alone, the fail-open rule;
+ * `probe` stands in for the probe when given.
+ */
+async function silentSwitch(cmd, { queues = { "pi-jobs": "ok" }, deadlineMs = 300, probeAnswers = true, probe = null } = {}) {
+	let output = "";
+	const wrote = [], closed = [], dropAfter = [], asked = [];
+	const errs = [];
+	const origErr = process.stderr.write.bind(process.stderr);
+	const started = performance.now();
+	process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+	const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+	let code;
+	try {
+		code = await main([cmd, "--valkey-url", "redis://127.0.0.1:6379"], { VALKEY_URL: "redis://127.0.0.1:6379" }, {
+			statusDeadlineMs: deadlineMs, cwd: tempDir("pd-1007-silent-"), write: (text) => { output += text; },
+			valkeyRefusal: async (url, env, opts) => (asked.push({ ...opts, calledAt: performance.now() }), null),
+			controlClients: {
+				makeRedisClient: (_url, options) => (dropAfter.push(options?.disconnectTimeoutMs), probe ?? (probeAnswers ? {
+					on() {}, disconnect() {}, async smembers() { return []; },
+					async scan() { return ["0", Object.keys(queues).filter((n) => n !== "pi-jobs").map((n) => `bull:${n}:meta`)]; },
+				} : { on() {}, disconnect() {}, smembers: never, scan: never })),
+				makeQueue: (connection, { name }) => {
+					const kind = queues[name];
+					dropAfter.push(connection.disconnectTimeout);
+					const act = () => {
+						wrote.push(name);
+						if (kind === "silent write") return never();
+						if (kind === "slow ok") return new Promise((resolve) => setTimeout(resolve, 50));
+						if (kind === "valkey error") return Promise.reject(reply(NOPERM_EVALSHA));
+						if (kind === "lost after send") return Promise.reject(new Error("Connection is closed."));
+						if (kind.startsWith("script error")) return Promise.reject(reply(WRONGTYPE_IN_SCRIPT));
+						return Promise.resolve();
+					};
+					const readBack = { "script error, paused": true, "script error, running": false }[kind];
+					const readRefused = kind === "script error, read refused";
+					return {
+						name,
+						client: kind === "no connection" ? never() : kind === "refused connection" ? Promise.reject(new Error("connect ECONNREFUSED 127.0.0.1:6379")) : Promise.resolve({}),
+						pause: act, resume: act,
+						isPaused: () => (readRefused ? Promise.reject(reply("WRONGTYPE Operation against a key holding the wrong kind of value")) : readBack === undefined ? never() : Promise.resolve(readBack)),
+						async close() { closed.push(name); },
+					};
+				},
+			},
+		});
+	} finally {
+		process.stderr.write = origErr;
+	}
+	return { code, out: output, err: errs.join(""), ms: performance.now() - started, wrote, closed, dropAfter, asked };
+}
+
+const PAUSE_NEXT = "  run pi-dispatch status once Valkey answers to see each queue, then pi-dispatch pause again\n";
+// Valkey's own words, measured: an ACL that denies EVALSHA refuses before the script runs; an error inside a script
+// names the script, and what the script wrote before it stays written.
+const NOPERM_EVALSHA = "NOPERM User op has no permissions to run the 'evalsha' command";
+const WRONGTYPE_IN_SCRIPT = "WRONGTYPE Operation against a key holding the wrong kind of value script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57.";
+
+test("a refusal counts as before the script only in the codes Valkey gives before running one, and never when the message names the script (issue #1007)", () => {
+	const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+	for (const message of [NOPERM_EVALSHA, "NOPERM User op has no permissions to run the 'eval' command", "READONLY You can't write against a read only replica.", "LOADING Valkey is loading the dataset in memory", "BUSY Valkey is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.", "MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'.", "NOSCRIPT No matching script. Please use EVAL."]) {
+		assert.equal(refusedBeforeScript(reply(message)), true, message);
+	}
+	for (const message of [WRONGTYPE_IN_SCRIPT, "ERR ACL failure in script: User op has no permissions to run the 'hset' command script: 5eded3bf426091e7c63bb61fea48e99bda3199fa, on @user_script:1.", "NOPERM inside script: 5eded3bf426091e7c63bb61fea48e99bda3199fa, on @user_script:1.", "OOM command not allowed when used memory > 'maxmemory'.", "ERR unknown command"]) {
+		assert.equal(refusedBeforeScript(reply(message)), false, message);
+	}
+	assert.equal(refusedBeforeScript(new Error(NOPERM_EVALSHA)), false, "only Valkey's own reply");
+});
+
+test("pause ends at its deadline and says of each queue whether it was paused, sent and not confirmed, refused or not sent (issue #1007)", { timeout: 15_000 }, async () => {
+	const mixed = await silentSwitch("pause", { queues: { "pi-jobs": "ok", "pi-jobs@mini2": "silent write", "pi-jobs@mini3": "no connection" } });
+	assert.ok(mixed.ms < 500, `ended at its 300 ms deadline (took ${Math.round(mixed.ms)} ms)`);
+	const left = mixed.asked[0]?.deadlineAt - mixed.asked[0]?.calledAt;
+	assert.ok(left > 0 && left <= 300, "the refusal check's PING is held to the same deadline");
+	assert.equal(mixed.code, 1, "a queue not confirmed is a failure");
+	assert.equal(mixed.out, "");
+	assert.equal(mixed.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379\n"
+		+ "  pi-jobs: paused\n"
+		+ "  pi-jobs@mini2: sent, not confirmed (no answer within 0.3 seconds); it may still be paused when Valkey answers\n"
+		+ "  pi-jobs@mini3: not sent (no connection within 0.3 seconds)\n" + PAUSE_NEXT);
+	assert.deepEqual(mixed.wrote.sort(), ["pi-jobs", "pi-jobs@mini2"], "a queue that never connected was never written to");
+	assert.deepEqual(mixed.closed.sort(), ["pi-jobs", "pi-jobs@mini2", "pi-jobs@mini3"]);
+	assert.deepEqual(mixed.dropAfter, [0, 0, 0, 0], "the probe and each queue drop their sockets at once");
+	// Valkey's own refusal changed nothing; a connection that failed first sent nothing; one that closed under the write
+	// may have taken it. No "nothing changed" once a write left.
+	const failed = await silentSwitch("pause", { queues: { "pi-jobs": "valkey error", "pi-jobs@mini2": "refused connection", "pi-jobs@mini3": "lost after send" } });
+	assert.equal(failed.code, 1);
+	assert.equal(failed.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379\n"
+		+ `  pi-jobs: refused by Valkey, unchanged (${NOPERM_EVALSHA})\n`
+		+ "  pi-jobs@mini2: not sent (connect ECONNREFUSED 127.0.0.1:6379)\n"
+		+ "  pi-jobs@mini3: sent, not confirmed (Connection is closed.); it may still be paused when Valkey answers\n" + PAUSE_NEXT);
+	// A Valkey that answers nothing: the deadline is spent before any queue is built, nothing was sent, and the list
+	// of queues itself may be short.
+	const silent = await silentSwitch("pause", { probeAnswers: false });
+	assert.ok(silent.ms < 500, `the writes share the deadline the discovery spent (took ${Math.round(silent.ms)} ms)`);
+	assert.equal(silent.code, 1);
+	assert.equal(silent.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379 [registry unreadable: registry timeout] [queue scan incomplete]\n"
+		+ "  pi-jobs: not sent (no connection within 0.3 seconds)\n"
+		+ "  nothing changed\n"
+		+ `  ${killSwitchShortNote(true)}\n` + PAUSE_NEXT);
+	assert.deepEqual(silent.closed, [], "no queue was built once the deadline was spent");
+	// Every queue at once: a queue whose write is never answered does not hold back the next one's.
+	const atOnce = await silentSwitch("pause", { queues: { "pi-jobs": "silent write", "pi-jobs@mini2": "slow ok" } });
+	assert.match(atOnce.err, /\n {2}pi-jobs@mini2: paused\n/);
+	// An error raised inside the script may follow a switch it already made: the queue is read back and said as it is,
+	// it counts as written (no "nothing changed"), and a read back that does not answer says it may have partly applied.
+	const inScript = await silentSwitch("pause", { queues: { "pi-jobs": "script error, paused", "pi-jobs@mini2": "script error, running", "pi-jobs@mini3": "script error, unread" } });
+	assert.equal(inScript.code, 1);
+	assert.equal(inScript.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379\n"
+		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_IN_SCRIPT}); it reads paused now\n`
+		+ `  pi-jobs@mini2: Valkey answered with an error (${WRONGTYPE_IN_SCRIPT}); it reads running now, and part of the pause may have applied\n`
+		+ `  pi-jobs@mini3: Valkey answered with an error (${WRONGTYPE_IN_SCRIPT}); it may have partly applied\n` + PAUSE_NEXT);
+	// A read back that did not answer waits on Valkey; one that Valkey answered with an error (the meta key holding a
+	// string, say) is Valkey answering, so the next step is putting its cause right.
+	const unread = await silentSwitch("pause", { queues: { "pi-jobs": "script error, unread" } });
+	assert.equal(unread.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379\n"
+		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_IN_SCRIPT}); it may have partly applied\n` + PAUSE_NEXT);
+	const readRefused = await silentSwitch("pause", { queues: { "pi-jobs": "script error, read refused" } });
+	assert.equal(readRefused.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379\n"
+		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_IN_SCRIPT}); it may have partly applied\n`
+		+ "  run pi-dispatch status to see each queue, then pi-dispatch pause again once what Valkey refused or failed on is put right\n");
+	// A refusal before the script changed nothing, and the next step is not waiting on Valkey.
+	const refused = await silentSwitch("pause", { queues: { "pi-jobs": "valkey error" } });
+	assert.equal(refused.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379\n"
+		+ `  pi-jobs: refused by Valkey, unchanged (${NOPERM_EVALSHA})\n`
+		+ "  nothing changed\n"
+		+ "  run pi-dispatch status to see each queue, then pi-dispatch pause again once what Valkey refused or failed on is put right\n");
+	// A write sent and not answered is enough to fail: the queue may or may not be paused.
+	const doubt = await silentSwitch("pause", { queues: { "pi-jobs": "ok", "pi-jobs@mini2": "silent write" } });
+	assert.equal(doubt.code, 1);
+	assert.equal(doubt.out, "", "never the line that says the deployment is paused");
+	// Every queue answered: the line and the exit code as before.
+	const whole = await silentSwitch("pause", { queues: { "pi-jobs": "ok", "pi-jobs@mini2": "ok", "pi-jobs@mini3": "ok" } });
+	assert.deepEqual([whole.code, whole.out, whole.err], [0, "paused: worker will stop taking new jobs (jobs still enqueue) [3 queues]\n", ""]);
+});
+
+test("resume ends at its deadline, sends no resume after one that is not confirmed, and says of each queue what it is (issue #1007)", { timeout: 15_000 }, async () => {
+	const stuck = await silentSwitch("resume", { queues: { "pi-jobs": "ok", "pi-jobs@mini2": "silent write", "pi-jobs@mini3": "ok" } });
+	assert.ok(stuck.ms < 500, `took ${Math.round(stuck.ms)} ms`);
+	assert.equal(stuck.code, 1);
+	assert.equal(stuck.err, "error: could not resume the whole deployment at redis://127.0.0.1:6379\n"
+		+ "  pi-jobs: resumed\n"
+		+ "  pi-jobs@mini2: sent, not confirmed (no answer within 0.3 seconds); it may still be resumed when Valkey answers\n"
+		+ "  pi-jobs@mini3: not sent (not tried after a queue whose resume is not confirmed: a resume that lands later starts jobs)\n"
+		+ "  run pi-dispatch status once Valkey answers to see each queue, then pi-dispatch resume again; a resume not confirmed may start jobs when it lands\n");
+	assert.deepEqual(stuck.wrote, ["pi-jobs", "pi-jobs@mini2"], "one after another, and none after the one in doubt");
+	const left = stuck.asked[0]?.deadlineAt - stuck.asked[0]?.calledAt;
+	assert.ok(left > 0 && left <= 300, "the refusal check's PING is held to the same deadline");
+	// An error inside the script stops the resume as a doubt does, and the queue is said as Valkey holds it.
+	const errored = await silentSwitch("resume", { queues: { "pi-jobs": "script error, running", "pi-jobs@mini2": "ok" } });
+	assert.equal(errored.err, "error: could not resume the whole deployment at redis://127.0.0.1:6379\n"
+		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_IN_SCRIPT}); it reads running now\n`
+		+ "  pi-jobs@mini2: not sent (not tried after a queue whose resume Valkey answered with an error)\n"
+		+ "  run pi-dispatch status to see each queue, then pi-dispatch resume again once what Valkey refused or failed on is put right\n");
+	assert.deepEqual(errored.wrote, ["pi-jobs"]);
+	const refused = await silentSwitch("resume", { queues: { "pi-jobs": "valkey error", "pi-jobs@mini2": "ok" } });
+	assert.match(refused.err, /\n {2}pi-jobs@mini2: not sent \(not tried after a queue whose resume Valkey refused\)\n {2}nothing changed\n/);
+	const whole = await silentSwitch("resume", { queues: { "pi-jobs": "ok", "pi-jobs@mini2": "ok", "pi-jobs@mini3": "ok" } });
+	assert.deepEqual([whole.code, whole.out, whole.err], [0, "resumed [3 queues]\n", ""]);
+	assert.deepEqual(whole.wrote, ["pi-jobs", "pi-jobs@mini2", "pi-jobs@mini3"]);
+});
+
+/** `cmd` through a real Valkey's proxy that freezes at the first queue's write, so no write reaches Valkey. */
+async function frozenAtWrite(cmd, deadlineMs) {
+	const { makeQueue } = await import("../src/queue.mjs");
+	const { freezingProxy } = await import("./helpers/freezing-proxy.mjs");
+	const proxy = await freezingProxy(process.env.VALKEY_TEST_URL);
+	const errs = [];
+	const origErr = process.stderr.write.bind(process.stderr);
+	process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+	const started = performance.now();
+	let code;
+	try {
+		code = await main([cmd, "--valkey-url", proxy.url], { VALKEY_URL: proxy.url }, {
+			statusDeadlineMs: deadlineMs, cwd: tempDir("pd-1007-switch-"), valkeyRefusal: async () => null, write: () => {},
+			controlClients: {
+				makeQueue: (connection, opts) => {
+					const queue = makeQueue(connection, opts);
+					const act = (verb) => () => { proxy.freeze(); return queue[verb](); };
+					return { name: queue.name, client: queue.client, pause: act("pause"), resume: act("resume"), close: () => queue.close(), disconnect: () => queue.disconnect() };
+				},
+			},
+		});
+	} finally {
+		process.stderr.write = origErr;
+		proxy.close();
+	}
+	return { code, lines: errs.join("").split("\n"), ms: performance.now() - started };
+}
+
+test("pause and resume through a real Valkey that stops answering at the write end at their deadline and report the write as sent and not confirmed (issue #1007, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
+	for (const cmd of ["pause", "resume"]) {
+		const { code, lines, ms } = await frozenAtWrite(cmd, 800);
+		assert.ok(ms < 1500, `${cmd} ended at its 800 ms deadline, the close included (took ${Math.round(ms)} ms)`);
+		assert.equal(code, 1, cmd);
+		assert.ok(lines.some((l) => / sent, not confirmed \(no answer within 0\.8 seconds\)/.test(l)), `${cmd}: ${lines.join(" / ")}`);
+		assert.ok(!lines.some((l) => /: (paused|resumed)$/.test(l) || l === "  nothing changed"), "no write was answered, and one was sent");
+	}
+});
+
+test("pause and resume against a real Valkey whose script fails after it switched the queue say the queue as Valkey holds it, never unchanged (issue #1007, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
+	const { makeQueue } = await import("../src/queue.mjs");
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const url = process.env.VALKEY_TEST_URL;
+	// Every queue the kill switch names is one of this test's own on that Valkey (its name prefixed), so no other test's
+	// queue is paused, and the shared queue's events stream is never touched.
+	const prefix = `pd1007-${process.pid}-${Date.now()}-`;
+	const direct = makeRedisClient(url);
+	direct.on("error", () => {});
+	const run = async (cmd) => {
+		const errs = [];
+		const origErr = process.stderr.write.bind(process.stderr);
+		process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+		try {
+			const code = await main([cmd, "--valkey-url", url], { VALKEY_URL: url }, {
+				cwd: tempDir("pd-1007-script-"), valkeyRefusal: async () => null, write: () => {},
+				controlClients: { makeQueue: (connection, { name }) => makeQueue(connection, { name: `${prefix}${name}` }) },
+			});
+			return { code, err: errs.join("") };
+		} finally {
+			process.stderr.write = origErr;
+		}
+	};
+	const meta = `bull:${prefix}pi-jobs:meta`;
+	try {
+		// BullMQ's pause script moves the jobs and flips the flag, then XADDs to the events stream: a string there fails
+		// the script after the switch.
+		await direct.set(`bull:${prefix}pi-jobs:events`, "not a stream");
+		const paused = await run("pause");
+		assert.equal(paused.code, 1);
+		assert.match(paused.err, /\n {2}pi-jobs: Valkey answered with an error \(WRONGTYPE [^\n]*user_script[^\n]*\); it reads paused now\n/, paused.err);
+		assert.doesNotMatch(paused.err, /nothing changed|refused by Valkey/);
+		assert.equal(await direct.hexists(meta, "paused"), 1, "paused, as said");
+		const resumed = await run("resume");
+		assert.equal(resumed.code, 1);
+		assert.match(resumed.err, /\n {2}pi-jobs: Valkey answered with an error \(WRONGTYPE [^\n]*\); it reads running now\n/, resumed.err);
+		assert.equal(await direct.hexists(meta, "paused"), 0, "running again, as said: the dangerous direction");
+	} finally {
+		let cursor = "0";
+		do {
+			const [next, keys] = await direct.scan(cursor, "MATCH", `bull:${prefix}*`, "COUNT", 500);
+			cursor = String(next);
+			if (keys.length > 0) await direct.del(...keys);
+		} while (cursor !== "0");
+		direct.disconnect();
+	}
+});
+
+test("pause and resume that confirm every queue they found over a list that may be short print the line and the fleet's sentence and exit 0, and one that also left a found queue unconfirmed exits 1 (issues #964, #1007)", { timeout: 15_000 }, async () => {
+	// The scan failed: every queue found was paused, so the switch is said as done, with what a list that may be short
+	// means under it (issue #964), as the console answers it.
+	const unscanned = await silentSwitch("pause", { probe: { on() {}, disconnect() {}, async smembers() { return []; }, async scan() { throw new Error("scan refused"); } } });
+	assert.deepEqual([unscanned.code, unscanned.err], [0, ""]);
+	assert.equal(unscanned.out, `paused: worker will stop taking new jobs (jobs still enqueue) [queue scan incomplete]\n  but ${killSwitchShortNote(true)}\n`);
+	// The registry could not be read: the same, for a resume.
+	const blind = await silentSwitch("resume", { probe: { on() {}, disconnect() {}, async smembers() { throw new Error("registry refused"); }, async scan() { return ["0", []]; } } });
+	assert.deepEqual([blind.code, blind.err], [0, ""]);
+	assert.equal(blind.out, `resumed [registry unreadable: registry refused]\n  but ${killSwitchShortNote(false)}\n`);
+	// A found queue not confirmed over such a list: the report, with the scan's words on its first line and the fleet's
+	// sentence before what to do, exit 1.
+	const doubt = await silentSwitch("pause", { queues: { "pi-jobs": "silent write" }, probe: { on() {}, disconnect() {}, async smembers() { return []; }, async scan() { throw new Error("scan refused"); } } });
+	assert.deepEqual([doubt.code, doubt.out], [1, ""]);
+	assert.equal(doubt.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379 [queue scan incomplete]\n"
+		+ "  pi-jobs: sent, not confirmed (no answer within 0.3 seconds); it may still be paused when Valkey answers\n"
+		+ `  ${killSwitchShortNote(true)}\n` + PAUSE_NEXT);
 });

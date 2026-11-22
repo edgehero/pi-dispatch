@@ -27,6 +27,7 @@ const FLEET_READ_TIMEOUT_MS = 2_000;
  * and counts, and the waiting details. Each read keeps its own bound and ends sooner when this comes first. Before it, a
  * Valkey that took the connection and answered nothing (a frozen server, a stopped container behind a live port, a
  * proxy that holds bytes) held status open with nothing printed, because the paused state and the counts had no bound.
+ * `pause` and `resume` wait as long for their discovery and their writes (issue #1007), and say what each queue is.
  */
 export const STATUS_DEADLINE_MS = 5_000;
 
@@ -142,8 +143,8 @@ with a consent per action:  pi install npm:@edgehero/pi-dispatch-admin`;
 	// holding a replacement across an `await` swallows the runner's result frames (issue #266). `cwd` is the folder a
 	// command takes for the deployment's (its `./.env` and `./triggers.json`); only `triggers` reads it so far (issue
 	// #970), and a test passes one rather than moving the whole process with `process.chdir`. `statusDeadlineMs` is
-	// `status`'s wait on one Valkey (`STATUS_DEADLINE_MS`, issue #1003), shorter in a test so a Valkey that never answers
-	// is seen in well under a second.
+	// `status`'s, `pause`'s and `resume`'s wait on one Valkey (`STATUS_DEADLINE_MS`, issues #1003 and #1007), shorter in a
+	// test so a Valkey that never answers is seen in well under a second.
 export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk), writeErr = (chunk) => process.stderr.write(chunk), valkeyRefusal = valkeyRefusalAtStart, now = () => new Date(), controlClients = {}, cwd = process.cwd(), statusDeadlineMs = STATUS_DEADLINE_MS } = {}) {
 	const cmd = argv[0];
 	if (cmd === "auth") {
@@ -704,12 +705,15 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	const { parseConnection, makeRedisClient } = await import("./connection.mjs");
 	const { closeWithin, fleetQueueNames, discoverHostQueuesReporting, unionQueueNames, makeQueue } = await import("./queue.mjs");
 	const { readLiveHosts } = await import("./host-registry.mjs");
-	// `status` reads under one deadline (issue #1003, `statusDeadline`), from here, before the refusal check. `pause` and
-	// `resume` keep their own waits: they write, and one ended at a deadline would leave the deployment's switch in a
-	// state nobody read. `within` is a read's bound: its own, or what is left of the deadline when that is sooner.
+	// One deadline over everything each verb asks of this Valkey (`statusDeadline`), from here, before the refusal check:
+	// `status`'s reads since issue #1003, and `pause`'s and `resume`'s discovery and writes since issue #1007, which
+	// waited for as long as a Valkey that took the connection and stopped answering stayed so, printed nothing, and could
+	// leave the deployment half switched without saying so. A write the deadline cuts short is reported for what it is
+	// (`switchQueue`), never as done and never as "nothing changed". `within` is a read's or a write's bound: its own,
+	// or what is left of the deadline when that is sooner.
 	const status = cmd === "status";
-	const deadline = status ? statusDeadline(deadlineMs) : null;
-	const within = (ownMs) => (deadline ? deadline.within(ownMs) : ownMs);
+	const deadline = statusDeadline(deadlineMs);
+	const within = deadline.within;
 	const { readConsumerStatus, CONSUMER_READ_TIMEOUT_MS } = status ? await import("./consumer-status.mjs") : {};
 	const { readPollerFacts } = status ? await import("./poller-facts.mjs") : {};
 	// EVERY queue this deployment drains (issue #57), not just the shared one. This is the kill switch:
@@ -723,7 +727,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	// than left indistinguishable from a single-host success while a named host keeps spending.
 	// `readLiveHosts` RETURNS `{unreachable}` rather than rejecting, so `blind` is a branch on its
 	// value and the `.catch` below is only for a client that throws before it can answer.
-	const refused = await valkeyRefusal(url, env, deadline ? { deadlineAt: deadline.at } : undefined);
+	const refused = await valkeyRefusal(url, env, { deadlineAt: deadline.at });
 	if (refused) return fail(refused);
 	// A disconnect timeout of 0 (`makeRedisClient`'s, issue #599), as `cancel`'s probe has: ioredis' default arms a ref'd
 	// two-second timer at `disconnect()` that only the socket's close clears, and a Valkey that answers nothing never
@@ -743,10 +747,13 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	// The pollers' heartbeats (issue #970) beside them, on the same probe, with this deployment's GITHUB_INGEST and its own
 	// triggers file: they need nothing the other two answer, and read after them they made a Valkey that never answers
 	// wait one bound longer. Never a reason for status to fail: what cannot be read is said in `pollers` itself.
-	const [fleet, existing, pollers] = await Promise.all([
+	// On a resume, this host's own queue's meta key beside them (`ownQueuesThatExist`, issue #1007): a scan that did not
+	// finish may not name it, and the resume then left it paused without a word.
+	const [fleet, existing, pollers, ownFound] = await Promise.all([
 		readLiveHosts(probe, { timeoutMs: within(FLEET_READ_TIMEOUT_MS) }).catch((error) => ({ unreachable: error?.message ?? String(error) })),
 		discoverHostQueuesReporting(probe, { timeoutMs: within(FLEET_READ_TIMEOUT_MS) }),
 		status ? readPollerFacts(probe, { env, cwd, now: () => Number(now()), timeoutMs: within(FLEET_READ_TIMEOUT_MS) }).catch(() => ({ expected: null, hosts: [], complete: false })) : null,
+		cmd === "resume" ? ownQueuesThatExist(probe, own?.names ?? [], within(FLEET_READ_TIMEOUT_MS)) : [],
 	]);
 	// Consumer demand (issue #924) is read beside the queue reads below rather than before them, so a demand read that
 	// does not answer cannot spend the queues' share of the deadline. The probe stays open until it ends (the `finally`);
@@ -755,37 +762,37 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	if (!status) probe.disconnect?.();
 	const blind = fleet?.unreachable ?? null;
 	// With this host's own queue on a pause (issue #964, `ownQueueOf`), which a registry or a scan that did not answer cannot
-	// name. Not on a resume: a queue the scan did not find does not exist, has nothing to resume, and a queue built to
-	// resume it would write its meta key.
-	const names = unionQueueNames(fleetQueueNames(fleet?.hosts), [...existing.names, ...(cmd === "pause" ? own?.names ?? [] : [])]);
+	// name. On a resume only where it exists, by discovery or by its own meta key (`ownFound`, issue #1007): a queue that
+	// does not exist has nothing to resume, and a queue built to resume it would write its meta key.
+	const names = unionQueueNames(fleetQueueNames(fleet?.hosts), [...existing.names, ...(cmd === "pause" ? own?.names ?? [] : ownFound)]);
 	// The registry being unreadable no longer means we saw one queue: the keyspace scan may well have
-	// found them. Report the count we ACTED on, and name the degraded read separately, the scan's too (issue #964).
-	const span = `${names.length > 1 ? ` [${names.length} queues]` : ""}${blind ? ` [registry unreadable: ${blind}]` : ""}${existing?.incomplete ? " [queue scan incomplete]" : ""}${own?.problem ? ` [this host's queue not added: ${own.problem}]` : ""}`;
-	// What a set that may be short means, and what to do (issue #964), under the line; the exit code stays 0.
+	// found them. Report the count we ACTED on, and name the degraded read separately, the scan's too (issue #964), on the
+	// line of a whole switch and on the first line of `switchReport`'s (issue #1007).
+	const ownNote = own?.problem ? ` [this host's queue not added: ${own.problem}]` : "";
+	const span = `${names.length > 1 ? ` [${names.length} queues]` : ""}${blind ? ` [registry unreadable: ${blind}]` : ""}${existing?.incomplete ? " [queue scan incomplete]" : ""}${ownNote}`;
+	// What a set that may be short means, and what to do (issue #964), under the line of a switch that confirmed every
+	// queue it found; the exit code stays 0, as the console answers that switch. `switchReport` says it otherwise.
 	const short = blind || existing?.incomplete ? `\n${label}  but ${killSwitchShortNote(cmd === "pause")}` : "";
 	const queues = [];
-	// Once `status`'s deadline is spent (a Valkey that answered nothing to the PING) no queue is built: a queue closed in
+	// Once the deadline is spent (a Valkey that answered nothing to the PING) no queue is built: a queue closed in
 	// the tick it was built is closed while its socket is still opening, and ioredis then prints the ready check that
 	// fails on it as an unhandled error, since BullMQ has stopped listening. A stand-in that never answers takes its
 	// place, so every read below says unread in its own words, as it would have of the real queue.
-	const spent = deadline?.spent() ?? false;
+	const spent = deadline.spent();
 	try {
 		// Constructed INSIDE the try: `makeQueue` can throw on a malformed peer-written name, and a throw
 		// at index k > 0 would otherwise leak the k connections already opened. The disconnect timeout is the probe's.
 		for (const name of names) queues.push(spent ? unansweredQueue(name) : (controlClients.makeQueue ?? makeQueue)({ ...parseConnection(url, { failFast: true }), disconnectTimeout: 0 }, { name }));
 		if (cmd === "pause" || cmd === "resume") {
-			const done = [];
-			try {
-				for (const q of queues) {
-					await (cmd === "pause" ? q.pause() : q.resume());
-					done.push(q.name);
-				}
-			} catch (error) {
-				// A mid-loop failure leaves the deployment HALF switched. Naming what did change is the whole
-				// difference between an operator who knows to finish the job and one who reads "unreachable"
-				// as "nothing happened" and walks away from a fleet with one host still spending.
-				return fail(`could not ${cmd} the whole deployment at ${urlShown(url)}\n  ${done.length > 0 ? `${cmd}d: ${done.join(", ")}` : "nothing changed"}\n  failed at: ${names[done.length]}\n  ${error.message}${blind || existing?.incomplete ? `\n  and ${killSwitchShortNote(cmd === "pause")}` : ""}`);
-			}
+			// A switch that did not reach every queue leaves the deployment HALF switched. Naming what each queue is now is
+			// the whole difference between an operator who knows to finish the job and one who reads "unreachable" as
+			// "nothing happened" and walks away from a fleet with one host still spending (issue #1007: the line that said
+			// so came only from a queue whose write failed, never from one that was never answered).
+			const steps = await switchQueues(queues, cmd, () => within(deadlineMs), deadlineMs / 1000);
+			// A queue it found and did not confirm is a failure, exit 1 (issue #1007). A list that may be short, beside a switch
+			// that confirmed every queue it found, is not: it is said (`short`, issue #964), as the console says it over its
+			// answer that the fleet was paused.
+			if (steps.some((step) => step.state !== "confirmed")) return fail(switchReport({ cmd, shown: urlShown(url), names, steps, blind, incomplete: Boolean(existing?.incomplete), ownNote }));
 			write(`${label}${cmd === "pause" ? `paused: worker will stop taking new jobs (jobs still enqueue)${span}` : `resumed${span}`}${short}\n`);
 		} else {
 			// "paused" is included in the counts because jobs enqueued while paused land in the
@@ -830,16 +837,16 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	} finally {
 		if (status) probe.disconnect?.();
 		// Bounded (issue #1003): BullMQ's close sends QUIT and waits for the answer, so a Valkey that stopped answering
-		// after a queue's connection was ready held the command open here, after its line was printed. For `status` the
-		// close ends by the deadline too, so a spent one drops the connection at once.
+		// after a queue's connection was ready held the command open here, after its line was printed. The close ends by
+		// the deadline too, for every verb (issues #1003 and #1007), so a spent one drops the connection at once.
 		await Promise.all(queues.map((q) => closeWithin(q, within(KILL_SWITCH_CLOSE_TIMEOUT_MS))));
 	}
 	return 0;
 }
 
 /**
- * `status`'s one deadline over a Valkey (issue #1003, `STATUS_DEADLINE_MS`), from the moment this is called, on the
- * monotonic clock. `at` is the deadline as a `performance.now()` instant; `within(ownMs)` is a read's bound, its own or
+ * The kill switch verbs' one deadline over a Valkey (issues #1003 and #1007, `STATUS_DEADLINE_MS`), from the moment
+ * this is called, on the monotonic clock. `at` is the deadline as a `performance.now()` instant; `within(ownMs)` is a read's bound, its own or
  * what is left when that is sooner, never below 1 ms (`readStatusWaiting` and `readTargetStatus` take 0 as "use the
  * default", which would give a read its whole time again after the deadline passed); `spent()` says nothing is left.
  */
@@ -870,7 +877,133 @@ function statusShortfall({ shown, seconds, hint, connectionError = null, answere
 	return `${head}${connectionError !== null ? `\n  ${connectionError}` : ""}\n  the line above leaves out ${lacks}`;
 }
 
-/** A queue that never answers: `status`'s stand-in for each queue once its deadline is spent (`killSwitch`). */
+/** What `switchQueue` reads a step that ran out of time as. */
+const NO_ANSWER = Symbol("no answer");
+
+/**
+ * Whether Valkey refused a queue's pause or resume before its script ran (issue #1007), so the queue did not change:
+ * an ACL that denies EVAL or EVALSHA, a read-only replica, a Valkey still loading, one busy with another script, a
+ * replica whose master is down, or a script it does not hold (ioredis sends EVAL on that one itself). Only these
+ * codes, and only with no sign of the script in the message: a Lua script is not rolled back when it errors, and an
+ * error raised inside one names it ("... script: <sha>, on @user_script:57."). BullMQ's pause script moves the jobs and
+ * flips the meta flag before its XADD to the events stream, so a WRONGTYPE there follows a switch that already
+ * happened (measured: an events key holding a string, the queue paused, the reply an error), and an ACL failure inside
+ * a script comes after the writes before it.
+ */
+export function refusedBeforeScript(error) {
+	const message = String(error?.message ?? "");
+	return error?.name === "ReplyError" && /^(NOPERM|READONLY|LOADING|BUSY|MASTERDOWN|NOSCRIPT)\b/.test(message) && !/user_script/.test(message);
+}
+
+/**
+ * One queue's pause or resume under the kill switch's deadline (issue #1007): `{ state, why? }`, never thrown.
+ *   "confirmed"    Valkey answered: the queue is paused (or running).
+ *   "unconfirmed"  the write was sent and not answered within `ms`, or failed after it was sent. It may still apply when
+ *                  Valkey answers: measured, a pause whose Valkey was stopped (SIGSTOP) as the script reached it applied
+ *                  once the Valkey was continued, after the command had given up and exited.
+ *   "refused"      Valkey refused it before the script ran (`refusedBeforeScript`): the queue did not change.
+ *   "errored"      Valkey answered with any other error, which can follow a switch the script already made. The
+ *                  queue's paused state is read back within what is left of `ms`: `reads` is true (paused), false
+ *                  (running), or null when that read did not tell; `readUnanswered` is true where it did not answer
+ *                  at all (no reply in time, or a connection that failed), never where Valkey answered it with an
+ *                  error, which is Valkey answering.
+ *   "not-sent"     the queue's connection did not come up within `ms`, or failed first: the write never left.
+ * The write is started only once the queue's client is ready, which is what makes "sent" knowable: BullMQ writes it in
+ * the same turn then (its client promise has settled, and nothing between the call and ioredis' socket write waits on
+ * I/O), while a write started earlier would wait inside BullMQ for a connection that may come up after this command
+ * said it was never sent. A failure after the start is read as sent, the safe direction: "not sent" is a promise that
+ * nothing will change.
+ */
+async function switchQueue(q, cmd, ms, seconds) {
+	let timer;
+	const late = new Promise((resolve) => { timer = setTimeout(resolve, ms, NO_ANSWER); });
+	try {
+		const ready = await Promise.race([Promise.resolve(q.client).then(() => true, (error) => ({ error })), late]);
+		if (ready === NO_ANSWER) return { state: "not-sent", why: `no connection within ${seconds} seconds` };
+		if (ready !== true) return { state: "not-sent", why: ready.error?.message ?? String(ready.error) };
+		const answer = await Promise.race([Promise.resolve().then(() => (cmd === "pause" ? q.pause() : q.resume())).then(() => true, (error) => ({ error })), late]);
+		if (answer === true) return { state: "confirmed" };
+		if (answer === NO_ANSWER) return { state: "unconfirmed", why: `no answer within ${seconds} seconds` };
+		const why = answer.error?.message ?? String(answer.error);
+		if (refusedBeforeScript(answer.error)) return { state: "refused", why };
+		if (answer.error?.name !== "ReplyError") return { state: "unconfirmed", why };
+		const reads = await Promise.race([Promise.resolve().then(() => q.isPaused()).then((paused) => (typeof paused === "boolean" ? paused : null), (error) => (error?.name === "ReplyError" ? null : NO_ANSWER)), late]);
+		return { state: "errored", why, reads: reads === NO_ANSWER ? null : reads, ...(reads === NO_ANSWER ? { readUnanswered: true } : {}) };
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
+ * Pause or resume every queue (issue #1007), one `switchQueue` step each, in `queues`' order. `left()` is what is left
+ * of the deadline as each step starts. A PAUSE goes to every queue at once, as the console's does (`flipQueues`, issue
+ * #842): each queue has a connection of its own, and the kill switch must not wait out one queue before it tries the
+ * next. A RESUME goes one queue after another and stops at the first that is not confirmed, the rest not sent: a resume
+ * that lands unobserved when Valkey answers starts jobs, so none is sent after one already in doubt.
+ */
+async function switchQueues(queues, cmd, left, seconds) {
+	if (cmd === "pause") return Promise.all(queues.map((q) => switchQueue(q, cmd, left(), seconds)));
+	const steps = [];
+	const after = { refused: "not tried after a queue whose resume Valkey refused", errored: "not tried after a queue whose resume Valkey answered with an error" };
+	for (const q of queues) {
+		const doubt = steps.find((step) => step.state !== "confirmed");
+		steps.push(doubt ? { state: "not-sent", skipped: true, why: after[doubt.state] ?? "not tried after a queue whose resume is not confirmed: a resume that lands later starts jobs" } : await switchQueue(q, cmd, left(), seconds));
+	}
+	return steps;
+}
+
+/**
+ * A pause or resume that did not confirm every queue it found (issue #1007): each queue on a line of its own, as
+ * confirmed, sent but not confirmed, refused by Valkey, or not sent; "nothing changed" only when no write was sent, never
+ * once one was; that the list itself may be short when the registry or the keyspace scan did not answer (a Valkey that
+ * stopped answering leaves the shared queue alone in it, the fail-open rule), in the fleet's sentence (issue #964,
+ * `killSwitchShortNote`) under the reads named on the first line as a whole switch's line names them; and what to do
+ * next. `ownNote` is this host's queue that could not be added, as the whole switch's line says it.
+ */
+function switchReport({ cmd, shown, names, steps, blind = null, incomplete = false, ownNote = "" }) {
+	const done = `${cmd}d`;
+	const lines = names.map((name, i) => {
+		const { state, why, reads } = steps[i];
+		if (state === "confirmed") return `${name}: ${done}`;
+		if (state === "unconfirmed") return `${name}: sent, not confirmed (${why}); it may still be ${done} when Valkey answers`;
+		if (state === "refused") return `${name}: refused by Valkey, unchanged (${why})`;
+		if (state === "errored") return `${name}: Valkey answered with an error (${why}); ${reads === null ? "it may have partly applied" : `it reads ${reads ? "paused" : "running"} now${reads === (cmd === "pause") ? "" : `, and part of the ${cmd} may have applied`}`}`;
+		return `${name}: not sent (${why})`;
+	});
+	// A write that Valkey answered with an error may have applied, so it counts as sent here, as one never answered does.
+	if (!steps.some((step) => ["confirmed", "unconfirmed", "errored"].includes(step.state))) lines.push("nothing changed");
+	if (blind || incomplete) lines.push(killSwitchShortNote(cmd === "pause"));
+	// "Once Valkey answers" only where something waits on it: a write not answered, a read back that did not answer, or a
+	// connection that did not come up. A refusal or an error is Valkey's answer, a read back it answered with an error
+	// included, and the next step is putting its cause right.
+	const pending = steps.some((step) => step.state === "unconfirmed" || (step.state === "errored" && step.readUnanswered === true));
+	const waiting = pending || steps.some((step) => step.state === "not-sent" && !step.skipped);
+	const failedOn = steps.some((step) => step.state === "refused" || step.state === "errored");
+	lines.push(`run pi-dispatch status ${waiting ? "once Valkey answers " : ""}to see each queue, then pi-dispatch ${cmd} again${!waiting && failedOn ? " once what Valkey refused or failed on is put right" : ""}${cmd === "resume" && pending ? "; a resume not confirmed may start jobs when it lands" : ""}`);
+	const unread = `${blind ? ` [registry unreadable: ${blind}]` : ""}${incomplete ? " [queue scan incomplete]" : ""}`;
+	return `could not ${cmd} the whole deployment at ${shown}${unread}${ownNote}\n  ${lines.join("\n  ")}`;
+}
+
+/**
+ * Which of `names` (this host's own queue, issue #964) have a meta key, read by EXISTS on `probe` within `ms` (issue
+ * #1007): a resume's look at a queue its discovery may not have named, since a scan that did not finish left it paused
+ * without a word. EXISTS writes nothing, where a queue built to look would write its meta key. One whose read does not
+ * answer in time, or fails, is left out, as a queue nobody found.
+ */
+async function ownQueuesThatExist(probe, names, ms) {
+	if (names.length === 0) return [];
+	const { QUEUE_KEY, queueKey } = await import("./bullmq-internals.mjs");
+	let timer;
+	const late = new Promise((resolve) => { timer = setTimeout(resolve, ms, null); });
+	try {
+		const found = await Promise.all(names.map((name) => Promise.race([Promise.resolve().then(() => probe.exists(queueKey(name, QUEUE_KEY.meta))).then((n) => Number(n) === 1, () => false), late])));
+		return names.filter((_, i) => found[i] === true);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** A queue that never answers: the kill switch's stand-in for each queue once its deadline is spent (`killSwitch`). */
 function unansweredQueue(name) {
 	const never = new Promise(() => {});
 	return { name, client: never, isPaused: () => never, getJobCounts: () => never, close: async () => {} };

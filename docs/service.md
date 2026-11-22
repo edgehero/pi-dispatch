@@ -36,10 +36,24 @@ From any terminal:
   `pi-dispatch resume` takes jobs again, and `pi-dispatch status` prints counts and [waiting details](#status-output). Both reach every
   queue the host registry and a look for queues name, and this host's own (`pi-jobs@<name>`) when the deployment's `.env` sets
   `PI_WORKER_NAME`, only on the deployment's Valkey: the `.env`'s `VALKEY_URL` when it and the shell's differ, else the one the command
-  reaches with no `--valkey-url`. A resume reaches that queue only once it exists. When the shell sets another name, or sets one the
+  reaches with no `--valkey-url`. A resume reaches that queue only once it exists, and looks for it itself when the look for queues
+  did not name it. When the shell sets another name, or sets one the
   `.env` does not, or the `.env` cannot be read, the line says so (`[this host's queue not added: ...]`) and leaves that queue out. When the registry or the look could not be read
   (`[registry unreadable: ...]`, `[queue scan incomplete]`), a second line says the list of queues may be short and to pause (or resume)
   again once Valkey answers; the exit code stays 0.
+  Both wait about five seconds on a Valkey, as `status` does. When a queue is not confirmed, the command exits 1
+  and says of each queue whether it was paused (or resumed), sent but not confirmed, refused by Valkey before the write
+  ran (unchanged: an ACL that denies it, a read-only replica, a Valkey still loading or busy), answered with another
+  error, or not sent. A queue sent but not confirmed may still change when Valkey answers: a pause sent to a Valkey that
+  stopped answering applied once it was back, after the command had given up. Any other error can come after the queue
+  already switched (the queue's events stream holding the wrong type of value, say), so the command reads the queue back
+  and says whether it is paused or running now, or that it may have partly applied when that read does not tell.
+  "nothing changed" is said only when no write was sent or every one was refused before it ran. A pause goes to every
+  queue at once; a resume goes one queue after another and sends none after one that is not confirmed, since a resume
+  that lands later starts jobs. When the host registry or the look for queues could not be read too, the report's first
+  line names it and the report says the list of queues may be short. Then run `pi-dispatch status` (once Valkey
+  answers, when it did not) to see each queue, put right what Valkey refused or failed on, and run the same command
+  again: pausing a paused queue or resuming a running one is harmless.
 - `pi-dispatch service restart --drain` restarts the worker without stopping a job halfway. It pauses the queues this host's worker takes
   jobs from: the shared one and, when `PI_WORKER_NAME` is set, the host's own (`pi-jobs@<name>`, where its cron, chained and manual runs and
   the forge deliveries [routed to it](multi-host.md#a-forge-delivery-that-needs-one-particular-machine) wait). It waits until none of them has
