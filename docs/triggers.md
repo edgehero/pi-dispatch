@@ -771,14 +771,14 @@ pi-dispatch triggers check triggers.json.new && mv triggers.json.new triggers.js
   is read for whether it is set, never for its value, which is not printed.
 - With `GITHUB_INGEST` and `GITHUB_AUTH_SOURCE` unset, the file decides whether `serve` takes GitHub webhooks: one
   GitHub rule is enough, and then `serve` needs `WEBHOOK_SECRET`. So adding the first GitHub rule to a deployment with
-  no `WEBHOOK_SECRET` is refused for the receiver and the watch collector. The poller does not need it while it is
-  unset or empty, but a `WEBHOOK_SECRET` of spaces refuses the poller too. Set `GITHUB_INGEST=poll` if the poller
-  brings GitHub's events. Where `GITHUB_INGEST` or `GITHUB_AUTH_SOURCE` already says GitHub, the same refusal is named
+  no `WEBHOOK_SECRET`, or one of spaces, is refused for the receiver. The poller and the watch collector never read
+  it. Set `GITHUB_INGEST=poll` if the poller brings GitHub's events. Where `GITHUB_INGEST` or `GITHUB_AUTH_SOURCE` already says GitHub, the same refusal is named
   as the deployment's.
 - The watch collector is named only where a pull source is known: in the file, or, for a file that does not parse, in
   the deployment's current file. A file that removes the last pull source gets a note: a watch collector started on it
   refuses to start.
-- It does not judge the rest of the environment (a forge's own settings, `POLL_REPOS`, `GITHUB_INGEST=webhook` against a
+- It does not judge the rest of the environment (a forge's own webhook settings and `RECEIVER_PORT`, which only
+  `serve` reads, `POLL_REPOS`, `GITHUB_INGEST=webhook` against a
   poller, Valkey), the other files a service loads at start (the envelope's own content, the pause windows, the scoped
   limits, the projects, the model endpoints), nor what only a live fleet can say (whether the hosts agree on the cron
   set). `pi-dispatch doctor` does. Nor does it know which of the services run on this host: it answers for each one

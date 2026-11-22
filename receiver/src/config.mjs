@@ -32,7 +32,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { groupTriggers } from "./trigger-groups.mjs";
-import { configError, githubIngestFrom, githubServedByServe, loadGitHubAuth, positiveInt } from "@edgehero/pi-dispatch/config";
+import { configError, githubIngestFrom, githubServedByServe, loadForgeWebhook, loadGitHubAuth, positiveInt } from "@edgehero/pi-dispatch/config";
 import { FORGE_KINDS, parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { watchSecretsMissing } from "@edgehero/pi-dispatch/watch-contract";
 
@@ -53,6 +53,9 @@ const DEFAULT_TRIGGERS_PATH = "./triggers.json";
 export const IDENTITY_RETRY_FLOOR_SECONDS = 60;
 export const IDENTITY_RETRY_DEFAULT_SECONDS = 600;
 
+/** The receiver commands `loadReceiverConfig` loads for (issue #1006), each judging only what it reads. */
+export const RECEIVER_COMMANDS = Object.freeze(["serve", "poll", "watch"]);
+
 /**
  * The boot identity-retry window in milliseconds, from `RECEIVER_IDENTITY_RETRY_SECONDS`. Parsed in
  * ONE place for both loaders (serve and poll), so the floor cannot drift between them. `positiveInt`
@@ -67,27 +70,41 @@ export function identityRetryWindowMs(env = process.env) {
  * Parse the receiver's config from `env` (default process.env). Filesystem access is injected
  * (`readFile`, `fileExists`) so the loader is hermetically testable and never touches disk in tests.
  *
- * `verifiesWatchPushes` is set by `serve` alone (issue #994), the one command that answers `POST /watch/<source>` and
- * verifies each push with its source's `secretEnv`: with it, a watch source whose secret is unset or blank refuses the
- * file. `poll` and `watch` load through this loader without it and never judge that secret, since neither reads it
- * (the poller has no watch route, and the collector pulls). It used to be judged for all three, so a deployment that
- * added a watch source and forgot its secret lost GitHub polling at its next restart, exit 2 and not restarted, over a
- * setting the poller never uses. Off by default because the cost of forgetting it is bounded: the push handler answers
- * a source whose secret is missing by the same predicate (unset, or blank after trimming) with 503 and verifies nothing
- * (receiver/src/watch.mjs), so a caller that left it out would refuse each push instead of its start, and never accept
- * one signed with a blank key. It is kept on the returned config, so `reloadTriggers` judges a live edit for `serve`
- * exactly as its start did, from one decision.
+ * `command` names the receiver command loading it, and each judges only the settings it reads (issues #994, #1006):
+ *
+ *  - `serve` (the default) reads everything: the triggers file, each watch source's push secret, the GitHub auth block,
+ *    `GITHUB_INGEST`, `WEBHOOK_SECRET` where it serves GitHub, `RECEIVER_PORT` and `RECEIVER_BIND`, the identity retry
+ *    window, and the GitLab, Forgejo and Azure DevOps webhook blocks (`loadForgeWebhook`).
+ *  - `poll` reads the triggers file, the GitHub auth block (it polls and resolves its identity with it), `GITHUB_INGEST`
+ *    and the identity retry window, and none of what only a listener reads.
+ *  - `watch` reads the triggers file alone: it pulls watch sources, resolves no identity and calls no forge, so the
+ *    GitHub auth block and the identity retry window are skipped too. `GITHUB_INGEST` is still judged for it, a stated
+ *    residual: the console says a garbled one stops every receiver command, and changing that sentence changes a
+ *    rendered page this change does not touch.
+ *
+ * All three used to judge everything, so a `GITLAB_TOKEN` set for the worker, a malformed `RECEIVER_PORT`, a watch
+ * source without its secret or (for `watch`) a PAT source without its token stopped a command that never reads them,
+ * exit 2 and not restarted. `serve` is the default so a new caller that forgets it is judged as `serve` is and
+ * refuses, rather than arming routes it never parsed. `command` is kept on the returned config, so `reloadTriggers`
+ * judges a live edit for `serve` exactly as its start did, from one decision.
  */
-export function loadReceiverConfig(env = process.env, { readFile = readFileSync, fileExists = existsSync, verifiesWatchPushes = false } = {}) {
+export function loadReceiverConfig(env = process.env, { readFile = readFileSync, fileExists = existsSync, command = "serve" } = {}) {
+	if (!RECEIVER_COMMANDS.includes(command)) throw new Error(`loadReceiverConfig: unknown receiver command ${JSON.stringify(command)}`);
+	const listener = command === "serve";
 	// Triggers and the GitHub auth block are parsed FIRST, before the secret check, because the secret is
 	// now conditional on what they say. Their own fail-loud errors therefore surface first -- a garbled
 	// GITHUB_AUTH_SOURCE is reported as a garbled GITHUB_AUTH_SOURCE, never laundered into a confusing
 	// complaint about WEBHOOK_SECRET.
-	const triggers = loadTriggers(env, readFile, fileExists, verifiesWatchPushes === true);
-	const github = loadGitHubAuth(env, fileExists);
+	const triggers = loadTriggers(env, readFile, fileExists, listener);
+	const github = command === "watch" ? null : loadGitHubAuth(env, fileExists);
 	// Before the secret check for the same reason as the two above: a typo'd GITHUB_INGEST is reported as itself,
 	// never as a WEBHOOK_SECRET the deployment may not need (issue #879).
 	const githubIngest = githubIngestFrom(env);
+	const valkeyUrl = env.VALKEY_URL ?? "redis://127.0.0.1:6379"; // mirrors worker config: producer and consumer share one queue
+	// What `poll` and `watch` read, and nothing a listener alone reads (issue #1006): no `servesGithub`, so a reload of
+	// this config never reports GitHub rules unserved, and no route block, since neither command arms a route.
+	if (command === "watch") return { command, githubIngest, valkeyUrl, triggers };
+	if (command === "poll") return { command, githubIngest, valkeyUrl, identityRetryWindowMs: identityRetryWindowMs(env), triggers, github };
 	const servesGithub = decideServesGithub(env, triggers.github);
 
 	const webhookSecret = env.WEBHOOK_SECRET;
@@ -105,19 +122,21 @@ export function loadReceiverConfig(env = process.env, { readFile = readFileSync,
 		webhookSecret,
 		servesGithub,
 		// What the operator said about the transport (`null`: unset, so `servesGithub` was inferred). Carried so the boot
-		// line that skips the GitHub arm can name which rule decided, and so `poll` can refuse under `webhook`.
+		// line that skips the GitHub arm can name which rule decided.
 		githubIngest,
-		// Whether this config judges watch source secrets (issue #994): `serve`'s, which `reloadTriggers` reads back.
-		verifiesWatchPushes: verifiesWatchPushes === true,
-		valkeyUrl: env.VALKEY_URL ?? "redis://127.0.0.1:6379", // mirrors worker config: producer and consumer share one queue
+		// The command this config was judged for (issue #1006), which `reloadTriggers` reads back for watch secrets.
+		command,
+		valkeyUrl,
 		port: positiveInt(env, "RECEIVER_PORT", 3000),
 		bind: env.RECEIVER_BIND ?? "0.0.0.0",
 		identityRetryWindowMs: identityRetryWindowMs(env),
 		triggers,
 		github,
-		gitlab: loadGitLabConfig(env),
-		forgejo: loadForgejoConfig(env),
-		azure: loadAzureConfig(env),
+		// Each null when nothing names that forge, and then no route exists for it. The rule is the worker package's
+		// (`loadForgeWebhook`), so doctor judges a block by the same code this refuses it with.
+		gitlab: loadForgeWebhook("gitlab", env),
+		forgejo: loadForgeWebhook("forgejo", env),
+		azure: loadForgeWebhook("azure", env),
 	};
 }
 
@@ -188,137 +207,6 @@ function hasGithubRules(group) {
 }
 
 /**
- * The GitLab endpoint's configuration, or `null` when the deployment serves no GitLab -- in which case no
- * `/gitlab` route exists at all, rather than one that answers 401. An endpoint that responds is an endpoint
- * an operator can believe is armed.
- *
- * `GITLAB_WEBHOOK_MODE` is REQUIRED once any GitLab variable is set, and is not defaulted. The two modes
- * are not equally strong -- `signature` is an HMAC over the body, `token` is a shared-secret compare that
- * proves nothing about the body's integrity -- so which one a deployment runs must be a thing somebody
- * chose and can be asked about, never a thing it fell into. Defaulting to the weaker one would silently
- * downgrade every operator who did not know the field existed; defaulting to the stronger one would break
- * every instance below GitLab 19.0.
- */
-function loadGitLabConfig(env) {
-	const mode = env.GITLAB_WEBHOOK_MODE;
-	const secret = env.GITLAB_WEBHOOK_SECRET;
-	const token = env.GITLAB_TOKEN;
-	const apiUrl = env.GITLAB_URL ?? "https://gitlab.com";
-	if (!mode && !secret && !token) return null;
-
-	if (mode !== "signature" && mode !== "token") {
-		throw configError(`GITLAB_WEBHOOK_MODE must be "signature" (HMAC, GitLab 19.0+) or "token" (X-Gitlab-Token, any version); got ${JSON.stringify(mode)}`);
-	}
-	if (typeof secret !== "string" || secret.trim() === "") {
-		throw configError("GITLAB_WEBHOOK_SECRET is required; refusing to start a gitlab endpoint that cannot verify deliveries");
-	}
-	// The gate needs this token BEFORE any job runs: the actor's access level is what authorises a GitLab
-	// trigger at all (CONST-TRIGGER-AUTHOR-GATE), and without a token every lookup is indeterminate and
-	// every delivery 503s, which GitLab never resends. After 4 in a row GitLab disables the hook for a while
-	// (on gitlab.com, and a group hook anywhere; a self-managed project hook only where the
-	// `auto_disabling_web_hooks` feature flag is on). Refusing at boot is the difference between one clear
-	// message and every delivery failing, and perhaps the hook switched off.
-	if (typeof token !== "string" || token.trim() === "") {
-		throw configError("GITLAB_TOKEN is required for gitlab triggers -- the receiver resolves the actor's project access level before it may enqueue");
-	}
-	return { mode, secret, token, apiUrl };
-}
-
-/**
- * The Forgejo/Gitea block, or `null` when nothing names it -- same presence rule as GitLab's: an endpoint
- * that answers for a forge nobody configured is an endpoint an operator can believe is armed.
- *
- * There is no MODE here, and that absence is the good news. Forgejo signs the raw body with HMAC-SHA256
- * and sends GitHub's three headers verbatim, so there is exactly one verification mechanism and it is the
- * strong one -- no choice to make, and none to get wrong.
- *
- * `FORGEJO_BOT_ID` is optional and exists for one reason: a repository-scoped token cannot call
- * `GET /user` (see worker/src/forgejo-identity.mjs). Without it, following the token-scoping advice would
- * make the receiver unable to identify itself, and identity is not optional here.
- *
- * `FORGEJO_PERMISSION_TOKEN` is optional and is the author gate's alone (OQ-043). Forgejo answers a lookup of
- * ANOTHER user's repository permission only to a site admin or a repository admin, so whichever token asks must
- * belong to one. FORGEJO_TOKEN is also every forgejo job's token, so making ITS account an admin hands each job
- * a token that can lift branch protection. This variable lets a DIFFERENT account, an admin of the repositories,
- * answer that one GET with a `read:repository` token, while the job's account stays a `write` collaborator.
- * Read here and nowhere else: it never reaches the worker's job env, and the worker refuses it in PI_FORWARD_ENV
- * and run.secrets (WORKER_ONLY_SECRET_VARS). Unset (or blank), the lookup falls back to FORGEJO_TOKEN, which is
- * the behaviour before it existed and works only if that account is an admin; `lookupTokenVar` names which one
- * is in use, so the boot line and a 403's reason can say so.
- */
-function loadForgejoConfig(env) {
-	const secret = env.FORGEJO_WEBHOOK_SECRET;
-	const token = env.FORGEJO_TOKEN;
-	const apiUrl = env.FORGEJO_URL;
-	const botId = env.FORGEJO_BOT_ID ?? null;
-	if (!secret && !token && !apiUrl) return null;
-
-	// No default instance URL, deliberately: Forgejo is self-hosted by nature and there is no forgejo.com to
-	// fall back to. Guessing one would send a token to a host the operator never named.
-	if (typeof apiUrl !== "string" || apiUrl.trim() === "") {
-		throw configError("FORGEJO_URL is required for forgejo triggers -- there is no default instance to fall back to");
-	}
-	if (typeof secret !== "string" || secret.trim() === "") {
-		throw configError("FORGEJO_WEBHOOK_SECRET is required; refusing to start a forgejo endpoint that cannot verify deliveries");
-	}
-	// Needed BEFORE any job runs: the actor's repository permission is what authorises a forgejo trigger at
-	// all (CONST-TRIGGER-AUTHOR-GATE), and without a token every lookup is indeterminate and every delivery
-	// 503s, which Forgejo never resends. Refusing at boot is the difference between one clear message and
-	// every delivery failing in a history nobody is watching.
-	if (typeof token !== "string" || token.trim() === "") {
-		throw configError("FORGEJO_TOKEN is required for forgejo triggers -- the receiver resolves the actor's repository permission before it may enqueue");
-	}
-	const permissionToken = typeof env.FORGEJO_PERMISSION_TOKEN === "string" ? env.FORGEJO_PERMISSION_TOKEN.trim() : "";
-	return {
-		secret,
-		token,
-		apiUrl: apiUrl.trim(),
-		botId,
-		lookupToken: permissionToken !== "" ? permissionToken : token,
-		lookupTokenVar: permissionToken !== "" ? "FORGEJO_PERMISSION_TOKEN" : "FORGEJO_TOKEN",
-	};
-}
-
-/**
- * The Azure DevOps block, or `null` when nothing names it.
- *
- * `AZURE_WEBHOOK_MODE` is REQUIRED once any AZURE_* variable is set and is deliberately not defaulted --
- * the same rule GitLab's mode gets, and for a sharper reason. Azure offers no HMAC at all, so BOTH modes
- * are shared-secret compares that cover no bytes; which header carries the secret is a deployment fact
- * somebody has to have decided, and defaulting it would mean an operator could arm an endpoint without
- * ever noticing that its gate proves only that the sender knew a string.
- */
-function loadAzureConfig(env) {
-	const mode = env.AZURE_WEBHOOK_MODE;
-	const secret = env.AZURE_WEBHOOK_SECRET;
-	const token = env.AZURE_TOKEN;
-	const orgUrl = env.AZURE_ORG_URL;
-	const headerName = env.AZURE_WEBHOOK_HEADER ?? null;
-	if (!mode && !secret && !token && !orgUrl) return null;
-
-	if (mode !== "basic" && mode !== "header") {
-		throw configError(`AZURE_WEBHOOK_MODE must be "basic" (HTTP Basic on the subscription) or "header" (a custom header); got ${JSON.stringify(mode)}`);
-	}
-	if (mode === "header" && (typeof headerName !== "string" || headerName.trim() === "")) {
-		throw configError("AZURE_WEBHOOK_HEADER is required when AZURE_WEBHOOK_MODE=header -- there is no default header name to guess");
-	}
-	if (typeof secret !== "string" || secret.trim() === "") {
-		throw configError("AZURE_WEBHOOK_SECRET is required; refusing to start an azure endpoint that cannot authenticate deliveries");
-	}
-	// No default organization URL: guessing one would send an operator's token to an organization they
-	// never named.
-	if (typeof orgUrl !== "string" || orgUrl.trim() === "") {
-		throw configError("AZURE_ORG_URL is required for azure triggers (e.g. https://dev.azure.com/your-org)");
-	}
-	// Needed BEFORE any job runs: project membership is what authorises an azure trigger at all
-	// (CONST-TRIGGER-AUTHOR-GATE), and without a token every lookup is indeterminate and every delivery 503s.
-	if (typeof token !== "string" || token.trim() === "") {
-		throw configError("AZURE_TOKEN is required for azure triggers -- the receiver resolves the actor's project membership before it may enqueue");
-	}
-	return { mode, secret, headerName: headerName?.trim() ?? null, token, orgUrl: orgUrl.trim().replace(/\/+$/, "") };
-}
-
-/**
  * Load, validate, and group the receiver's webhook triggers from the unified triggers file. The file is
  * the reviewed, committed source of truth for which events trigger which flow; a missing, unparseable, or
  * malformed file fails loud rather than degrading to an empty (silently trigger-nothing) allowlist.
@@ -356,7 +244,7 @@ function loadAzureConfig(env) {
  * counted. The raw file index is the rule's identity -- the filter reports it on the job as
  * `trigger.matched.index`, so a run is explainable back to the exact triggers.json entry that fired it.
  */
-function loadTriggers(env, readFile, fileExists, verifiesWatchPushes) {
+function loadTriggers(env, readFile, fileExists, listener) {
 	const path = env.PI_TRIGGERS_FILE ?? DEFAULT_TRIGGERS_PATH;
 
 	if (!fileExists(path)) {
@@ -366,10 +254,9 @@ function loadTriggers(env, readFile, fileExists, verifiesWatchPushes) {
 	const document = parseTriggersDocument(readFile(path, "utf8"), path);
 	const parsed = document.triggers;
 	const watchSources = document.watchSources ?? {};
-	// Judged for `serve` alone (`verifiesWatchPushes`, issue #994), by the worker's predicate (`watchSecretsMissing`,
-	// issue #970), shared with doctor and `pi-dispatch triggers check`, so none of them can call a secret present that
-	// this refuses.
-	if (verifiesWatchPushes && watchSecretsMissing(watchSources, env).length > 0) throw configError("watch: a configured source secret is missing");
+	// Judged for `serve` alone (`command`, issue #994), by the worker's predicate (`watchSecretsMissing`, issue #970),
+	// shared with doctor and `pi-dispatch triggers check`, so none of them can call a secret present that this refuses.
+	if (listener && watchSecretsMissing(watchSources, env).length > 0) throw configError("watch: a configured source secret is missing");
 
 	return groupTriggers(parsed, { watchSources });
 }
@@ -408,14 +295,14 @@ export function triggersFilePath(env = process.env) {
  * minutes or fail outright, and a reload cannot refuse to boot) and a handler built into a server already listening,
  * the boot-only coupling DES-TRIGGER-OUTSIDE-PI exists to keep.
  *
- * Watch source secrets are judged as the start judged them, by `cfg.verifiesWatchPushes` (issue #994): `serve`'s
- * config keeps a new source without its secret out and runs on, while the poller's (which carries no such field) and
- * the watch collector's take it. Read from `cfg` rather than passed by each caller, so `serve` cannot start strict and
+ * Watch source secrets are judged as the start judged them, by `cfg.command` (issues #994, #1006): `serve`'s config
+ * keeps a new source without its secret out and runs on, while the poller's (which carries no such field) and the
+ * watch collector's take it. Read from `cfg` rather than passed by each caller, so `serve` cannot start strict and
  * reload lax.
  */
 export function reloadTriggers(env, cfg, { readFile = readFileSync, fileExists = existsSync } = {}) {
 	try {
-		cfg.triggers = loadTriggers(env, readFile, fileExists, cfg.verifiesWatchPushes === true);
+		cfg.triggers = loadTriggers(env, readFile, fileExists, cfg.command === "serve");
 		if (cfg.servesGithub === false && cfg.githubIngest !== "poll" && hasGithubRules(cfg.triggers.github)) return { ok: true, githubUnserved: githubRuleCount(cfg.triggers.github) };
 		return { ok: true };
 	} catch (e) {

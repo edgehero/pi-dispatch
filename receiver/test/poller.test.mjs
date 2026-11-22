@@ -2216,6 +2216,17 @@ test("the poller starts on a file whose watch source's secret is unset and follo
 	}
 });
 
+test("the poller starts whatever serve's own settings say: a forge webhook block, a blank WEBHOOK_SECRET, a malformed RECEIVER_PORT (issue #1006)", async () => {
+	// It polls GitHub and listens on nothing, so it loads as a command that does not listen and reads none of them; each
+	// used to stop it at its start (exit 2, not restarted) through serve's loader. The fixture file holds GitHub rules, so
+	// with GITHUB_INGEST unset serve would serve GitHub and need the webhook secret.
+	for (const setting of [{ GITLAB_TOKEN: "glpat-x" }, { GITLAB_WEBHOOK_MODE: "bogus" }, { FORGEJO_TOKEN: "t" }, { AZURE_TOKEN: "t" }, { RECEIVER_PORT: "http" }, { WEBHOOK_SECRET: "   " }]) {
+		const { out } = await runPoller({ env: { POLL_REPOS: "o/r", ...setting }, routes: labelRoutes() });
+		assertNoRepoFailure(out);
+		assert.equal(out.filter((o) => o.event === "poll_cycle").length, 1, JSON.stringify(setting));
+	}
+});
+
 test("the poller follows the file by reading it, never through a watch (issue #947, source pin)", () => {
 	// A watch needs a debounce timer, and no timer the poller arms may outlive `done` (the async_hooks test above) nor be
 	// unref'd (the pin above); the header says why a read at each judgement is as fresh for a loop that judges only inside

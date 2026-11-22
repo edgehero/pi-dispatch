@@ -176,15 +176,15 @@ test("a job path holding the deployment's egress-private/ or the envelope file r
 	assert.match(overlay.refusals[0].reason, /^PI_GLOBAL_PI_DIR must be an absolute path .*\(a setting of this deployment, whatever the file says\)$/);
 });
 
-test("the first GitHub rule makes serve need WEBHOOK_SECRET where nothing else says GitHub: the receiver's and the collector's refusal, the poller's only for a secret of spaces", async () => {
+test("the first GitHub rule makes serve need WEBHOOK_SECRET where nothing else says GitHub: the receiver's refusal alone, a secret of spaces included (issues #970, #1006)", async () => {
 	const before = { watchSources: { prod: source("WATCH_SIGNING") }, triggers: [WATCH_RULE] };
 	const after = { ...before, triggers: [WATCH_RULE, LABEL] };
 	const cwd = deployment({ "before.json": before, "after.json": after, ".env": `POLL_REPOS=o/r\nWATCH_SIGNING=${SECRET}\n` });
 	assert.equal((await check(cwd, ["before.json"])).code, 0);
 	const r = await check(cwd, ["after.json"]);
 	assert.equal(r.code, 1);
-	assert.match(r.err, /^error: the receiver and the watch collector refuse it: this file holds a GitHub rule, and with GITHUB_INGEST and GITHUB_AUTH_SOURCE unset that makes serve serve GitHub, which needs WEBHOOK_SECRET, unset or blank here: set it, or set GITHUB_INGEST=poll where the poller brings GitHub's events\n/);
-	assert.match(r.err, /\nA receiver or watch collector started on /);
+	assert.match(r.err, /^error: the receiver refuses it: this file holds a GitHub rule, and with GITHUB_INGEST and GITHUB_AUTH_SOURCE unset that makes serve serve GitHub, which needs WEBHOOK_SECRET, unset or blank here: set it, or set GITHUB_INGEST=poll where the poller brings GitHub's events\n/);
+	assert.match(r.err, /\nA receiver started on /);
 	assert.equal((await check(cwd, ["after.json"], { WEBHOOK_SECRET: "w" })).code, 1, "a secret this shell alone sets is no secret the services have");
 	writeFileSync(join(cwd, ".env"), `POLL_REPOS=o/r\nWATCH_SIGNING=${SECRET}\nWEBHOOK_SECRET=w\n`);
 	assert.equal((await check(cwd, ["after.json"])).code, 0, "with the secret in the .env the services read");
@@ -194,9 +194,9 @@ test("the first GitHub rule makes serve need WEBHOOK_SECRET where nothing else s
 	const both = await check(fromFile);
 	assert.equal(both.code, 0, both.err);
 	assert.equal((await check(deployment({ "triggers.json": { triggers: [NOT_GITHUB.gitlab] }, ".env": "GITHUB_INGEST=both\nPOLL_REPOS=o/r\n" }))).code, 1, "and without it there");
-	// The poller puts its placeholder in for an unset or empty secret, never for one of spaces, which refuses it too.
+	// The poller and the collector never read it (issue #1006), so a secret of spaces refuses the receiver alone too.
 	assert.deepEqual(judge({ triggers: [LABEL] }, { WEBHOOK_SECRET: "" }).refusals.map((x) => x.readers), [["receiver"]]);
-	assert.deepEqual(judge({ triggers: [LABEL] }, { WEBHOOK_SECRET: "  " }).refusals.map((x) => x.readers), [["receiver", "poller"]]);
+	assert.deepEqual(judge({ triggers: [LABEL] }, { WEBHOOK_SECRET: "  " }).refusals.map((x) => x.readers), [["receiver"]]);
 	// The deployment alone says GitHub: the same refusal, named as the deployment's.
 	const said = judge({ triggers: [NOT_GITHUB.gitlab] }, { GITHUB_AUTH_SOURCE: "pat" });
 	assert.deepEqual(said.refusals.map((x) => [x.readers, x.reason]), [[["receiver"], "serve serves GitHub here (GITHUB_AUTH_SOURCE is set) and WEBHOOK_SECRET is unset or blank, so it refuses to start (a setting of this deployment, whatever the file says)"]]);
@@ -242,9 +242,11 @@ test("a watch source's secret: missing or blank refuses the receiver alone, set 
 	assert.equal(shellOnly.err, `error: WATCH_SIGNING is set in this shell and not in ${join(shellOnlyCwd, ".env")} (no value is shown), and the services read the .env, so whether it is set for them cannot be told: add it to the .env, or unset it in this shell\n`);
 	const onEnvFile = { GITHUB_INGEST: "poll", POLL_REPOS: "o/r", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "t" };
 	const docFs = { readFile: () => JSON.stringify(doc), fileExists: () => true };
-	assert.throws(() => loadReceiverConfig(onEnvFile, { ...docFs, verifiesWatchPushes: true }), /watch: a configured source secret is missing/, "the receiver on the .env alone refuses the file");
+	assert.throws(() => loadReceiverConfig(onEnvFile, { ...docFs, command: "serve" }), /watch: a configured source secret is missing/, "the receiver on the .env alone refuses the file");
 	assert.doesNotThrow(() => loadPollerConfig(onEnvFile, docFs), "and the poller takes it");
-	assert.equal((await check(shellOnlyCwd, [], { WATCH_SIGNING: "   " })).code, 1, "blank here and absent there is refused the same way");
+	// Blank here and absent there: missing to every reader alike, so judged as missing, never refused as set here alone.
+	const blankHere = await check(shellOnlyCwd, [], { WATCH_SIGNING: "   " });
+	assert.match(blankHere.err, /^error: the receiver refuses it: watch source "prod" needs its signing secret WATCH_SIGNING, which is unset or blank here\n/);
 	// Empty in this shell and absent from the .env: unset to every reader, judged so.
 	const emptyHere = await check(shellOnlyCwd, [], { WATCH_SIGNING: "" });
 	assert.equal(emptyHere.code, 1);
@@ -257,6 +259,9 @@ test("a watch source's secret: missing or blank refuses the receiver alone, set 
 		assert.deepEqual([split.code, split.out], [1, ""]);
 		assert.equal(split.err, `error: WATCH_SIGNING is ${words} in ${join(cwd, ".env")} (neither value is shown), so whether it is set cannot be told: make them agree (the service runs the file's)\n`);
 	}
+	// Empty in one place and blank in the other: missing to every reader alike (issue #1006), so judged, not refused.
+	const missingBoth = await check(deployment({ "triggers.json": doc, ".env": `${POLL}WATCH_SIGNING=" "\n` }), [], { WATCH_SIGNING: "" });
+	assert.match(missingBoth.err, /^error: the receiver refuses it: watch source "prod" needs its signing secret WATCH_SIGNING, which is unset or blank here\n/);
 	// Two different values that are both set: presence is all this judges, so nothing is said.
 	const both = await check(deployment({ "triggers.json": doc, ".env": `${POLL}WATCH_SIGNING=${SECRET}\n` }), [], { WATCH_SIGNING: "another-private-value" });
 	assert.equal(both.code, 0, both.err);
@@ -348,7 +353,7 @@ test("the check reads only the settings the CLI resolves from the deployment, an
 	for (const k of TRIGGERS_CHECK_ENV_KEYS) assert.ok(read.has(k), `${k} is resolved by the CLI and read by the check`);
 });
 
-test("parity: the check refuses for the receiver, the poller and the watch collector exactly where their real loaders throw (issues #970, #994)", async () => {
+test("parity: the check refuses for the receiver, the poller and the watch collector exactly where their real loaders throw (issues #970, #994, #1006)", async () => {
 	const docs = {
 		plain: { triggers: [LABEL, cron("/srv/never-read")] },
 		gitlabOnly: { triggers: [NOT_GITHUB.gitlab] },
@@ -362,58 +367,85 @@ test("parity: the check refuses for the receiver, the poller and the watch colle
 	// No base satisfies serve's WEBHOOK_SECRET by itself: that rule is judged too. Each keeps the rules the check leaves
 	// to doctor satisfied (POLL_REPOS, a parseable GITHUB_AUTH_SOURCE), so a throw below is one the check owns.
 	const bases = [{ GITHUB_INGEST: "poll", POLL_REPOS: "o/r" }, { POLL_REPOS: "o/r" }, { GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "p", POLL_REPOS: "o/r" }];
+	const dir = tempDir("pd-1006-parity-");
+	const owned = /^watch: a configured source secret is missing$|run\.flow must be a non-empty string|^WEBHOOK_SECRET is required/;
+	// Each reader by its own entry, on the file at `env.PI_TRIGGERS_FILE`: `serve`'s loader as start.mjs calls it
+	// (`command: "serve"`, the loader's default), the poller's, and the collector's start with its own default loader, which goes on
+	// to judge Valkey only once its loader took the file, so that is refused here and nothing connects anywhere.
+	const loaders = {
+		serve: async (env) => loadReceiverConfig(env, { command: "serve" }),
+		poll: async (env) => loadPollerConfig(env),
+		collector: (env) => startWatchPuller(env, { judgeValkey: async () => { throw new Error("collector started"); }, signals: false, out: () => {} }),
+	};
+	const outcomes = async (env) => {
+		const result = {};
+		for (const [reader, load] of Object.entries(loaders)) {
+			try {
+				await load(env);
+				result[reader] = "takes";
+			} catch (error) {
+				result[reader] = error.message === "collector started" ? "takes" : error.piDispatchConfig === true ? error.message : assert.fail(error);
+			}
+		}
+		return result;
+	};
 	let rows = 0;
 	const seen = new Set();
 	for (const [name, doc] of Object.entries(docs)) {
 		const text = JSON.stringify(doc);
-		const fs = { readFile: () => text, fileExists: () => true };
+		const path = join(dir, `${name}.json`);
+		writeFileSync(path, text);
 		for (const base of bases) {
 			for (const signing of values) {
 				for (const webhook of values) {
 					const env = { ...base, ...(signing === undefined ? {} : { WATCH_SIGNING: signing }), ...(webhook === undefined ? {} : { WEBHOOK_SECRET: webhook }) };
-					const verdict = checkTriggersText(text, "/d/triggers.json", { env, now });
+					const verdict = checkTriggersText(text, path, { env, now });
 					const refuses = (reader) => verdict.refusals.some((x) => x.readers.includes(reader));
 					const takes = (reader) => verdict.readers.includes(reader) && !refuses(reader);
-					const outcome = (load) => {
-						try {
-							return { cfg: load() };
-						} catch (error) {
-							assert.equal(error.piDispatchConfig, true);
-							assert.match(error.message, /^watch: a configured source secret is missing$|run\.flow must be a non-empty string|^WEBHOOK_SECRET is required/, `${name} ${JSON.stringify(env)}: only a refusal the check owns`);
-							return { error };
-						}
-					};
 					const label = `${name} ${JSON.stringify(env)}`;
-					// `serve` asks its loader to judge watch source secrets (receiver/src/start.mjs), which only it verifies pushes
-					// with; the poller and the collector load without that (issue #994).
-					const serve = outcome(() => loadReceiverConfig(env, { ...fs, verifiesWatchPushes: true }));
-					const poll = outcome(() => loadPollerConfig(env, fs));
-					const collector = outcome(() => loadReceiverConfig(env, fs));
-					assert.equal(refuses("receiver"), Boolean(serve.error), `receiver: ${label}`);
-					assert.equal(refuses("poller"), Boolean(poll.error), `poller: ${label}`);
-					seen.add(`serve ${serve.error ? "refuses" : "takes"}, poll ${poll.error ? "refuses" : "takes"}, collector ${collector.error ? "refuses" : "takes"}`);
-					// The collector loads as `startWatchPuller` does (its default `loadConfig`, called with the environment alone), and
-					// refuses to start without a pull source before any Valkey.
-					if (takes("watch collector")) assert.ok(!collector.error && Object.values(collector.cfg.triggers.watchSources).some((s) => s.pull), label);
-					else await assert.rejects(startWatchPuller(env, { loadConfig: (e) => loadReceiverConfig(e, fs), signals: false, out: () => {} }), (e) => e.piDispatchConfig === true, `watch collector: ${label}`);
+					const got = await outcomes({ ...env, PI_TRIGGERS_FILE: path });
+					for (const reader of ["serve", "poll"]) if (got[reader] !== "takes") assert.match(got[reader], owned, `${reader} ${label}: only a refusal the check owns`);
+					assert.equal(refuses("receiver"), got.serve !== "takes", `receiver: ${label}`);
+					assert.equal(refuses("poller"), got.poll !== "takes", `poller: ${label}`);
+					// Without a pull source the collector refuses every file before any Valkey, and the check names it nowhere.
+					assert.equal(takes("watch collector"), got.collector === "takes", `watch collector: ${label}`);
+					seen.add(`serve ${got.serve === "takes" ? "takes" : "refuses"}, poll ${got.poll === "takes" ? "takes" : "refuses"}, collector ${got.collector === "takes" ? "starts" : "refuses"}`);
 					rows++;
 				}
 			}
 		}
 	}
 	assert.ok(rows >= 300, `${rows} rows`);
-	// The table reaches every outcome the loaders can give, the splits included: a watch secret missing refuses serve and
-	// neither the poller nor the collector (issue #994), and a WEBHOOK_SECRET of spaces where serve serves GitHub refuses
-	// all three.
-	assert.deepEqual([...seen].sort(), ["serve refuses, poll refuses, collector refuses", "serve refuses, poll takes, collector refuses", "serve refuses, poll takes, collector takes", "serve takes, poll takes, collector takes"]);
+	// The table reaches every outcome the readers can give, the splits included: a watch secret or WEBHOOK_SECRET missing
+	// or blank refuses serve and neither the poller nor the collector (issues #994, #1006), and a file that does not parse
+	// refuses all three.
+	assert.deepEqual([...seen].sort(), ["serve refuses, poll refuses, collector refuses", "serve refuses, poll takes, collector refuses", "serve refuses, poll takes, collector starts", "serve takes, poll takes, collector refuses", "serve takes, poll takes, collector starts"]);
 	// A secret of spaces is missing to the receiver itself, not only to this check: the loaders' trim is the rule.
 	const watched = JSON.stringify(docs.watched);
-	assert.throws(() => loadReceiverConfig({ GITHUB_INGEST: "poll", WATCH_SIGNING: "   " }, { readFile: () => watched, fileExists: () => true, verifiesWatchPushes: true }), /^Error: watch: a configured source secret is missing$/);
-	// A source naming WEBHOOK_SECRET, unset or blank: serve's refusal alone, and nothing for the poller to stand in for.
+	assert.throws(() => loadReceiverConfig({ GITHUB_INGEST: "poll", WATCH_SIGNING: "   " }, { readFile: () => watched, fileExists: () => true }), /^Error: watch: a configured source secret is missing$/);
+	// A source naming WEBHOOK_SECRET, unset or blank: serve's refusal alone.
 	for (const env of [{ GITHUB_INGEST: "poll" }, { GITHUB_INGEST: "poll", WEBHOOK_SECRET: "  " }]) {
 		const split = judge(docs.webhookNamed, env);
 		assert.deepEqual(split.refusals.map((x) => x.readers), [["receiver"]], JSON.stringify(env));
 		assert.deepEqual(split.notes, [], JSON.stringify(env));
+	}
+
+	// What only `serve` reads (issue #1006): a forge webhook block named and incomplete, or a malformed RECEIVER_PORT.
+	// `serve` refuses it whatever the file holds, which is doctor's to say (`forgeWebhookFaults`), not this check's: the
+	// verdict is the same with the setting as without, and the poller and the collector start exactly as they did.
+	const listenerOnly = [{ GITLAB_TOKEN: "t" }, { GITLAB_WEBHOOK_MODE: "bogus" }, { FORGEJO_TOKEN: "t" }, { AZURE_TOKEN: "t" }, { AZURE_WEBHOOK_MODE: "header", AZURE_WEBHOOK_SECRET: "s", AZURE_TOKEN: "t", AZURE_ORG_URL: "https://dev.azure.com/o" }, { RECEIVER_PORT: "http" }];
+	for (const name of ["watched", "plain", "gitlabOnly"]) {
+		const path = join(dir, `${name}.json`);
+		const env = { GITHUB_INGEST: "poll", POLL_REPOS: "o/r", WATCH_SIGNING: "set", PI_TRIGGERS_FILE: path };
+		const without = await outcomes(env);
+		const verdictWithout = checkTriggersText(JSON.stringify(docs[name]), path, { env: { ...env, PI_TRIGGERS_FILE: undefined }, now });
+		for (const setting of listenerOnly) {
+			const label = `${name} ${JSON.stringify(setting)}`;
+			const got = await outcomes({ ...env, ...setting });
+			assert.match(got.serve, /^GITLAB_|^FORGEJO_|^AZURE_|^invalid RECEIVER_PORT/, `serve refuses it: ${label}`);
+			assert.deepEqual([got.poll, got.collector], [without.poll, without.collector], `the poller and the collector do not read it: ${label}`);
+			assert.deepEqual(checkTriggersText(JSON.stringify(docs[name]), path, { env: { ...env, ...setting, PI_TRIGGERS_FILE: undefined }, now }).refusals, verdictWithout.refusals, label);
+		}
 	}
 });
 

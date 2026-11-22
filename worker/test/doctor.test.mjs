@@ -3109,7 +3109,7 @@ test("doctor: a malformed RECEIVER_PORT is echoed by value and warned about; a s
 	// The port is not a secret, so echoing the malformed shape is what makes the warn actionable.
 	const { out, text } = capture();
 	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("github"), RECEIVER_PORT: "http" }), imgDeps(out, green));
-	assert.match(text(), /⚠ RECEIVER_PORT is "http", which is not a positive integer -- the receiver and the poller will refuse to start/);
+	assert.match(text(), /⚠ RECEIVER_PORT is "http", which is not a positive integer -- the receiver will refuse to start\n/);
 
 	const { out: o2, text: t2 } = capture();
 	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("github"), RECEIVER_PORT: "0" }), imgDeps(o2, green));
@@ -3256,11 +3256,12 @@ test("githubServeDecision answers what the receiver's own loader decides, over e
 	}
 });
 
-test("doctor: forgejo triggers with nothing set warn with the exact vars receiver boot requires", async () => {
+test("doctor: forgejo triggers with nothing set say serve arms no route for them, and claim no refusal (#1006)", async () => {
 	const { out, text } = capture();
 	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("forgejo") }), imgDeps(out, green));
 	assert.equal(code, 0, "warn, never fail");
-	assert.match(text(), /⚠ triggers\.json has forgejo triggers but FORGEJO_URL, FORGEJO_WEBHOOK_SECRET, FORGEJO_TOKEN are unset/);
+	assert.match(text(), /⚠ triggers\.json has forgejo triggers but none of FORGEJO_WEBHOOK_SECRET, FORGEJO_TOKEN, FORGEJO_URL is set, so `pi-dispatch-receiver serve` serves no \/forgejo route and they never fire \(nothing refuses to start\)\n/);
+	assert.doesNotMatch(text(), /forgejo webhook settings|will refuse to start/);
 	assert.match(text(), /docs\/forgejo\.md/, "the fix says where the setup is documented");
 	assert.match(text(), /FORGEJO_BOT_ID/, "the repository-scoped-token caveat is named");
 });
@@ -3271,8 +3272,8 @@ test("doctor: a half-set forgejo block names only the vars actually missing", as
 		imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("forgejo"), FORGEJO_URL: "https://code.example.org", FORGEJO_TOKEN: "fj_token_val" }),
 		imgDeps(out, green),
 	);
-	assert.match(text(), /⚠ triggers\.json has forgejo triggers but FORGEJO_WEBHOOK_SECRET is unset/);
-	assert.doesNotMatch(text(), /FORGEJO_URL,|FORGEJO_TOKEN,/, "set vars are not reported missing");
+	assert.match(text(), /⚠ forgejo webhook settings: FORGEJO_WEBHOOK_SECRET is unset or blank -- with any of FORGEJO_WEBHOOK_SECRET, FORGEJO_TOKEN, FORGEJO_URL set, the receiver \(`pi-dispatch-receiver serve`\) arms \/forgejo and will refuse to start on these; the poller and the watch collector do not read them\n/, "set vars are not reported missing");
+	assert.doesNotMatch(text(), /✓ forgejo triggers configured/, "a block serve refuses is not reported configured");
 	assert.doesNotMatch(text(), /fj_token_val/, "the token value never reaches output");
 });
 
@@ -3302,14 +3303,17 @@ test("doctor: a fully-configured forgejo block reports ✓ with the instance URL
 	assert.doesNotMatch(text(), /fj_hook_secret|fj_token_val/, "presence only");
 });
 
-test("doctor: azure triggers with nothing set warn for the undefaulted mode AND the required vars", async () => {
+test("doctor: azure triggers with nothing set say serve arms no route for them; one variable set names every fault (#1006)", async () => {
 	const { out, text } = capture();
 	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("azure") }), imgDeps(out, green));
 	assert.equal(code, 0, "warn, never fail");
-	assert.match(text(), /⚠ triggers\.json has azure triggers but AZURE_WEBHOOK_MODE is unset -- the receiver will refuse to start/);
+	assert.match(text(), /⚠ triggers\.json has azure triggers but none of AZURE_WEBHOOK_MODE, AZURE_WEBHOOK_SECRET, AZURE_TOKEN, AZURE_ORG_URL is set, so `pi-dispatch-receiver serve` serves no \/azure route and they never fire \(nothing refuses to start\)\n/);
 	assert.match(text(), /"basic" \(HTTP Basic on the service hook\) or "header"/, "the fix names both legal modes");
-	assert.match(text(), /⚠ triggers\.json has azure triggers but AZURE_WEBHOOK_SECRET, AZURE_TOKEN, AZURE_ORG_URL are unset/);
 	assert.match(text(), /docs\/azure-devops\.md/);
+	const { out: o2, text: t2 } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("azure"), AZURE_TOKEN: "az_token_val" }), imgDeps(o2, green));
+	assert.match(t2(), /⚠ azure webhook settings: AZURE_WEBHOOK_MODE is unset or blank, AZURE_WEBHOOK_SECRET is unset or blank, AZURE_ORG_URL is unset or blank -- with any of /);
+	assert.doesNotMatch(t2(), /az_token_val/);
 });
 
 test("doctor: AZURE_WEBHOOK_MODE=header pulls AZURE_WEBHOOK_HEADER into the required set", async () => {
@@ -3318,7 +3322,7 @@ test("doctor: AZURE_WEBHOOK_MODE=header pulls AZURE_WEBHOOK_HEADER into the requ
 		imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("azure"), AZURE_WEBHOOK_MODE: "header", AZURE_WEBHOOK_SECRET: "az_hook_secret", AZURE_TOKEN: "az_token_val", AZURE_ORG_URL: "https://dev.azure.com/acme" }),
 		imgDeps(out, green),
 	);
-	assert.match(text(), /⚠ triggers\.json has azure triggers but AZURE_WEBHOOK_HEADER is unset/);
+	assert.match(text(), /⚠ azure webhook settings: AZURE_WEBHOOK_HEADER is unset or blank -- /);
 	assert.doesNotMatch(text(), /az_hook_secret|az_token_val/, "presence only");
 });
 
@@ -3332,7 +3336,7 @@ test("doctor: a fully-configured azure block reports ✓ with the org URL; a bog
 	// A value boot refuses is echoed by name -- a mode is a choice, not a secret.
 	const { out: o2, text: t2 } = capture();
 	await runDoctor(imgEnv({ ...base, AZURE_WEBHOOK_MODE: "hmac" }), imgDeps(o2, green));
-	assert.match(t2(), /⚠ triggers\.json has azure triggers but AZURE_WEBHOOK_MODE is "hmac"/);
+	assert.match(t2(), /⚠ azure webhook settings: AZURE_WEBHOOK_MODE is "hmac" -- /);
 	assert.doesNotMatch(t2(), /✓ azure triggers configured/, "an unbootable mode is not reported configured");
 });
 
@@ -3340,8 +3344,7 @@ test("doctor: gitlab triggers also preflight the receiver-boot vars (undefaulted
 	const { out, text } = capture();
 	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("gitlab"), GITLAB_TOKEN: "glpat_secret_val" }), imgDeps(out, green));
 	assert.match(text(), /✓ gitlab triggers configured \(https:\/\/gitlab\.com\)/, "the worker-side token line is unchanged");
-	assert.match(text(), /⚠ triggers\.json has gitlab triggers but GITLAB_WEBHOOK_MODE is unset/);
-	assert.match(text(), /⚠ triggers\.json has gitlab triggers but GITLAB_WEBHOOK_SECRET is unset/);
+	assert.match(text(), /⚠ gitlab webhook settings: GITLAB_WEBHOOK_MODE is unset or blank, GITLAB_WEBHOOK_SECRET is unset or blank -- with any of GITLAB_WEBHOOK_MODE, GITLAB_WEBHOOK_SECRET, GITLAB_TOKEN set, the receiver/);
 	assert.doesNotMatch(text(), /glpat_secret_val/, "the token value never reaches output");
 
 	const { out: o2, text: t2 } = capture();
@@ -3349,8 +3352,7 @@ test("doctor: gitlab triggers also preflight the receiver-boot vars (undefaulted
 		imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("gitlab"), GITLAB_TOKEN: "glpat_secret_val", GITLAB_WEBHOOK_MODE: "signature", GITLAB_WEBHOOK_SECRET: "gl_hook_secret" }),
 		imgDeps(o2, green),
 	);
-	assert.doesNotMatch(t2(), /GITLAB_WEBHOOK_MODE is/, "a chosen mode prints no line");
-	assert.doesNotMatch(t2(), /GITLAB_WEBHOOK_SECRET is unset/);
+	assert.doesNotMatch(t2(), /gitlab webhook settings/, "a complete block prints no line");
 	assert.doesNotMatch(t2(), /gl_hook_secret/, "presence only");
 });
 
@@ -10065,8 +10067,9 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		endpointsDeclaredIn: async (e) => (await import("../src/egress-cli.mjs")).endpointsDeclaredIn({ env: e, cwd: "/nonexistent-503", fs: { readFileSync: enoent, existsSync: () => false }, platform: "linux" }),
 		// Issue #918: the private endpoints' boot-file line reads the model endpoints' file as the service does.
 		endpointsFileSetting: async (e) => (await import("../src/egress-cli.mjs")).endpointsFileSetting({ env: e, cwd: "/nonexistent-918", readEnv: enoent, exists: () => false }),
-		// Issue #1001: who refuses to start where serve needs WEBHOOK_SECRET reads that one key, for the poller's stand-in.
-		webhookSecretRefusers: async (e) => (await import("../src/triggers-check.mjs")).webhookSecretRefusers(e, { collects: true }),
+		// Issue #1006: serve's rule for each forge's webhook block, which reads that forge's variables alone.
+		forgeWebhookFaults: (e) => ["gitlab", "forgejo", "azure"].flatMap((kind) => cfg.forgeWebhookFaults(kind, e)),
+		forgeWebhookNamed: (e) => ["gitlab", "forgejo", "azure"].map((kind) => cfg.forgeWebhookNamed(kind, e)),
 	};
 	assert.deepEqual([...handedEnv].filter((n) => !Object.hasOwn(probes, n)).sort(), [], "every imported helper doctor hands env to is probed here");
 	const probedReads = {};

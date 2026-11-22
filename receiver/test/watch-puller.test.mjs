@@ -56,4 +56,22 @@ test("the collector starts on its real loader where a source's push secret is un
 	assert.deepEqual(lines.filter(line => line.event !== "watch_pull_cycle"), [], "no refusal and no kept-config line");
 	assert.deepEqual(lines.map(line => [line.event, line.source]), [["watch_pull_cycle", "prod"]]);
 });
+test("the collector starts whatever the settings it never reads say: serve's, and the GitHub auth and identity retry the poller reads (issue #1006)", { timeout: 10_000 }, async () => {
+	// It pulls, listens on nothing, resolves no identity and calls no forge, so its own loader judges none of them; each
+	// used to stop it at its start through serve's loader. The file holds a GitHub rule, so with GITHUB_INGEST unset
+	// serve would need the webhook secret.
+	const dir = tempDir("watch-puller-listener-");
+	const path = join(dir, "triggers.json");
+	writeFileSync(path, JSON.stringify({ watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_SIGNING", maxPerDay: 10, pull: { kind: "file", path: "/var/log/shop.log", fields: { service: "checkout" }, intervalSeconds: 30 } } }, triggers: [{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } }] }));
+	for (const setting of [{ GITLAB_TOKEN: "glpat-x" }, { GITLAB_WEBHOOK_MODE: "bogus" }, { FORGEJO_TOKEN: "t" }, { AZURE_TOKEN: "t" }, { RECEIVER_PORT: "http" }, {}, { WEBHOOK_SECRET: "   " }, { GITHUB_AUTH_SOURCE: "pat" }, { GITHUB_AUTH_SOURCE: "app" }, { GITHUB_AUTH_SOURCE: "bogus" }, { RECEIVER_IDENTITY_RETRY_SECONDS: "x" }]) {
+		const deps = setup(); const lines = []; let cycled; const cycle = new Promise(resolve => { cycled = resolve; });
+		const adapterFactory = () => ({ async poll() { return { findings: [], deliveries: [], cursor: {} }; } });
+		const out = value => { lines.push(value); if (value.event === "watch_pull_cycle") cycled(); };
+		const puller = await startWatchPuller({ PI_TRIGGERS_FILE: path, ...setting }, { redis: deps.redis, store: deps.store, enqueue: deps.enqueue, adapterFactory, now, signals: false, out });
+		await cycle; puller.stop(); await puller.done;
+		assert.deepEqual(lines.map(line => line.event), ["watch_pull_cycle"], JSON.stringify(setting));
+	}
+	// GITHUB_INGEST is the one setting it does not read and still judges, a stated residual (receiver/src/config.mjs).
+	await assert.rejects(startWatchPuller({ PI_TRIGGERS_FILE: path, GITHUB_INGEST: "sometimes" }, { ...setup(), signals: false, out: () => {} }), (e) => e.piDispatchConfig === true && /^GITHUB_INGEST must be/.test(e.message));
+});
 

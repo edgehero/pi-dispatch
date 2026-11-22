@@ -118,12 +118,12 @@ export async function readPollerFacts(redis, { env = process.env, cwd = process.
 	}
 	if (facts.expected === true || hosts.length > 0) {
 		// This host's copy, judged as `pi-dispatch triggers check` judges it: the reason a poller refuses it, if one does.
-		// WEBHOOK_SECRET is the one secret a poller's start judges (a blank one where serve serves GitHub); a watch source's
-		// secret is `serve`'s alone (issue #994), so it is not resolved here and a shell that disagrees with the .env on it
-		// leaves the poller's answer judged.
+		// No secret the check asks about is a poller's: a watch source's secret and WEBHOOK_SECRET are `serve`'s alone
+		// (issues #994, #1006), so none is resolved here, and a shell that disagrees with the .env on one leaves the
+		// poller's answer judged.
 		let local = null;
 		try {
-			const judged = await judge({ env, cwd, platform, readEnv, readText, now, secrets: ["WEBHOOK_SECRET"] });
+			const judged = await judge({ env, cwd, platform, readEnv, readText, now, secrets: [] });
 			if (judged.problem) problems.push(judged.problem);
 			// A file read and not judged still has its digest: a poller that refused it refused this host's file.
 			if (typeof judged.text === "string") {

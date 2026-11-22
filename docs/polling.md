@@ -33,13 +33,12 @@ npx @edgehero/pi-dispatch-receiver poll
 ```
 
 `WEBHOOK_SECRET` is not needed: there is no inbound delivery to verify, so demanding one would block
-exactly the deployment this mode exists for. It is not quite unread, though, and the difference can stop
-a boot. `poll` builds its config through the receiver's own loader rather than forking it, and a
-genuinely empty value is swapped for a placeholder before that loader ever sees it, so `WEBHOOK_SECRET=`
-boots while `WEBHOOK_SECRET=" "` does not: a space is a value, and the loader rejects it as one that
-cannot verify a signature. A malformed `RECEIVER_PORT` refuses too, even though `poll` binds no port. A
-secret with a real value is simply carried and unused, which is what lets one env file serve both
-commands. Under `GITHUB_INGEST=poll` the loader asks for no secret at all, so neither value refuses.
+exactly the deployment this mode exists for. `poll` reads it not at all, nor any other setting only
+`serve` uses: `RECEIVER_PORT`, `RECEIVER_BIND`, the GitLab, Forgejo and Azure DevOps webhook settings and a
+watch source's push secret. Unset, blank or malformed, none of them stops `poll`, which is what lets one env
+file serve both commands. Before this release `poll` loaded them through `serve`'s loader and refused a
+`WEBHOOK_SECRET` of spaces, a malformed `RECEIVER_PORT` and a `GITLAB_TOKEN` set without the GitLab
+webhook settings beside it, none of which it uses.
 
 `GITHUB_INGEST` says which transport carries GitHub, and `serve` reads it too. `poll` is the one to set here: `serve`,
 if it runs for another forge, then mounts no GitHub route and needs no `WEBHOOK_SECRET`. Left unset, `serve` takes a
@@ -212,9 +211,9 @@ Deleting it changes nothing about polling: the next beat writes it again.
   the last copy that loaded, `nextAt` when its next cycle starts, and `ageMs` how long ago it beat.
 - `note` says what needs saying. The poller keeps the previous file because the current one is invalid: the reason is
   the one `pi-dispatch triggers check` gives the poller for the file in this folder, when that is the file the poller
-  refused (the heartbeat carries the file's digest, not its reason). A watch source's secret is not asked for it, since
-  only `serve` reads one. The file it refused is another copy: run the check where the
-  poller runs. `expected` is `true` and no poller has published a heartbeat: none runs, or it is older than this
+  refused (the heartbeat carries the file's digest, not its reason). No secret is asked for it: a watch source's
+  secret and `WEBHOOK_SECRET` are `serve`'s alone. The file it refused is another copy: run the check where the poller
+  runs. `expected` is `true` and no poller has published a heartbeat: none runs, or it is older than this
   release, which publishes none; when this folder's file is invalid, the note adds the reason a poller would refuse to start on it.
 - `complete: false` means the heartbeats could not all be read, and an empty `hosts` then proves nothing. `local` says
   what of this folder could not be read (a setting this shell and `.env` disagree on, a missing file). `status` exits 0
@@ -313,10 +312,9 @@ whose webhook job was queued more than ten minutes before, or whose run has park
 | `POLL_CATCHUP_MINUTES` | 60 | how long a poller may have been away and still catch up when it starts again, counted from when its next poll was due; a repository overdue by longer starts from now (see [How it works](#how-it-works)). `0` never catches up. 50400 (35 days, the cursors' lifetime) or more always resumes, as the poller did before this setting; a negative, a fraction or junk refuses at boot |
 | `RECEIVER_IDENTITY_RETRY_SECONDS` | 600 | how long the boot's identity lookup retries a transient failure (a 502, a refused connection, GitHub mid-restart) before exiting 1 for the supervisor, floored at 60 with the same raise-or-refuse rules; the poller's gate and `serve`'s arms share the one window |
 
-`WEBHOOK_SECRET`, `RECEIVER_PORT` and `RECEIVER_BIND` are `serve` concerns and `poll` uses none of
-them, but it does load them, because it reuses the receiver's loader rather than forking it. A
-malformed `WEBHOOK_SECRET` (unless `GITHUB_INGEST=poll`) or `RECEIVER_PORT` therefore refuses a `poll` boot with
-that loader's own message. A watch source's push secret is a `serve` concern the loader does not judge for `poll` at
-all, so an unset one never refuses it. `RECEIVER_BIND` is taken verbatim and validated by nothing, so there is no
-malformed value of it to refuse. Everything in [`docs/secrets.md`](secrets.md) about the receiver applies here
-unchanged: the poller holds the same forge credential and the same queue URL.
+`WEBHOOK_SECRET`, `RECEIVER_PORT`, `RECEIVER_BIND`, the other forges' webhook settings and a watch source's push
+secret are `serve` concerns, and `poll` neither uses nor judges them: it reuses the receiver's loader rather than
+forking it, as a command that does not listen, so what it does judge (the triggers file, the GitHub auth settings,
+`GITHUB_INGEST`, `RECEIVER_IDENTITY_RETRY_SECONDS`) is parsed exactly as `serve` parses it. Everything in
+[`docs/secrets.md`](secrets.md) about the receiver applies here unchanged: the poller holds the same forge credential
+and the same queue URL.

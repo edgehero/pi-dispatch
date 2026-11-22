@@ -4,15 +4,15 @@
  * The file has four readers, and each refuses to START on a file it cannot take (exit 2, which a supervisor does not
  * restart), while one that is already running keeps the last copy that loaded: the worker (`loadSchedules`, only where
  * `PI_TRIGGERS_FILE` is set, since unset means it schedules no cron and reads no file), the receiver (`serve`), the
- * poller (`poll`) and the watch collector (`watch`, which loads the file with `serve`'s loader, less its watch secret
- * rule, and has nothing to do without a pull source). The edit that took polling down in #970 was an invalid file
+ * poller (`poll`) and the watch collector (`watch`, which loads the file with `serve`'s loader, less what only a
+ * listener reads, and has nothing to do without a pull source). The edit that took polling down in #970 was an invalid file
  * meeting a restart: the worker had kept its old schedules, so the deployment looked healthy while no forge event
  * reached it. A check run before the swap is the one place that refusal can be seen while nothing is down yet.
  *
  * ONE JUDGEMENT PER READER, BY THE READERS' OWN CODE wherever the worker package has it: a copy is the drift this file
  * would otherwise exist to catch. The few receiver rules it cannot import (which files make `serve` serve GitHub, that
- * `serve` alone judges a watch source's secret, the poller's stand-in for an unset WEBHOOK_SECRET, the collector's
- * pull-source test) are copies, held to the real loaders by the parity table in its tests. In order:
+ * `serve` alone judges a watch source's secret and WEBHOOK_SECRET, the collector's pull-source test) are copies, held
+ * to the real loaders by the parity table in its tests. In order:
  *
  *  1. `parseTriggersDocument`, the shared validator every loader runs first. A refusal here is every reader's, and
  *     nothing below can be judged on a file that does not parse.
@@ -26,19 +26,18 @@
  *     the two containment refusals at the worker's start. A cron trigger left to another host is a note, never a
  *     refusal: that is a fleet working as declared.
  *  3. The receiver's loader. `watchSecretsMissing`, its own predicate, on presence only: a watch source whose signing
- *     secret is unset or blank refuses the receiver alone, which verifies the source's pushes with it; `serve` asks the
- *     loader for that rule (`verifiesWatchPushes`) and the poller and the collector, which read no push, do not (issue
- *     #994). Then `serve`'s own secret: with `GITHUB_INGEST` and `GITHUB_AUTH_SOURCE` unset the FILE decides whether
- *     `serve` serves GitHub (`githubServedByServe`, asked with the receiver's own test of the file, a GitHub-sourced
- *     forge rule), so adding the first GitHub rule to a deployment with no `WEBHOOK_SECRET` stops `serve` and the
- *     collector at their next start, and is this file's refusal; where the deployment alone says GitHub, the same
- *     refusal is named as the deployment's.
+ *     secret is unset or blank refuses the receiver alone, which verifies the source's pushes with it: the loader judges
+ *     it for `command: "serve"` and not for the poller and the collector, which read no push (issues #994, #1006). Then `serve`'s own secret, the receiver's alone for the same reason: with `GITHUB_INGEST` and
+ *     `GITHUB_AUTH_SOURCE` unset the FILE decides whether `serve` serves GitHub (`githubServedByServe`, asked with the
+ *     receiver's own test of the file, a GitHub-sourced forge rule), so adding the first GitHub rule to a deployment
+ *     with no `WEBHOOK_SECRET` stops `serve` at its next start, and is this file's refusal; where the deployment alone
+ *     says GitHub, the same refusal is named as the deployment's.
  *
  * worker/test/triggers-check.test.mjs holds step 3 to the real `loadReceiverConfig`, `loadPollerConfig` and
  * `startWatchPuller`, and each config read here to `loadConfig`'s.
  *
- * NOT JUDGED HERE, on purpose: what the environment alone decides beyond the two refusals above (the forge blocks,
- * `POLL_REPOS`, `GITHUB_INGEST=webhook` against a poller, the other boot files' own contents, Valkey), and what needs a
+ * NOT JUDGED HERE, on purpose: what the environment alone decides beyond the two refusals above (the forge webhook
+ * blocks and `RECEIVER_PORT`, which only `serve` reads, issue #1006; `POLL_REPOS`, `GITHUB_INGEST=webhook` against a poller, the other boot files' own contents, Valkey), and what needs a
  * live fleet (the cron fingerprint the boot reconcile compares with its peers). Those are doctor's and the services'.
  * Neither is whether each service runs on this host: the answer is for every reader that would load this file here. A
  * private endpoint folder the worker's boot cannot judge either (a path it cannot read) is a note naming it, since the
@@ -228,13 +227,14 @@ function judgeJobPaths({ config, path, io, cwd, worker, notes }) {
 }
 
 /**
- * `serve`'s `WEBHOOK_SECRET`, where it serves GitHub (receiver/src/config.mjs, `loadReceiverConfig`): the readers that
- * refuse to start without it are `webhookSecretRefusers`'. Whether `serve` serves GitHub is `githubServedByServe`, asked
- * with the receiver's own test of the file (`hasGithubRule`). A `GITHUB_INGEST` none of them takes refuses all three
- * receiver commands, and is said as the deployment's.
+ * `serve`'s `WEBHOOK_SECRET`, where it serves GitHub (receiver/src/config.mjs, `loadReceiverConfig`): the receiver alone
+ * refuses to start without it, since the poller and the collector load as commands that do not listen and never read it
+ * (issue #1006: the poller refused a secret of spaces, and the collector any missing one). Whether `serve` serves GitHub
+ * is `githubServedByServe`, asked with the receiver's own test of the file (`hasGithubRule`). A `GITHUB_INGEST` none of
+ * them takes refuses all three receiver commands (each reads it), and is said as the deployment's.
  */
 function judgeServeSecret({ document, env, collects, refusals }) {
-	const receivers = webhookSecretRefusers(env, { collects });
+	const receivers = ["receiver"];
 	let servedByFile;
 	let servedAlone;
 	try {
@@ -252,15 +252,4 @@ function judgeServeSecret({ document, env, collects, refusals }) {
 	} else {
 		refusals.push({ readers: receivers, reason: "this file holds a GitHub rule, and with GITHUB_INGEST and GITHUB_AUTH_SOURCE unset that makes serve serve GitHub, which needs WEBHOOK_SECRET, unset or blank here: set it, or set GITHUB_INGEST=poll where the poller brings GitHub's events" });
 	}
-}
-
-/**
- * The readers that refuse to start where `serve` serves GitHub and `WEBHOOK_SECRET` is unset or blank: the receiver; the
- * watch collector where the file has a pull source (`collects`), since it loads with `serve`'s loader and, without a
- * pull source, refuses every file and reads none; and the poller only where `env` leaves the secret truthy (a blank
- * one), `pollerLoaderEnv`'s rule exactly (a falsy WEBHOOK_SECRET is replaced by the poller's placeholder for the
- * loader's call, a blank one is passed through and refused). Shared with doctor's WEBHOOK_SECRET line (issue #1001).
- */
-export function webhookSecretRefusers(env, { collects }) {
-	return ["receiver", ...(env.WEBHOOK_SECRET ? ["poller"] : []), ...(collects ? ["watch collector"] : [])];
 }
