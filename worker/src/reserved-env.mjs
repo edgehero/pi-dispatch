@@ -99,6 +99,9 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// `run.secrets`: a trigger setting its own cap, or its own list, would be the policy choosing itself.
 	"PI_MAX_COST_MICROS",
 	"PI_ALLOWED_MODELS",
+	// Issue #1008: the list-price allowance for subscription calls, written by the worker from the trigger's
+	// run.maxSubscriptionUsd. A trigger binding it through run.secrets would choose its own limit, or none.
+	"PI_SUBSCRIPTION_ALLOWANCE_MICROS",
 	// Issue #888: the idle and stall limits the runner stops a job on. A trigger binding either through run.secrets would
 	// set its own limits past what the file and the deployment allow.
 	"PI_JOB_IDLE_MS",

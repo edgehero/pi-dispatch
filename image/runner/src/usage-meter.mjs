@@ -10,7 +10,7 @@ import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readPidNamespace, runnerIdentity } from "./child-route.mjs";
 import { parseAllowedModels, parseCostMicros } from "./config.mjs";
-import { configError, COST_CAP, COST_CAP_UNENFORCEABLE, COST_REFUSAL_NUMBERS, COST_REFUSALS, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE, TOKEN_BUDGET } from "./outcome.mjs";
+import { configError, COST_CAP, COST_CAP_UNENFORCEABLE, COST_REFUSAL_NUMBERS, COST_REFUSALS, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE, SUBSCRIPTION_ALLOWANCE, TOKEN_BUDGET } from "./outcome.mjs";
 
 /**
  * Process-wide usage meter (issue #58; REQ-TOKEN-ACCOUNTING-AND-CAPS, CONST-BUDGET-BEFORE-TOKENS).
@@ -180,6 +180,8 @@ export const STOP_MESSAGES = Object.freeze({
 	[TOKEN_BUDGET]: "pi-dispatch: token cap exceeded",
 	[COST_CAP]: "pi-dispatch: cost cap reached",
 	[MODEL_NOT_ALLOWED]: "pi-dispatch: model not allowed",
+	// Issue #1008: the job's list-price allowance for subscription calls is used up (createAllowanceGuard).
+	[SUBSCRIPTION_ALLOWANCE]: "pi-dispatch: subscription allowance reached",
 });
 
 /**
@@ -316,6 +318,10 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		// The part of `cost` priced on notional providers (issue #1008, notionalProviders in the header). Part of `cost`,
 		// never beside it: the totals and the rows stay a partition of every call.
 		costNotional: 0,
+		// Notional calls whose cost could not be read (issue #1008): no cost block, or a total that is not a finite number
+		// at or above 0 (a rejected result included). `costNotional` lacks their price, so notionalMicros() reads as
+		// unbounded once there is one, and the subscription allowance fails closed rather than judge a total it knows is short.
+		notionalUnread: 0,
 		// The first stop's reason (a STOP_MESSAGES key), or null. Set once by stop(), never overwritten.
 		stopReason: null,
 		// The pre-#501 flag, kept as a read-only view: true exactly when the stop was the token cap.
@@ -398,8 +404,13 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		const price = priced ? Math.max(0, given) : 0;
 		if (priced) state.cost += price;
 		else state.unpriced += 1;
-		// Issue #1008: added in the same order as `cost`, so with every price at or above 0 the sum can never exceed it.
-		if (priced && notionalProviders !== null && notionalProviders.has(ctx.provider)) state.costNotional += price;
+		// Issue #1008: added in the same order as `cost`, so with every price at or above 0 the sum can never exceed it. A
+		// notional call whose cost cannot be read (absent, not finite, or negative, which `cost` takes as 0) is counted
+		// apart (`notionalUnread`), so the allowance never judges a notional total that is missing a price.
+		if (notionalProviders !== null && notionalProviders.has(ctx.provider)) {
+			if (priced) state.costNotional += price;
+			if (!priced || given < 0) state.notionalUnread += 1;
+		}
 
 		const id = typeof ctx.sessionId === "string" ? ctx.sessionId : "";
 		if (id.length > 0) state.sessionIds.add(id);
@@ -596,6 +607,19 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 	}
 
 	/**
+	 * The settled list price of this process's notional calls (issue #1008, `costNotional`) in integer micro-dollars,
+	 * rounded UP, so an allowance judged against it is reached no later than the dollars say. Settled only: a call in
+	 * flight adds nothing until its answer is metered. 0 for a job with no subscription entries. Infinity once any notional
+	 * call's cost could not be read (`notionalUnread`): the total is then known to be short, and Infinity is the reading
+	 * every comparison with a limit fails closed on. An accessor, not part of snapshot(), so the subscription allowance
+	 * (createAllowanceGuard) and anything else that judges the notional part read the one number the exit line's
+	 * `costNotional` is made of (that key stays the sum of the prices that were read).
+	 */
+	function notionalMicros() {
+		return state.notionalUnread > 0 ? Infinity : Math.ceil(state.costNotional * 1e6);
+	}
+
+	/**
 	 * Hand over the children's totals (issue #500): a foldChildLedgers result, cumulative. Two rules keep a bad fold
 	 * from ever reading as less spend:
 	 *   - SATURATE, never zero. A number the meter cannot carry (not a number, negative, not finite, or above
@@ -712,7 +736,7 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		if (typeof version === "string" && version.length > 0) piAiVersion = version;
 	}
 
-	return { state, cap, costCap, allowed, stop, record, observe, adopt, observeResult, snapshot, usageSnapshot, setPiAiVersion, rows, setChildren };
+	return { state, cap, costCap, allowed, stop, record, observe, adopt, observeResult, snapshot, usageSnapshot, setPiAiVersion, rows, setChildren, notionalMicros };
 }
 
 
@@ -1920,8 +1944,12 @@ export async function installProcessUsageMeter({
  * Missing any one, the job is refused as a tagged configError: exit 2, not retried, before any spend. The
  * model list is checked first: a job that would be refused for both is named by the policy that decides
  * which provider is called at all. Names only, never values: the cap and the list are not echoed.
+ *
+ * The subscription allowance (issue #1008, `allowanceMicros`, createAllowanceGuard) is checked last, against
+ * SUBSCRIPTION_ALLOWANCE, and refused as `cost-cap-unenforceable`: a dollar limit this runner cannot apply before a
+ * call, the cap's own refusal, so an operator reads one reason for both money limits.
  */
-export function assertPoliciesEnforceable({ maxCostMicros = null, allowedModels = null, meterOk, brake, enforces = [] }) {
+export function assertPoliciesEnforceable({ maxCostMicros = null, allowedModels = null, allowanceMicros = null, meterOk, brake, enforces = [] }) {
 	const missing = (stop) => (!meterOk
 		? "the process-wide usage meter did not install"
 		: !brake
@@ -1934,6 +1962,9 @@ export function assertPoliciesEnforceable({ maxCostMicros = null, allowedModels 
 	}
 	if (maxCostMicros !== null && missing(COST_CAP) !== null) {
 		throw configError(`PI_MAX_COST_MICROS is set but cannot be enforced before a call: ${missing(COST_CAP)}`, COST_CAP_UNENFORCEABLE);
+	}
+	if (allowanceMicros !== null && missing(SUBSCRIPTION_ALLOWANCE) !== null) {
+		throw configError(`PI_SUBSCRIPTION_ALLOWANCE_MICROS is set but cannot be enforced before a call: ${missing(SUBSCRIPTION_ALLOWANCE)}`, COST_CAP_UNENFORCEABLE);
 	}
 }
 
@@ -3588,6 +3619,70 @@ export function notionalProviders({ subscriptions = null, subscriptionAdmission 
 }
 
 /**
+ * THE SUBSCRIPTION ALLOWANCE (issue #1008; REQ-TOKEN-ACCOUNTING-AND-CAPS (d)). A guard for the meter's seam:
+ * `{ enforces: [SUBSCRIPTION_ALLOWANCE], admit, snapshot }`.
+ *
+ * A notional call (a subscription with no paid extra usage, notionalProviders) leaves the cost cap, which bounds money,
+ * and a subscription job without this allowance has no dollar limit at all. The allowance is the trigger's
+ * `run.maxSubscriptionUsd`, sent as PI_SUBSCRIPTION_ALLOWANCE_MICROS: a limit on the LIST PRICE of the job's notional
+ * calls. admit(call) refuses a call on a provider in `notional` once `settled()` (the meter's notionalMicros: the
+ * settled list price of the notional calls so far, rounded up) is at or above `allowanceMicros`, and the refusal stops
+ * the job (the meter's one stop) as SUBSCRIPTION_ALLOWANCE.
+ *
+ * Checked BETWEEN calls, on settled cost alone, and that is the whole difference from the cap: no bound, no hold, no
+ * wait. The calls in flight when the allowance is reached still finish and are counted, so a job can end above its
+ * allowance by what those calls cost. A notional call whose cost could not be read (no cost block, a total that is not a
+ * finite number at or above 0, a rejected result) leaves the total unknown: `settled()` then reads Infinity and the next
+ * notional call is refused, `why: "unreadable"`. A model priced at zero adds 0 and is not bounded, as the cap does not
+ * bound it either; an answer whose usage counts are zero with a finite price adds that price. That is the owner's
+ * decision for issue #1008: list price is not money, so the allowance is a budget for the work, not a hard ceiling,
+ * and a call refused only because others were in flight would stop work the allowance had room for.
+ *
+ * NEVER a billed call. `notional` is the very set the cost guard admits without a charge, so a call outside it (an
+ * API-key call, a call on a connection with paid extra usage, any call in a child process, where `notional` is null)
+ * passes here untouched and is judged by the cap alone; nothing here can admit a call the cap refused, because a guard
+ * only refuses. A notional call's model must also carry its pinned price (pricedAsPinned, the cost guard's check), or
+ * the price the meter settles it at, which this guard trusts, would be the caller's: refused, logged `why: "unboundable"`.
+ * A `settled` that throws or answers anything but a finite number at or above zero fails closed. Log line
+ * `subscription_allowance_refused`, numbers only.
+ *
+ * A malformed allowance on the queued job reaches the runner as 0 (the worker's fail-closed reading), so its first
+ * notional call is refused. With no notional provider the guard refuses nothing.
+ */
+export function createAllowanceGuard({ allowanceMicros, notional = null, settled, log = () => {} }) {
+	if (!Number.isSafeInteger(allowanceMicros) || allowanceMicros < 0) throw new Error(`invalid PI_SUBSCRIPTION_ALLOWANCE_MICROS: ${allowanceMicros}`);
+	if (notional !== null && !(notional instanceof Set)) throw new Error("createAllowanceGuard: notional must be a Set or null");
+	if (typeof settled !== "function") throw new Error("createAllowanceGuard: settled must be a function");
+	const state = { refused: 0 };
+
+	function refuse(fields) {
+		state.refused += 1;
+		log("subscription_allowance_refused", { ...fields, allowance: allowanceMicros });
+		return SUBSCRIPTION_ALLOWANCE;
+	}
+
+	function admit({ model, priced }) {
+		if (notional === null || !notional.has(model?.provider)) return null;
+		if (priced !== undefined && !pricedAsPinned(model, priced)) return refuse({ why: "unboundable" });
+		let spent;
+		try {
+			spent = settled();
+		} catch {
+			spent = NaN;
+		}
+		if (!(typeof spent === "number" && Number.isFinite(spent) && spent >= 0)) return refuse({ why: "unreadable" });
+		return spent >= allowanceMicros ? refuse({ spent }) : null;
+	}
+
+	/** The exit line's allowance field, present only when an allowance is set (run-job spreads it into `tokens`). */
+	function snapshot() {
+		return { allowanceMicros };
+	}
+
+	return { enforces: Object.freeze([SUBSCRIPTION_ALLOWANCE]), admit, snapshot, state };
+}
+
+/**
  * The one guard the runner hands both meter halves (issues #501, #502): the model guard and the cost guard, in
  * THAT order, or null when neither policy is set (and then every call goes through exactly as before).
  *
@@ -3604,13 +3699,23 @@ export function notionalProviders({ subscriptions = null, subscriptionAdmission 
  *
  * `notional` (issue #1008) is notionalProviders' set, which reaches the cost guard only while this guard has its model
  * half and a subscription admission: without them a call's provider does not prove which credential carried it.
+ *
+ * THE ALLOWANCE THIRD (issue #1008): with `allowanceMicros` set, createAllowanceGuard, given the same gated set and
+ * `settledNotional` (the meter's notionalMicros). Its place is no matter for the cap's single slot either way: it
+ * refuses only notional calls, which take no slot. It comes after the cost guard so that, under a cap, a notional call
+ * off its pinned price is refused by the cap's own rule first (`cost-cap`, `unboundable`), as before the allowance
+ * existed; without a cap the allowance refuses it itself. Installed
+ * whenever an allowance is set, with no notional provider too (it then refuses nothing), so a job whose calls are all
+ * billed is not refused as unenforceable. Its snapshot (`allowanceMicros`) comes after `modelRefused`, TOKEN_KEYS' order.
  */
-export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null, externalInflight = null, claim = null, outsideWaiting = null, onQueue = null, now = Date.now, setTimer = setInterval, clearTimer = clearInterval, subscriptionAdmission = null, subscriptions = null, refreshCredentials = () => {}, notional = null }) {
+export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null, externalInflight = null, claim = null, outsideWaiting = null, onQueue = null, now = Date.now, setTimer = setInterval, clearTimer = clearInterval, subscriptionAdmission = null, subscriptions = null, refreshCredentials = () => {}, notional = null, allowanceMicros = null, settledNotional = null }) {
 	const model = allowedModels === null ? null : createModelGuard({ allowedModels, log, env, now, subscriptionAdmission, subscriptions, refreshCredentials });
+	const proven = model !== null && typeof subscriptionAdmission === "function" ? notional : null;
 	// `external` (issue #500), its in-flight part and the turn's readers (issue #985) reach the cost guard only: they are
 	// spend, which only a cap judges. The clock and the timer are its waiters' (issue #985), injected by tests.
-	const cost = maxCostMicros === null ? null : createCostGuard({ capMicros: maxCostMicros, env, log, external, externalInflight, claim, outsideWaiting, onQueue, now, setTimer, clearTimer, notional: model !== null && typeof subscriptionAdmission === "function" ? notional : null });
-	const guards = [model, cost].filter((guard) => guard !== null);
+	const cost = maxCostMicros === null ? null : createCostGuard({ capMicros: maxCostMicros, env, log, external, externalInflight, claim, outsideWaiting, onQueue, now, setTimer, clearTimer, notional: proven });
+	const allowance = allowanceMicros === null ? null : createAllowanceGuard({ allowanceMicros, notional: proven, settled: settledNotional, log });
+	const guards = [model, cost, allowance].filter((guard) => guard !== null);
 	if (guards.length === 0) return null;
 	return {
 		enforces: Object.freeze(guards.flatMap((guard) => [...guard.enforces])),
@@ -3649,10 +3754,11 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 			return cost ? cost.charges() : null;
 		},
 		snapshot() {
-			return { ...(cost ? cost.snapshot() : {}), ...(model ? model.snapshot() : {}) };
+			return { ...(cost ? cost.snapshot() : {}), ...(model ? model.snapshot() : {}), ...(allowance ? allowance.snapshot() : {}) };
 		},
 		model,
 		cost,
+		allowance,
 	};
 }
 

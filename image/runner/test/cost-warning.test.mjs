@@ -41,7 +41,7 @@ test("the threshold is 70% of the limit rounded up, exact for every safe integer
 	for (const bad of [-1, 1.5, Number.NaN, "100"]) assert.throws(() => warningThreshold(bad), /whole number/);
 	const warnings = createCostWarnings({ rootSessionId: "root" });
 	assert.equal(warnings.armed(), false, "nothing watched: the factory is not loaded");
-	assert.throws(() => warnings.watch({ name: "subscription-allowance", limit: 10, settled: () => 0 }), /fixed text/, "no words, no limit");
+	assert.throws(() => warnings.watch({ name: "token_budget", limit: 10, settled: () => 0 }), /fixed text/, "no words, no limit");
 	assert.throws(() => warnings.watch({ name: "cost-cap", limit: 0, settled: () => 0 }), /above 0/);
 	assert.throws(() => warnings.watch({ name: "cost-cap", limit: 10, settled: 5 }), /function/);
 	warnings.watch({ name: "cost-cap", limit: 10, settled: () => 0 });

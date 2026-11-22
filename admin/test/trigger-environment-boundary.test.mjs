@@ -18,10 +18,12 @@ import * as plans from "../src/write-plans.mjs";
 const ACTION = "trigger-environment-edit";
 /** What only a person may set. `flow`, `provider` and `model` stay the tool's, so they are the card's and not this list's. */
 const PERSON_ONLY = CARD_FIELDS.filter((key) => !["flow", "provider", "model"].includes(key));
-const VALUE = { maxCostUsd: "1", models: ["anthropic/claude-haiku-4-5"], fallbackModels: ["anthropic/claude-haiku-4-5"], modelSelection: { strategy: "random", candidates: ["anthropic/claude-haiku-4-5"] }, mcp: ["linear"], packages: false, excludeTools: ["bash"], excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] };
+const VALUE = { maxCostUsd: "1", maxSubscriptionUsd: "5", models: ["anthropic/claude-haiku-4-5"], fallbackModels: ["anthropic/claude-haiku-4-5"], modelSelection: { strategy: "random", candidates: ["anthropic/claude-haiku-4-5"] }, mcp: ["linear"], packages: false, excludeTools: ["bash"], excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] };
 /** Every spelling a model might reach for: the loader's own near misses, and a homoglyph of each (Cyrillic letters). */
 const NEAR_MISSES = {
   maxCostUsd: ["MaxCostUsd", "max_cost_usd", "maxCost", "MAX-COST-USD", "m\u0430xCostUsd"],
+  // Issue #1008: the allowance's own name in the cases a model sends, the words its docs use for it, and a homoglyph.
+  maxSubscriptionUsd: ["MaxSubscriptionUsd", "max_subscription_usd", "maxSubscription", "MAX-SUBSCRIPTION-USD", "subscriptionAllowance", "subscription_allowance_usd", "m\u0430xSubscriptionUsd"],
   models: ["Models", "allowedModels", "allowed_models", "modelIds", "\u0430llowedModels"],
   fallbackModels: ["FallbackModels", "fallback_models", "fallbackModel", "fallback-model-ids", "f\u0430llbackModels"],
   modelSelection: ["ModelSelection", "model_selection", "model-selections", "mоdelSelection"],
@@ -221,7 +223,7 @@ test("the action's field list is the one field list: every key, once, and the ta
   assert.equal(new Set(TRIGGER_ENVIRONMENT_EDIT_FIELDS).size, TRIGGER_ENVIRONMENT_EDIT_FIELDS.length);
   assert.deepEqual([...actionNamed(ACTION).fields], [...TRIGGER_ENVIRONMENT_EDIT_FIELDS]);
   // The two the tool keeps, and the rest, which no tool may send. Held both ways so a new card field must choose a side here.
-  assert.deepEqual(PERSON_ONLY, ["maxCostUsd", "models", "fallbackModels", "modelSelection", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools"]);
+  assert.deepEqual(PERSON_ONLY, ["maxCostUsd", "maxSubscriptionUsd", "models", "fallbackModels", "modelSelection", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools"]);
   const proof = /const TOOL_PROOF_FIELDS = new Set\(\[([^]*?)\]\)/.exec(readFileSync(new URL("../src/write-plans.mjs", import.meta.url), "utf8"))[1];
   assert.deepEqual([...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]).sort(), [...PERSON_ONLY].sort());
   assert.equal(ACTIONS.filter((action) => action.name === ACTION).length, 1);
@@ -246,7 +248,7 @@ test("the specs' list of tool-proof fields and the two counts they say are the c
   const proof = /const TOOL_PROOF_FIELDS = new Set\(\[([^]*?)\]\)/.exec(readFileSync(new URL("../src/write-plans.mjs", import.meta.url), "utf8"))[1];
   const fields = [...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]);
   assert.deepEqual([...named].sort(), [...fields].sort(), "the requirement names each tool-proof field");
-  const WORDS = { eight: 8, nine: 9 };
+  const WORDS = { eight: 8, nine: 9, ten: 10 };
   const all = /A person changes all (\w+) on the trigger's page/.exec(bullet)[1];
   assert.equal(WORDS[all], fields.length, "and counts them");
   // What `dispatch_trigger_edit` may set, the row number aside: the action's fields as a tool can send them.

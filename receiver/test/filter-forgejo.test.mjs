@@ -400,3 +400,16 @@ test("Forgejo webhook jobs preserve the explicit auxiliary grant", () => {
 		for (const key of Object.keys(grant)) assert.deepEqual(result.job[key], grant[key], key);
 	}
 });
+
+test("Forgejo webhook jobs carry the trigger's subscription allowance, and a trigger without one carries no key (#1008)", () => {
+	const allowance = { maxSubscriptionUsd: "12.50" };
+	for (const extra of [allowance, {}]) {
+		const group = { label: triggersRaw.label.map(rule => ({ ...rule, ...extra })), comment: { ...triggersRaw.comment, ...extra }, pullRequest: triggersRaw.pullRequest.map(rule => ({ ...rule, ...extra })), issue: [{ index: 9, actions: new Set(["closed"]), flow: "fix", ...extra }], prClose: [{ index: 10, actions: new Set(["closed"]), flow: "fix", ...extra }] };
+		for (const [event, payload] of [["issues", issuePayload()], ["issue_comment", commentPayload()], ["pull_request", prPayload()], ["issues", issuePayload({ action: "closed" })], ["pull_request", prPayload({ action: "closed" })]]) {
+			const result = filterForgejo(event, parseForgejoSubset(payload), group, knownFlows, SELF_ID, true, "allowance");
+			assert.equal(result.enqueue, true, result.reason);
+			assert.equal(result.job.maxSubscriptionUsd, extra.maxSubscriptionUsd);
+			assert.equal(Object.hasOwn(result.job, "maxSubscriptionUsd"), extra.maxSubscriptionUsd !== undefined);
+		}
+	}
+});

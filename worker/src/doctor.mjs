@@ -141,7 +141,7 @@ const BUNDLE_DOCTOR_TIMEOUT_MS = 30_000;
 import { readOverlay, readOverlayDocument, resolveSettings, settingsVersionFor } from "./runtime-settings.mjs";
 import { DEPLOYMENT_WINDOWS, DOLLAR_KEY_PREFIX, deploymentWindowsAt, dollarWindowCaps, dollarWindowFloors, valkeyEndpointTag } from "./dollar-budget.mjs";
 import { dayKey, monthKey, weekKey } from "./budget.mjs";
-import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, effectiveCostCapMicros, formatMicros, optionalUsdMicros, parseUsdMicros } from "./money.mjs";
+import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, effectiveAllowanceMicros, effectiveCostCapMicros, formatMicros, optionalUsdMicros, parseUsdMicros } from "./money.mjs";
 import { cronPlacement, envelopeJobPaths } from "./schedules.mjs";
 import { envelopeDigest, envelopeInsideJobPaths, loadEnvelopeChecked } from "./envelope.mjs";
 import { keptTokens, operatorCount, readTokensFile, tokensFilePath } from "./console-tokens.mjs";
@@ -6785,7 +6785,9 @@ export { resolveConfiguredModelRuns as resolveDoctorModelRuns } from "./model-ob
  * A random candidate's subject (`random: true`) also carries its `trigger` (the trigger's label, shared by every
  * candidate of one pool) and `triggerCap`, the trigger's OWN cap in micro-dollars or null (issue #968): a pool mixing
  * billing classes needs that one positive, and the deployment's cap, which `cap` folds in, does not stand in for it.
- * Every other trigger's subject carries `triggerCap` too (issue #1008), for `notionalCapChecks`.
+ * Every other trigger's subject carries `triggerCap` too (issue #1008), for `notionalCapChecks`. A random candidate's
+ * subject also carries `allowance`, the trigger's `run.maxSubscriptionUsd` in micro-dollars or null, for the mixed-pool
+ * line, which names it.
  */
 export function modelSubjects({ runs = [], deployment, envList = null, modelRoles = {}, projects = [], fallbacks = false }) {
 	const listOf = (list) => (Array.isArray(list) ? list.map(splitModelEntry).filter((ref) => ref !== null).map((ref) => ({ provider: ref.provider, id: ref.model })) : []);
@@ -6798,16 +6800,18 @@ export function modelSubjects({ runs = [], deployment, envList = null, modelRole
 	};
 	// The worker's own reading (model-selection.mjs `triggerCapped`): a malformed value reads as 0, never as no cap.
 	const triggerCapOf = (triggerValue) => effectiveCostCapMicros(triggerValue, null);
+	// Issue #1008: the trigger's list-price allowance for subscription calls, the worker's own reading (`effectiveJobOf`).
+	const allowanceOf = (value) => effectiveAllowanceMicros(value);
 	const subjects = [{ label: "the deployment default", main: { provider: deployment.provider, id: deployment.model }, list: listOf(envList), cap: capOf(undefined), secretNames: [], secretFileNames: [], decisionJob: false, decisionModel: null, named: false, deployment: true }];
 	for (const run of resolveDoctorModelRuns({ runs, deployment, envList, modelRoles, projects }).runs) {
 		if (run.modelSelection) {
 			// Authorization was checked separately by resolveDoctorModelRuns. Each possible execution is a
 			// singleton: unrelated allowed providers need no forwarded credential and cannot widen its cost bound.
-			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], auxiliaryModels: run.auxiliaryModels ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, named: true, random: true, trigger: run.label, triggerCap: triggerCapOf(run.maxCostUsd) });
+			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], auxiliaryModels: run.auxiliaryModels ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, named: true, random: true, trigger: run.label, triggerCap: triggerCapOf(run.maxCostUsd), allowance: allowanceOf(run.maxSubscriptionUsd) });
 			continue;
 		}
 		const main = { provider: run.provider ?? deployment.provider, id: run.model ?? deployment.model };
-		const shared = { cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], auxiliaryModels: run.auxiliaryModels ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, triggerCap: triggerCapOf(run.maxCostUsd) };
+		const shared = { cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], auxiliaryModels: run.auxiliaryModels ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, triggerCap: triggerCapOf(run.maxCostUsd), allowance: allowanceOf(run.maxSubscriptionUsd) };
 		subjects.push({
 			label: run.label,
 			main,
@@ -7290,7 +7294,9 @@ export function subscriptionCredentialCheck(provider, row) {
  *   - with one, gets a fact line: each draw bills its own candidate's class, and the cap bounds the API-key draws and a
  *     draw on a connection with paid extra usage (the runner's cost guard prices every such call from the table it
  *     pinned before any extension loaded, and a model priced at zero there is bounded by nothing); a draw on a
- *     connection without paid extra usage is notional since issue #1008 and leaves the cap and the dollar windows;
+ *     connection without paid extra usage is notional since issue #1008 and leaves the cap and the dollar windows, and
+ *     the line says what bounds it instead: the trigger's `run.maxSubscriptionUsd` (the subject's `allowance`) where it
+ *     sets one, beside the quota and the turn and time limits;
  *   - and warns for a bound connection whose `extraUsageCreditMicros` is below the job's cap: the worker refuses each
  *     draw on it as auth-credit-cap-required (subscription-runtime.mjs `check`), so the pool only ever runs API keys.
  * Classes depend on the host's own connections file, so another host may judge the same pool otherwise; every line
@@ -7301,7 +7307,7 @@ export function mixedBillingPoolChecks(subjects, { verdictOf = () => undefined }
 	const pools = new Map();
 	for (const subject of subjects) {
 		if (subject.random !== true || typeof subject.trigger !== "string") continue;
-		const pool = pools.get(subject.trigger) ?? { cap: subject.cap, triggerCap: subject.triggerCap, subscription: [], api: [], connections: new Map() };
+		const pool = pools.get(subject.trigger) ?? { cap: subject.cap, triggerCap: subject.triggerCap, allowance: subject.allowance ?? null, subscription: [], api: [], connections: new Map() };
 		const verdict = verdictOf(subject.main.provider);
 		const ref = `${subject.main.provider}/${subject.main.id}`;
 		if (verdict?.managed === true) {
@@ -7323,7 +7329,9 @@ export function mixedBillingPoolChecks(subjects, { verdictOf = () => undefined }
 			continue;
 		}
 		const cap = Number.isSafeInteger(pool.cap) ? `$${formatMicros(pool.cap)}` : "per-job";
-		checks.push({ ok: true, label: `${trigger}: its random pool mixes billing classes on this host (${classes}); each draw bills its own candidate's class, and the job's ${cap} cap bounds the API-key draws and a draw on a connection with paid extra usage (the runner prices those calls from pi's model catalog and the overlay models.json, and a model priced at zero there is not bounded by it); a draw on a subscription without paid extra usage is notional: its calls leave the cap and the dollar windows, and only its quota and the job's turn and time limits bound it (a job image from before issue #1008 still counts them under the cap)` });
+		// Issue #1008: what bounds a notional draw, the trigger's allowance first where it sets one.
+		const notionalBound = Number.isSafeInteger(pool.allowance) ? `the trigger's $${formatMicros(pool.allowance)} run.maxSubscriptionUsd (its calls' settled list price, checked between calls), its quota and the job's turn and time limits bound it` : "only its quota and the job's turn and time limits bound it, as the trigger sets no run.maxSubscriptionUsd";
+		checks.push({ ok: true, label: `${trigger}: its random pool mixes billing classes on this host (${classes}); each draw bills its own candidate's class, and the job's ${cap} cap bounds the API-key draws and a draw on a connection with paid extra usage (the runner prices those calls from pi's model catalog and the overlay models.json, and a model priced at zero there is not bounded by it); a draw on a subscription without paid extra usage is notional: its calls leave the cap and the dollar windows, and ${notionalBound} (a job image from before issue #1008 still counts them under the cap)` });
 		for (const [connectionProvider, verdict] of pool.connections) {
 			const credit = verdict.extraUsageCreditMicros;
 			if (!Number.isSafeInteger(credit) || credit <= 0 || (Number.isSafeInteger(pool.cap) && pool.cap <= credit)) continue;
@@ -7365,7 +7373,7 @@ export function notionalCapChecks(subjects, { verdictOf = () => undefined } = {}
 		if (subject.deployment === true || subject.fallback === true) continue;
 		const trigger = subject.random === true ? subject.trigger : subject.label;
 		if (typeof trigger !== "string") continue;
-		const entry = triggers.get(trigger) ?? { cap: subject.triggerCap, routes: [] };
+		const entry = triggers.get(trigger) ?? { cap: subject.triggerCap, allowance: subject.allowance ?? null, routes: [] };
 		entry.routes.push(subject.main, ...(subject.list ?? []), ...(subject.auxiliaryModels ?? []).map(refOf), ...(subject.decisionModel ? [refOf(subject.decisionModel)] : []));
 		triggers.set(trigger, entry);
 	}
@@ -7375,14 +7383,17 @@ export function notionalCapChecks(subjects, { verdictOf = () => undefined } = {}
 		return verdict?.ok === true && verdict.managed === true && Object.hasOwn(verdict, "extraUsageCreditMicros") && notionalConnection(verdict);
 	};
 	const checks = [];
-	for (const [trigger, { cap, routes }] of triggers) {
+	for (const [trigger, { cap, allowance, routes }] of triggers) {
 		if (!(Number.isSafeInteger(cap) && cap > 0) || routes.length === 0 || !routes.every(notional)) continue;
 		const providers = [...new Set(routes.map((ref) => printable(ref.provider)))].join(", ");
+		// Issue #1008: a trigger that sets run.maxSubscriptionUsd has its subscription calls bounded at list price, so the
+		// line says so instead of "only the quota", and its fix no longer offers what the trigger already has.
+		const bound = Number.isSafeInteger(allowance) ? `so its jobs are bounded by its $${formatMicros(allowance)} run.maxSubscriptionUsd at list price, the subscription's quota and their turn and time limits` : "so its jobs are bounded only by the subscription's quota and their turn and time limits";
 		checks.push({
 			ok: false,
 			warn: true,
-			label: `${trigger}: its run.maxCostUsd ($${formatMicros(cap)}) bounds nothing on this host: every model it may call is on a subscription connection without paid extra usage (${providers}), whose calls leave the cost cap and the dollar windows, so its jobs are bounded only by the subscription's quota and their turn and time limits`,
-			fix: "limit the trigger's turns or minutes (run.maxTurns, run.maxMinutes) to bound such a job; keep run.maxCostUsd where the trigger lists run.auxiliaryModels, which need a positive cap, or where a job image from before issue #1008 still runs its jobs",
+			label: `${trigger}: its run.maxCostUsd ($${formatMicros(cap)}) bounds nothing on this host: every model it may call is on a subscription connection without paid extra usage (${providers}), whose calls leave the cost cap and the dollar windows, ${bound}`,
+			fix: `${Number.isSafeInteger(allowance) ? "limit its turns or minutes (run.maxTurns, run.maxMinutes) to bound such a job further" : "set run.maxSubscriptionUsd to give its subscription calls a list-price allowance, or limit its turns or minutes (run.maxTurns, run.maxMinutes), to bound such a job"}; keep run.maxCostUsd where the trigger lists run.auxiliaryModels, which need a positive cap, or where a job image from before issue #1008 still runs its jobs`,
 		});
 	}
 	return checks;
@@ -7669,6 +7680,8 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 				// Issue #999: an auxiliary model's provider keeps its variables other than its API key reserved in run.secrets.
 				...(Array.isArray(t.run.auxiliaryModels) ? { auxiliaryModels: t.run.auxiliaryModels } : {}),
 				maxCostUsd: t.run.maxCostUsd ?? undefined,
+				// Issue #1008: the list-price allowance for subscription calls, for the mixed-pool line, which names it.
+				...(t.run.maxSubscriptionUsd !== undefined && t.run.maxSubscriptionUsd !== null ? { maxSubscriptionUsd: t.run.maxSubscriptionUsd } : {}),
 				secretNames: t.run.secrets !== undefined && t.run.secrets !== null ? Object.keys(t.run.secrets) : [],
 				// Issue #967: the file secret names too, whether the trigger's jobs are watch jobs, and a watch rule's `decide`
 				// model, whose provider's API key the rule may declare like the main one since issue #997, for the

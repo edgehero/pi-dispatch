@@ -194,6 +194,9 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					// Issue #501's per-job dollar cap, by the same narrowing rule: a child that dropped it would run
 					// uncapped. Passed through whenever the parent's data carries it; absent stays absent.
 					maxCostUsd: job.data?.maxCostUsd,
+					// Issue #1008: the parent's list-price allowance for subscription calls, by the same rule: a child that
+					// dropped it would run its subscription calls with no dollar limit. Absent stays absent.
+					maxSubscriptionUsd: job.data?.maxSubscriptionUsd,
 					// Issue #888: the parent's limits, by the same narrowing rule: a child that dropped a ceiling would run longer
 					// than its trigger allows. Absent stays absent.
 					idleTimeoutMinutes: job.data?.idleTimeoutMinutes,

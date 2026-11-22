@@ -305,7 +305,7 @@ export function swallowedRunSentence(jobId, existing) {
 	return `an identical run was queued${hhmm} as ${jobId} (${existing?.state ?? "already queued or done"}); nothing new was queued.`;
 }
 
-async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, auxiliaryModels, modelSelection, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, secrets, secretFiles, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, dataVersion, now = new Date() }, { dataVersions } = {}) {
+async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, auxiliaryModels, modelSelection, maxCostUsd, maxSubscriptionUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, secrets, secretFiles, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, dataVersion, now = new Date() }, { dataVersions } = {}) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
@@ -340,6 +340,9 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 		...(auxiliaryModels !== undefined && { auxiliaryModels }),
 		// Issue #501: the per-job dollar cap, passed through for the outbox child that inherits its parent's.
 		...(maxCostUsd !== undefined && { maxCostUsd }),
+		// Issue #1008: the list-price allowance for subscription calls, as written and only when set, like the cap. It asks
+		// for version 12 (JOB_DATA_FIELD_VERSIONS), so an older worker defers the job rather than run it with no allowance.
+		...(maxSubscriptionUsd !== undefined && { maxSubscriptionUsd }),
 		// Issue #888: the trigger's limits, conditional like the cap, so a job that names none has the data it always had.
 		...(idleTimeoutMinutes !== undefined && { idleTimeoutMinutes }),
 		...(stallTimeoutMinutes !== undefined && { stallTimeoutMinutes }),
@@ -650,7 +653,7 @@ export async function enqueueLateForgeJob(queue, kind, fields, { dataVersions } 
  * semantic dedup id. Throws on a bad delivery id or console name, and on input a newer release stored with a
  * `dataVersion` above this build's (issue #761; every caller that rebuilds stored input answers with a reply then).
  */
-function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, auxiliaryModels, modelSelection, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, privateEndpoints, skillsDir, instructions, mayMerge, mayMergePolicy, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretFiles, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
+function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, auxiliaryModels, modelSelection, maxCostUsd, maxSubscriptionUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, privateEndpoints, skillsDir, instructions, mayMerge, mayMergePolicy, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretFiles, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	if (mayMerge !== undefined && typeof mayMerge !== "boolean") throw new TypeError("merge-policy-invalid");
 	if (mayMerge === true && (command !== undefined || typeof mayMergePolicy !== "string" || !/^[a-f0-9]{64}$/.test(mayMergePolicy))) throw new TypeError("merge-policy-invalid");
@@ -718,6 +721,9 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		// #501. The trigger's per-job dollar cap, as written. Conditional like `excludeTools`, at JOB level for its
 		// reason, and a narrowing like it: the worker runs the job under the smaller of this and the deployment cap.
 		...(maxCostUsd !== undefined && { maxCostUsd }),
+		// Issue #1008: the trigger's list-price allowance for subscription calls, as written, conditional like the cap. It
+		// asks for version 12, so an older worker defers the job rather than run its subscription calls with no limit.
+		...(maxSubscriptionUsd !== undefined && { maxSubscriptionUsd }),
 		// Issue #888: the trigger's limits, conditional like the cap: a dropped ceiling is a longer run than the file allows.
 		...(idleTimeoutMinutes !== undefined && { idleTimeoutMinutes }),
 		...(stallTimeoutMinutes !== undefined && { stallTimeoutMinutes }),

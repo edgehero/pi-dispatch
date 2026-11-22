@@ -46,6 +46,7 @@ import {
 	classifyThrow,
 	configError,
 	COST_CAP,
+	SUBSCRIPTION_ALLOWANCE,
 	costRefusalField,
 	decideExit,
 	EXIT_INFRA,
@@ -423,7 +424,9 @@ async function main() {
 	// (issue #985). From here on the exit line carries childTotal, childProcesses and unmeteredChildren, zeros with no
 	// children.
 	childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });
-	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), externalInflight: () => childWatch.externalInflight(), claim: (waited) => childWatch.claim(waited), outsideWaiting: () => childWatch.outsideWaiting(), subscriptionAdmission, subscriptions: subscriptionEntries, refreshCredentials: () => credentialRefresher?.apply(), notional });
+	// Issue #1008: the subscription allowance is the guard's third part, only when the trigger set one. It judges the
+	// same notional set against the meter's own settled notional total, the number the exit line's costNotional carries.
+	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), externalInflight: () => childWatch.externalInflight(), claim: (waited) => childWatch.claim(waited), outsideWaiting: () => childWatch.outsideWaiting(), subscriptionAdmission, subscriptions: subscriptionEntries, refreshCredentials: () => credentialRefresher?.apply(), notional, allowanceMicros: cfg.subscriptionAllowanceMicros, settledNotional: () => meter.notionalMicros() });
 	// The job's first refusal (issue #985): a child's, when its refusal is what stopped the job (childWatch.refusal), else
 	// this guard's own, each a rule with its own numbers.
 	const jobRefusal = () => childWatch.refusal() ?? (policyGuard?.refusedWhy() ? { why: policyGuard.refusedWhy(), numbers: policyGuard.refusal() } : null);
@@ -458,10 +461,12 @@ async function main() {
 	// here, after the install it depends on and before any extension loads, while nothing has been spent
 	// (INT-RUNNER-EXIT-CODE-PROTOCOL): exit 2, `model-policy-unenforceable` or `cost-cap-unenforceable`. The
 	// fallback bus meter below is the `ok: false` case, and it can only see a call after it was paid for. The cost
-	// guard enforces the cap and the model guard the list; a job carrying neither policy passes untouched.
+	// guard enforces the cap and the model guard the list; a job carrying neither policy passes untouched. The
+	// subscription allowance (issue #1008) is refused the cap's way when it cannot be applied before a call.
 	assertPoliciesEnforceable({
 		maxCostMicros: cfg.maxCostMicros,
 		allowedModels: cfg.allowedModels,
+		allowanceMicros: cfg.subscriptionAllowanceMicros,
 		...policyEnforcement(usageMeter),
 	});
 
@@ -520,6 +525,11 @@ async function main() {
 	// answer-draft run's loader takes none of these factories, and a classifier run returned above.
 	costWarnings = createCostWarnings({ rootSessionId, isParked, queuedElsewhere: () => inbox?.queued() === true || steersQueued(session), log });
 	if (policyGuard?.cost && cfg.maxCostMicros > 0) costWarnings.watch({ name: COST_CAP, limit: cfg.maxCostMicros, settled: () => policyGuard.spend().spentMicros + childWatch.settled() });
+	// Issue #1008: the same warning at 70% of the subscription allowance, only when the trigger set one above 0, by the
+	// meter's settled notional total (notionalMicros, the allowance guard's own reading), so it warns no earlier than the
+	// allowance would refuse and never on a call still in flight. A total that cannot be read (Infinity) warns nothing:
+	// the next subscription call is refused anyway.
+	if (policyGuard?.allowance && cfg.subscriptionAllowanceMicros > 0) costWarnings.watch({ name: SUBSCRIPTION_ALLOWANCE, limit: cfg.subscriptionAllowanceMicros, settled: () => meter.notionalMicros() });
 	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(requestApproval?.factories ?? []), ...(reportProgress?.factories ?? []), ...(roleSubagents?.factories ?? []), ...(inbox ? [inbox.factory] : []), ...(costWarnings.armed() ? [costWarnings.factory] : [])];
 	const watchTools = watchReadOnly ? createWatchTools({ config: watchToolsConfig, runtime: modelRuntime }) : null;
 	const answerTools = answerDraftInput ? createAnswerDraftTools({ input: answerDraftInput, runtime: modelRuntime }) : null;

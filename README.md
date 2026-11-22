@@ -509,7 +509,7 @@ machine the console runs on, and says how to undo it. One
 expensive for even one request under its cap, the page refuses the change and names the amount a short task needs, rather than letting a job start and fail.
 If the page is out of date, it asks you to reload rather than write over someone else's change.
 
-**Some of this only a person sets.** The commands pi-dispatch gives an AI cannot set a trigger's job cap, the list of models its jobs may use, its fallback models, random model pools,
+**Some of this only a person sets.** The commands pi-dispatch gives an AI cannot set a trigger's job cap, its subscription allowance, the list of models its jobs may use, its fallback models, random model pools,
 its outside systems, which tools its jobs lose (pi's own or those your extensions add), whether they load your packages, or which of your packages and extensions
 they leave out. A command that tries is refused, and you are never asked to confirm it. You set those on the page,
 or your technical person sets them in the triggers file ([what the card can say, and what it refuses](docs/console.md#what-a-triggers-jobs-get)).
@@ -738,11 +738,12 @@ optional reviewed grant for local review listeners below. [`SECURITY.md`](SECURI
 - `provider`, `model`: the model its jobs run on ([choosing the model](docs/triggers.md#choosing-the-model-and-the-turn-limit)).
 - `modelSelection`: choose one model at random from a reviewed list, keeping its choice through retries ([random model pools](docs/triggers.md#choosing-randomly-from-a-reviewed-pool)).
 - `models`, `fallbackModels`, `maxCostUsd`: the models a job may call, the ones to try when one is rate limited, and its own dollar cap ([limiting models](docs/triggers.md#limiting-which-models-a-job-may-call), [fallback models](docs/model-failover.md), [a dollar cap](docs/triggers.md#a-dollar-cap-per-job)).
+- `maxSubscriptionUsd`: how much its subscription calls may use, counted at list price, since those calls leave the dollar cap ([a subscription allowance](docs/triggers.md#a-subscription-allowance-per-job)).
 - `replicas`: races independent sandboxes on one event ([replicas](docs/replicas.md)).
 - `waitFor`: holds a job, unstarted and unbilled, until a time or your own check ([waiting](docs/wait-for.md)).
 - `instructions`, `skillsDir`, `github`, `portfolio`: the rest are in [`docs/triggers.md`](docs/triggers.md#optional-run-fields).
 
-On a trigger's page in the console, a person changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `modelSelection`, `mcp`, `packages`, `excludeTools`, `excludeExtensions` and
+On a trigger's page in the console, a person changes `flow`, `provider`, `model`, `maxCostUsd`, `maxSubscriptionUsd`, `models`, `fallbackModels`, `modelSelection`, `mcp`, `packages`, `excludeTools`, `excludeExtensions` and
 `excludeExtensionTools` with one preview and one Confirm ([what a trigger's jobs get](docs/console.md#what-a-triggers-jobs-get)). The page writes this host's file,
 so on a fleet where each host keeps its own, a host keeps what it has until its copy changes. A few others have the page's Edit form. The rest change in the file, and editing the file works as it always has.
 

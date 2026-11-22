@@ -724,7 +724,7 @@ test("docs/console.md's actions table has the card's action, by the button a per
   const row = rows.find(([where]) => where === "A trigger's page");
   assert.ok(row, "the row");
   assert.equal(row[1], "Preview the change");
-  const plain = { flow: "its flow", provider: "its provider", model: "and model", maxCostUsd: "its job cap", models: "its allowed models", fallbackModels: "and fallbacks", modelSelection: "its random pool", mcp: "its servers", packages: "the staged packages", excludeTools: "its tools", excludeExtensions: "each extension it leaves out", excludeExtensionTools: "each extension's tool it removes" };
+  const plain = { flow: "its flow", provider: "its provider", model: "and model", maxCostUsd: "its job cap", maxSubscriptionUsd: "its subscription allowance", models: "its allowed models", fallbackModels: "and fallbacks", modelSelection: "its random pool", mcp: "its servers", packages: "the staged packages", excludeTools: "its tools", excludeExtensions: "each extension it leaves out", excludeExtensionTools: "each extension's tool it removes" };
   assert.deepEqual(Object.keys(plain), [...CARD_FIELDS], "one plain name per field");
   for (const [field, name] of Object.entries(plain)) assert.ok(row[2].includes(name), `${field} is said as ${name}`);
   assert.match(row[2], /A person's action, which no tool reaches/);
@@ -815,7 +815,7 @@ test("docs/console.md says what a tool cannot reach, and names the fields a tool
   // The deployment's caps are a setting, which a tool can raise behind a confirm: "those six" is as far as this holds, and the section says so.
   assert.match(read("admin/src/action-policy.mjs"), /"setting-set": rule\("confirm",[^\n]*"dispatch_set"\)/);
   assert.match(said, /`dispatch_set` still sets the deployment's own caps, behind a confirm wherever a cap could rise/);
-  assert.match(said, /Those nine are the operator's to write/);
+  assert.match(said, /Those ten are the operator's to write/);
   assert.match(said, /pi's own `bash` is outside this, as it is outside every action/);
   // The bar on the Confirm says what is true of this action, and claims nothing of what moves a job's spend elsewhere.
   const reason = /"trigger-environment-edit": rule\("person", "([^"]+)"\)/.exec(read("admin/src/action-policy.mjs"))[1];
@@ -834,7 +834,7 @@ test("docs/triggers.md's two editors are the card's fields and the Edit form's, 
   for (const key of ["flow", "backend", "provider", "model", "maxTurns", ...EDIT_FIELDS.slice(2)]) assert.ok(tool.includes(key), key);
   // Which of the card's fields a tool can still set: "the first three", and that it cannot set the rest, read from what the tool takes.
   assert.deepEqual(CARD_FIELDS.filter((key) => tool.includes(key)), CARD_FIELDS.slice(0, 3));
-  assert.match(doc, /Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_\*` tool can set the other nine/);
+  assert.match(doc, /Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_\*` tool can set the other ten/);
   // The opening of the optional fields: most are the file's alone, and which are not is read from what the Edit form and the tool take.
   const flags = /\. ((?:`[A-Za-z]+`(?:, | and )?)+) change how a run is followed or picked up, and that page's Edit form and `dispatch_trigger_edit` take them too/.exec(doc);
   assert.deepEqual(spans(flags[1]), EDIT_FIELDS.slice(2));

@@ -29,9 +29,9 @@ The add editor and its JSON fallback write the add tool's entry, including `run.
 
 A trigger's page has two editors, and no key has both:
 
-- **What its jobs get** changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `modelSelection`, `mcp`, `packages`,
+- **What its jobs get** changes `flow`, `provider`, `model`, `maxCostUsd`, `maxSubscriptionUsd`, `models`, `fallbackModels`, `modelSelection`, `mcp`, `packages`,
   `excludeTools`, `excludeExtensions` and `excludeExtensionTools`, with one preview that says each change in words and one Confirm. Only a person can use this form, and no `dispatch_*` tool
-  reaches it. Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_*` tool can set the other nine
+  reaches it. Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_*` tool can set the other ten
   ([what a trigger's jobs get](console.md#what-a-triggers-jobs-get)).
 - **Edit** changes the venue (`backend`), `maxTurns`, `progress`, `statusComment`, `steer` and `recover`. Cron cannot enable
   statusComment or recover.
@@ -948,7 +948,7 @@ An exhausted subscription excludes all candidates sharing that account/applicati
 
 A pool may hold subscription models and API-key models together. Which class a candidate is in depends on the worker's host: a model whose provider is bound to a [subscription connection](subscription-auth.md) there is a subscription candidate, also while that connection cannot sign in, and every other model spends an API key. Each draw bills its own candidate's class: a job that draws the subscription model runs on the subscription, and one that draws the API-key model runs on the key. The first draw passes over a subscription model that cannot take the job now (its allowance exhausted or at or above the [quota reserve](#using-the-subscription-quota-reserve), its connection signed out, or its paid extra usage below the cap) and may land on an API-key model. After that the class never changes: a retry, a parked answer, an approval or a recovery stays on it, and a replacement after a subscription limit picks only another subscription model, or waits when all of them are blocked.
 
-A pool that mixes the two classes on a host needs a positive `run.maxCostUsd` on its own trigger; the deployment's `maxCostUsd` alone does not count. Without one, every job of the trigger is refused as `auth-route-unbounded` when a worker picks it up, before anything is drawn or spent, and `pi-dispatch doctor` names the trigger on that host. The cap bounds the API-key draws, and a draw on a subscription connection that allows paid extra usage: the runner prices each such call from pi's model catalog and the overlay `models.json` as they were when the job started, so a long run there can stop as `cost-cap`. A model priced at zero there is not bounded by the cap; pi's own Claude and OpenAI models are all priced. A draw on a subscription without paid extra usage bills nothing, so its calls do not count against the cap or any dollar window: only the subscription's quota and the job's turn and time limits bound it (see [what the cap counts](costs.md#what-the-cap-counts)). An image from before this release still counts those calls against the cap. A pool of API-key models alone, or of subscription models alone, needs no cap. That is judged on each host at each pickup: if a host later binds one candidate's provider to a connection, the pool becomes mixed there, and its jobs, retries and continuations included, are refused as `auth-route-unbounded` until the trigger sets a cap.
+A pool that mixes the two classes on a host needs a positive `run.maxCostUsd` on its own trigger; the deployment's `maxCostUsd` alone does not count. Without one, every job of the trigger is refused as `auth-route-unbounded` when a worker picks it up, before anything is drawn or spent, and `pi-dispatch doctor` names the trigger on that host. The cap bounds the API-key draws, and a draw on a subscription connection that allows paid extra usage: the runner prices each such call from pi's model catalog and the overlay `models.json` as they were when the job started, so a long run there can stop as `cost-cap`. A model priced at zero there is not bounded by the cap; pi's own Claude and OpenAI models are all priced. A draw on a subscription without paid extra usage bills nothing, so its calls do not count against the cap or any dollar window: the subscription's quota, the job's turn and time limits and, when the trigger sets one, its [subscription allowance](#a-subscription-allowance-per-job) bound it (see [what the cap counts](costs.md#what-the-cap-counts)). An image from before this release still counts those calls against the cap. A pool of API-key models alone, or of subscription models alone, needs no cap. That is judged on each host at each pickup: if a host later binds one candidate's provider to a connection, the pool becomes mixed there, and its jobs, retries and continuations included, are refused as `auth-route-unbounded` until the trigger sets a cap.
 
 An API-key draw takes its key from the worker's environment or from the trigger's own `run.secrets` ([the provider key as a run secret](secrets.md#the-provider-key-as-a-run-secret)). Either way the key reaches only the draws whose model, or a model in the trigger's `run.auxiliaryModels`, is on a provider that reads it (a variable named in `PI_FORWARD_ENV` reaches every job), and then pi spends it under the cap. A subscription draw does not get it, so no tool or script the job runs can spend it outside the cost meter; the worker logs `run_secret_withheld` naming the run secret it kept out. A project bundle's variable of that name is kept out the same way. Run secrets that are no candidate's API key reach every draw. Upgrade every worker before a pool mixes the classes: an older worker refuses such a job as `auth-mixed-billing`, spending nothing.
 
@@ -1193,6 +1193,54 @@ of this once when a trigger sets `maxCostUsd`, as it does for `models`.
   list (or `PI_ALLOWED_MODELS`) decides which model windows its jobs hold their cap in: the listed models only.
   A job with no list holds its cap in every model window, since it may switch to any model. See
   [scoped limits](scoped-limits.md#dollar-windows-and-model-rows-version-2).
+
+## A subscription allowance per job
+
+A call on a subscription connection without paid extra usage bills nothing per call, so the dollar cap does not count
+it ([what the cap counts](costs.md#what-the-cap-counts)). Without anything else, such a job's subscription calls have no
+dollar limit at all: only the account's quota and the job's turn and time limits stop it. A trigger can give them one:
+
+```json
+{ "on": { "type": "label", "any": ["pi:triage"] },
+  "run": { "kind": "github", "flow": "triage", "maxCostUsd": "1", "maxSubscriptionUsd": "40" } }
+```
+
+- `"maxSubscriptionUsd"` is a plain decimal, read exactly as `maxCostUsd` is: above 0, at most 1000000, with at most 6
+  decimals, best quoted. A value the loader refuses is named by the trigger and the field, never the value.
+- It counts the **list price** of the job's subscription calls: each call's price from pi's model catalog (and the
+  overlay `models.json`) as the run record shows it, the `costNotional` part of the run's cost. That is the catalog
+  price and nothing more: for an Anthropic call past 200,000 input tokens on a model the catalog does not tier, the cap
+  charges a long-context surcharge on top (2 times the input side, 1.5 times the output), and the allowance does not.
+  The runner checks it between calls, against what the calls so far settled at,
+  and holds nothing for a call still running. So the calls already running when the allowance is reached finish and
+  count, and a job with parallel subagents can end above it by what those calls cost. The next subscription call is not
+  sent, and the whole run stops with reason `subscription-allowance` (exit 2, not retried).
+- It never counts a call that can be billed. An API-key call, or a call on a connection with paid extra usage, is
+  judged by the dollar cap alone, as before; the allowance can neither let one pass the cap nor stop one.
+- No deployment value stands behind it. Absent means no allowance. There is no panel or environment setting.
+- At 70% of it the run is warned once, as for the cap ([a warning before the cost cap](job-limits.md#a-warning-before-the-cost-cap)).
+- It is counted per attempt, as the cap is: each container starts again at 0, so a durable run's recovery, or a retry
+  of a local job, can spend a further allowance.
+- A watch rule refuses the field (`watch: unsupported run field`), as its jobs are built by name.
+- A subscription call whose cost cannot be read (no cost at all, a cost that is not a number, or a negative one) leaves
+  the total unknown, so the next subscription call is refused and the run stops with `subscription-allowance`. An answer
+  whose counts are zero but whose price is a number adds that price. A model priced at zero adds nothing, so it is not
+  bounded by the allowance, as it is not bounded by the cap either.
+- A job with an allowance needs a job image that declares `subscriptionAllowance`. The shipped image does. On an older
+  image the job is refused before it costs anything, with reason `job-image-subscription-allowance-unsupported`.
+- It needs triggers file version 11, which the writers stamp, and a job of it is queued at job data version 12. A
+  worker that reads less holds such a job (`newer-release`) until a worker that reads it picks it up, so nothing runs
+  with the allowance dropped. A receiver or worker that dropped it anyway is caught as `trigger-skew`, naming the field,
+  as for `maxCostUsd`. A value that does not parse on a queued job (a hand-built one) reads as 0, so the job's first
+  subscription call is refused.
+- A chained job keeps its parent's allowance. A console re-run of a forge or cron job takes the allowance its trigger
+  sets now, as every other field of the re-run does; a re-run of an ad-hoc local job keeps the one that job carried.
+- No AI tool can set or change it, in any spelling. A person can change it in the file or on the
+  [trigger's page](console.md#what-a-triggers-jobs-get), which says raising or removing it is a widening.
+- `pi-dispatch doctor` names it on a random pool that mixes billing classes, as what bounds its subscription draws.
+
+The allowance is not a quota share: the account's five-hour and seven-day windows are shared by every job on it and read
+only when a job starts, so no per-job share of them can be measured. See [subscription authentication](subscription-auth.md).
 
 ## Using the subscription quota reserve
 

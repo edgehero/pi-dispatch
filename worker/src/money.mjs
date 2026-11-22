@@ -131,6 +131,23 @@ export function effectiveCostCapMicros(triggerValue, deploymentValue, onMalforme
 }
 
 /**
+ * The list-price allowance for a job's subscription calls (issue #1008, `run.maxSubscriptionUsd`) in integer
+ * micro-dollars, or null when the job carries none. The trigger's alone: no deployment value stands behind it, so
+ * absent is no allowance. A malformed value reaches this only from a hand-built queue entry (the loader refuses one in
+ * both services) and, `effectiveCostCapMicros`' rule, neither throws nor drops the limit that was asked for: it reads
+ * as 0, which refuses the job's first subscription call (the runner's allowance is reached at 0 settled), and
+ * `onMalformed(key)` is told the KEY, never the value, so the worker logs it.
+ */
+export function effectiveAllowanceMicros(value, onMalformed = () => {}) {
+	try {
+		return optionalUsdMicros(value, "run.maxSubscriptionUsd");
+	} catch {
+		onMalformed("maxSubscriptionUsd");
+		return 0;
+	}
+}
+
+/**
  * The first parsed trigger whose `run.maxCostUsd` is above the deployment's `maxCostUsd`, as its index in
  * `triggers`, or -1 (issue #501). A trigger may only narrow the per-job cap, so a value above it can only be a
  * mistake: the job would run under the deployment's cap anyway, while the file reads as allowing more. Pure,

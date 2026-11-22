@@ -598,6 +598,8 @@ function runFieldsOf(entry, flow) {
     ...(run.fallbackModels !== undefined ? { fallbackModels: run.fallbackModels } : {}),
     ...(run.modelSelection !== undefined ? { modelSelection: run.modelSelection } : {}), ...(run.auxiliaryModels !== undefined ? { auxiliaryModels: run.auxiliaryModels } : {}),
     ...(run.maxCostUsd !== undefined ? { maxCostUsd: run.maxCostUsd } : {}),
+    // Issue #1008: the list-price allowance for subscription calls, by the cap's rule, as the filters carry it.
+    ...(run.maxSubscriptionUsd !== undefined ? { maxSubscriptionUsd: run.maxSubscriptionUsd } : {}),
     // Issue #888: the trigger's limits, by the cap's rule.
     ...(run.idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes: run.idleTimeoutMinutes } : {}),
     ...(run.stallTimeoutMinutes !== undefined ? { stallTimeoutMinutes: run.stallTimeoutMinutes } : {}),
@@ -630,9 +632,12 @@ function runFieldsOf(entry, flow) {
  */
 // An ad-hoc re-run normally uses deployment defaults. Reviewed random and auxiliary grants keep
 // their ceiling and cap; the old random generation and physical selection cannot follow them.
+// Issue #1008: a subscription allowance the job carried is kept on every re-run. No deployment value stands behind it,
+// so a re-run without it would run the job's subscription calls with no dollar limit at all.
 function randomRerunFields(data) {
-  if (data.modelSelection === undefined && data.auxiliaryModels === undefined) return {};
-  return { ...(data.modelSelection !== undefined ? { modelSelection: data.modelSelection } : {}), ...(data.auxiliaryModels !== undefined ? { auxiliaryModels: data.auxiliaryModels } : {}), ...(data.models !== undefined ? { models: data.models } : {}), ...(data.maxCostUsd !== undefined ? { maxCostUsd: data.maxCostUsd } : {}) };
+  const allowance = data.maxSubscriptionUsd !== undefined ? { maxSubscriptionUsd: data.maxSubscriptionUsd } : {};
+  if (data.modelSelection === undefined && data.auxiliaryModels === undefined) return allowance;
+  return { ...(data.modelSelection !== undefined ? { modelSelection: data.modelSelection } : {}), ...(data.auxiliaryModels !== undefined ? { auxiliaryModels: data.auxiliaryModels } : {}), ...(data.models !== undefined ? { models: data.models } : {}), ...(data.maxCostUsd !== undefined ? { maxCostUsd: data.maxCostUsd } : {}), ...allowance };
 }
 
 function runFieldsSummary(job) {
@@ -643,6 +648,8 @@ function runFieldsSummary(job) {
     ...(job.fallbackModels !== undefined ? { fallbackModels: job.fallbackModels } : {}),
     ...(job.modelSelection !== undefined ? { modelSelection: job.modelSelection } : {}), ...(job.auxiliaryModels !== undefined ? { auxiliaryModels: job.auxiliaryModels } : {}),
     maxCostUsd: job.maxCostUsd ?? null,
+    // Issue #1008: only when the job carries one, so a preview of every other run says what it always said.
+    ...(job.maxSubscriptionUsd !== undefined ? { maxSubscriptionUsd: job.maxSubscriptionUsd } : {}),
     secretsProfile: job.secretsProfile ?? null,
     image: job.image ?? null,
     backend: job.backend ?? null,

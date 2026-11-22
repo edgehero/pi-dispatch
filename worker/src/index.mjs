@@ -25,7 +25,7 @@ import { isPerMachineHost } from "./backends.mjs";
 import { hash16 } from "./fleet-lease.mjs";
 import { endpointsForModel } from "./model-endpoints.mjs";
 import { splitModelEntry, auxiliaryModelsProblem } from "./model-ref.mjs";
-import { effectiveCostCapMicros } from "./money.mjs";
+import { effectiveAllowanceMicros, effectiveCostCapMicros } from "./money.mjs";
 import { dollarWindowCaps, valkeyEndpointTag } from "./dollar-budget.mjs";
 import { concurrencyFor, dollarCapsFor, makeInFlight, modelDollarRows, projectDollarCapsFor, projectRowFor, rowScopeFor, scopedLedgers } from "./scoped-limits.mjs";
 import { memberScopeOf, projectOf } from "./projects.mjs";
@@ -240,8 +240,12 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 	// env list arrives as its own argument and never through `settings`, which the overlay (and so `dispatch_set`)
 	// writes. Absent stays absent, so an unrestricted job's effective job has no `models` key at all.
 	const models = data.models ?? allowedModels ?? null;
+	// Issue #1008: `maxSubscriptionMicros` is this function's answer and never the queued data's, so a stray key of that
+	// name on the data is dropped here rather than spread into the job the container env is built from.
+	const { maxSubscriptionMicros: _stray, ...fields } = data;
+	const allowance = effectiveAllowanceMicros(data.maxSubscriptionUsd, (key) => log("job_subscription_allowance_malformed", { key }));
 	return {
-		...data,
+		...fields,
 		...(data.modelSelection === undefined ? { provider: data.provider ?? settings.provider, model: data.model ?? settings.model } : {}),
 		maxTurns: data.maxTurns ?? settings.maxTurns,
 		maxTokens: data.maxTokens ?? settings.maxTokens, // optional per-job token budget (issue #25); null => runner meter only
@@ -253,6 +257,13 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 		// image preflight requires `costCap` of any job that carries one.
 		// A malformed queued value is logged by KEY only (`job_cost_cap_malformed`), never by value.
 		maxCostMicros: effectiveCostCapMicros(data.maxCostUsd, settings.maxCostUsd, (key) => log("job_cost_cap_malformed", { key })),
+		// Issue #1008: the list-price allowance for the job's subscription calls in integer micro-dollars, the trigger's
+		// `run.maxSubscriptionUsd` alone (no deployment value narrows or supplies it), and only when the job carries one,
+		// so a job without it is the effective job it always was. A malformed queued value fails closed to 0
+		// (`effectiveAllowanceMicros`, logged `job_subscription_allowance_malformed` by key), which refuses the job's first
+		// subscription call. buildContainerEnv sends it as PI_SUBSCRIPTION_ALLOWANCE_MICROS, and the image preflight
+		// requires `subscriptionAllowance` of any job that carries one.
+		...(allowance !== null ? { maxSubscriptionMicros: allowance } : {}),
 	};
 }
 
@@ -1947,7 +1958,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// the deployment's list. Only when the wiring supplies the check, so a bare processor keeps the default.
 				// The same for `maxCostUsd` (#501): `effectiveJobOf` keeps the arrived value under its own key and writes the
 				// resolved cap as `maxCostMicros`, but it is read off `job.data` here too, so no later fill can hide a drop.
-				...(deps?.checkWaitSkew ? { checkWaitSkew: (j, ...rest) => deps.checkWaitSkew({ ...j, models: job.data?.models, fallbackModels: job.data?.fallbackModels, auxiliaryModels: job.data?.auxiliaryModels, modelSelection: job.data?.modelSelection, maxCostUsd: job.data?.maxCostUsd }, ...rest) } : {}),
+				// And `maxSubscriptionUsd` (issue #1008), read off `job.data` for the same reason.
+				...(deps?.checkWaitSkew ? { checkWaitSkew: (j, ...rest) => deps.checkWaitSkew({ ...j, models: job.data?.models, fallbackModels: job.data?.fallbackModels, auxiliaryModels: job.data?.auxiliaryModels, modelSelection: job.data?.modelSelection, maxCostUsd: job.data?.maxCostUsd, maxSubscriptionUsd: job.data?.maxSubscriptionUsd }, ...rest) } : {}),
 				// #227. BOUNDED AFTER THE ABORT, and this is what makes `abortable` an honest declaration.
 				//
 				// `makeRunContainer`'s promise settles ONLY on the docker child's `close` or `error`. Nothing

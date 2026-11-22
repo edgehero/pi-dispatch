@@ -7,7 +7,7 @@ export function localRunData(run) {
 		github: run.github, packages: run.packages, image: run.image,
 		...Object.fromEntries([
 			"backend", "excludeTools", "excludeExtensions", "excludeExtensionTools", "mcp", "privateEndpoints", "models", "fallbackModels", "auxiliaryModels", "modelSelection",
-			"maxCostUsd", "idleTimeoutMinutes", "stallTimeoutMinutes", "maxMinutes", "skillsDir", "secrets", "secretFiles", "secretsProfile", "secretBundle",
+			"maxCostUsd", "maxSubscriptionUsd", "idleTimeoutMinutes", "stallTimeoutMinutes", "maxMinutes", "skillsDir", "secrets", "secretFiles", "secretsProfile", "secretBundle",
 		].filter((key) => run[key] !== undefined).map((key) => [key, run[key]])),
 		resume: run.resume,
 		...(run.portfolio !== undefined && { portfolio: run.portfolio }),

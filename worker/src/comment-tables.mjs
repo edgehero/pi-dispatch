@@ -62,6 +62,8 @@ export const TERMINAL_COMMENTS = {
 	// configuration, and the comment's reader may be an issue author who can act on neither.
 	"cost-cap": "Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.",
 	"model-not-allowed": "Stopped: the run tried to call an AI model this trigger does not allow, or to change an AI request in a way it does not allow, so the call was not made. Partial work may exist. Not retried.",
+	// Issue #1008: the list-price allowance for subscription calls, named as such and never by its amount, for the same reason.
+	"subscription-allowance": "Stopped: this run reached its allowance for subscription AI calls, counted at list price, or could no longer count against it because a subscription call's cost could not be read, so its next subscription call was not made. Partial work may exist. Not retried.",
 	"cost-cap-unenforceable": "Stopped: this run has a cost limit, and the job image could not enforce it before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.",
 	"model-policy-unenforceable": "Stopped: this run is limited to certain AI models, and the job image could not enforce that before each AI call, so nothing was sent to the AI provider. The operator needs to update the job image. Not retried.",
 	// The runner's refusals of the job's MCP servers, each before the prompt. Never the server's name, its host or a

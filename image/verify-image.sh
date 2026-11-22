@@ -963,6 +963,28 @@ IWHANG
 				echo "$iw_counters" | grep -q '"v":1,"steps":[1-9]' \
 					|| fail "the image declares idleWatch but wrote no activity counters beside the session file: $iw_counters"
 				;;
+			subscriptionAllowance)
+				# Issue #1008. The claim is that the runner reads PI_SUBSCRIPTION_ALLOWANCE_MICROS and stops a job whose
+				# subscription calls' settled list price reached it. Proved twice, offline: the baked runner's own guard, meter and
+				# runtime wrapper refuse the next subscription call and leave an API-key call to the cap; and a real job handed a
+				# malformed value is refused before any call by the variable's name. A runner that ignored the variable would try the
+				# call and exit on the network error instead.
+				sa_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges \
+					--entrypoint node "$IMAGE_REF" /app/image/runner/test/fixtures/subscription-allowance-smoke.mjs 2>&1) && sa_code=0 || sa_code=$?
+				[ "$sa_code" = 0 ] && echo "$sa_out" | grep -q '^subscription allowance capability holds$' \
+					|| fail "the image declares 'subscriptionAllowance' but its offline allowance proof failed (exit $sa_code): $sa_out"
+				sa_job=$(mktemp -d)
+				echo "Reply with the single word ok." >"$sa_job/prompt.md"
+				chmod -R a+rX "$sa_job"
+				sa_run=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$sa_job:/job:ro" \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_SUBSCRIPTION_ALLOWANCE_MICROS=not-a-number \
+					"$IMAGE_REF" 2>&1) && sa_run_code=0 || sa_run_code=$?
+				rm -rf "$sa_job"
+				sa_exit=$(echo "$sa_run" | grep '"event":"exit"' | tail -1)
+				[ "$sa_run_code" = 2 ] && echo "$sa_exit" | grep -q 'PI_SUBSCRIPTION_ALLOWANCE_MICROS' \
+					|| fail "the image declares 'subscriptionAllowance' but a job with a malformed PI_SUBSCRIPTION_ALLOWANCE_MICROS was not refused before its first call (exit $sa_run_code: $sa_exit)"
+				;;
 			subscriptionLease)
 				# Issue #895. Use the baked guard, drop reader and pinned ModelRuntime with an injected clock:
 				# requests inside the old five-minute floor must work, then use a replacement beyond the old

@@ -390,7 +390,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
   const FIELDS = {
     "run-enqueue": ["folder", "flow", "task"], "standing-answer-add": ["title", "text", "projects", "repo", "runId"], "answer-draft-drop": ["runId", "draftRunId", "digest"],
     "model-role-edit": [...MODEL_ROLE_EDIT_FIELDS],
-    "trigger-environment-edit": ["index", "pageDigest", "flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "modelSelection", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools", "keyOrder"],
+    "trigger-environment-edit": ["index", "pageDigest", "flow", "provider", "model", "maxCostUsd", "maxSubscriptionUsd", "models", "fallbackModels", "modelSelection", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools", "keyOrder"],
     "sandbox-prepare": ["repo", "index", "ref", "host", "pin"], "sandbox-pin": ["host", "id"], "sandbox-end": ["host", "id", "nonce", "containerId"], "device-remove": ["id"], "sessions-end-all": [], "sandbox-host-set": ["host", "target", "deployment", "nodePath", "cliPath", "shell"],
     "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],

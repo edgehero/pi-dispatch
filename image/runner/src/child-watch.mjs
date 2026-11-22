@@ -655,7 +655,8 @@ export function createChildWatch({
 		 * The exit line's issue #985 charge keys from the parent guard's charges(): `costChargedMicros`, what the cap
 		 * charged (the parent's settled spend plus the children's, settled()), `costLiftedMicros`, the part of it above
 		 * pi's own price (the children's from their ledgers' `liftedMicros`), and `costWaited`, the calls that waited for
-		 * room (their ledgers' `waited`). In that order, after `modelRefused` (the worker's TOKEN_KEYS).
+		 * room (their ledgers' `waited`). In that order, after `modelRefused` and, with an allowance, after `allowanceMicros`
+		 * (issue #1008), which follows it (the worker's TOKEN_KEYS).
 		 */
 		chargeFields(own) {
 			const view = current();

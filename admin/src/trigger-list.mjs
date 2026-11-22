@@ -24,9 +24,9 @@ const copyStrings = (value) => Array.isArray(value) ? value.filter((v) => typeof
 const recordOf = (r) => Object.fromEntries(["jobId", "target", "project", "kind", "triggerIndex", "triggerType", "flow", "startedAt", "endedAt", "outcome"].filter((k) => typeof r?.[k] === "string" || Number.isSafeInteger(r?.[k])).map((k) => [k, r[k]]).concat([["reason", recordReason(r)]]));
 
 function ruleOf(t) {
-  const scalar = ["index", "type", "forge", "runKind", "localEventDigest", "worker", "debounceSeconds", "id", "pattern", "phrase", "folder", "flow", "command", "provider", "model", "maxTurns", "backend", "image", "repository", "number", "once", "packages", "resume", "portfolio", "replicas", "maxCostUsd", "secretsProfile", "secretBundle", "awaitInput", "github", "progress", "statusComment", "recover", "steer", "mayMerge", "skillsDir", "gateTimeout", "gateBudgetRaiseUsd"];
+  const scalar = ["index", "type", "forge", "runKind", "localEventDigest", "worker", "debounceSeconds", "id", "pattern", "phrase", "folder", "flow", "command", "provider", "model", "maxTurns", "backend", "image", "repository", "number", "once", "packages", "resume", "portfolio", "replicas", "maxCostUsd", "maxSubscriptionUsd", "secretsProfile", "secretBundle", "awaitInput", "github", "progress", "statusComment", "recover", "steer", "mayMerge", "skillsDir", "gateTimeout", "gateBudgetRaiseUsd"];
   const out = Object.fromEntries(scalar.filter((k) => typeof t[k] === "string" || typeof t[k] === "boolean" || Number.isSafeInteger(t[k])).map((k) => [k, t[k]]));
-  for (const key of ["maxCostUsd", "gateBudgetRaiseUsd"]) {
+  for (const key of ["maxCostUsd", "maxSubscriptionUsd", "gateBudgetRaiseUsd"]) {
     if (typeof t[key] === "number" && Number.isFinite(t[key]) && t[key] >= 0) out[key] = t[key];
     else delete out[key];
   }
@@ -82,7 +82,7 @@ function chipsOf(t, packagesAvailable) {
   if (t.awaitInput === true || t.gates?.length) add("asks", "may wait for a person");
   if (t.steer === true) add("asks", "takes messages");
   if (t.recover === true) add("writes", "recovers a lost run");
-  if (t.models?.length || t.maxCostUsd !== undefined || t.waitFor?.length || t.reviewState?.length || t.all?.length || t.none?.length || t.number) add("narrows", "reviewed constraints");
+  if (t.models?.length || t.maxCostUsd !== undefined || t.maxSubscriptionUsd !== undefined || t.waitFor?.length || t.reviewState?.length || t.all?.length || t.none?.length || t.number) add("narrows", "reviewed constraints");
   if (t.secretBundle === false) add("narrows", "no project secret bundle");
   if (t.disarmed) add("spent", "spent one-shot");
   return chips;

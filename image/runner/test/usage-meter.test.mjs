@@ -25,7 +25,7 @@ import {
 	pricedModel,
 	unreportedUsage,
 } from "../src/usage-meter.mjs";
-import { COST_CAP, COST_CAP_UNENFORCEABLE, EXIT_POLICY, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE, TOKEN_BUDGET } from "../src/outcome.mjs";
+import { COST_CAP, COST_CAP_UNENFORCEABLE, EXIT_POLICY, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE, SUBSCRIPTION_ALLOWANCE, TOKEN_BUDGET } from "../src/outcome.mjs";
 
 /**
  * These tests are PURE: no pi import, no skip gate, no filesystem. Every pi-shaped dependency of
@@ -1406,7 +1406,7 @@ test("the meter's stop is first-wins: a later stop never overwrites the reason, 
 });
 
 test("STOP_MESSAGES names every meter stop, and breached is a read-only view of the token stop", () => {
-	assert.deepEqual(Object.keys(STOP_MESSAGES).sort(), [COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET].sort());
+	assert.deepEqual(Object.keys(STOP_MESSAGES).sort(), [COST_CAP, MODEL_NOT_ALLOWED, SUBSCRIPTION_ALLOWANCE, TOKEN_BUDGET].sort(), "issue #1008 added the subscription allowance's stop");
 	assert.equal(STOP_MESSAGES[TOKEN_BUDGET], "pi-dispatch: token cap exceeded", "the token stop's message is unchanged");
 	assert.ok(Object.isFrozen(STOP_MESSAGES));
 	const meter = createUsageMeter({ maxTokens: null });

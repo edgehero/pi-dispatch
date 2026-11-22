@@ -46,7 +46,7 @@ export function resolveJobImage(job, defaultImage) {
  *                            CAPABILITY_GATES row (replicaUnsupported, commandUnsupported,
  *                            excludeToolsUnsupported, loadExclusionsUnsupported, modelPolicyUnsupported, costCapUnsupported, mcpUnsupported,
  *                            forgeMcpUnsupported, awaitInputUnsupported, progressUnsupported, recoverUnsupported,
- *                            steerUnsupported)
+ *                            steerUnsupported, subscriptionAllowanceUnsupported)
  *                            => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
@@ -349,6 +349,19 @@ export const CAPABILITY_GATES = Object.freeze([	// REQ-REPLICA-RUNS: an image bu
 		reason: "job-image-secret-files-unsupported",
 		event: "refused_image_secret_files_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare secret files (\`dev.pi-dispatch.capabilities\` ${declared}), so it cannot verify their owner, permissions and paths. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// Issue #1008: a runner that predates the subscription allowance reads no PI_SUBSCRIPTION_ALLOWANCE_MICROS, so a job
+	// whose trigger set run.maxSubscriptionUsd would run its subscription calls with no dollar limit at all and record a
+	// clean exit. Needed whenever the job carries one, 0 included (`!== null`, the cap row's rule: 0 is a malformed
+	// value's fail-closed reading, not none). Last in the table, so a job that also lacks an older feature is refused for
+	// that one, as before.
+	Object.freeze({
+		token: "subscriptionAllowance",
+		needed: (job) => job?.maxSubscriptionMicros !== null && job?.maxSubscriptionMicros !== undefined,
+		result: "subscriptionAllowanceUnsupported",
+		reason: "job-image-subscription-allowance-unsupported",
+		event: "refused_image_subscription_allowance_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare the subscription allowance (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore the trigger's run.maxSubscriptionUsd and run this job's subscription calls with no dollar limit at all. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 ]);
 

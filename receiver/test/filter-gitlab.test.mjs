@@ -506,3 +506,16 @@ test("GitLab webhook jobs preserve the explicit auxiliary grant", () => {
 		for (const key of Object.keys(grant)) assert.deepEqual(result.job[key], grant[key], key);
 	}
 });
+
+test("GitLab webhook jobs carry the trigger's subscription allowance, and a trigger without one carries no key (#1008)", () => {
+	const allowance = { maxSubscriptionUsd: "12.50" };
+	for (const extra of [allowance, {}]) {
+		const group = { label: triggers.label.map(rule => ({ ...rule, ...extra })), comment: { ...triggers.comment, ...extra }, pullRequest: triggers.pullRequest.map(rule => ({ ...rule, ...extra })), issue: [{ index: 9, actions: new Set(["close"]), flow: "fix", ...extra }], prClose: [{ index: 10, actions: new Set(["close"]), flow: "fix", ...extra }] };
+		for (const payload of [issuePayload(), notePayload(), mrPayload(), issuePayload({ object_attributes: { iid: 5, action: "close" }, changes: {} }), mrPayload({ object_attributes: { iid: 12, action: "close" } })]) {
+			const result = filterGitLab(parseGitLabSubset(payload), group, knownFlows, SELF_ID, true, "allowance");
+			assert.equal(result.enqueue, true, result.reason);
+			assert.equal(result.job.maxSubscriptionUsd, extra.maxSubscriptionUsd);
+			assert.equal(Object.hasOwn(result.job, "maxSubscriptionUsd"), extra.maxSubscriptionUsd !== undefined);
+		}
+	}
+});

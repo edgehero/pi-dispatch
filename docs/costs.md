@@ -273,7 +273,8 @@ no charge, the run record still prices it at list price in `tokens.cost`, and `t
 The windows are charged `tokens.cost` less `tokens.costNotional`, and `notionalProviders` on the record names the
 providers whose calls were notional.
 
-So a subscription job's limits are the account's quota (checked before it starts) and its turn and time limits. A
+So a subscription job's limits are the account's quota (checked before it starts), its turn and time limits and, when
+its trigger sets one, its list-price allowance (below). A
 job that mixes them, a subscription model with an API-key `run.auxiliaryModels` entry for example, reserves its cap
 and settles only what its API-key calls cost. A job whose every model is notional reserves nothing, and
 `pi-dispatch doctor` warns when a trigger's own `run.maxCostUsd` then bounds nothing on that host.
@@ -282,6 +283,18 @@ The job image and the worker both have to know this. An image from before this r
 call against the cap, as before (the safe side); with a worker from before it, the connection is never marked, so
 every call counts. A worker of this release with an older image settles the whole cost of a mixed attempt, since the
 image writes no `costNotional`. See [the upgrade guide](upgrading.md).
+
+**A list-price allowance for subscription calls** (issue #1008). A trigger's `run.maxSubscriptionUsd` limits the
+list price of the job's notional calls, the `tokens.costNotional` part, which no cap counts: the catalog price, without
+the long-context surcharge the cap adds to an Anthropic call past 200,000 input tokens. The runner checks it
+between calls against what those calls settled at and holds nothing for a call still running: the calls already running
+when it is reached finish and count, so `costNotional` can end above it, and the next subscription call stops the run
+as `subscription-allowance`. A subscription call whose cost cannot be read (absent, not a number, negative) leaves the
+total unknown and stops the run at the next subscription call the same way; a model priced at zero adds nothing and is
+not bounded by it. It is counted per attempt, as the cap is. It never counts a call that can be billed, and the record
+carries it as `tokens.allowanceMicros`. No deployment value stands behind it, so a trigger without one leaves its subscription calls
+with no dollar limit. A malformed value on a queued job reads as 0 and refuses the first subscription call. See
+[triggers.md](triggers.md#a-subscription-allowance-per-job).
 
 ### Parallel calls
 
@@ -629,8 +642,10 @@ is an open issue.
 - **A crash holds the reservation until the key expires.** A worker that dies between reserve and settle leaves
   the hold in every window it touched: 2 days for a day key, 9 for a week, 40 for a month.
 - **A subscription connection without paid extra usage is bounded by its quota, not by dollars** (issue #1008):
-  its calls leave the cap and every window. Only the account's quota and the job's turn and time limits bound such
-  a job. In a job that mixes it with API-key calls, a notional call whose answer reported no usage (or no price)
+  its calls leave the cap and every window. The account's quota, the job's turn and time limits and the trigger's
+  optional list-price allowance (`run.maxSubscriptionUsd`) bound such a job; the allowance is checked between calls
+  on settled cost, so it can be passed by the calls in flight; a subscription call whose cost cannot be read stops the
+  run at the next one, and a model priced at zero is bounded by neither. In a job that mixes it with API-key calls, a notional call whose answer reported no usage (or no price)
   still floors the settlement, the safe side.
 - **Contention near a cap.** Each job holds its whole per-job cap while it runs. A window with $1 left refuses a
   $2-capped job that would have spent $0.30. The refusal is final for that delivery.
