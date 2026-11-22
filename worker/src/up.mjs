@@ -35,7 +35,9 @@
  * Converge-style, not transactional: a declined or failed step is reported and the pass continues, so
  * one flaky pull does not hide the doctor report that says what else is missing. Exit code mirrors
  * doctor's: 0 unless the docker daemon was unreachable up front (nothing else can be probed, so up
- * stops there with 1) or doctor itself returned nonzero (its code is returned verbatim).
+ * stops there with 1) or doctor itself returned nonzero (its code is returned verbatim). An image read an engine left
+ * unanswered (issue #1040) either stops up there with 1 or skips that venue's steps alone, as its gate's refusal would,
+ * by the rule written beside `DOCKER_STEP_TIMEOUT_MS`.
  */
 import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
@@ -97,14 +99,26 @@ const VALKEY_STOP_ARGS = ["stop", "pi-dispatch-valkey"];
 const VALKEY_RM_ARGS = ["rm", "pi-dispatch-valkey"];
 
 // Issue #1021: the bounds of the docker steps a daemon that stops answering held `up` at, each for as long as it stayed
-// silent. `DOCKER_STEP_TIMEOUT_MS`, thirty seconds, for every short daemon call before a Valkey starts: `docker version`,
-// the ownership reads (`query`: the container inspect, `ps -a --filter volume=`, the volume inspect) and the Valkey owner
-// check's exec, stop (its own 10 s grace inside it) and rm. `OWNER_CHECK_RUN_TIMEOUT_MS`, two minutes, for the owner
-// check's `docker run`, which creates and starts a Valkey, and on a host that has not got `VALKEY_IMAGE` pulls it first:
-// nothing else in `up` pulls that image, so that pull falls inside this bound (a few megabytes; not measured). The run's
-// refusal names the `docker pull` that takes it out. The marker's wait is `OWNER_CHECK_WAIT_MS` of the clock in all.
-// Unbounded still: the job image steps, compose, and the Valkey and egress proxy runs, stops and removals, all long by
-// nature or streamed for the operator to watch.
+// silent. `DOCKER_STEP_TIMEOUT_MS`, thirty seconds, for every short daemon call before a Valkey starts:
+// `docker version`, the job image's presence read on each engine a venue pulls it into (`docker image inspect`,
+// `podman image exists`, of the image the worker runs, the default or PI_JOB_IMAGE's) and the openshell venues' image
+// capability read on the gateway's engine (both since issue #1040), the ownership reads (`query`: the container
+// inspect, `ps -a --filter volume=`, the volume inspect) and the Valkey owner check's exec, stop (its own 10 s grace
+// inside it) and rm. An image read that overran is said with the engine named as not answering and the command. It
+// stops `up` there, nothing started, where that engine's gate refusal would (the docker venue's read; the podman
+// venue's with no docker venue beside it), and an openshell venue's read where openshell is the only venue or another
+// venue runs on the engine that did not answer, whose every later step asks it again. Otherwise only the venue that
+// read it is skipped, as after its refused gate, and an openshell venue skipped so makes `up` exit non-zero at the end.
+// `OWNER_CHECK_RUN_TIMEOUT_MS`, two minutes, for the owner check's `docker run`, which creates and starts a Valkey, and
+// on a host that has not got `VALKEY_IMAGE` pulls it first: nothing else in `up` pulls that image, so that pull falls
+// inside this bound (a few megabytes; not measured). The run's refusal names the `docker pull` that takes it out. The
+// marker's wait is `OWNER_CHECK_WAIT_MS` of the clock in all. The openshell gate's own reads (its engine's `version`
+// among them) have that gate's 15 s read bound instead. Unbounded still: the job image's pull and tag on either engine,
+// compose, the Valkey volume's create, and the Valkey and egress proxy containers' runs, stops and removals, all long
+// by nature or streamed for the operator to watch; the egress step's own reads (the proxy's inspect, the network
+// inspect), which come after the Valkey step; and on podman every command of the stack step (its `ps` and `inspect`
+// reads, systemctl and loginctl), which runs after a gate saw podman answer (`podmanGate`'s `podman info`, or the
+// openshell gate's bounded `podman version`) and after the bounded image read.
 const OWNER_CHECK_RUN_TIMEOUT_MS = 120_000;
 const DOCKER_STEP_TIMEOUT_MS = 30_000;
 const OWNER_CHECK_WAIT_MS = 20_000;
@@ -379,8 +393,9 @@ export async function runUp(argv = [], deps = {}) {
 	}
 	out("✓ Docker daemon reachable\n");
 
-	// (b) the default job image. Presence first, so the happy path re-run prompts for nothing.
-	await dockerImageStep({ jobImage, spawn, out, yes, prompt, summary });
+	// (b) the default job image. Presence first, so the happy path re-run prompts for nothing. Issue #1040: that read is
+	// bounded too, and a daemon that stopped answering it stops `up` here, as the `docker version` gate above does.
+	if ((await dockerImageStep({ jobImage, spawn, out, yes, prompt, summary, timeoutMs: dockerStepTimeoutMs }))?.unanswered) return cannotContinue(out, "docker");
 
 	}
 
@@ -399,7 +414,15 @@ export async function runUp(argv = [], deps = {}) {
 			out("  the docker steps above are unaffected; the podman steps below are skipped\n");
 		} else {
 			podmanReady = true;
-			await podmanImageStep({ jobImage, spawn, out, yes, prompt, summary });
+			// Issue #1040: its presence read is bounded, and podman not answering it is met as the gate's refusal is: the
+			// docker steps still run beside it, and alone `up` stops here.
+			const read = await podmanImageStep({ jobImage, spawn, out, yes, prompt, summary, timeoutMs: dockerStepTimeoutMs });
+			if (read?.unanswered) {
+				podmanReady = false;
+				summary.push(["podman", `NOT ready: ${read.unanswered}`]);
+				if (!dockerUsed) return cannotContinue(out, "podman");
+				out("  the docker steps above are unaffected; the podman steps below are skipped\n");
+			}
 		}
 	}
 
@@ -407,10 +430,24 @@ export async function runUp(argv = [], deps = {}) {
 	// PI_OPENSHELL_ENGINE names. The docker and podman steps above are reused as they are, without `podmanGate`, whose
 	// rootless job-user rule is the podman venue's and not this one's; where `local` or `podman` already put the image into
 	// that same store (`imageEngine` null) nothing is pulled twice. Then what the image declares, as doctor reads it.
+	// Issue #1040: each of these reads is bounded. One that overran is met as a refused openshell gate is (a0) when another
+	// venue runs on the OTHER engine (`local` beside openshell on podman, `podman` beside openshell on docker): the openshell
+	// steps are skipped, the other venue's still run, and `up` exits non-zero at the end. It stops `up` at once when
+	// openshell is the only venue, or when another venue runs on the very engine that did not answer, whose every step
+	// after this asks that engine again: going on there would only meet its next read, and the next with no bound of its
+	// own (the egress step's on docker, the stack step's on podman) would hang where this one was bounded.
 	if (openshellReady) {
-		if (openshell.imageEngine === "docker") await dockerImageStep({ jobImage, spawn, out, yes, prompt, summary });
-		else if (openshell.imageEngine === "podman") await podmanImageStep({ jobImage, spawn, out, yes, prompt, summary });
-		await openshellImageCapsStep({ engine: openshell.engine, venues, jobImage, spawn, out, summary });
+		const step = { jobImage, spawn, out, yes, prompt, summary, timeoutMs: dockerStepTimeoutMs };
+		const pulled = openshell.imageEngine === "docker" ? await dockerImageStep(step) : openshell.imageEngine === "podman" ? await podmanImageStep(step) : undefined;
+		const read = pulled?.unanswered ? pulled : await openshellImageCapsStep({ engine: openshell.engine, venues, jobImage, spawn, out, summary, timeoutMs: dockerStepTimeoutMs });
+		if (read?.unanswered) {
+			const sameEngine = openshell.engine === "docker" ? dockerUsed : podmanReady;
+			if (sameEngine || !(dockerUsed || podmanReady)) return cannotContinue(out, openshell.engine);
+			openshellReady = false;
+			openshellFailed = true;
+			summary.push(["openshell", `NOT ready: ${read.unanswered}`]);
+			out("  the other venues' steps below are unaffected; the openshell steps are skipped\n");
+		}
 	}
 
 	// (d) init — always, and unconditionally safe to re-run: its never-clobber is contractual, so an
@@ -1492,12 +1529,15 @@ function registrationCount(read) {
 /**
  * What the job image declares, read from the gateway's engine as doctor reads it (issue #707): `sandboxLayout` is copy
  * mode's requirement (its runner finds the job under /sandbox), `transcriptStderr` its live transcript. Bind mode reads
- * the `mounts` layout and tails the host's session file, so for it only the image's presence is said.
+ * the `mounts` layout and tails the host's session file, so for it only the image's presence is said. Issue #1040: the
+ * read is bounded at `timeoutMs`, and `{ unanswered }` comes back when the engine did not answer it (`runUp` decides).
  */
-async function openshellImageCapsStep({ engine, venues, jobImage, spawn, out, summary }) {
+async function openshellImageCapsStep({ engine, venues, jobImage, spawn, out, summary, timeoutMs }) {
 	if (jobImage.skip) return;
 	const image = jobImage.image;
-	const read = await runCmdQuery(spawn, engine, ["image", "inspect", "--format", '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}', image]);
+	const args = ["image", "inspect", "--format", '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}', image];
+	const read = await runCmdQuery(spawn, engine, args, { timeoutMs });
+	if (read.timedOut) return imageReadUnanswered(out, engine, args, timeoutMs);
 	if (read.code !== 0) {
 		out(`✗ the job image (${image}) is not in ${engine}'s store, the store the OpenShell gateway runs sandboxes from\n`);
 		summary.push(["openshell image", `${image} NOT in ${engine}'s store: pull or build it there`]);
@@ -1523,11 +1563,40 @@ async function openshellImageCapsStep({ engine, venues, jobImage, spawn, out, su
 	summary.push(["openshell image", `${image} declares sandboxLayout and transcriptStderr`]);
 }
 
-/** The default job image into docker's store (step b), shared by the `local` venue and an openshell venue on docker (issue #707). */
-async function dockerImageStep({ jobImage, spawn, out, yes, prompt, summary }) {
-	if (jobImage.skip) summary.push(["job image", "not checked: which image the worker runs is unknown (see above)"]);
-	else if (!jobImage.isDefault) await overrideImageStep({ bin: "docker", jobImage, spawn, out, yes, prompt, summary });
-	else if (await runCmd(spawn, "docker", ["image", "inspect", LOCAL_IMAGE]) === 0) {
+/**
+ * An image read that overran its bound (issue #1040), said in the `docker version` gate's words with the command, so the
+ * operator sees which call the engine left unanswered. Returns `{ unanswered }`, the same in a sentence for the summary;
+ * `runUp` decides whether the pass stops. The engine may still finish the read after its CLI is killed, which changes
+ * nothing: it only reads.
+ */
+function imageReadUnanswered(out, bin, args, timeoutMs) {
+	const command = `${bin} ${quoteArgs(args)}`;
+	const secs = Math.round(timeoutMs / 1000);
+	out(`✗ ${bin === "docker" ? "Docker daemon" : bin} not answering\n    → \`${command}\` did not finish within ${secs} s: check that ${bin === "docker" ? "the daemon answers" : `${bin} answers as this account`}, then re-run\n`);
+	return { unanswered: `${bin} did not answer \`${command}\` within ${secs} s` };
+}
+
+/** The closing line of a pass that stops at an engine that did not answer (issue #1040), and `up`'s exit code for it. */
+function cannotContinue(out, bin) {
+	out(`\nup: cannot continue without ${bin === "docker" ? "Docker" : bin}: fix the above, then re-run \`pi-dispatch up\`.\n`);
+	return 1;
+}
+
+/**
+ * The default job image into docker's store (step b), shared by the `local` venue and an openshell venue on docker (issue
+ * #707). The presence read is bounded at `timeoutMs` (issue #1040), and `{ unanswered }` comes back when docker did not
+ * answer it.
+ */
+async function dockerImageStep({ jobImage, spawn, out, yes, prompt, summary, timeoutMs }) {
+	if (jobImage.skip) {
+		summary.push(["job image", "not checked: which image the worker runs is unknown (see above)"]);
+		return;
+	}
+	if (!jobImage.isDefault) return overrideImageStep({ bin: "docker", jobImage, spawn, out, yes, prompt, summary, timeoutMs });
+	const presenceArgs = ["image", "inspect", LOCAL_IMAGE];
+	const presence = await runCmdQuery(spawn, "docker", presenceArgs, { timeoutMs });
+	if (presence.timedOut) return imageReadUnanswered(out, "docker", presenceArgs, timeoutMs);
+	if (presence.code === 0) {
 		out(`✓ Job image present (${LOCAL_IMAGE})\n`);
 		summary.push(["job image", `already present (${LOCAL_IMAGE})`]);
 	} else {
@@ -1620,16 +1689,21 @@ function jobImageMeaning(value) {
  * The image an overriding PI_JOB_IMAGE names (issue #523), into the store `bin` reads: present is left alone, absent is
  * offered as ONE pull of exactly that name when it names its registry (a short name is never pulled). No tag: the worker runs the name as configured, so `pi-job:latest` means
  * nothing to it, and re-pointing that tag would change what a later unset PI_JOB_IMAGE runs. The name is the operator's
- * own configuration, shown in full before consent, and jobs still run with --pull=never.
+ * own configuration, shown in full before consent, and jobs still run with --pull=never. The presence read (`image
+ * inspect` on docker, `image exists` on podman) is bounded at `timeoutMs` (issue #1040), and `{ unanswered }` comes back
+ * when it overran.
  */
-async function overrideImageStep({ bin, jobImage, spawn, out, yes, prompt, summary }) {
+async function overrideImageStep({ bin, jobImage, spawn, out, yes, prompt, summary, timeoutMs }) {
 	const { image, from } = jobImage;
 	const podman = bin === "podman";
 	const row = podman ? "podman job image" : "job image";
 	const where = podman ? "in this account's Podman store" : "on this host";
 	const named = `PI_JOB_IMAGE from ${from}`;
 	const pullArgs = ["pull", image];
-	if ((await runCmd(spawn, bin, podman ? ["image", "exists", image] : ["image", "inspect", image])) === 0) {
+	const presenceArgs = podman ? ["image", "exists", image] : ["image", "inspect", image];
+	const presence = await runCmdQuery(spawn, bin, presenceArgs, { timeoutMs });
+	if (presence.timedOut) return imageReadUnanswered(out, bin, presenceArgs, timeoutMs);
+	if (presence.code === 0) {
 		out(`✓ Job image present ${podman ? "in this account's Podman store " : ""}(${image}, ${named})\n`);
 		summary.push([row, `already present (${image})`]);
 		return;
@@ -1657,16 +1731,21 @@ async function overrideImageStep({ bin, jobImage, spawn, out, yes, prompt, summa
 	}
 }
 
-/** The default job image into this account's Podman store, mirroring the docker step (b) line for line. */
-async function podmanImageStep({ jobImage, spawn, out, yes, prompt, summary }) {
+/**
+ * The default job image into this account's Podman store, mirroring the docker step (b) line for line, its presence read
+ * bounded at `timeoutMs` too (issue #1040): `{ unanswered }` when podman did not answer it.
+ */
+async function podmanImageStep({ jobImage, spawn, out, yes, prompt, summary, timeoutMs }) {
 	// The same rule as docker's step (issue #523): only the image the worker runs, under its own name when PI_JOB_IMAGE
 	// names one. The podman venue reads the same key (`jobImageFrom`), so its store needs exactly that image too.
 	if (jobImage.skip) {
 		summary.push(["podman job image", "not checked: which image the worker runs is unknown (see above)"]);
 		return;
 	}
-	if (!jobImage.isDefault) return overrideImageStep({ bin: "podman", jobImage, spawn, out, yes, prompt, summary });
-	if ((await runCmd(spawn, "podman", PODMAN_EXISTS_ARGS)) === 0) {
+	if (!jobImage.isDefault) return overrideImageStep({ bin: "podman", jobImage, spawn, out, yes, prompt, summary, timeoutMs });
+	const presence = await runCmdQuery(spawn, "podman", PODMAN_EXISTS_ARGS, { timeoutMs });
+	if (presence.timedOut) return imageReadUnanswered(out, "podman", PODMAN_EXISTS_ARGS, timeoutMs);
+	if (presence.code === 0) {
 		out(`✓ Job image present in this account's Podman store (${LOCAL_IMAGE})\n`);
 		summary.push(["podman job image", `already present (${LOCAL_IMAGE})`]);
 		return;
@@ -2302,21 +2381,6 @@ async function defaultProbeValkeyAuth(url, { env, cwd }) {
 	return (await valkeyAuthState(url, { withoutPassword: true, context: valkeyClientContext({ env, cwd }) })).state;
 }
 
-/** Exit code of a spawned command; null when it could not launch (not on PATH) — mirrors doctor. */
-function runCmd(spawn, cmd, args) {
-	return new Promise((resolve) => {
-		let child;
-		try {
-			child = spawn(cmd, args, { stdio: "ignore" });
-		} catch {
-			resolve(null);
-			return;
-		}
-		child.on("error", () => resolve(null)); // ENOENT etc. — the binary is not available
-		child.on("close", (code) => resolve(code));
-	});
-}
-
 /**
  * Run a CONSENTED command with its stdout+stderr streamed to `out` as it happens — a docker pull's
  * progress is the operator's confirmation that the thing they approved is the thing running.
@@ -2437,7 +2501,7 @@ async function ensureEgressNetwork(spawn, out, network) {
 	await runStreamed(spawn, "docker", EGRESS_NETWORK_ARGS, out);
 }
 
-/** Like runCmd but with stdout+stderr captured, for read-only lookups (docker ps). */
+/** A spawned command's exit code with stdout+stderr captured, for read-only lookups (docker ps). */
 function runCmdCapture(spawn, cmd, args) {
 	return new Promise((resolve) => {
 		let child;

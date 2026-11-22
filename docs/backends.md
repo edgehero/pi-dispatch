@@ -374,10 +374,18 @@ the first chunk on the CLI's stdout, which carries only the container's own outp
 messages on stderr): an upper bound on the whole start, create, start and the runner's boot included. The runner
 writes a line before its first model call on every job whose idle watch is armed, earlier with staged packages; a job
 without one has its exit line as the first output at the latest, so the bound can be the whole run. A slow create
-shows in both lines, a slow start as a small first number and a large second one. A container that writes no stdout
-logs no first output. Both carry durations, not wall times: on a host whose log has no timestamps of its own (the
-macOS launchd service's), read them by their order, after `worker_started` and beside `sandbox_reaper_pass`, and
-expect `container_created` up to one poll step (250 ms) after `container_first_output` when the create was very fast.
+shows in both lines. A small first number and a large second one is a slow start, or anything after the start before
+the container's first line reached the CLI (the container's boot, or the output's way back): measured, containerd
+stopped right after a container had started (docker's `StartedAt` 21 ms) gave a first output at 8086 ms. A container
+that writes no stdout logs no first output. Both numbers are durations, and every worker log line also carries `time`,
+the wall time it was written, in UTC with milliseconds (issue #1040). So on a host whose log has no time of its own
+(the macOS launchd service writes the worker's output to a plain file) these lines, `sandbox_reaper_pass` and
+`cpu_reserve_fail_open` can be lined up against another clock, such as your VM's own view of a slow window. The run was
+spawned `ms` before `container_first_output`'s `time`, to the millisecond (both are read in the one moment that line
+is written), and up to one poll step (250 ms) more before `container_created`'s, or more if the worker's event loop
+was held, since that line is written when the poll sees the file. That is also why `container_created` can come after
+`container_first_output` when the create was very fast. Under systemd, journald stamps each line with its own time as
+well (local time, to the second, unless `journalctl -o short-iso-precise` asks for more).
 A backend whose argv carries no `--cidfile` logs neither, and one whose CLI writes the file at another moment, or
 prints on stdout itself, would make a line mean something else.
 
