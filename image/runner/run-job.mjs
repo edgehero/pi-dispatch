@@ -400,10 +400,13 @@ async function main() {
 	// with neither there is no guard, so such a job runs exactly as before.
 	// The parent's children hook (issue #500 part E, child-watch.mjs): folds the child ledgers into this meter, writes
 	// SPENT and STOP, judges the stops on the job's whole spend, and detects pi processes that report through no ledger.
-	// Built before the guard, whose `external` is every child's spend and in-flight bound as of the last fold. From here
-	// on the exit line carries childTotal, childProcesses and unmeteredChildren, zeros with no children.
+	// Built before the guard, whose `external` is every child's spend and in-flight bound as of the last fold, whose
+	// `externalInflight` the in-flight part of it, which a parent call waits for rather than being refused by, and whose
+	// `claim` and `outsideWaiting` the turn every admission takes while anyone in the job waits, as a child's does
+	// (issue #985). From here on the exit line carries childTotal, childProcesses and unmeteredChildren, zeros with no
+	// children.
 	childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });
-	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), subscriptionAdmission: subscriptionRegistration ? (provider) => subscriptionRegistration.admitted(provider) : null, subscriptions: subscriptionEntries, refreshCredentials: () => credentialRefresher?.apply() });
+	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), externalInflight: () => childWatch.externalInflight(), claim: (waited) => childWatch.claim(waited), outsideWaiting: () => childWatch.outsideWaiting(), subscriptionAdmission: subscriptionRegistration ? (provider) => subscriptionRegistration.admitted(provider) : null, subscriptions: subscriptionEntries, refreshCredentials: () => credentialRefresher?.apply() });
 	costRefusalWhy = () => policyGuard?.refusedWhy() ?? null;
 	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch });
 	// The price table the meter pinned from this runtime, before any extension loads, handed to pi children (issue #587's

@@ -160,7 +160,7 @@ test("the same under a dollar cap: the child judges against SPENT, the parent st
 	let own = { spentMicros: 900_000, inflightMicros: 0 };
 	const hook = createChildWatch({ dir: w.ledger, meter, guard: () => ({ spend: () => own }), proc: null });
 	hook.sample();
-	assert.deepEqual(JSON.parse(readFileSync(join(w.ledger, "SPENT"), "utf8")), { v: 1, total: 900_000, byLedger: {} });
+	assert.deepEqual(JSON.parse(readFileSync(join(w.ledger, "SPENT"), "utf8")), { v: 1, total: 900_000, byLedger: {}, inflight: 0, inflightByLedger: {}, gen: 1, waiting: 0 });
 	let spent;
 	const result = await rpcChild(w, {
 		env: { ...w.env, PI_MAX_COST_MICROS: String(cap) },
@@ -178,7 +178,7 @@ test("the same under a dollar cap: the child judges against SPENT, the parent st
 	assert.deepEqual(stopOf(w.ledger), { v: 1, reason: COST_CAP });
 	assert.match(result.stdout, new RegExp(STOP_MESSAGES[COST_CAP]));
 	const [name] = readdirSync(w.ledger).filter((file) => CHILD_LEDGER_NAME.test(file));
-	assert.deepEqual(spent, { v: 1, total: 999_500 + 777, byLedger: { [name]: 777 } }, "SPENT carries each ledger's part");
+	assert.deepEqual(spent, { v: 1, total: 999_500 + 777, byLedger: { [name]: 777 }, inflight: 0, inflightByLedger: {}, gen: 2, waiting: 0 }, "SPENT carries each ledger's part");
 	hook.teardown();
 	assert.equal(meter.snapshot().childTotal, 777);
 });

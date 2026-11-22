@@ -233,7 +233,7 @@ test("issue #985: any onPayload that throws withheld its request, so its settle 
 const LOCAL = Object.freeze({ id: "local", api: "openai-completions", provider: "local", baseUrl: "http://127.0.0.1:1" });
 
 /** A guard whose bound is the model's `bound`, or the final body's `grow` when larger; an injected clock and timer. */
-function finalWaitGuard({ cap, external = null }) {
+function finalWaitGuard({ cap, external = null, externalInflight = null, claim = null, outsideWaiting = null }) {
 	const clock = { now: 0 };
 	const timer = { run: null };
 	const logged = [];
@@ -242,6 +242,9 @@ function finalWaitGuard({ cap, external = null }) {
 		env: {},
 		bound: (method, model, context, options, env, body) => (body === undefined ? model.bound : Math.max(model.bound, body.grow ?? 0)),
 		external,
+		externalInflight,
+		claim,
+		outsideWaiting,
 		log: (event, fields) => logged.push({ event, fields }),
 		now: () => clock.now,
 		setTimer: (run) => ((timer.run = run), { unref() {} }),
@@ -292,6 +295,101 @@ test("issue #985: a final payload's retake counts the outside spend that rose wh
 	g.within("after the other settled");
 	assert.equal(sending.state, "pi-dispatch: cost cap reached", "50 + 400 + 700 > 1000: no retake, and waiting can no longer help");
 	assert.deepEqual([g.guard.state.inflight, g.guard.refusedWhy(), stops], [0, "final-payload", ["cost-cap"]]);
+});
+
+test("issue #985: a final payload refused only by holds in another process releases its own, waits, and takes the larger hold back once they settle there", { timeout: 10_000 }, async () => {
+	let outside = 500; // all of it in flight in another process (a sibling child, or the parent)
+	let inflight = 500;
+	const g = finalWaitGuard({ cap: 1000, external: () => outside, externalInflight: () => inflight });
+	const mine = handStream();
+	const request = sizedCall(300);
+	assert.equal(g.guard.admit(request), null, "0 + 0 + 500 + 300 <= 1000");
+	const stops = [];
+	const prepared = g.guard.prepare({ ...request, stop: (reason) => stops.push(reason), stopped: () => null })[1];
+	g.guard.bind(mine.stream);
+	const sending = outcomeOf(prepared.onPayload(grown(700))); // 0 + 500 + 700 > 1000; 0 + 0 + 700 <= 1000 once the 500 settles
+	await flush();
+	g.within("waiting, holding nothing");
+	assert.deepEqual([sending.state, g.guard.state.inflight], ["pending", 0], "its 300 given back while it waits");
+	assert.deepEqual(g.logged.at(-1), { event: "cost_wait", fields: { why: "final-payload", bound: 700, spent: 0, inflight: 0, external: 500, externalInflight: 500, cap: 1000, waiting: 0 } });
+	g.timer.run();
+	await flush();
+	assert.equal(sending.state, "pending", "nothing settled elsewhere yet");
+	outside = 100; // settled there at 100
+	inflight = 0;
+	g.timer.run();
+	await flush();
+	g.within("retaken");
+	assert.deepEqual([sending.state, g.guard.state.inflight, stops], ["sent", 700, []], "0 + 0 + 100 + 700 <= 1000");
+});
+
+test("issue #985: a final payload that waited takes its larger hold back only with the wait claim", { timeout: 10_000 }, async () => {
+	let won = false;
+	const g = finalWaitGuard({ cap: 1000, claim: () => won });
+	const { other, prepared, stops } = finalWaitRace(g, { otherBound: 400, mineBound: 300 });
+	const sending = outcomeOf(prepared.onPayload(grown(700))); // 400 + 700 > 1000; it fits once the other settles
+	await flush();
+	other.end(answered(0.00005));
+	await flush();
+	g.within("fits, claim lost");
+	assert.deepEqual([sending.state, g.guard.state.inflight], ["pending", 0], "not retaken without the claim");
+	won = true;
+	g.timer.run();
+	await flush();
+	g.within("claimed");
+	assert.deepEqual([sending.state, g.guard.state.inflight, stops], ["sent", 700, []]);
+});
+
+test("issue #985: while another process waits, a final payload that GROWS takes its turn for the growth; without it, it waits at the front and grows in its turn", { timeout: 10_000 }, async () => {
+	let won = false;
+	const g = finalWaitGuard({ cap: 1000, external: () => 0, externalInflight: () => 0, claim: () => won, outsideWaiting: () => true });
+	const mine = handStream();
+	const request = sizedCall(300);
+	won = true;
+	assert.equal(g.guard.admit(request), null, "admitted in its turn");
+	won = false;
+	const prepared = g.guard.prepare({ ...request, stop: () => {}, stopped: () => null })[1];
+	g.guard.bind(mine.stream);
+	const same = outcomeOf(prepared.onPayload(grown(300)));
+	await flush();
+	assert.equal(same.state, "sent", "a final payload that does not grow takes nothing more, so no turn");
+	const second = handStream();
+	won = true;
+	const request2 = sizedCall(200);
+	assert.equal(g.guard.admit(request2), null);
+	won = false;
+	const prepared2 = g.guard.prepare({ ...request2, stop: () => {}, stopped: () => null })[1];
+	g.guard.bind(second.stream);
+	const growing = outcomeOf(prepared2.onPayload(grown(400))); // 300 + 400 <= 1000 fits, but the growth is an admission
+	await flush();
+	g.within("growth without its turn");
+	assert.deepEqual([growing.state, g.guard.state.inflight], ["pending", 300], "its 200 given back; it waits at the front");
+	assert.equal(g.logged.at(-1).fields.why, "turn");
+	won = true;
+	g.timer.run();
+	await flush();
+	g.within("grown in its turn");
+	assert.deepEqual([growing.state, g.guard.state.inflight], ["sent", 700]);
+});
+
+test("issue #985: while anyone waits, a growing final payload that may not wait and has no turn is refused under the rule turn; an aborted one gives up unsent, refusing nothing", { timeout: 10_000 }, async () => {
+	for (const aborted of [false, true]) {
+		let won = true;
+		const g = finalWaitGuard({ cap: 1000, external: () => 0, externalInflight: () => 0, claim: () => won, outsideWaiting: () => true });
+		const controller = new AbortController();
+		const request = { ...sizedCall(200, aborted ? { signal: controller.signal } : {}), waitable: false };
+		assert.equal(g.guard.admit(request), null, "admitted in its turn");
+		won = false;
+		const stops = [];
+		const prepared = g.guard.prepare({ ...request, stop: (reason) => stops.push(reason), stopped: () => null })[1];
+		g.guard.bind(handStream().stream);
+		if (aborted) controller.abort();
+		const sending = outcomeOf(prepared.onPayload(grown(400))); // 400 fits, but the growth has no turn
+		await flush();
+		g.within(aborted ? "aborted" : "refused");
+		if (aborted) assert.deepEqual([sending.state, g.guard.state.refused, stops, g.guard.state.inflight], [WAIT_ABORTED_MESSAGE, 0, [], 200], "unsent, its 200 held to its settle");
+		else assert.deepEqual([sending.state, g.guard.refusedWhy(), stops, g.guard.state.inflight], ["pi-dispatch: cost cap reached", "turn", ["cost-cap"], 200], "never grown without its turn, refused under the rule turn");
+	}
 });
 
 test("issue #985: a final payload whose job stopped while it waited ends with that stop and is never sent", { timeout: 10_000 }, async () => {

@@ -993,6 +993,26 @@ function externalStop(isStopped) {
 }
 
 /**
+ * The stop a final-payload wait ends on (issue #985): this meter's own, or one from outside this process (`isStopped`, a
+ * child reading its parent's STOP), made this meter's as judge makes it. A call waiting at its final payload holds the
+ * FRONT of its guard's queue, so the drain asks no other call's judge while it waits; without this a parent's STOP would
+ * not reach a child's final-payload waiter, which would then be sent once room appeared. Never throws: it runs inside
+ * the drain, where a throw would leave the waiting onPayload unanswered for good.
+ */
+function stopNow(meter, isStopped) {
+	if (meter.state.stopReason !== null) return meter.state.stopReason;
+	if (isStopped === null) return null;
+	const reason = externalStop(isStopped);
+	if (reason === null) return null;
+	try {
+		meter.stop(reason);
+	} catch {
+		// The reason still ends the wait.
+	}
+	return meter.state.stopReason ?? reason;
+}
+
+/**
  * One call's verdict, for both halves: the stop reason that ends it, null to dispatch it unjudged, or ADMITTED.
  *
  * THE GUARD CONTRACT (issues #501, #502). `guard.admit({ method, model, args })` answers null or undefined to let
@@ -1093,8 +1113,8 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 	// Whether a call made now may wait for room (judge's WAITING): never under an admitted dispatch (HOLDING).
 	const waitable = () => deferred !== null && hardStop !== null && typeof guard?.wait === "function" && holding.getStore() !== true;
 	// The call's arguments as the guard prepared them for an admitted call (the model guard wraps options.onPayload).
-	// `stopped()` (issue #985) lets a final-payload wait end when the job stopped meanwhile.
-	const prepareFor = (verdict, method, model, args) => (verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method, model, args, stop: (reason) => meter.stop(reason), stopped: () => meter.state.stopReason }) : args);
+	// `stopped()` (issue #985) lets a final-payload wait end when the job stopped meanwhile, here or outside (stopNow).
+	const prepareFor = (verdict, method, model, args) => (verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method, model, args, stop: (reason) => meter.stop(reason), stopped: () => stopNow(meter, isStopped) }) : args);
 	// Judged and dispatched on ONE copy (issue #502, PR #538's review): a model whose fields are getters could
 	// answer the guard with one id and the provider with another. Only while a guard can judge, so a job with no
 	// policy dispatches the caller's own object exactly as before.
@@ -1233,7 +1253,7 @@ export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, gu
 			const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: reentry, isStopped, legacy: true, priced: guard !== null && hardStop ? priceEntry(prices, model) : undefined, waitable, waiter });
 			if (verdict === DEFERRED) return DEFERRED;
 			if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
-			const options = verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method: kind, model, args: [context, given], stop: (reason) => meter.stop(reason), stopped: () => meter.state.stopReason })[1] : given;
+			const options = verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method: kind, model, args: [context, given], stop: (reason) => meter.stop(reason), stopped: () => stopNow(meter, isStopped) })[1] : given;
 			const provider = fallbackModels?.getProvider?.(model.provider);
 			const builtin = provider?.getModels?.().some((candidate) => candidate.api === model.api) ? provider : null;
 			// Any call other than the runtime call's own re-entry, made under a runtime call's dispatch, is that call's forward
@@ -1811,6 +1831,12 @@ export async function installProcessUsageMeter({
 		if (toreDown) return;
 		toreDown = true;
 		runtimeLayer.restore();
+		// A call still waiting for room (issue #985) no longer keeps the process alive: the session that made it is over.
+		try {
+			guard?.close?.();
+		} catch {
+			// A guard's teardown never fails the meter's.
+		}
 		// THE RE-ARM GAP, made inferable (REQ-TOKEN-ACCOUNTING-AND-CAPS). Compat half only: at 0.99.1 a
 		// session's own calls never enter the registry, so this window can hide only a legacy extension call.
 		//
@@ -2450,21 +2476,36 @@ export function unreportedUsage(message, api) {
  * fraction of its bound. The cap stays a hard bound (CONST-BUDGET-BEFORE-TOKENS): nothing is under-reserved. Instead a
  * call offered as `waitable` (judge's WAITING) that does not fit, and is refused ONLY by holds that will settle, gets
  * COST_WAIT: `spent + (external() - its part in flight) + bound <= cap`, and something to wait for (a hold of ours in
- * flight, or a waiter ahead of it). The wrapper queues it (`wait(retry)`) and answers its caller with a placeholder.
+ * flight, a hold in flight elsewhere, or a waiter ahead of it). The wrapper queues it (`wait(retry)`) and answers its
+ * caller with a placeholder.
  * The queue is FIFO: a new waitable call queues behind every waiter even when it would fit, so a large call is never
  * starved by small ones. Every settle (and a refusal, which stops the job) schedules a DRAIN with queueMicrotask, never
  * synchronously: flushPending settles inside admit, and a drain there would re-enter admit and break the single pending
- * slot. The drain retries the front waiter and goes on while waiters are admitted or end; a 1 s unref'd timer drains
- * too while anyone waits, which picks up what no settle signals (a meter stop that is not a refusal, a drop in
- * external spend). A waiter that sees no progress (no settle of ours, no drop in external spend) for COST_WAIT_IDLE_MS is
- * refused `over-cap`, its `cost_refused` line carrying `waited` (ms); so is one whose wait can no longer help (spend
- * rose meanwhile). Log lines, numbers only: `cost_wait` when a call starts waiting, `cost_waited { waitedMs }` when it
- * is admitted. Deadlock: a waiter holds nothing, every hold belongs to a call already sent, whose settle depends only
+ * slot. The drain retries the front waiter and goes on while waiters are admitted or end; a 1 s timer drains too while
+ * anyone waits, which picks up what no settle signals (a meter stop that is not a refusal, a STOP from outside, a
+ * settle in another process); it is unref'd, but ref'd while nothing of ours is in flight (keepAlive). A waiter that
+ * sees no progress (no settle of ours, no settle elsewhere: outsideNow) for COST_WAIT_IDLE_MS is refused `over-cap`, its
+ * `cost_refused` line carrying `waited` (ms); so is one whose wait can no longer help (spend rose meanwhile). Log
+ * lines, numbers only: `cost_wait` when a call starts waiting, `cost_waited { waitedMs }` when it is admitted. Deadlock: a waiter holds nothing, every hold belongs to a call already sent, whose settle depends only
  * on its own provider stream (result() is memoised and independent of the consumer), and a call that could be what a
  * held call waits for (a forward, a call from a provider or an onPayload) runs under HOLDING and never waits; what is
- * left is caught by the waiter's own 15 minute limit, the job's idle and stall limits, and abort. `outsideInflight`
- * (the part of external() still in flight, which waiting could free) is 0 here: every outside micro-dollar counts as
- * settled spend.
+ * left is caught by the waiter's own 15 minute limit, the job's idle and stall limits, and abort.
+ *
+ * ACROSS PROCESSES (issue #985's second part). A role's parallel tasks run as pi child processes, each with its own
+ * guard judging against the others' and the parent's holds through `external()`. `externalInflight()`, beside it, is
+ * the part of that outside spend still IN FLIGHT (a parent: its children's open holds as of the last fold; a child:
+ * SPENT's `inflight` less its own folded part), so a call refused only by holds in other processes waits for them as
+ * it waits for holds of its own; without it every outside micro-dollar counts as settled and such a call is refused.
+ * Admission still judges `external()` whole. Progress elsewhere is read by the timer's drain (every outsideNow). Every
+ * process judges the others as of the last fold (up to a tick old), so a room that opens elsewhere is seen by every
+ * process in the same reading. While ANY process of the job has a waiter (this queue, or `outsideWaiting()`), every
+ * admission in every process, fresh calls included, therefore takes its TURN (`claim(waited)`, claimWait: one process
+ * per SPENT generation admits, never in the generation right after another process's turn, and a call that waited
+ * never in the first generation that shows the wait). When nobody waits anywhere no turn is taken and admission is what
+ * it was, so the only overshoot across processes left is the one DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY names: the
+ * pre-existing one-tick residual between fresh calls in different processes, including the tick in which a wait
+ * begins and before it is published. Waiting itself adds no overshoot. The queue is per process: across processes there is no
+ * order beyond the turns.
  *
  * The final payload may WAIT too: a waitable call whose final shaped request (prepare) does not fit only because of
  * others' holds releases its own hold, waits at the FRONT of the queue holding nothing, and takes the larger hold back
@@ -2487,9 +2528,13 @@ export const COST_WAIT_IDLE_MS = 15 * 60 * 1000;
 /** The drain timer's period while anyone waits (issue #985): the child-fold and re-arm tick's. */
 export const COST_WAIT_TICK_MS = 1000;
 
-export function createCostGuard({ capMicros, env = process.env, log = () => {}, bound = callCostBound, external = null, now = Date.now, setTimer = setInterval, clearTimer = clearInterval }) {
+export function createCostGuard({ capMicros, env = process.env, log = () => {}, bound = callCostBound, external = null, externalInflight = null, claim = null, outsideWaiting = null, onQueue = null, now = Date.now, setTimer = setInterval, clearTimer = clearInterval }) {
 	if (!Number.isSafeInteger(capMicros) || capMicros < 0) throw new Error(`invalid PI_MAX_COST_MICROS: ${capMicros}`);
 	if (external !== null && typeof external !== "function") throw new Error("createCostGuard: external must be a function");
+	if (externalInflight !== null && (typeof externalInflight !== "function" || external === null)) throw new Error("createCostGuard: externalInflight must be a function, beside external");
+	if (claim !== null && typeof claim !== "function") throw new Error("createCostGuard: claim must be a function");
+	if (outsideWaiting !== null && typeof outsideWaiting !== "function") throw new Error("createCostGuard: outsideWaiting must be a function");
+	if (onQueue !== null && typeof onQueue !== "function") throw new Error("createCostGuard: onQueue must be a function");
 	// `waited` (issue #985) counts the calls that waited, each once (at admission, at its final payload, or both), for a
 	// later exit-line key; not in snapshot().
 	const state = { spent: 0, inflight: 0, refused: 0, boundExceeded: 0, longContext: 0, unjudged: 0, unanswered: 0, waited: 0, why: null };
@@ -2497,19 +2542,23 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 	// The waiters (issue #985), FIFO: `{ retry, since }`, the front retried first. See WAITING in the header.
 	const queue = [];
 	let timer = null;
+	// Whether the drain timer keeps the process alive now (keepAlive), and whether it never may again (close).
+	let held = false;
+	let closed = false;
 	let draining = false;
 	let drainScheduled = false;
-	// The last progress a waiter could gain room from: a settle of ours, or a drop in external spend.
+	// The last progress a waiter could gain room from: a settle of ours, or a change elsewhere (outsideNow).
 	let progressAt = now();
 	let lastOutside = 0;
-	// The part of external() still in flight, which a settle elsewhere could free: 0, so all of it counts as settled spend.
-	const outsideInflight = 0;
+	let lastOutsideInflight = 0;
+	// Whether onQueue last heard that someone waits here (notifyQueue), and whether a notice is already scheduled.
+	let noticed = false;
+	let noticeScheduled = false;
 
 	/**
 	 * Spend this guard does not see itself (issue #500), in micro-dollars, read at every admit: for a parent, what its
 	 * children spent and hold in flight; for a child, what the parent's SPENT file says. Fail closed: anything but a
 	 * finite number at or above zero, or a throw, is Infinity, so the call is refused rather than judged against 0.
-	 * A value below the last one read is progress for a waiter (issue #985).
 	 */
 	function externalMicros() {
 		if (external === null) return 0;
@@ -2519,10 +2568,44 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		} catch {
 			return Infinity;
 		}
-		if (!(typeof value === "number" && Number.isFinite(value) && value >= 0)) return Infinity;
-		if (value < lastOutside) progressAt = now();
-		lastOutside = value;
-		return value;
+		return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : Infinity;
+	}
+
+	/**
+	 * The outside spend and the part of it still IN FLIGHT (issue #985): `{ outside, outsideInflight }`, read together at
+	 * every judgement. `externalInflight()` is asked right after `external()`, and the wiring answers both from ONE
+	 * reading (one fold for a parent, one read of SPENT for a child), so the two never come from different moments.
+	 * What is in flight elsewhere settles at its real cost, which frees room, so a call refused only by it may WAIT for
+	 * it (waitHelps); what is settled elsewhere never comes back. The in-flight part fails toward 0, never toward room: no
+	 * reader, a throw, or anything but a finite number at or above zero is 0 (the call is then judged as before issue
+	 * #985's second part, every outside micro-dollar settled), and it is never more than `outside`. It decides only
+	 * whether a call waits or is refused; admission is judged on `outside` whole, so a wrong in-flight part can never
+	 * admit a call the cap has no room for.
+	 *
+	 * PROGRESS for a waiter's idle limit: the outside spend fell (a hold elsewhere settled below its bound), its in-flight
+	 * part fell (a hold settled, or its process ended), or, with the in-flight part known, its settled part rose (a hold
+	 * elsewhere settled, its process taking the room again at once, so the in-flight part never showed the drop between
+	 * two readings). A rise of the in-flight part alone is not progress: it is a new call taking room.
+	 */
+	function outsideNow() {
+		const outside = externalMicros();
+		let outsideInflight = 0;
+		if (externalInflight !== null && Number.isFinite(outside)) {
+			let value;
+			try {
+				value = externalInflight();
+			} catch {
+				value = 0;
+			}
+			outsideInflight = typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(value, outside) : 0;
+		}
+		if (Number.isFinite(outside)) {
+			const settledRose = externalInflight !== null && outside - outsideInflight > lastOutside - lastOutsideInflight;
+			if (outside < lastOutside || outsideInflight < lastOutsideInflight || settledRose) progressAt = now();
+			lastOutside = outside;
+			lastOutsideInflight = outsideInflight;
+		}
+		return { outside, outsideInflight };
 	}
 
 	function refuse(fields) {
@@ -2539,9 +2622,66 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 
 	// ── The waiters (issue #985) ──
 
-	/** Whether waiting can help a call of bound `b`: it fits once the holds settle, and there is something to wait for. */
-	function waitHelps(b, outside, others, behind) {
+	/**
+	 * Whether waiting can help a call of bound `b`: it fits once the holds settle (ours, and the in-flight part of the
+	 * outside spend), and there is something to wait for: a hold of ours, a hold elsewhere, or a waiter ahead.
+	 */
+	function waitHelps(b, { outside, outsideInflight }, others, behind) {
 		return state.spent + (outside - outsideInflight) + b <= capMicros && (others > 0 || outsideInflight > 0 || behind);
+	}
+
+	/**
+	 * THE TURN (issue #985). While any process of the job has a waiter, every admission in every process takes a turn:
+	 * `claim(waited)` wins the turn of the outside reading's SPENT generation (claimWait: one process per generation;
+	 * the wiring also refuses the generation right after another process's turn, and, for a call that WAITED, a
+	 * generation whose previous one did not already show someone waiting), asked right after that reading. No claim
+	 * reader (no other process to share a room with): always. A throw or anything but true: not now.
+	 */
+	function claimed(waited) {
+		if (claim === null) return true;
+		try {
+			return claim(waited) === true;
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * Whether an admission now must take its turn (issue #985): someone waits here (this queue) or in another process
+	 * (`outsideWaiting()`, read with the outside reading: SPENT's `waiting` for a child, the fold of its children's
+	 * ledgers for the parent). Fails toward taking the turn: a throw or anything but false is "someone waits". When
+	 * nobody waits anywhere, admission is exactly what it was, no turn and no delay.
+	 */
+	function mustTakeTurn() {
+		if (claim === null) return false;
+		if (queue.length > 0) return true;
+		if (outsideWaiting === null) return false;
+		try {
+			return outsideWaiting() !== false;
+		} catch {
+			return true;
+		}
+	}
+
+	/**
+	 * Tell `onQueue` (a child's ledger writer) when this process starts or stops having a waiter (issue #985), on a
+	 * microtask, so the notice never runs inside admit and sees the queue as admit left it. A child publishes its
+	 * waiting through its ledger, so every other process takes its turn while it waits.
+	 */
+	function notifyQueue() {
+		if (onQueue === null || noticeScheduled) return;
+		noticeScheduled = true;
+		queueMicrotask(() => {
+			noticeScheduled = false;
+			const waitingNow = queue.length > 0;
+			if (waitingNow === noticed) return;
+			noticed = waitingNow;
+			try {
+				onQueue(queue.length);
+			} catch {
+				// A notice that fails is retried by the next change; the ledger's own writes carry the count too.
+			}
+		});
 	}
 
 	/** Whether a waiter has waited COST_WAIT_IDLE_MS with no progress since it started waiting. */
@@ -2550,10 +2690,35 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 	}
 
 	function arm() {
-		if (timer !== null) return;
-		timer = setTimer(drain, COST_WAIT_TICK_MS);
-		// Unref'd: a waiting call must never be the reason the runner stays alive.
-		timer?.unref?.();
+		if (timer === null) {
+			timer = setTimer(drain, COST_WAIT_TICK_MS);
+			held = false;
+			// Unref'd: a waiting call must never be the reason the runner stays alive while a call of its own is in flight.
+			timer?.unref?.();
+		}
+		keepAlive();
+	}
+
+	/**
+	 * Ref the drain timer while someone waits and nothing of this guard's is in flight (issue #985), unref it otherwise.
+	 * Such a waiter waits for ANOTHER process's holds (waitHelps: with nothing of ours in flight, only a hold elsewhere is
+	 * left to wait for), and nothing else need keep this process alive meanwhile: a call of our own in flight has its
+	 * socket, a hold in another process has none here. Unref'd, a pi child in print mode whose one call waits for its
+	 * siblings would leave the event loop empty and exit mid-call, its answer never given. Bounded as the wait is (an
+	 * abort, a stop, the idle limit). After close() (the meter's teardown) never ref'd again: a waiter nobody answers any
+	 * more must not hold the runner past its exit line.
+	 */
+	function keepAlive() {
+		if (timer === null) return;
+		const want = !closed && queue.length > 0 && state.inflight === 0;
+		if (want === held) return;
+		held = want;
+		try {
+			if (want) timer.ref?.();
+			else timer.unref?.();
+		} catch {
+			// A timer that cannot be ref'd keeps the old behaviour: unref'd.
+		}
 	}
 
 	/** Take a waiter off the queue; true when it was on it. The timer stops with the last one. */
@@ -2561,9 +2726,11 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		const index = queue.indexOf(waiter);
 		if (index < 0) return false;
 		queue.splice(index, 1);
+		notifyQueue();
 		if (queue.length === 0 && timer !== null) {
 			clearTimer(timer);
 			timer = null;
+			held = false;
 		}
 		return true;
 	}
@@ -2597,6 +2764,8 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 			}
 		} finally {
 			draining = false;
+			// Every settle drains, so here is where an in-flight sum that fell to 0 meets a waiter still queued.
+			keepAlive();
 		}
 	}
 
@@ -2604,6 +2773,7 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 	function wait(retry) {
 		const waiter = { retry, since: now() };
 		queue.push(waiter);
+		notifyQueue();
 		state.waited += 1;
 		arm();
 		return waiter;
@@ -2693,12 +2863,29 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		if (isUnreadable(model) || isUnreadable(options)) return refuseCall(waiter, { why: "unboundable" });
 		const b = method === "generateImages" || method === "streamDeferred" ? Infinity : bound(method, model, context, options, env);
 		if (!Number.isFinite(b)) return refuseCall(waiter, { why: "unboundable" });
-		const outside = externalMicros();
+		const reading = outsideNow();
+		const { outside } = reading;
 		if (!Number.isFinite(outside)) return refuseCall(waiter, { why: "external" });
 		const queued = waiter !== null && queue.includes(waiter);
 		// FIFO (issue #985): a waitable call that is not the front waiter waits behind the queue, even when it fits.
 		const behind = waitable && queue.length > 0 && queue[0] !== waiter;
-		if (!behind && state.spent + state.inflight + outside + b <= capMicros) {
+		const fits = !behind && state.spent + state.inflight + outside + b <= capMicros;
+		// While someone waits anywhere, a call that fits takes its room only in its turn (THE TURN above): a waiter and a
+		// call in another process see the same room in the same reading. Without its turn a call that WAITED waits on
+		// (nothing settled, so no progress), and a fresh one that may wait starts waiting. One that may NOT wait (under an
+		// admitted dispatch: a router's forward) is refused `over-cap`, as it was before waiting existed: admitted without
+		// its turn it would take the room a waiter elsewhere takes in its turn, a way past the cap waiting would open.
+		if (fits && (queued || mustTakeTurn()) && !claimed(queued)) {
+			if (queued) return idle(waiter) ? refuseCall(waiter, { bound: b, ...outsideFields(reading) }) : COST_WAIT;
+			if (waitable) {
+				log("cost_wait", { why: "turn", bound: b, spent: state.spent, inflight: state.inflight, ...outsideFields(reading), cap: capMicros, waiting: queue.length });
+				return COST_WAIT;
+			}
+			// Its own rule, `turn` (COST_REFUSALS): the call fits, so `over-cap` would send an operator to raise a cap that
+			// cannot help; the exit line and the record say the stop came from a call that may not wait meeting a wait.
+			return refuseCall(waiter, { why: "turn", bound: b, ...outsideFields(reading) });
+		}
+		if (fits) {
 			if (queued) {
 				remove(waiter);
 				log("cost_waited", { waitedMs: now() - waiter.since });
@@ -2707,11 +2894,17 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 			pending = { bound: b, model, stream: !RUNTIME_RESULT_METHODS.includes(method), waitable, waited: queued };
 			return null;
 		}
-		if (waitable && waitHelps(b, outside, state.inflight, behind) && !(queued && idle(waiter))) {
-			if (!queued) log("cost_wait", { bound: b, spent: state.spent, inflight: state.inflight, ...(external === null ? {} : { external: outside }), cap: capMicros, waiting: queue.length });
+		if (waitable && waitHelps(b, reading, state.inflight, behind) && !(queued && idle(waiter))) {
+			if (!queued) log("cost_wait", { bound: b, spent: state.spent, inflight: state.inflight, ...outsideFields(reading), cap: capMicros, waiting: queue.length });
 			return COST_WAIT;
 		}
-		return refuseCall(waiter, external === null ? { bound: b } : { bound: b, external: outside });
+		return refuseCall(waiter, { bound: b, ...outsideFields(reading) });
+	}
+
+	/** The outside numbers a cost_wait or cost_refused line carries: `external` with a reader, `externalInflight` with its in-flight reader. */
+	function outsideFields({ outside, outsideInflight }) {
+		if (external === null) return {};
+		return externalInflight === null ? { external: outside } : { external: outside, externalInflight: outsideInflight };
 	}
 
 	function bind(result) {
@@ -2768,19 +2961,22 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 					const reason = stopped?.() ?? null;
 					if (reason !== null && Object.hasOwn(STOP_MESSAGES, reason)) return end(new Error(STOP_MESSAGES[reason]));
 					if (ticket.settled) return refuseFinal({ bound: enlarged, waited: now() - waiter.since });
-					const outside = externalMicros();
-					if (!Number.isFinite(outside)) return refuseFinal({ bound: enlarged, waited: now() - waiter.since });
-					if (state.spent + state.inflight + outside + enlarged <= capMicros) {
+					const reading = outsideNow();
+					if (!Number.isFinite(reading.outside)) return refuseFinal({ bound: enlarged, waited: now() - waiter.since });
+					if (state.spent + state.inflight + reading.outside + enlarged <= capMicros) {
+						// As at admission: a call that waited takes its room only in its turn.
+						if (!claimed(true)) return idle(waiter) ? refuseFinal({ bound: enlarged, waited: now() - waiter.since }) : undefined;
 						state.inflight += enlarged;
 						ticket.bound = enlarged;
 						log("cost_waited", { waitedMs: now() - waiter.since });
 						return end(null);
 					}
-					if (waitHelps(enlarged, outside, state.inflight, false) && !idle(waiter)) return undefined;
+					if (waitHelps(enlarged, reading, state.inflight, false) && !idle(waiter)) return undefined;
 					return refuseFinal({ bound: enlarged, waited: now() - waiter.since });
 				},
 			};
 			queue.unshift(waiter);
+			notifyQueue();
 			// A call counts once: one that already waited at admission is not counted again here.
 			if (!ticket.waited) state.waited += 1;
 			ticket.waited = true;
@@ -2822,22 +3018,36 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 					finalBound = bound(method, model, context, options, env, sent);
 				} catch { /* A body we cannot bound must never reach the transport. */ }
 				const enlarged = Math.max(ticket.bound, finalBound);
-				const outside = externalMicros();
+				const reading = outsideNow();
+				const { outside } = reading;
 				if (!ticket.settled && Number.isFinite(enlarged) && Number.isFinite(outside)) {
 					const others = state.inflight - ticket.bound;
-					if (state.spent + others + outside + enlarged <= capMicros) {
+					const fits = state.spent + others + outside + enlarged <= capMicros;
+					// A hold that grows is an admission of the growth: while someone waits anywhere it takes its turn too
+					// (THE TURN). One that loses it waits at the front like a payload that does not fit, when it may wait;
+					// an aborted one gives up unsent; one that may not wait is refused, by the rule `turn` as at admission
+					// (grown without its turn, it would take a waiter's room elsewhere).
+					const turnLost = fits && enlarged > ticket.bound && mustTakeTurn() && !claimed(false);
+					if (turnLost && signalAborted(given.signal)) throw new Error(WAIT_ABORTED_MESSAGE);
+					if (turnLost && !ticket.waitable) {
+						refuse({ why: "turn", bound: enlarged });
+						stop(COST_CAP);
+						throw new Error(STOP_MESSAGES[COST_CAP]);
+					}
+					if (fits && !turnLost) {
 						state.inflight += enlarged - ticket.bound;
 						ticket.bound = enlarged;
 						ticket.sent = true;
 						return sent;
 					}
-					// Issue #985: refused only by others' holds, on a call that may wait. Release, wait at the front, retake.
-					if (ticket.waitable && waitHelps(enlarged, outside, others, false)) {
+					// Issue #985: refused only by others' holds (or by its turn), on a call that may wait. Release, wait at
+					// the front, retake.
+					if (ticket.waitable && (turnLost || waitHelps(enlarged, reading, others, false))) {
 						// A call whose signal is already aborted never waits, logs no wait and keeps its hold: an abort
 						// listener would never fire for it, and its caller, being gone, would hold the front of the queue
 						// until room appeared and then be sent.
 						if (signalAborted(given.signal)) throw new Error(WAIT_ABORTED_MESSAGE);
-						log("cost_wait", { why: "final-payload", bound: enlarged, spent: state.spent, inflight: others, ...(external === null ? {} : { external: outside }), cap: capMicros, waiting: queue.length });
+						log("cost_wait", { why: turnLost ? "turn" : "final-payload", bound: enlarged, spent: state.spent, inflight: others, ...outsideFields(reading), cap: capMicros, waiting: queue.length });
 						state.inflight -= ticket.bound;
 						ticket.bound = 0;
 						await waitForFinal({ ticket, enlarged, stop, stopped, signal: given.signal });
@@ -2883,7 +3093,21 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		return state.why;
 	}
 
-	return { enforces: Object.freeze([COST_CAP]), admit, prepare, bind, wait, leave, snapshot, spend, unjudged, refusedWhy, state };
+	/**
+	 * The meter's teardown (issue #985): the drain timer is never ref'd again (keepAlive), so a waiter left queued past
+	 * the session that made it cannot keep the runner up after its exit line. Waiters still drain on the unref'd timer.
+	 */
+	function close() {
+		closed = true;
+		keepAlive();
+	}
+
+	/** How many calls wait here now (issue #985): what a child's ledger and the parent's SPENT publish as `waiting`. */
+	function waiting() {
+		return queue.length;
+	}
+
+	return { enforces: Object.freeze([COST_CAP]), admit, prepare, bind, wait, leave, close, waiting, snapshot, spend, unjudged, refusedWhy, state };
 }
 
 // ── Issue #502, part 4: the allowed-model list, checked before every provider call ────────────────────────
@@ -3280,10 +3504,11 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
  * order, so with no list the exit line is byte-identical to before. `unjudged` reaches the cost guard only: it is
  * the cap's counter of displaced compat entries.
  */
-export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null, now = Date.now, subscriptionAdmission = null, subscriptions = null, refreshCredentials = () => {} }) {
+export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null, externalInflight = null, claim = null, outsideWaiting = null, onQueue = null, now = Date.now, setTimer = setInterval, clearTimer = clearInterval, subscriptionAdmission = null, subscriptions = null, refreshCredentials = () => {} }) {
 	const model = allowedModels === null ? null : createModelGuard({ allowedModels, log, env, now, subscriptionAdmission, subscriptions, refreshCredentials });
-	// `external` (issue #500) reaches the cost guard only: it is spend, which only a cap judges.
-	const cost = maxCostMicros === null ? null : createCostGuard({ capMicros: maxCostMicros, env, log, external });
+	// `external` (issue #500), its in-flight part and the turn's readers (issue #985) reach the cost guard only: they are
+	// spend, which only a cap judges. The clock and the timer are its waiters' (issue #985), injected by tests.
+	const cost = maxCostMicros === null ? null : createCostGuard({ capMicros: maxCostMicros, env, log, external, externalInflight, claim, outsideWaiting, onQueue, now, setTimer, clearTimer });
 	const guards = [model, cost].filter((guard) => guard !== null);
 	if (guards.length === 0) return null;
 	return {
@@ -3303,7 +3528,7 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 			for (const guard of guards) guard.bind?.(result);
 		},
 		// The cost guard's queue (issue #985), only with a cap: a guard without `wait` is never asked to wait.
-		...(cost ? { wait: (retry) => cost.wait(retry), leave: (waiter) => cost.leave(waiter) } : {}),
+		...(cost ? { wait: (retry) => cost.wait(retry), leave: (waiter) => cost.leave(waiter), close: () => cost.close(), waiting: () => cost.waiting() } : {}),
 		unjudged(count) {
 			cost?.unjudged(count);
 		},
@@ -3328,8 +3553,8 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 // THE LEDGER FILE (issue #500; DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY). A pi child process runs its own meter and
 // reports through one file in the run's ledger directory, which the parent folds on its tick (foldChildLedgers).
 //   - Name: `<pid>.<nonce>.json` (CHILD_LEDGER_NAME): the child's pid in decimal, a nonce of 16 lowercase hex
-//     characters. Any other name is ignored, so the directory can also hold the parent's `STOP` and `SPENT` and the
-//     temporary file of an atomic write (it must not end in `.json`).
+//     characters. Any other name is ignored, so the directory can also hold the parent's `STOP` and `SPENT`, a wait
+//     claim (`CLAIM.<gen>`, issue #985) and the temporary file of an atomic write (it must not end in `.json`).
 //   - Written whole, by rename, as compact JSON of at most CHILD_LEDGER_MAX_BYTES (64 KiB).
 //   - Every field is required, in every state:
 //       { "v": 3,
@@ -3339,7 +3564,7 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 //         "rows": [ { "provider", "model", "calls", "input", "output", "cacheRead", "cacheWrite", "cacheWrite1h",
 //                     "reasoning", "total", "cost", "unpriced" } ],
 //         "spentMicros", "inflightMicros", "costRefused", "modelRefused",
-//         "boundExceeded", "costUnanswered", "costUnreported", "longContext", "costUnjudged" }
+//         "boundExceeded", "costUnanswered", "costUnreported", "longContext", "costUnjudged", "waiting" }
 //     `starting` is the preload's stub (zeros, `metered: true`), written before the meter installs; `running` once
 //     it has; `done` at exit. `metered: false` says the child's meter did not install. `totals` is the child meter's
 //     snapshot, `rows` its rows() (first-seen order, at most CHILD_LEDGER_ROWS written and CHILD_LEDGER_MAX_ROWS
@@ -3349,6 +3574,9 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 //     written with or without a guard; the parent's meter adds it through setChildren). childLedger() builds exactly
 //     this object. Version 2 added the four guard counters, version 3 `costUnreported`; a file of an older version is
 //     malformed (unmetered), so a child from an older image floors the job rather than hiding a call it did not count.
+//     `waiting` (issue #985: how many calls wait in the child) is additive and optional: no version, and a file without
+//     it, or with anything but a count, is read whole and counted as WAITING (ledgerWaiting), so every process takes its
+//     turn rather than none.
 //   - Numbers only. Token amounts and `cost` are numbers from 0 to Number.MAX_SAFE_INTEGER; `calls`, `unresolved`,
 //     `unpriced`, `sessions` and the guard counters are safe integers at least 0. Ids are printable ASCII and
 //     match USAGE_ID_PATTERN after lowercasing, the worker's rule. The rows partition the totals: their calls sum to
@@ -3358,7 +3586,16 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 // THE SPENT FILE (spentFile, externalFor). The parent tells each child what the rest of the job has spent, so a child's
 // cost guard can judge the whole job without counting itself twice: `{ "v": 1, "total", "byLedger": { <name>: micros } }`,
 // where `total` is the parent's own spend plus every ledger's `spentMicros + inflightMicros`, and `byLedger` is each
-// ledger's part. A child's external spend is `total - byLedger[its own name]`.
+// ledger's part. A child's external spend is `total - byLedger[its own name]`. Issue #985 added three keys: the part of
+// `total` still in flight, `"inflight"` (the parent's own in-flight plus every open, metered ledger's) and
+// `"inflightByLedger": { <name>: micros }` (each such ledger's nonzero part), so a child's call refused only by holds
+// that will settle waits for them (inflightFor: `inflight - inflightByLedger[its own name]`), and `"gen"`, the parent's
+// count of SPENT writes, which names the one turn per generation every admission takes while anyone waits (claimWait),
+// with `"waiting"` (how many calls wait anywhere in the job) and `"waitingSince"` (since which generation, only while
+// someone waits). `v` stays 1: the keys are additive, a reader from before them ignores them (externalFor reads only the
+// three above) and so refuses such a call as it always did (it takes no turn either, which cannot matter: the parent
+// and its children run one image's runner), and a reader of them that meets a file without them (a
+// parent from before) waits for nothing and takes no turn.
 //
 // What the fold trusts, and why it is cooperative accounting rather than a boundary: the agent holds the provider key
 // and shares the runner's uid, so it can delete or forge these files. The rules make that fail toward a floor or an
@@ -3486,6 +3723,10 @@ export function parseChildLedger(text) {
 	// is not a ledger the meter wrote.
 	if (sum.calls !== totals.calls - totals.unresolved || sum.unpriced !== totals.unpriced) return null;
 	if (!LEDGER_AMOUNTS.every((key) => agrees(sum[key], totals[key]))) return null;
+	// `waiting` (issue #985): how many calls wait in the child. Additive, so no version: anything but a safe integer at
+	// or above zero, or its absence (a child from before it), is null, unknown, which the fold counts as waiting
+	// (ledgerWaiting), never as not; it is not a reason to call the file malformed.
+	ledger.waiting = Number.isSafeInteger(raw.waiting) && raw.waiting >= 0 ? raw.waiting : null;
 	return ledger;
 }
 
@@ -3579,11 +3820,13 @@ const DEFAULT_LEDGER_FS = { readdirSync, lstatSync, openSync, fstatSync, readSyn
  *     that is counted in `flooded`, unmetered and unread. `flooded` is a high-water mark of how many such names one
  *     listing held.
  * Returns `{ processes, unmetered, flooded, totals, rows, spentMicros, inflightMicros, costRefused, modelRefused,
- * boundExceeded, costUnanswered, costUnreported, longContext, costUnjudged, settledMicros, chargeMicros, missing, files, retired }`:
+ * boundExceeded, costUnanswered, costUnreported, longContext, costUnjudged, settledMicros, chargeMicros,
+ * liveInflightMicros, liveWaiting, missing, files, retired }`:
  * `processes` the ledger files ever seen (flooded and retired ones included), `unmetered` those counted unmetered
  * (flooded ones included), `totals` and the counters summed over every file's mark and the retired aggregate, `rows`
  * merged by pair (the model-less row last, ids null), `settledMicros` the sum of each ledger's ledgerSettled() and
- * `chargeMicros` of its ledgerCharge(), `missing` true when the directory could not be listed, `files` the per-file
+ * `chargeMicros` of its ledgerCharge(), `liveInflightMicros` of each tracked file's ledgerInflight() (issue #985: the
+ * part of `chargeMicros` a settle can still free) and `liveWaiting` of its ledgerWaiting(), `missing` true when the directory could not be listed, `files` the per-file
  * state for the next call (a Map by name of `{ pid, state, unmetered, why, high, sig }`, `why` one of `malformed`,
  * `unmetered`, `shrank`, `vanished`), which the detector reads for a file's pid and state, and `retired` the
  * aggregate (`{ count, names, pids, high, charge, settled }`). `meter.setChildren()` takes the result as it is.
@@ -3659,11 +3902,15 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 	let unmetered = flooded;
 	let chargeMicros = retired.charge;
 	let settledMicros = retired.settled;
+	let liveInflightMicros = 0;
+	let liveWaiting = 0;
 	for (const entry of files.values()) {
 		if (entry.unmetered) unmetered += 1;
 		addLedger(sum, entry.high);
 		chargeMicros = saturatingAdd(chargeMicros, ledgerCharge(entry.high));
 		settledMicros = saturatingAdd(settledMicros, ledgerSettled(entry.high));
+		liveInflightMicros = saturatingAdd(liveInflightMicros, ledgerInflight(entry));
+		liveWaiting = saturatingAdd(liveWaiting, ledgerWaiting(entry));
 	}
 	// The model-less row last, as usageSnapshot emits its bucket.
 	const merged = new Map(sum.rows);
@@ -3671,7 +3918,7 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 	merged.delete("");
 	const rows = [...merged.values(), ...(modelless ? [modelless] : [])];
 	const counters = Object.fromEntries(LEDGER_GUARD_COUNTS.map((key) => [key, sum[key]]));
-	return { processes: files.size + flooded + retired.count, unmetered, flooded, totals: sum.totals, rows, ...counters, settledMicros, chargeMicros, missing, files, retired };
+	return { processes: files.size + flooded + retired.count, unmetered, flooded, totals: sum.totals, rows, ...counters, settledMicros, chargeMicros, liveInflightMicros, liveWaiting, missing, files, retired };
 }
 
 /** A copy of a ledger mark, its rows copied too. */
@@ -3710,30 +3957,73 @@ export function ledgerCharge(high) {
 }
 
 /**
+ * The part of a tracked ledger's charge still IN FLIGHT that its process can still settle (issue #985), from a fold's
+ * per-file entry: its mark's `inflightMicros`, but 0 for a file counted unmetered (never read again, so its mark cannot
+ * fall) and for a `done` one (its process is ending: a call it still held never settles). A call that waited for such
+ * a hold would wait for nothing, so it counts as settled here, like every retired file's charge.
+ */
+export function ledgerInflight(entry) {
+	if (!entry || entry.unmetered || entry.state === "done") return 0;
+	const value = entry.high?.inflightMicros ?? 0;
+	return typeof value === "number" && value >= 0 ? Math.min(value, Number.MAX_SAFE_INTEGER) : 0;
+}
+
+/**
+ * How many calls wait in a tracked ledger's child (issue #985), from a fold's per-file entry: its mark's `waiting`, 0 for
+ * a file counted unmetered or `done` (as ledgerInflight), and 1 when it is unknown (a child from before the key, or a
+ * value that is not a count): a child that may be waiting makes every process take its turn, never the reverse.
+ */
+export function ledgerWaiting(entry) {
+	if (!entry || entry.unmetered || entry.state === "done") return 0;
+	const value = entry.high?.waiting;
+	return Number.isSafeInteger(value) && value >= 0 ? value : 1;
+}
+
+/**
  * The SPENT file the parent writes for its children (issue #500; the ledger comment above has the format): `total` is
  * `parentMicros` (the parent's own spent plus in-flight) plus every ledger's ledgerCharge() (retired ones included),
- * and `byLedger` each tracked ledger's part, by file name. A number that cannot be carried saturates at
- * Number.MAX_SAFE_INTEGER.
+ * and `byLedger` each tracked ledger's part, by file name. Since issue #985 also the IN-FLIGHT part of that total:
+ * `inflight` is `parentInflightMicros` (the parent's own in-flight, part of `parentMicros`) plus every tracked
+ * ledger's ledgerInflight(), and `inflightByLedger` each tracked ledger's nonzero part, by file name, so a child can
+ * wait for holds that will settle instead of being refused by them (inflightFor). Each part is at most the matching
+ * charge, so `inflight` never passes `total`. And `gen`, the parent's count of SPENT writes (`generation`, from 1), which
+ * names the TURN an admission takes against this file while anyone waits (claimWait), with `waiting`, how many calls
+ * wait anywhere in the job (the parent's own and its children's, ledgerWaiting), and `waitingSince`, the generation
+ * since which someone has waited without a break (only while someone waits). A number that cannot be carried
+ * saturates at Number.MAX_SAFE_INTEGER.
  */
-export function spentFile(fold, parentMicros) {
+export function spentFile(fold, parentMicros, parentInflightMicros = 0, generation = null, waiting = 0, waitingSince = null) {
 	// Whole micro-dollars, rounded UP: externalFor() reads only safe integers, so the writer must never emit a file its
 	// own reader refuses, and rounding up only overcharges.
 	const carry = (value) => (typeof value === "number" && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? Math.ceil(value) : Number.MAX_SAFE_INTEGER);
 	const byLedger = {};
+	const inflightByLedger = {};
 	let total = saturatingAdd(carry(parentMicros), carry(fold?.retired?.charge ?? 0));
+	let inflight = Math.min(carry(parentInflightMicros), carry(parentMicros));
 	for (const [name, entry] of fold?.files ?? []) {
 		const part = carry(ledgerCharge(entry.high));
 		byLedger[name] = part;
 		total = saturatingAdd(total, part);
+		// Only a nonzero part is written: a name absent is 0, and the file stays inside CHILD_LEDGER_MAX_BYTES with every
+		// open ledger in flight (ledgerInflight is 0 for a `done` file, the only kind the open-file cap does not bound).
+		const live = Math.min(carry(ledgerInflight(entry)), part);
+		if (live > 0) inflightByLedger[name] = live;
+		inflight = saturatingAdd(inflight, live);
 	}
-	return { v: 1, total, byLedger };
+	if (!(Number.isSafeInteger(generation) && generation >= 1)) return { v: 1, total, byLedger, inflight, inflightByLedger };
+	// The turn's two facts (issue #985), with the generation they belong to: how many calls wait anywhere in the job, and
+	// since which generation someone has waited without a break. A count that cannot be carried is written as waiting.
+	const count = Number.isSafeInteger(waiting) && waiting >= 0 ? waiting : 1;
+	const since = count > 0 && Number.isSafeInteger(waitingSince) && waitingSince >= 1 && waitingSince <= generation ? { waitingSince } : {};
+	return { v: 1, total, byLedger, inflight, inflightByLedger, gen: generation, waiting: count, ...since };
 }
 
 /**
  * A child's external spend from a parsed SPENT file: the job's total less its own ledger's part, so the child's cost
  * guard never counts its own spend twice (once as its own, once a tick late through SPENT). Anything malformed is
  * Infinity, which the cost guard refuses: a SPENT that cannot be read is no licence to spend. A missing file is the
- * caller's case (nothing written yet), not this one.
+ * caller's case (nothing written yet), not this one. It reads `v`, `total` and `byLedger` only: the in-flight keys
+ * (issue #985) are inflightFor's, and a reader from before them reads a file that has them exactly as before.
  */
 export function externalFor(spent, ownName) {
 	const whole = (value) => Number.isSafeInteger(value) && value >= 0;
@@ -3741,6 +4031,23 @@ export function externalFor(spent, ownName) {
 	const own = Object.hasOwn(spent.byLedger, ownName) ? spent.byLedger[ownName] : 0;
 	if (!whole(own) || own > spent.total) return Infinity;
 	return spent.total - own;
+}
+
+/**
+ * The IN-FLIGHT part of a child's external spend (issue #985), from the same parsed SPENT: `inflight` less its own
+ * ledger's `inflightByLedger` part (what the parent folded of this child's own holds, which its guard already counts
+ * live), and never above externalFor(). 0 when SPENT is malformed, when either key is missing (a parent from before
+ * issue #985's second part), or when either is malformed in any part: the child's guard then counts every outside
+ * micro-dollar as settled, as it did, which can only refuse a call that could have waited, never admit one.
+ */
+export function inflightFor(spent, ownName) {
+	const external = externalFor(spent, ownName);
+	if (!Number.isFinite(external)) return 0;
+	const whole = (value) => Number.isSafeInteger(value) && value >= 0;
+	if (!whole(spent.inflight) || !isPlain(spent.inflightByLedger)) return 0;
+	const own = Object.hasOwn(spent.inflightByLedger, ownName) ? spent.inflightByLedger[ownName] : 0;
+	if (!whole(own) || own > spent.inflight) return 0;
+	return Math.min(spent.inflight - own, external);
 }
 
 /**
@@ -3776,6 +4083,8 @@ export function childLedger({ state, metered = true, meter = null, guard = null 
 		costUnreported: snap?.costUnreported ?? 0,
 		longContext: refused.longContext ?? 0,
 		costUnjudged: refused.costUnjudged ?? 0,
+		// Issue #985: the calls waiting in this child, so every other process takes its turn while it waits.
+		waiting: metered && typeof guard?.waiting === "function" ? guard.waiting() : 0,
 	};
 }
 
@@ -3791,11 +4100,14 @@ export function childLedger({ state, metered = true, meter = null, guard = null 
 //   - `STOP`: `{ "v": 1, "reason": <a STOP_MESSAGES key> }` (stopFile). Once it exists, a child's next call is braked
 //     with that reason. Present but not readable as that shape, it is a stop as the token cap: a garbled STOP is still a
 //     STOP (externalStop). Missing means go.
-//   - `SPENT`: spentFile's object. A child's cost guard adds externalFor(SPENT, its own name) to what it judges. Missing
-//     means 0 (the parent has written nothing yet), malformed or unreadable means Infinity (the call is refused).
+//   - `SPENT`: spentFile's object. A child's cost guard adds externalFor(SPENT, its own name) to what it judges, and
+//     waits for inflightFor(SPENT, its own name) (issue #985). Missing means 0 (the parent has written nothing yet),
+//     malformed or unreadable means Infinity (the call is refused).
 // Both are read on every call, without blocking and without following a link (readLedger), so a FIFO or a symlink
 // planted under either name refuses rather than hangs. Every file in the directory is written by writeFileAtomic, whose
 // temporary file is created exclusively under a random name, so nothing planted there can block or redirect a writer.
+// The one other file, a turn's claim (WAIT_CLAIM_PREFIX, issue #985), is created the same way by any process, the
+// parent's included, and only ever created or checked for, never written or read.
 
 /** The ledger directory, set by the runner for every descendant. */
 export const CHILD_LEDGER_ENV = "PI_DISPATCH_CHILD_LEDGER";
@@ -3803,6 +4115,68 @@ export const CHILD_LEDGER_ENV = "PI_DISPATCH_CHILD_LEDGER";
 export const RUNNER_PID_ENV = "PI_DISPATCH_RUNNER_PID";
 export const STOP_FILE = "STOP";
 export const SPENT_FILE = "SPENT";
+/**
+ * THE TURN (issue #985): the file a process creates, EXCLUSIVELY, to admit calls against one SPENT generation while
+ * anyone in the job waits: `CLAIM.<gen>`, empty. Every process judges the others as of the last SPENT (or, for the
+ * parent, the fold it was written from), so when a hold settles every process sees that room in the same generation:
+ * without turns a waiter and any other call, in two processes, would each take it, and a call that would have been
+ * refused before waiting existed would pass the cap. So, while any process has a waiter (SPENT's `waiting`, a child's
+ * own queue, the parent's fold of its children's ledgers), every admission in every process, fresh or not, takes the
+ * turn of its generation: one process per generation admits (as many of its own calls as fit), the others wait, and
+ * a call that may not wait (a forward) and has no turn is refused, as before waiting existed. A turn won on an older
+ * SPENT is lost: the claimer reads the generation again once its claim exists (startChildMeter has why that suffices).
+ * Two more rules close the moment between the parent's fold and its SPENT write, where an admission can land unseen by
+ * the next SPENT though always by the one after: no process admits in the generation right after another process's
+ * turn (waitClaimTaken), and a call that WAITED is not admitted in the first generation that shows the wait
+ * (`waitingSince`), so no call admitted without a turn, before anyone knew of the wait, can be missed. When nobody
+ * waits no turn is taken: admission and its timing are what they were. A claim names a generation, so a claimer that
+ * dies leaves nothing to clear; the parent removes each claim three generations on. Created like every file here
+ * (writeFileAtomic's flags), never opened: `O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK`, so a FIFO or a link planted at the
+ * name only loses the turn. Not a ledger name, so the fold never reads it.
+ */
+export const WAIT_CLAIM_PREFIX = "CLAIM.";
+
+/** The claim file's name for SPENT generation `gen`. */
+export function waitClaimName(gen) {
+	return `${WAIT_CLAIM_PREFIX}${gen}`;
+}
+
+/**
+ * Win generation `gen`'s turn in `dir` (WAIT_CLAIM_PREFIX): true when this call created the file, false when it exists
+ * or cannot be created (fail closed: the call waits, never admitted without its turn). Never throws.
+ */
+export function claimWait({ dir, gen, fs = DEFAULT_WRITE_FS }) {
+	if (typeof dir !== "string" || !Number.isSafeInteger(gen) || gen < 1) return false;
+	const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+	let fd;
+	try {
+		fd = fs.openSync(join(dir, waitClaimName(gen)), flags, 0o600);
+	} catch {
+		return false;
+	}
+	try {
+		fs.closeSync(fd);
+	} catch {
+		// Created: the claim is won whether or not the descriptor closes cleanly.
+	}
+	return true;
+}
+
+/**
+ * Whether generation `gen`'s turn was taken (its claim file exists, whatever it is), for the rule that no process admits
+ * in the generation right after another process's turn (issue #985: an admission made in that turn can land between
+ * the parent's fold and its SPENT write, so the next SPENT may not show it; the one after always does). A name that
+ * cannot be checked is taken: fail toward waiting a generation.
+ */
+export function waitClaimTaken({ dir, gen, lstat = lstatSync }) {
+	if (typeof dir !== "string" || !Number.isSafeInteger(gen) || gen < 1) return false;
+	try {
+		lstat(join(dir, waitClaimName(gen)));
+		return true;
+	} catch (error) {
+		return error?.code !== "ENOENT";
+	}
+}
 /**
  * The parent's pinned price table (pinPriceTable, issue #587's review), for pi children: written ONCE by the runner into
  * the ledger directory, read-only (0444), its sha256 in PRICE_TABLE_ENV, which the runner sets in its own environment
@@ -3939,20 +4313,33 @@ export function readStop({ dir, fs = DEFAULT_LEDGER_FS }) {
 }
 
 /**
- * The child cost guard's `external` (issue #500): externalFor(SPENT, own ledger name) in micro-dollars, 0 while
- * `<dir>/SPENT` does not exist, Infinity when it is malformed. An unreadable one throws, which the cost guard also reads
- * as Infinity: a SPENT that cannot be read is no licence to spend.
+ * The child cost guard's outside readings from ONE read of `<dir>/SPENT` (issues #500, #985): `external`,
+ * externalFor(SPENT, own ledger name) in micro-dollars, `inflight`, inflightFor() of the same parse, `gen`, the file's
+ * generation (null when it has none: a parent from before issue #985's second part), `present`, `waiting` (whether
+ * anyone in the job may be waiting, true unless the file says 0) and `waitingSince`. Zeros, null and false while the
+ * file does not exist; `external` Infinity (and `waiting` true) when it is malformed. An unreadable one throws, which
+ * the cost guard also reads as Infinity: a SPENT that cannot be read is no licence to spend.
  */
-export function readExternal({ dir, name, fs = DEFAULT_LEDGER_FS }) {
+export function readSpent({ dir, name, fs = DEFAULT_LEDGER_FS }) {
 	const text = readControl(fs, dir, SPENT_FILE);
-	if (text === null) return 0;
+	if (text === null) return { external: 0, inflight: 0, gen: null, present: false, waiting: false, waitingSince: null };
 	let parsed;
 	try {
 		parsed = JSON.parse(text);
 	} catch {
-		return Infinity;
+		return { external: Infinity, inflight: 0, gen: null, present: true, waiting: true, waitingSince: null };
 	}
-	return externalFor(parsed, name);
+	const gen = isPlain(parsed) && Number.isSafeInteger(parsed.gen) && parsed.gen >= 1 ? parsed.gen : null;
+	// A file with a generation and no readable count says someone may be waiting: take the turn (fail toward it). One
+	// with no generation (a parent from before the turn) has none to take.
+	const waiting = gen !== null && !(Number.isSafeInteger(parsed.waiting) && parsed.waiting === 0);
+	const since = gen !== null && Number.isSafeInteger(parsed.waitingSince) && parsed.waitingSince >= 1 && parsed.waitingSince <= gen ? parsed.waitingSince : null;
+	return { external: externalFor(parsed, name), inflight: inflightFor(parsed, name), gen, present: true, waiting, waitingSince: since };
+}
+
+/** The child cost guard's `external` (issue #500): readSpent()'s `external`, which throws what it throws. */
+export function readExternal({ dir, name, fs = DEFAULT_LEDGER_FS }) {
+	return readSpent({ dir, name, fs }).external;
 }
 
 /** The table's file text: `{ v: 1, entries: [[key, { api, cost, compat }], ...] }`, in key order. */
@@ -4014,7 +4401,8 @@ export function childLedgerName(pid, random = (bytes) => globalThis.crypto.getRa
  *   - `compat`: `{ module, fallbackModels }`, the child's own pi-ai compat copy (installProcessUsageMeter `compat`). Its
  *     stream factory is the brake's.
  *   - `env`: the policies come from it as the runner reads them: PI_ALLOWED_MODELS (the model guard) and
- *     PI_MAX_COST_MICROS (a cost guard whose `external` is readExternal). The token cap is not the child's: the parent
+ *     PI_MAX_COST_MICROS (a cost guard whose `external` and `externalInflight` are one readSpent, so a call refused
+ *     only by holds that will settle waits for them, issue #985). The token cap is not the child's: the parent
  *     judges it on its own spend plus every child's, and answers through STOP. A policy that does not parse leaves the
  *     child unmetered (`metered: false`), the floor, rather than unguarded.
  *   - `dir`, `name`: the ledger directory and this child's file in it.
@@ -4023,11 +4411,13 @@ export function childLedgerName(pid, random = (bytes) => globalThis.crypto.getRa
  *     The file is born with the pre-dispatch write of that first call.
  *   - `state`: an object kept across calls in one process (the handoff's), so a second class handed over (two copies
  *     of pi in one process) is installed with the same meter and guard and the ledger stays one file.
+ *   - `now`, `setTimer`, `clearTimer`: the cost guard's clock and drain timer (issue #985), for tests.
  *
  * The install is `brake: true` (a hard stop with no policy, so a STOP can be answered) and `isStopped` reads STOP before
  * every call. The ledger is written whole (writeFileAtomic) after the install (unless `lazy`), on every change the meter
- * reports, BEFORE every call is dispatched with that call counted in flight (the child's guard, below), and once more
- * as `done` when the process exits. FAIL CLOSED ON A WRITE: the pre-dispatch write that fails refuses its call, so no
+ * reports, BEFORE every call is dispatched with that call counted in flight (the child's guard, below), again as a
+ * capped call's onPayload returns with the hold it is sent under (issue #985), and once more as `done` when the process
+ * exits. FAIL CLOSED ON A WRITE: the pre-dispatch write that fails refuses its call, so no
  * call goes out that the ledger does not already show; and once any write has failed (a full or unwritable /tmp, a
  * directory the agent removed), the child is unmetered and STOPPED: isStopped answers the token cap for every later
  * call, and every later write that still succeeds says `metered: false`. With the install failed, the ledger says `metered: false` and carries zeros. Returns
@@ -4046,6 +4436,9 @@ export async function startChildMeter({
 	writeFs = DEFAULT_WRITE_FS,
 	onExit = (listener) => process.on("exit", listener),
 	install = installProcessUsageMeter,
+	now = Date.now,
+	setTimer = setInterval,
+	clearTimer = clearInterval,
 }) {
 	try {
 		if (state.child) {
@@ -4111,7 +4504,85 @@ export async function startChildMeter({
 		}
 		child.metered = true;
 		child.meter = createUsageMeter({ maxTokens: null, maxCostMicros, allowedModels, onChange: () => child.write("running") });
-		const policy = createPolicyGuard({ maxCostMicros, allowedModels, env, external: () => readExternal({ dir, name, fs }) });
+		// ONE read of SPENT per judgement (issue #985): `external` reads the file, and `externalInflight`, which the cost
+		// guard asks right after it, answers from that same read, so a total from one tick is never paired with an
+		// in-flight part from the next. A read that throws leaves the in-flight part at 0 (the guard refuses anyway).
+		let spentRead = { external: 0, inflight: 0, gen: null, present: false, waiting: false, waitingSince: null };
+		const external = () => {
+			spentRead = { external: Infinity, inflight: 0, gen: null, present: true, waiting: true, waitingSince: null };
+			spentRead = readSpent({ dir, name, fs });
+			return spentRead.external;
+		};
+		// THE TURN (issue #985), against the SPENT generation the call was judged by, from the same read: no generation
+		// yet (SPENT not written) is no turn; a SPENT with none at all (a parent from before the turn) takes none, as
+		// before. A call that WAITED needs a generation whose previous one already showed someone waiting (so no process
+		// admitted then without its turn); no call takes the generation right after another process's turn; and the
+		// turn itself is the generation's claim file (claimWait), kept for every admission of this child in it.
+		let claimedGen = null;
+		const claim = (waited) => {
+			const gen = spentRead.gen;
+			if (gen === null) return spentRead.present && !spentRead.waiting;
+			if (waited && !(spentRead.waitingSince !== null && spentRead.waitingSince <= gen - 1)) return false;
+			if (gen === claimedGen) return true;
+			if (claimedGen !== gen - 1 && waitClaimTaken({ dir, gen: gen - 1, lstat: fs.lstatSync ?? lstatSync })) return false;
+			if (!claimWait({ dir, gen, fs: writeFs })) return false;
+			claimedGen = gen;
+			// THE GENERATION MOVED? Read SPENT's generation again AFTER the claim file exists: if the parent wrote a newer
+			// one meanwhile, this turn is lost and the call waits for the next. Without this a turn could be won twice
+			// across the boundary: a process B that read the newer SPENT found no claim for this generation (checked
+			// before it was created), took the next one and was admitted, and this call, judged on the older SPENT, was
+			// admitted too, neither seeing the other. With it: if B's check came before this claim was created, the
+			// parent's newer SPENT was written before that check, so before this re-read, which sees it and gives up; if
+			// B's check came after, B saw this claim and gave up the generation after it. A re-read that fails loses too.
+			try {
+				return readSpent({ dir, name, fs }).gen === gen;
+			} catch {
+				return false;
+			}
+		};
+		// The clock and the timer are the cost guard's waiters' (issue #985), injected by tests. `onQueue` publishes this
+		// child's waiting the moment it starts or stops (a lazy child's file is born for it: its call is about to go out).
+		const policy = createPolicyGuard({
+			maxCostMicros,
+			allowedModels,
+			env,
+			external,
+			externalInflight: () => spentRead.inflight,
+			claim,
+			outsideWaiting: () => spentRead.waiting,
+			onQueue: () => {
+				child.live = true;
+				child.write("running");
+			},
+			now,
+			setTimer,
+			clearTimer,
+		});
+		// THE FINAL-PAYLOAD WRITE (issue #985). The cost guard may change an admitted call's hold in its onPayload, after the
+		// pre-dispatch write: grow it to the final body's bound, or give it back while the call waits for room and take
+		// it again. The provider sends only after onPayload returns (pinned per priced api module), so the ledger is
+		// written once more as the hook returns, with the hold the call is sent under: the parent, and every sibling
+		// through SPENT, judge against that hold from the next tick, not from this call's settle. As the pre-dispatch write
+		// does, a write that fails refuses the call (the hook throws, so nothing is sent) and stops the child; a hook that
+		// threw is written too, its hold given back.
+		const finalWrite = (args) => {
+			const options = args?.[1];
+			const theirs = options?.onPayload;
+			if (!policy?.cost || typeof theirs !== "function") return args;
+			const onPayload = async function (...given) {
+				let sent;
+				try {
+					sent = await theirs.apply(this, given);
+				} catch (error) {
+					child.write("running");
+					throw error;
+				}
+				child.write("running");
+				if (child.failed) throw new Error(STOP_MESSAGES[TOKEN_BUDGET]);
+				return sent;
+			};
+			return [args[0], { ...options, onPayload }, ...args.slice(2)];
+		};
 		// THE PRE-DISPATCH WRITE. The guard is the last thing a call passes before it is dispatched (judge), so the child's
 		// guard wraps the policy guard (or stands alone, with no policy): once the policy admits a call, the ledger is
 		// written with that call already counted, in flight (`unresolved`), and a write that fails refuses the call. So
@@ -4130,8 +4601,13 @@ export async function startChildMeter({
 				floor = before;
 				return TOKEN_BUDGET;
 			},
-			...(policy ? { prepare: (call) => policy.prepare(call) } : {}),
+			...(policy ? { prepare: (call) => finalWrite(policy.prepare(call)) } : {}),
 			bind: (result) => policy?.bind?.(result),
+			// The cost guard's queue (issue #985): a call refused only by holds that will settle (its siblings', the
+			// parent's, its own) waits for them, as in the parent. COST_WAIT is not an admission, so admit() above writes
+			// nothing for it: the pre-dispatch write is made by the retry that is admitted, still the last step before its
+			// dispatch, so one reservation is still the most there can be.
+			...(policy?.wait ? { wait: (retry) => policy.wait(retry), leave: (waiter) => policy.leave(waiter), close: () => policy.close(), waiting: () => policy.waiting() } : {}),
 			unjudged: (count) => policy?.unjudged?.(count),
 			// The refusal counters only. Not policy.snapshot(): the cost guard's snapshot settles a pending admission at its
 			// bound, and the pre-dispatch write runs between an admission and its bind.

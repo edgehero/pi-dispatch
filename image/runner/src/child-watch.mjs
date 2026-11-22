@@ -37,9 +37,11 @@
  *        `cost-cap` under a dollar cap, else `token_budget` under a token cap, else `model-not-allowed` under a list,
  *        with `cause: "unmetered-child"` so the token stop does not log `token_budget_exceeded`. With no policy it
  *        is a floor only, and nothing stops.
- *   4. WRITE (ticks only). SPENT under a dollar cap (spentFile), and STOP with the meter's reason once it has stopped,
- *      rewritten on every tick so a deleted STOP comes back. The parent's own failure to write either is counted once
- *      as unmetered: a child it cannot reach is a child it cannot hold to the cap.
+ *   4. WRITE (ticks only). SPENT under a dollar cap (spentFile, with its in-flight part and its generation, issue
+ *      #985), and STOP with the meter's reason once it has stopped, rewritten on every tick so a deleted STOP comes
+ *      back. The parent's own failure to write either is counted once as unmetered: a child it cannot reach is a child
+ *      it cannot hold to the cap. SPENT also says how many calls wait in the job and since which generation, and the
+ *      turn's claim of three generations back is removed (claimWait).
  *
  * TEARDOWN: STOP first (the meter's reason, or `token_budget` when the job ended without a stop: past the final fold no
  * child call could be counted), then the final pass. The directory and its STOP stay: the container ends right after,
@@ -48,14 +50,16 @@
  * processes the detector saw, null with no detector) and `unmetered`.
  *
  * The parent's cost guard reads `external()`: every child's ledgerCharge() (settled plus in flight) as of the last
- * fold. The exit line's cost and model counters add the children's (`guardFields`).
+ * fold, `externalInflight()`, the part of it a child's settle can still free, and `claim()` and `outsideWaiting()`, the
+ * turn its admissions take while anyone in the job waits (issue #985). The exit line's cost and model counters add the children's
+ * (`guardFields`).
  */
-import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PI_ENTRIES, RUN_JOB_PATH } from "./child-route.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "./outcome.mjs";
-import { foldChildLedgers, SPENT_FILE, spentFile, STOP_FILE, stopFile, writeFileAtomic } from "./usage-meter.mjs";
+import { claimWait, foldChildLedgers, SPENT_FILE, spentFile, STOP_FILE, stopFile, waitClaimName, waitClaimTaken, writeFileAtomic } from "./usage-meter.mjs";
 
 /**
  * How much CPU a process may use with its ledger still `starting`. An honest child installs its meter at about 0.3 s of
@@ -96,7 +100,7 @@ const GUARD_FIELDS = Object.freeze(["costRefused", "boundExceeded", "longContext
 
 /** The fold of a directory with nothing in it: what setChildren gets before the first tick, so the keys are there. */
 function emptyFold() {
-	return { processes: 0, unmetered: 0, flooded: 0, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: [], spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0, settledMicros: 0, chargeMicros: 0, missing: false, files: new Map(), retired: null };
+	return { processes: 0, unmetered: 0, flooded: 0, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: [], spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0, settledMicros: 0, chargeMicros: 0, liveInflightMicros: 0, liveWaiting: 0, missing: false, files: new Map(), retired: null };
 }
 
 /** Whether a ledger's mark holds any spend at all. */
@@ -271,9 +275,10 @@ export function linuxProc({
  * written, and the detector alone sees the children). `guard()` returns the parent's policy guard or null (late, because
  * the guard's `external` is this hook's). `now` is a monotonic clock in ms (the wall-time grace off Linux, where a
  * proc with no `cpuMs` is used). Everything that touches the system is injected for the tests.
- * Returns `{ sample, teardown, external, stopped, guardFields, view }`: the two hook methods, the parent cost guard's
- * `external`, `stopped()` for the meter's onStop (writes STOP at once rather than on the next tick), `guardFields()`
- * (the exit line's guard counters plus the children's), and `view()` (the counts).
+ * Returns `{ sample, teardown, external, externalInflight, claim, outsideWaiting, stopped, guardFields, view }`: the two
+ * hook methods, the parent cost guard's `external`, `externalInflight`, `claim` and `outsideWaiting`, `stopped()` for the meter's onStop (writes STOP
+ * at once rather than on the next tick), `guardFields()` (the exit line's guard counters plus the children's), and
+ * `view()` (the counts).
  */
 export function createChildWatch({
 	dir,
@@ -309,6 +314,12 @@ export function createChildWatch({
 	const stuck = new Set();
 	let dirLost = false;
 	let writeFailed = false;
+	// SPENT's generation (issue #985): the count of SPENT writes, which names the turn of each (claimWait); the
+	// generation whose turn this parent took, under which every parent admission that fits is made; and the generation
+	// since which someone in the job has waited without a break (null while nobody waits), as SPENT says it.
+	let generation = 0;
+	let claimedGen = 0;
+	let waitingSince = null;
 	let firstWhy = null;
 	let warned = false;
 	let count = 0;
@@ -428,12 +439,35 @@ export function createChildWatch({
 		writeControl(STOP_FILE, JSON.stringify(stopFile(reason)));
 	}
 
+	/**
+	 * How many calls wait anywhere in the job (issue #985): the parent's own queue and its children's, as the last fold
+	 * has them (ledgerWaiting: unknown counts as waiting), and one more for a directory the fold could not list.
+	 */
+	function waitingCount() {
+		const view = current();
+		const own = guard()?.waiting?.() ?? 0;
+		return (Number.isSafeInteger(own) && own >= 0 ? own : 1) + view.liveWaiting + (view.missing ? 1 : 0);
+	}
+
 	/** Step 4. */
 	function writeControls() {
 		const before = writeFailed || dirLost;
 		if (meter.costCap !== null) {
 			const own = guard()?.spend?.() ?? { spentMicros: 0, inflightMicros: 0 };
-			writeControl(SPENT_FILE, JSON.stringify(spentFile(prev, own.spentMicros + own.inflightMicros)));
+			generation += 1;
+			const waiting = waitingCount();
+			waitingSince = waiting > 0 ? (waitingSince ?? generation) : null;
+			writeControl(SPENT_FILE, JSON.stringify(spentFile(prev, own.spentMicros + own.inflightMicros, own.inflightMicros, generation, waiting, waitingSince)));
+			// The claim of three generations back is read by no rule any more: a turn checks its own generation and the one
+			// before, and a reader judges one SPENT inside one synchronous admit. Best effort; a claim left behind only
+			// takes a name no generation will have again.
+			if (dir !== null && generation > 3) {
+				try {
+					(writeFs?.rmSync ?? rmSync)(join(dir, waitClaimName(generation - 3)), { force: true });
+				} catch {
+					// Nothing to undo.
+				}
+			}
 		}
 		if (meter.state.stopReason !== null) writeStop(meter.state.stopReason);
 		// A write that failed (or found the directory gone) is judged in this pass, not the next.
@@ -547,6 +581,42 @@ export function createChildWatch({
 		},
 		external() {
 			return current().chargeMicros;
+		},
+		/**
+		 * The part of external() still in flight in an open, metered ledger (issue #985: the fold's liveInflightMicros),
+		 * from the same fold, so the parent's cost guard waits for its children's holds instead of being refused by them.
+		 */
+		externalInflight() {
+			return current().liveInflightMicros;
+		},
+		/**
+		 * The parent guard's TURN (issue #985, claimWait), against the SPENT generation written from the last fold, by
+		 * the rules a child's turn keeps (`startChildMeter`): a call that waited needs a generation whose previous one
+		 * already showed someone waiting, no admission takes the generation right after another process's turn, and the
+		 * turn is the generation's claim file. Before the first SPENT there is no turn; with no directory no child can be
+		 * metered, so there is nobody to take turns with.
+		 */
+		claim(waited = false) {
+			if (dir === null) return true;
+			if (generation === 0) return false;
+			if (waited && !(waitingSince !== null && waitingSince <= generation - 1)) return false;
+			if (generation === claimedGen) return true;
+			if (claimedGen !== generation - 1 && waitClaimTaken({ dir, gen: generation - 1, lstat })) return false;
+			const gen = generation;
+			if (!claimWait({ dir, gen, ...(writeFs ? { fs: writeFs } : {}) })) return false;
+			claimedGen = gen;
+			// A child re-reads SPENT's generation after its claim exists (startChildMeter), since the parent may write a
+			// newer one in between. Here the generation moves only in writeControls, on this same thread, never between
+			// the check, the create and this line; the check stands so the rule reads the same on both sides.
+			return generation === gen;
+		},
+		/**
+		 * Whether a child may be waiting (issue #985): the last fold's ledgerWaiting() sum, or a directory it could not
+		 * list (fail toward waiting). With it the parent takes its turn for every admission while a child waits.
+		 */
+		outsideWaiting() {
+			const view = current();
+			return view.liveWaiting > 0 || view.missing === true;
 		},
 		stopped(reason) {
 			if (!closed) writeStop(reason);

@@ -6,7 +6,8 @@ import { crc32, deflateSync } from "node:zlib";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 // Pure: no static pi import in their module graph, so they load unconditionally and the gate below applies to pi only.
-import { CHILD_LEDGER_NAME, foldChildLedgers, parseChildLedger, pinPriceTable, publishPriceTable, resolvePiAiCompat, spentFile, STOP_MESSAGES, stopFile, writeFileAtomic } from "../src/usage-meter.mjs";
+import { CHILD_LEDGER_NAME, createUsageMeter, foldChildLedgers, parseChildLedger, pinPriceTable, publishPriceTable, resolvePiAiCompat, spentFile, STOP_MESSAGES, stopFile, writeFileAtomic } from "../src/usage-meter.mjs";
+import { createChildWatch } from "../src/child-watch.mjs";
 import { TOKEN_BUDGET } from "../src/outcome.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -333,6 +334,60 @@ test("a SPENT that leaves no room under the child's cost cap refuses its call; w
 	assert.equal(parsed.length, 1);
 	assert.equal(parsed[0].raw.costRefused, 1);
 	assert.equal(parsed[0].raw.totals.total, 0);
+});
+
+/**
+ * The parent's side for a real child (issue #985): the real children hook on the world's ledger directory, ticking as the
+ * runner's meter ticks, its guard a stand-in whose spend is `own` (the parent's settled and in-flight micro-dollars).
+ */
+function parentTicking(w, own, { capMicros = 1_000_000 } = {}) {
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: capMicros, rootSessionId: "root" });
+	const hook = createChildWatch({ dir: w.ledger, meter, guard: () => ({ spend: () => own, waiting: () => 0 }), proc: null });
+	hook.sample();
+	const timer = setInterval(() => hook.sample(), 250);
+	return { meter, hook, stop: () => clearInterval(timer) };
+}
+
+test("issue #985: a print-mode pi child whose call is refused only by the parent's hold in flight waits, alive with nothing of its own in flight, and runs in its turn once SPENT shows the hold settled", { skip }, async () => {
+	const w = priceFake(world({ api: "openai-completions" }), "openai-completions");
+	// The parent holds all but one micro-dollar of the cap IN FLIGHT, and has settled nothing.
+	const own = { spentMicros: 0, inflightMicros: 999_999 };
+	const parent = parentTicking(w, own);
+	try {
+		const running = run([entry("dist/bundle/cli.js"), ...printArgs(w), "hello"], { env: { ...w.env, PI_MAX_COST_MICROS: "1000000" }, cwd: w.root });
+		await new Promise((resolve) => setTimeout(resolve, 2500));
+		assert.equal(w.callCount(), 0, "waiting: nothing has reached the provider");
+		assert.equal(JSON.parse(readFileSync(join(w.ledger, "SPENT"), "utf8")).waiting, 1, "the child's wait reached the parent through its ledger");
+		// The parent's call settled at 5,000: the next SPENT has room.
+		Object.assign(own, { spentMicros: 5_000, inflightMicros: 0 });
+		const result = await running;
+		assert.equal(result.code, 0, result.stderr);
+		assert.equal(w.callCount(), 1, "the call ran once the hold elsewhere settled; the child did not exit while it waited");
+		const raw = assertMetered(w.ledger);
+		assert.deepEqual([raw.costRefused, raw.spentMicros, raw.waiting], [0, 777, 0], "waited, never refused");
+		assert.ok(readdirSync(w.ledger).some((name) => name.startsWith("CLAIM.")), "admitted from its wait in a generation's turn");
+	} finally {
+		parent.stop();
+	}
+});
+
+test("issue #985: the parent's STOP reaches a pi child's call while it waits for room, and the call is never sent", { skip }, async () => {
+	const w = priceFake(world({ api: "openai-completions" }), "openai-completions");
+	const parent = parentTicking(w, { spentMicros: 0, inflightMicros: 999_999 });
+	try {
+		const running = run([entry("dist/bundle/cli.js"), ...printArgs(w), "hello"], { env: { ...w.env, PI_MAX_COST_MICROS: "1000000" }, cwd: w.root });
+		await new Promise((resolve) => setTimeout(resolve, 2500));
+		assert.equal(w.callCount(), 0, "waiting");
+		parent.meter.stop("cost-cap");
+		parent.hook.stopped("cost-cap");
+		const result = await running;
+		assert.equal(w.callCount(), 0, "the stop ended it; the provider was never called");
+		assert.match(result.stdout, new RegExp(STOP_MESSAGES["cost-cap"]));
+		const { parsed } = ledgers(w.ledger);
+		assert.deepEqual([parsed.length, parsed[0].raw.costRefused, parsed[0].raw.totals.calls], [1, 0, 0], "a stop, not a refusal of its own, and no call counted");
+	} finally {
+		parent.stop();
+	}
 });
 
 test("a child whose spawner cleared the environment leaves no ledger file (issue #500)", { skip }, async () => {

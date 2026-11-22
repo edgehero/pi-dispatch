@@ -5667,7 +5667,21 @@ passes are bounded (the bullet above); the session and fork-source turns are as 
     `totals.cost`, so a child whose spawner dropped `PI_MAX_COST_MICROS`, and so has no guard and `spentMicros` 0, is
     still charged what it spent) plus its `inflightMicros`. `externalFor(spent, ownName)`
     is the total less the child's own part, so a child never counts its own spend twice. A malformed SPENT gives
-    Infinity, which the cost guard refuses.
+    Infinity, which the cost guard refuses. **Amended for issue #985 (waiting across processes)**: SPENT also carries
+    the part of `total` still IN FLIGHT, `inflight` (the parent's own in-flight plus every open, metered ledger's
+    `inflightMicros`) and `inflightByLedger` (each such ledger's nonzero part, so the file stays inside the 64 KiB read
+    cap with every open ledger in flight), `gen`, the parent's count of SPENT writes, `waiting`, how many calls wait
+    anywhere in the job (the parent's own queue plus each child's ledger `waiting`), and `waitingSince`, the generation
+    since which someone has waited without a break (only while someone waits). A `done` ledger (its process
+    ending), an unmetered one (never read again) and a retired one count as settled: a hold no settle can free is
+    nothing to wait for. `inflightFor(spent, ownName)` is `inflight` less the child's own part, never above
+    `externalFor`, and 0 when either key is missing or malformed in any part, so a wrong in-flight part only takes a
+    wait away. `v` stays 1: the keys are additive, `externalFor` reads only `v`, `total` and `byLedger`, so a child
+    from before them reads the file as before and refuses such a call as it did (it takes no turn either, which cannot
+    matter in a job: the parent and its children run one image's runner, so no older child shares a container with a
+    newer parent), and a child that meets a SPENT without them (a parent from before) waits for nothing and takes no
+    turn. With `gen` present, a `waiting` that is
+    missing or not a count reads as someone waiting (fail toward taking the turn).
   - **The fold.** `foldChildLedgers({ dir, fs, prev })` keeps a high-water mark per file. A good file that reached
     its mark in everything that only grows replaces it (`unresolved` and `inflightMicros` may fall). A file that
     is malformed in any part, says `metered: false`, shrank in anything (a row included) or vanished counts
@@ -5805,7 +5819,13 @@ passes are bounded (the bullet above); the session and fork-source turns are as 
     hook). It installs on the class the child's sessions use, with the child's own compat copy (`compat`),
     `brake: true`, and `isStopped` reading `STOP`. Its guard is built from the inherited `PI_ALLOWED_MODELS` and
     `PI_MAX_COST_MICROS`, read as the runner reads them. The cost guard's `external` is `externalFor(SPENT, own
-    name)`. A missing `SPENT` is 0, and a malformed or unreadable one refuses. The token cap is not the child's: the
+    name)`. A missing `SPENT` is 0, and a malformed or unreadable one refuses. Since issue #985 its
+    `externalInflight` is `inflightFor` of the same read (`readSpent`, one read per judgement, so a total from one
+    tick is never paired with an in-flight part from the next), and its guard offers the cost guard's queue, so a
+    child's call refused only by holds that will settle (its siblings', the parent's, its own) waits as a parent's does
+    (`DES-DOLLAR-RESERVE-AND-SETTLE`, **Waiting for room**); while anyone in the job waits, every admission of the child
+    takes its turn (the control files, below); its own waiting is published at once in its ledger (`waiting`, written
+    when its queue starts or stops having a waiter, a lazy child's file born for it). The token cap is not the child's: the
     parent judges it on its own spend plus every child's, and answers through `STOP`. A policy that does not
     parse, a failed install, no class, or a session runtime the install does not cover (checked at every
     `session_start`) makes the child `metered: false` for good. The ledger is written whole after the install
@@ -5816,7 +5836,15 @@ passes are bounded (the bullet above); the session and fork-source turns are as 
     with that call counted, in flight (`unresolved`), and a write that fails refuses the call. The settle then
     updates it. A call admitted and never seen by the meter stays counted, unresolved, so the ledger never shrinks.
     The refusal counters are read without the cost guard's snapshot, which would settle the pending admission at its
-    bound. One more write per call.
+    bound. One more write per call. A call told to WAIT (issue #985, `COST_WAIT`) is no admission and writes nothing:
+    the pre-dispatch write is made by the retry that is admitted, still the last step before its dispatch, so one
+    reservation is still the most there can be. **Amended for issue #985 (the final-payload write)**: the cost guard
+    can change an admitted call's hold in its `onPayload`, after the pre-dispatch write (grow it to the final body's
+    bound, or give it back while the call waits and take it again), so a capped call's ledger is written once more as
+    that hook returns, with the hold the call is sent under; the provider sends only after the hook returns (pinned per
+    priced api module), so the parent, and every sibling through SPENT, judge against that hold from the next tick,
+    not from the call's settle. It was written only at the settle before, so a sibling judged a grown call at its
+    admission bound. A failed write there refuses the call (the hook throws, nothing is sent) and stops the child.
   - **A ledger that cannot be written stops the child.** The fold has no notion of a stale file, so a failed write
     (a full or unwritable `/tmp`) would leave an older, smaller ledger that still says metered. The failed
     pre-dispatch write refuses its own call; once any write fails, `isStopped` answers the token cap for every later
@@ -5884,7 +5912,37 @@ passes are bounded (the bullet above); the session and fork-source turns are as 
     so a deleted STOP comes back within a tick. A directory found gone on a write is made again and counted lost. The
     parent's own failure to write either file is counted once as unmetered: a child the parent cannot reach is a child
     it cannot hold to the cap. No SPENT without a dollar cap: no child of such a job judges spend against the parent,
-    and a write that cannot fail cannot count as a breach.
+    and a write that cannot fail cannot count as a breach. **Amended for issue #985**: each SPENT carries its
+    generation (`gen`, the count of SPENT writes), `waiting` (the parent's own queue plus `ledgerWaiting` of every open
+    ledger: a child's `waiting`, or 1 when its ledger has none or not a count, so an unknown child counts as waiting) and
+    `waitingSince`, and the hook answers the parent's guard `externalInflight()` (the fold's `liveInflightMicros`, from
+    the same fold as `external()`), `outsideWaiting()` (a child may be waiting by the last fold, or the directory could
+    not be listed) and `claim(waited)`. THE TURN: every process judges the others as of the last tick, so when a hold
+    settles every process sees that room in the same generation, and without turns a waiter and any other call, in two
+    processes, each took it (measured: four role children, two waiting for one room, both started; and a fourth child's
+    fresh call landing within 10 ms of the third's admission from its wait, three long calls at once under a cap of two
+    and a half bounds, in every run). So while ANY process has a waiter, every admission in every process, fresh calls
+    and a final payload's growth included, is made only by the process that CREATED `CLAIM.<gen>` in the ledger
+    directory (`claimWait`: `O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK`, so a planted FIFO or link only loses the turn);
+    every call of that process that fits is admitted in it, the others wait. Two rules close the moment between the
+    parent's fold and its SPENT write, where an admission can land unseen by the next SPENT though always by the one
+    after: no process admits in the generation right after another process's turn (`waitClaimTaken`), and a call that
+    WAITED is not admitted in the first generation that shows the wait (`waitingSince` must be older than the
+    generation), so no call admitted without a turn before anyone knew of the wait can be missed. When nobody waits no
+    turn is taken, and admission and its timing are exactly what they were (measured: four role children under a cap
+    nobody reached, the same start times to within child startup noise, about 40 ms in 12 s). A claim names a
+    generation, so a claimer that dies leaves nothing to clear; the parent removes each claim three generations on. The
+    parent takes turns too (it judges the fold that SPENT was written from). Before the first SPENT there is no turn to
+    take, so a call that must take one waits for it; with no ledger directory there is nobody to take turns with. A call
+    that may not wait (under an admitted dispatch: a router's forward) and has no turn is REFUSED, a final payload's
+    growth included, with its own `why`, `turn`: admitted without its turn it took the room a waiter elsewhere took in
+    its turn (measured: 2010 and 2110 under a cap of 2000).
+    A TURN WON ON AN OLDER SPENT IS LOST: a child reads SPENT's generation again after its claim file exists, and if the
+    parent wrote a newer one meanwhile the call waits for the next turn (measured: without it a child's claim on
+    generation g and another's on g+1, made in that order across the boundary, both admitted, 2110 under 2000). If the
+    other's check for the claim on g came before this claim was created, the newer SPENT was written before that check,
+    so before the re-read, which sees it; if after, the other saw this claim and gave the next generation up. The parent
+    needs no re-read: its generation moves only on its own thread, never between its check, its claim and its use.
   - **A promise of a stream** (issue #571). pi-ai's legacy `streamSimple` and `stream` (compat.js) hand a registry
     entry's answer on as it is, so an extension's entry that answers with `Promise<stream>` (an async function)
     reaches its caller as a promise, and a caller that awaits it (a router forwarding to it) gets a working stream
@@ -5991,7 +6049,8 @@ passes are bounded (the bullet above); the session and fork-source turns are as 
   - **Residuals added**:
     - children overshoot a cap by up to N children times the headroom at the last SPENT: each child's guard judges
       against a SPENT up to one tick old, so N children that each start a call inside one tick each see the same
-      headroom, and those calls may stream for minutes (charged in full);
+      headroom, and those calls may stream for minutes (charged in full). UNCHANGED by issue #985: this is the pre-existing one-tick residual between fresh calls in different processes, including the tick in which a wait begins and before it is published; waiting itself adds no overshoot (while
+      a wait is published every admission takes its turn);
     - a pi child that lives and spends inside one tick, with its file deleted before the parent's first read of it;
     - DELIBERATE CONCEALMENT: a spawner that scrubs the environment and keeps the title from changing (a no-op
       `process.title` setter in an `--import`) while starting pi through `node -e "import(<pinned entry>)"` or a copy of
@@ -6103,10 +6162,11 @@ free local model, or using a few successful live probes as proof of every routin
      does not name, before the cost guard is asked, so such a call is never bounded or held in flight;
   4. the guard computes the call's BOUND (`callCostBound`) and refuses when
      `spent + in-flight bounds + bound > cap`, or when the bound is `Infinity`, except that a call refused ONLY by
-     the in-flight holds of other calls in this process WAITS for them instead (issue #985, **Waiting for room** below). A refusal counts `costRefused`,
+     the in-flight holds of other calls, in this process or in the job's other pi processes, WAITS for them instead
+     (issue #985, **Waiting for room** below). A refusal counts `costRefused`,
      logs `cost_refused` with numbers only, stops the job with `cost-cap` (the meter's one first-wins stop, which
      aborts the root session) and answers this call with the hard stop. The first refusal's rule (`unboundable`,
-     `external`, `over-cap` or `final-payload`) rides the exit line as `why` and reaches the run record (issue #507), because a stop at
+     `external`, `over-cap`, `final-payload` or `turn`) rides the exit line as `why` and reaches the run record (issue #507), because a stop at
      $0 read as a cap set too low when the fix was one models.json field. A closed enum, never the model id: the
      record is PII-free and the line is container-written. An admitted call's bound is held in
      flight until it settles.
@@ -6137,41 +6197,69 @@ free local model, or using a few successful live probes as proof of every routin
   what a call settles at, so six or seven parallel subagent calls held most of a cap and the next call stopped the
   job at a fifth of it, between two calls, with no report and no push. The cap stays a hard bound
   (`CONST-BUDGET-BEFORE-TOKENS`); nothing is reserved below the bound. Instead:
-  - a call that does not fit gets `COST_WAIT` when it may wait and waiting can help: `spent + external + bound <= cap`
-    (every micro-dollar of `external` counts as settled here: what is in flight elsewhere is not yet known), and
-    something to wait for, a hold of this guard's in flight or a waiter ahead of it. Otherwise it is refused as before;
+  - a call that does not fit gets `COST_WAIT` when it may wait and waiting can help:
+    `spent + (external - externalInflight) + bound <= cap`, and something to wait for, a hold of this guard's in
+    flight, a hold in flight in another process (`externalInflight > 0`), or a waiter ahead of it. Otherwise it is
+    refused as before. `externalInflight` (issue #985, part 2) is the part of the outside spend still in flight: for the
+    parent its children's open holds as of the last fold, for a pi child SPENT's `inflight` less its own part
+    (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`), read with `external` from one reading. It fails toward 0 (no reader,
+    a throw, anything but a finite number at or above zero; never above `external`), which only turns a wait into the
+    refusal it was before; admission still judges `external` whole, so it can never admit a call the cap has no room
+    for. Without it every micro-dollar of `external` counted as settled, and parallel role children were refused;
   - a call MAY wait unless it runs under an admitted call's dispatch: a forward, or a call from a provider, an
     `onPayload` hook or a timer scheduled there. An AsyncLocalStorage (`HOLDING`, one per process) marks each admitted
     dispatch in both halves, across its awaits. Such a call may be what its parent's hold is waiting for, so it never
     waits, and is refused as before when it does not fit. Not the dispatch token's context: a virtual model's physical
-    re-entry runs under the outer call's token, which holds no bound, and may wait. A guard without a queue (a pi
-    child's) is never offered a wait;
+    re-entry runs under the outer call's token, which holds no bound, and may wait. A guard without a queue is never
+    offered a wait; a pi child's guard has the queue since issue #985's second part;
   - the waiting call is answered at once with a PLACEHOLDER stream (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`), or a
     promise for a result method, and queued. The queue is FIFO: a new call that may wait queues behind every waiter,
     even one that would fit, so a large call is never starved by small ones (a call that may not wait is not held
     behind it). Every settle, and every refusal (which stops the job), DRAINS the queue on a microtask, never inside
     the settle: `flushPending` settles inside `admit`, and a drain there would re-enter `admit` and break the single
     pending slot. The drain retries the front waiter and goes on while waiters are admitted or end. A one second
-    unref'd timer drains too while anyone waits, which picks up what no settle signals (a meter stop that is not a
-    refusal, a drop in external spend);
+    timer drains too while anyone waits, which picks up what no settle signals (a meter stop that is not a refusal, a
+    parent's STOP read by a child, a settle in another process). It is unref'd, but REF'd while someone waits and
+    nothing of this guard's is in flight: such a waiter waits for another process's holds, and nothing else keeps the
+    process alive meanwhile (a call of its own in flight has its socket). Measured: unref'd, a role child whose one call
+    waited for its siblings left the event loop empty and exited mid-call, and the job ended `stop` with that task's
+    long call never made. The meter's teardown closes the guard (`close()`), after which it is never ref'd again;
+  - THE TURN: while any process of the job has a waiter (this guard's queue, or `outsideWaiting()`, which fails toward
+    yes), every admission that fits, a fresh call's and a final payload's growth included, is made only in its turn
+    (`claim(waited)`, `claimWait`, one process per SPENT generation, never the generation right after another process's
+    turn, and for a call that waited never the first generation that shows the wait:
+    `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`, the control files): every process sees a room in the same reading.
+    A call that waited and lost its turn waits on (nothing settled, so it is no progress), a fresh call that may wait
+    starts waiting (`cost_wait` with `why: "turn"`), a growing final payload waits at the front (an aborted one gives
+    up unsent), and a call that may not wait is refused, a final payload's growth included, under its own rule `turn`
+    (the exit line's and the record's `why`: raising the cap does not help such a stop). Before waiting existed the
+    other call, the one now waiting, would have been refused instead, so the job stops in this case as it did then,
+    under the other call. When nobody waits no turn is taken: admission is what it was;
   - each retry runs judge, prepare, dispatch, bind and observe again, in one synchronous block, in the caller's own
     async context (`AsyncLocalStorage.snapshot()` at the call), so the single-slot invariant and a child's
     pre-dispatch write hold as for any call, and the dispatch token and pi's own async-local state are the caller's,
     not those of the settle that drained it;
   - an abort of the call's signal while it waits leaves the queue and ends the placeholder `aborted` with zero usage;
-    a stop of the meter while it waits ends it with that stop's hard stop. Neither reaches a provider, and
+    a stop of the meter while it waits ends it with that stop's hard stop, and so does a parent's STOP for a pi child's
+    waiter, read on the next tick: the retry's judge asks `isStopped`, and a final payload's wait, which holds the
+    front of the queue so no other judge runs meanwhile, asks it too (`stopNow`). Neither reaches a provider, and
     neither is counted;
-  - a waiter that sees no progress for 15 minutes (`COST_WAIT_IDLE_MS`: no settle of this guard's, no drop in external
-    spend) is refused `over-cap`, and so is one whose wait can no longer help (spend rose meanwhile). Its
+  - a waiter that sees no progress for 15 minutes (`COST_WAIT_IDLE_MS`: no settle of this guard's, and nothing settled
+    elsewhere: the outside spend did not fall, its in-flight part did not fall, and its settled part did not rise; a
+    rise of the in-flight part alone is a new call, not a settle) is refused `over-cap`, and so is one whose wait can no
+    longer help (spend rose meanwhile). Its
     `cost_refused` line carries `waited` (ms). 15 minutes is the default idle limit, so a hung provider usually ends
     the job `idle` first, the accurate reason;
-  - log lines, numbers only: `cost_wait` (`bound`, `spent`, `inflight`, `external` with an external reader, `cap`,
-    `waiting`, and `why: "final-payload"` for a final payload's wait) when a call starts waiting, `cost_waited`
-    (`waitedMs`) when it is admitted.
+  - log lines, numbers only: `cost_wait` (`bound`, `spent`, `inflight`, `external` with an external reader,
+    `externalInflight` with its in-flight reader, `cap`, `waiting`, and `why: "final-payload"` for a final payload's
+    wait) when a call starts waiting, `cost_waited` (`waitedMs`) when it is admitted. A pi child's guard logs neither:
+    its output is its spawner's.
   No deadlock: a waiter holds nothing; every hold belongs to a call already sent, whose settle depends only on its own
   provider stream (`result()` is memoised and independent of the consumer); a call that could be what a held call
   waits for runs under `HOLDING` and never waits; in-process subagents run as tool calls, after the parent's own call
-  settled. What is left is caught by the waiter's own 15 minute limit, the job's idle and stall limits, and abort.
+  settled; a role's child tasks run as a tool call too, so no child's call is what a parent's hold waits for, and a
+  hold in another process settles from that process's own stream. What is left is caught by the waiter's own 15
+  minute limit, the job's idle and stall limits, and abort.
   When the call settles, its bound leaves the in-flight sum and `ceil(cost x 1e6)`, never below zero (pi's
   short-write term can go negative), joins `spent`. A charge above the bound counts `boundExceeded`. A call
   whose cost is unknown (no finite `cost.total`, or a rejected result) stays charged at its bound, and the meter
@@ -6593,6 +6681,17 @@ free local model, or using a few successful live probes as proof of every routin
     time without progress, so a job waits as long as calls keep settling.
   - **Bound the final payload by the context plus the body** (#781's first form): the body is built from the context,
     so the sum counted most bytes twice.
+  - **A cross-process lock held across read, judge and pre-dispatch write** (issue #985, part 2): a process killed while
+    holding it leaves a stale lock to detect and break, and every capped call of every process would pay for it. The
+    turn names a generation instead, so it needs no clearing, and it is taken only while someone waits.
+  - **Turns for waiters only** (this part's first form): a fresh call in another process landing in the same tick as a
+    waiter's turn took the same room, every run in the four-child lab, and that waiter would have been refused before
+    waiting existed, so it was a NEW way past the cap, not the old residual.
+  - **Turns for every admission even while nobody waits**: only one process could admit per tick at all, so N parallel
+    children whose calls fit the cap easily would start up to N ticks apart, a coordination delay on every capped job
+    with children. While nobody waits the overshoot of fresh calls inside one tick stays the named residual, unchanged.
+  - **Keep the drain timer unref'd in a waiting child**: measured, the child exits mid-call (an empty event loop) and
+    its task's long call is never made, while the job ends `stop`.
   - **Check the cap after each call** (the token cap's shape): the overshoot is one call, and one call can cost
     more than the cap.
   - **Reserve "the cap plus one worst call"** in the worker: several dollars per job on the default model, it
@@ -6649,10 +6748,19 @@ free local model, or using a few successful live probes as proof of every routin
     give-back rule.
 - **Residuals, named**:
   - **waiting** (issue #985): a job can sit up to 15 minutes behind a hung call before the waiter is refused (the job's
-    idle limit, 15 minutes by default, usually ends it first). Waiting is per process: a pi child process (a role's
-    task) never waits, and a call judged against what other processes hold counts all of it as settled, so parallel
-    role children are still refused when their holds fill the cap. A call under an admitted dispatch cannot wait, and
-    takes room ahead of the queue when it fits. The final payload's wait releases the call's hold on the strength of
+    idle limit, 15 minutes by default, usually ends it first). Across processes (issue #985, part 2): every process
+    judges the others as of the last tick, so a waiter waits up to a tick (and its own timer's phase) after a hold
+    elsewhere settles; while anyone waits every admission waits for its turn, up to about two ticks at the start of a
+    wait (measured: a call waiting only for its own process's hold, 513 ms before the turns, 2.0 s with them; a role
+    child admitted about 1.0 s after the settle that freed its room, before and after) and one process per tick after
+    that; the queue is per process, so a busier process can take each room first and keep a waiter in another waiting
+    until its work ends (each of its settles is progress, so the idle limit does not end that wait). The overshoot
+    across processes left is the pre-existing one-tick residual between fresh calls in different processes, including the tick in which a wait begins and before it is published; waiting itself adds no overshoot (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`); off Linux, where nothing
+    retires a dead child's ledger, a child killed mid-call keeps its hold `running` and a waiter waits for it until the
+    idle limit refuses it; a waiting process with nothing of its own in flight is kept alive by the drain timer, at
+    most until that limit or a stop. A call under an admitted dispatch cannot wait, and takes room ahead of the queue
+    when it fits while nobody waits; while anyone waits it is admitted only in its turn and refused without it. The
+    final payload's wait releases the call's hold on the strength of
     "nothing is sent before `onPayload` returns", which is pinned for pi-ai's api modules only: an extension's provider
     on a priced api id that sent before awaiting the hook would run unheld while it waits;
   - extension code in the job can still reach a provider the meter never sees: pi-ai's per-api stream
@@ -19654,6 +19762,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-22 (#985) | Issue #985, part 2: waiting across child processes. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: step 4, a call refused only by other calls' holds waits whether they run in its own process or in the job's other pi processes (was: this process); **Waiting for room**, waiting can help when `spent + (external - externalInflight) + bound <= cap` and something is in flight here or elsewhere (was: all of `external` counted settled), the in-flight part read with `external` from one reading and failing toward 0, never above `external`, admission still judging `external` whole; a pi child's guard has the queue (was: never offered a wait); the drain timer REF'd while someone waits with nothing of this guard's in flight and unref'd otherwise, closed at the meter's teardown (measured: unref'd, a waiting role child exited mid-call and the job ended `stop` without that task's call); NEW, THE TURN: while any process of the job has a waiter, every admission in every process, fresh calls and a final payload's growth included, takes its turn (one process per SPENT generation, never the generation right after another's turn, a call that waited never the first generation that shows the wait), a fresh call that loses it waiting (`cost_wait` `why: "turn"`), a call that may not wait and has none refused, a growth included, under a NEW rule `turn` (`COST_REFUSALS`, the exit line's and the record's `why`, since raising the cap cannot help it; measured: admitted, 2010 and 2110 under 2000), and with nobody waiting no turn and no delay; a parent's STOP ends a child's waiter on the next tick, a final payload's wait included (`stopNow`); progress for the idle limit is the outside spend falling, its in-flight part falling or its settled part rising, a rise of the in-flight part alone not; `cost_wait` and `cost_refused` carry `externalInflight`, and a child's guard logs neither; the no-deadlock argument covers role children. **Rejected**, four added: a cross-process lock across read, judge and write; turns for waiters only (measured: a fresh call in the same tick as a waiter's turn took the same room every run, a new way past the cap); turns for every admission even while nobody waits; an unref'd timer in a waiting child. **Residuals**: "waiting is per process, so parallel role children are still refused" REMOVED; NEW, across processes: a waiter lags a settle elsewhere by up to a tick, an admission waits for its turn while anyone waits (up to about two ticks at the start of a wait, measured 513 ms to 2.0 s for a wait on the job's own hold), no order across processes beyond the turns, a SIGKILLed child's hold off Linux waited for until the idle limit, a waiting process kept alive by the timer until that limit or a stop; the overshoot left is the pre-existing one-tick residual between fresh calls in different processes, including the tick in which a wait begins and before it is published, UNCHANGED; waiting itself adds none. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**, six places: the SPENT file gains `inflight`, `inflightByLedger` (nonzero parts only), `gen`, `waiting` and `waitingSince`, `v` still 1, a `done`, unmetered or retired ledger's hold counted settled, `inflightFor` (own part subtracted, 0 when missing or malformed, never above `externalFor`), a missing or bad `waiting` read as someone waiting, a reader from before reading the file as before; the ledger gains an optional `waiting` (no version; missing or not a count counted as waiting); the child's meter reads all from one `readSpent`, offers the queue, publishes its waiting at once and takes turns; every call on disk before it goes out: `COST_WAIT` writes no reservation, and a capped call's ledger is written again as its `onPayload` returns with the hold it is sent under (was: only at its settle, so siblings judged a grown call at its admission bound); the control files: `gen`, `waiting`, `waitingSince`, `externalInflight()`, `outsideWaiting()`, `claim(waited)` and THE TURN (`CLAIM.<gen>` created exclusively, a turn won on an older SPENT lost because a child reads the generation again after its claim exists (measured: without it two claims across one boundary both admitted, 2110 under 2000), a call that may not wait and has no turn refused, the two rules for the fold-to-write moment, removed three generations on; measured: four role children took one room twice before it, at most two calls at once in five runs with it, and no change in start times when nobody waits); the residual of children that start a call inside one tick is UNCHANGED: between fresh calls in different processes, including the tick in which a wait begins and before it is published, and waiting adds none; a child from before the keys takes no turn, which cannot happen in one container. **Code evidence**: image/runner/src/usage-meter.mjs -> createCostGuard (externalInflight, claim, outsideWaiting, onQueue, outsideNow, claimed, mustTakeTurn, notifyQueue, keepAlive, close, waiting), createPolicyGuard, stopNow, wrapModelRuntime, wrapProviderStreams, installProcessUsageMeter (uninstall), parseChildLedger, childLedger, foldChildLedgers (liveInflightMicros, liveWaiting), ledgerInflight, ledgerWaiting, spentFile, externalFor, inflightFor, readSpent, readExternal, WAIT_CLAIM_PREFIX, waitClaimName, claimWait, waitClaimTaken, startChildMeter; image/runner/src/child-watch.mjs -> createChildWatch (externalInflight, outsideWaiting, claim, the SPENT generation and waiting); image/runner/run-job.mjs; image/runner/test/child-wait.fuzz.test.mjs. |
 | 2026-11-22 (#1040) | **`DES-WORKER-ON-HOST` CORRECTED and AMENDED**, the Decision's bounded docker steps: it said every short docker call before a Valkey starts was bounded, while the job image's presence reads and the openshell venues' image capability read were not, so an engine that stopped answering there held `up` after "Docker daemon reachable" (or after the OpenShell gateway's line, on podman) with no word. All are bounded now at the same thirty seconds: the presence read on each engine a venue pulls the image into (`docker image inspect`, `podman image exists`, of the default image or of `PI_JOB_IMAGE`'s) and the capability read on the gateway's engine, docker or podman. An overrun is said as the engine not answering, with the command, in the `docker version` gate's words, and is met as that venue's refused gate is: it stops `up` with nothing pulled, run, created or started and neither init nor doctor reached where the gate's refusal would (the docker venue's read; the podman venue's with no docker venue beside it), and for an openshell venue's read where openshell is the only venue or another venue runs on the engine that did not answer; otherwise only the venue that read it is skipped, the others' steps all run, and an openshell venue skipped so makes `up` exit non-zero at the end. The entry now lists exactly what is bounded and what is not: the openshell gate's own reads keep its 15 s read bound, and unbounded still are the job image's pull and tag, compose, the Valkey volume's create, the Valkey and egress proxy containers' runs, stops and removals, the egress step's reads (after the Valkey step), and on podman every command of the stack step, after a gate saw podman answer and after the bounded image read. Rejected: stopping the whole pass on any overrun (a podman store that did not answer would hold back the docker venue's steps, against `up`'s rule that one venue's failure leaves the others' running), going on beside a venue on the same engine (its next read with no bound of its own would hang), and going on to the pull offer after a presence read that overran (a pull on an engine that did not answer a read is only the next hang). UNCHANGED, checked: `DES-HOST-REGISTRY` (the log line's `time`, `REQ-MULTI-HOST-COORDINATION`, is not a registry field and nothing decides by it), `DES-PODMAN-NATIVE-ROOTLESS-BACKEND` (the podman venue's gate is as before, and its image read overrunning is met as that gate's refusal). **Code evidence**: worker/src/up.mjs -> runUp, dockerImageStep, podmanImageStep, overrideImageStep, openshellImageCapsStep, imageReadUnanswered, cannotContinue, runCmdQuery, DOCKER_STEP_TIMEOUT_MS. |
 | 2026-11-22 (#1040) | **`DES-HOST-BUDGET` AMENDED**, a dated paragraph in the aggregate CPU reserve's bullet: an image whose labels could not be read cuts the leftover pass short (its rows judged by no one, the pass going on with the images it read, only a timeout still stopping it at once), so `kept` is always a fingerprint that misses; each doctor's helper name carries its pid, both its rms are `rm -f` of its own name, an exit 125 there no longer names another doctor, and a later doctor removes dead pids' helpers before its read on a daemon this host owns through the canary probes' sweep, with that sweep's PID-namespace caveat, and not from browser setup's read-only run, which runs no helper either; the worker removes its killed doctor child's helper itself with one bounded `rm -f` after a kill at the bound (not after a shutdown kill), and its pass takes the rest on any daemon; an image cut covers a row with no image id too; three residuals (what the worker's rm misses on a daemon not owned once the pass has ended, the PID namespace, two hosts' doctors with one pid and one worker name on a shared daemon) and two rejected alternatives (keeping the plain `rm`, a random suffix); the issue #978 paragraph's doctor name AMENDED in place and the issue #1021 paragraph's plain-rm sentence marked SUPERSEDED. **`DES-DOCTOR-RESULTS-PUBLISHED` AMENDED**, the worker's run residual: a killed run's CPU-reserve helper is named after its pid, removed by the worker right after a kill at the bound (`afterKill`), and otherwise by the next doctor's CPU-reserve step once that pid is dead on a daemon this host owns, or by the worker's leftover pass on any daemon while that pass runs; NEW log line `doctor_helper_not_removed` (`pid`, `reason`) when that rm failed. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, the doctor sub-bullet: the CPU-reserve read helper is pid-named too, and its own step removes a dead pid's with the probes' sweep right before its read, on a daemon this host owns. UNCHANGED, checked: `DES-CONCURRENCY-3` (one worker per daemon, the worker's helper name and its guard), `DES-RETENTION-SWEEPS-ON-A-TIMER` (the leftover pass still has no timer of its own). **Code evidence**: worker/src/cpu-reserve.mjs -> helperName, HELPER_NAME_RE, DOCTOR_HELPER_NAME_RE, guardHelperRun, removeLegacyHelpers, legacyHelperVerdict, removeKilledDoctorHelper; worker/src/doctor.mjs -> doctorCpuReserve (readOnly), sweepStaleDoctorHelpers, doctorHelperSweepChecks, cpuReserveChecks, sweepStaleProbeContainers; worker/src/doctor-spawner.mjs -> makeDoctorSpawner (afterKill), DOCTOR_RUN_TIMEOUT_MS; worker/src/start.mjs -> startWorker (the doctor spawner's afterKill). |
 | 2026-11-22 (#965) | **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` CORRECTED**, two clauses of its rejected alternatives: a queue built while Valkey takes the connection and answers nothing took 36 to 39 s at the 5 s bound when measured under #842 (it said about 30 s, from the 1 s measurement scaled up), and the console's queues behind the kill switch, the failed-job and steer actions, the fleet reader and the status read take the command bound since #842 and the one-shot queues of a rerun, a parked answer, a `dispatch_run`, a manual trigger fire and the zero touch and schedule pages since #961, not `cancelHeldJob`'s queues or `readSchedulers`' (plain `parseConnection(url, { failFast: true })` under timers of their own), a raw client only where its caller passes `commandTimeoutMs`, and `enqueueForgeJob`'s routed queue the connection of its caller's queue (it said the console's queues). **`DES-OPERATOR-CONSOLE` CORRECTED and AMENDED**: the #961 residual's routed approval queue was not measured (it said it threw after about 30 s, measured), with the 36 to 39 s measured under #842 named instead; the #842 previews clause says a failed job's, a steer's and a withdrawal's preview whose read threw or ran past its end answer 503 with Try again, since `planned()` now passes a planner's status, the run's own refusals staying 400; the #961 agent word clause adds a single write that threw (`action-unconfirmed` for a `valkeyMayStillRun` error and a host setup step, for a `valkeyNotSent` one the caller's own word for an unreachable answer, `action-unavailable` from the tools, `action-refused` from the console, else `action-refused`); the budget writes clause names `valkeyNotSent`, set where the code knows a Valkey read or connect got no answer before anything was sent (`writeClient`'s two throws, a refused connect among them since ioredis reports it as "Connection is closed."; the sandbox End's read of its session, never one Valkey answered with its own error reply), which the confirm answers 503 with `VALKEY_UNREACHABLE`, and `writeEnvelope` now throws such a connect on as the other two budget writes do; the module list drops `setQueuePausedOne`, whose removal and the action table's Fleet line saying so came with #1014. "What timed out is not sent later" UNCHANGED, checked. **Code evidence**: admin/src/console/actions.mjs -> planned, confirmOne, AGENT_REFUSED, AGENT_UNCONFIRMED; admin/src/audited-write.mjs -> auditedWrite, thrownAgentWord, thrownSentence, AGENT_REFUSED, AGENT_UNCONFIRMED, AGENT_UNAVAILABLE; admin/src/job-actions.mjs -> planSteer, planSteerWithdraw; admin/src/read-model.mjs -> writeClient, writeEnvelope, cancelHeldJob, readSchedulers, createFleetReader (pauseQueue); worker/src/sandbox-sessions.mjs -> requestSandboxEnd; worker/src/queue.mjs -> consoleQueueConnection, enqueueForgeJob. |

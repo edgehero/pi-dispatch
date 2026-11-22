@@ -132,7 +132,7 @@ const ROWS = [
 	["answer-draft-unavailable", "Draft state could not be read or published.", "Check the deployment's store and retained run sources. Do not repeat a paid job for its metric."],
 	["runner-policy", TERMINAL_COMMENTS["runner-policy"], "Read the job log for the turn or token budget it reached, or the refusal inside the container, and adjust the trigger."],
 	["provider-auth-refused", TERMINAL_COMMENTS["provider-auth-refused"], "Check the provider key on the worker and what it may use, then run the job again."],
-	["cost-cap", TERMINAL_COMMENTS["cost-cap"], "Raise the trigger's `run.maxCostUsd` or the deployment's `PI_MAX_COST_USD` if the work needs more, then run the job again."],
+	["cost-cap", TERMINAL_COMMENTS["cost-cap"], "Raise the trigger's `run.maxCostUsd` or the deployment's `PI_MAX_COST_USD` if the work needs more, then run the job again. A stop whose `why` is `turn` is not about the limit: see the reason's page."],
 	["model-not-allowed", "Stopped: an AI model this job would call is not on its list of allowed models, or the run tried to change an AI request in a way it does not allow, so that call was not made. When this was decided before the job started, no container was started and nothing was spent.", "Check the trigger's `run.models` and `PI_ALLOWED_MODELS`, and list every model the job may call, fallbacks included, or check the job log for a refused request."],
 	["cost-cap-unenforceable", TERMINAL_COMMENTS["cost-cap-unenforceable"], "Update the job image to a release that enforces cost limits, then run the job again."],
 	["model-policy-unenforceable", TERMINAL_COMMENTS["model-policy-unenforceable"], "Update the job image to a release that enforces model lists, then run the job again."],

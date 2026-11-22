@@ -278,18 +278,35 @@ A call is still refused, and the job stops with `cost-cap` and `why: "over-cap"`
 - it waited 15 minutes with no call finishing (the job's idle limit, also 15 minutes by default, usually ends such a
   job first, as `idle`).
 
-Two kinds of call never wait, and are refused as before when they do not fit: a call made inside another call that is
+One kind of call never waits, and is refused as before when it does not fit: a call made inside another call that is
 already running (a provider that forwards to another model, or a call from a request hook), because the call it runs
-inside may be waiting for it, and every call of a pi child process, such as a role's task. Spend in other processes
-counts as already spent, so parallel role children are still refused when their calls fill the cap.
+inside may be waiting for it. While a call in another process of the job waits, such a call is also refused when it
+fits but it is not its process's turn (below), with `why: "turn"`: admitted, it could take the room the waiting call
+takes. Before calls could wait it would have been admitted, and the other call, the one now waiting, refused; so the job
+stops in this case as it did then, under the other call. Raising the cap does not help such a stop.
+
+Calls in other processes count too. A role's parallel tasks run as pi child processes, each with its own meter
+([pi child processes](#pi-child-processes)). A child's call that does not fit only because of what its siblings and
+the job's own calls still hold waits for them, and a call of the job waits the same way for what its children hold.
+What another process already spent counts as spent: waiting cannot bring that back. Each process sees the others as
+of the runner's last count, at most a second old, so a call waits up to about a second after room appears elsewhere.
+While any process of the job has a call waiting, every new call in every process takes turns: in each second only one
+process starts calls, and the others see what it started before they try. So a waiting call and a new call elsewhere
+never take the same room, and a call can wait up to about two seconds for its turn when waiting begins. When nothing
+waits there are no turns and no delay. A call that waits takes its turn even when the job has no child processes, so
+the first wait of a waiting period runs about 1.5 to 2 seconds after room appears instead of at once (measured: a call
+that waited half a second for another to finish ran after 2.0 seconds). A waiting child stays alive while it waits. A stop of the job reaches a waiting child within a
+second, and its call ends without being sent.
 
 The final request is measured as the larger of the original request and the request as built for the provider. When
 that is more than the call held, and only other calls stand in its way, the call gives back what it held, waits ahead
 of every other waiting call, and takes the larger amount when room appears. Nothing is sent before then.
 
 A call that waits leaves two lines in the job log, `cost_wait` when it starts waiting and `cost_waited` with
-`waitedMs` when it runs. A refusal after a wait carries `waited` on its `cost_refused` line. All three hold numbers
-only.
+`waitedMs` when it runs (a child's call leaves none: a child's output goes to the tool that started it). A call that
+fits but waits for its turn has `why: "turn"` on its `cost_wait`. `cost_wait` and `cost_refused` carry
+`externalInflight`, the part of the children's spend still running, beside `external`. A refusal after a wait carries
+`waited` on its `cost_refused` line. All three hold numbers only.
 
 ### How a run settles
 
@@ -684,7 +701,13 @@ the provider key and runs as the same user as the runner. Named gaps:
 - a child that lives and spends inside one second, and whose ledger is deleted before the runner reads it;
 - a forged ledger that keeps reporting less than the child spent;
 - several children can each start a call against the same headroom, up to a second old, so together they can pass
-  a cap. That spend is still charged in full;
+  a cap. That spend is still charged in full. This is a gap between new calls only, and it includes the second in
+  which a call starts waiting, before the other processes can know of it. A waiting call adds no such gap: once its
+  wait is known, every call takes its turn;
+- a child's call that waits for room while a busier child keeps taking each room first waits until that child's work
+  ends;
+- off Linux, a child that is killed during a call leaves that call counted as running, and a call waiting for it
+  waits 15 minutes before it is refused;
 - off Linux there is no process scan, so only the ledgers count;
 - a child whose meter is still starting when the job ends, and that started in the job's last 10 seconds, is not
   counted;

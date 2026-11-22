@@ -1169,26 +1169,32 @@ test("Radius routes, zero-rate rows and custom gateways never dispatch under a l
 // Every test below asserts the cap's invariant at EACH step, not only at the end (`within`): what the guard settled,
 // plus what it holds in flight, plus the outside spend where there is one, never passes the cap.
 
-/** A fake interval: the drain the guard arms while anyone waits, run by hand (`tick()`). */
+/**
+ * A fake interval: the drain the guard arms while anyone waits, run by hand (`tick()`). `alive` is whether it keeps the
+ * process alive now: ref'd (true) or unref'd (false), as a Node timer is.
+ */
 function fakeTimer() {
-	const timer = { armed: null, unrefs: 0 };
+	const timer = { armed: null, unrefs: 0, alive: false };
 	timer.set = (run, ms) => {
-		timer.armed = { run, ms, unref: () => (timer.unrefs += 1) };
+		timer.alive = true;
+		timer.armed = { run, ms, unref: () => ((timer.unrefs += 1), (timer.alive = false)), ref: () => (timer.alive = true) };
 		return timer.armed;
 	};
 	timer.clear = (handle) => {
-		if (timer.armed === handle) timer.armed = null;
+		if (timer.armed !== handle) return;
+		timer.armed = null;
+		timer.alive = false;
 	};
 	timer.tick = () => timer.armed?.run();
 	return timer;
 }
 
 /** A guard for the waiting tests: an injected clock and timer, the bound read off the call's model (`model.bound`). */
-function waitingGuard({ capMicros, external = null }) {
+function waitingGuard({ capMicros, external = null, externalInflight = null, claim = null, outsideWaiting = null }) {
 	const clock = { now: 0 };
 	const timer = fakeTimer();
 	const logged = [];
-	const guard = createCostGuard({ capMicros, bound: (method, model) => model.bound, external, log: (event, fields) => logged.push({ event, fields }), now: () => clock.now, setTimer: timer.set, clearTimer: timer.clear });
+	const guard = createCostGuard({ capMicros, bound: (method, model) => model.bound, external, externalInflight, claim, outsideWaiting, log: (event, fields) => logged.push({ event, fields }), now: () => clock.now, setTimer: timer.set, clearTimer: timer.clear });
 	const within = (label) => {
 		const outside = external === null ? 0 : external();
 		assert.ok(guard.state.spent + guard.state.inflight + outside <= capMicros, `${label}: spent ${guard.state.spent} + in flight ${guard.state.inflight} + outside ${outside} passed the cap ${capMicros}`);
@@ -1619,7 +1625,7 @@ test("issue #985: a deferred classify answers with a promise of its retry's resu
 	}
 });
 
-test("issue #985: a guard without wait (a pi child's) is never offered a wait, so every call is judged as before", () => {
+test("issue #985: a guard without wait is never offered a wait, so every call is judged as before", () => {
 	const offered = [];
 	const { HandRuntime } = handRuntime();
 	const childLike = { enforces: [COST_CAP], admit: (call) => (offered.push(Object.keys(call)), null) };
@@ -1760,4 +1766,266 @@ test("issue #985: a drop in the outside spend is progress for the idle limit", (
 	within("refused");
 	assert.deepEqual(waiting.verdicts, [COST_WAIT, COST_WAIT, COST_CAP]);
 	assert.equal(logged.at(-1).fields.waited, 25 * 60 * 1000);
+});
+
+// ── Issue #985, part 2: holds in OTHER processes (a role's child tasks, the parent's calls) ─────────────────────
+//
+// `externalInflight()` is the part of `external()` still in flight elsewhere (a parent: its children's open holds; a
+// child: SPENT's in-flight part less its own). Each test asserts the cap at every step with the outside spend counted
+// whole (`within`): admission never counts the outside in-flight part as free.
+
+test("issue #985: a call refused only by holds in another process waits, holding nothing, and is admitted when they settle there", { timeout: 10_000 }, () => {
+	let outside = 700; // another process: 100 settled, 600 in flight
+	let inflight = 600;
+	const { guard, timer, logged, within } = waitingGuard({ capMicros: 1000, external: () => outside, externalInflight: () => inflight });
+	const waiting = queued(guard, 500); // 0 + 0 + 700 + 500 > 1000; 0 + 100 + 500 <= 1000 once the 600 settles
+	within("waiting");
+	assert.deepEqual([guard.state.inflight, guard.state.waited, guard.state.refused], [0, 1, 0], "nothing of its own in flight, and no refusal");
+	assert.deepEqual(logged, [{ event: "cost_wait", fields: { bound: 500, spent: 0, inflight: 0, external: 700, externalInflight: 600, cap: 1000, waiting: 0 } }], "numbers only");
+	timer.tick();
+	within("a tick with nothing settled elsewhere");
+	assert.deepEqual(waiting.verdicts, [COST_WAIT]);
+	outside = 150; // the hold elsewhere settled at 50
+	inflight = 0;
+	timer.tick();
+	within("admitted on the tick");
+	assert.deepEqual(waiting.verdicts, [COST_WAIT, null], "0 + 0 + 150 + 500 <= 1000");
+	assert.deepEqual([guard.state.inflight, timer.armed], [500, null]);
+	assert.deepEqual(logged.at(-1), { event: "cost_waited", fields: { waitedMs: 0 } });
+	// The same call with no in-flight reader: every outside micro-dollar counts as settled, so it is refused.
+	const blind = waitingGuard({ capMicros: 1000, external: () => 700 });
+	assert.equal(blind.guard.admit(sized(500)), COST_CAP, "nothing of its own to wait for, and the outside counted settled");
+});
+
+test("issue #985: what another process SETTLED is never waited for: refused when spent + settled outside + bound passes the cap, or when nothing is in flight anywhere", { timeout: 10_000 }, () => {
+	for (const [outside, inflight, why] of [[700, 100, "600 settled elsewhere + 500 > 800"], [700, 0, "nothing in flight anywhere: 700 settled elsewhere + 500 > 800"]]) {
+		const { guard, within } = waitingGuard({ capMicros: 800, external: () => outside, externalInflight: () => inflight });
+		assert.equal(guard.admit(sized(500)), COST_CAP, why);
+		within(why);
+		assert.equal(guard.state.waited, 0);
+	}
+	// A waiter whose hold elsewhere settles at its bound: its wait can no longer help, so it is refused on the tick.
+	let outside = 700;
+	let inflight = 600;
+	const { guard, timer, logged, within } = waitingGuard({ capMicros: 1000, external: () => outside, externalInflight: () => inflight });
+	const waiting = queued(guard, 500);
+	inflight = 0; // settled at its whole bound: 700 settled elsewhere + 500 > 1000
+	timer.tick();
+	within("refused");
+	assert.deepEqual(waiting.verdicts, [COST_CAP]);
+	assert.deepEqual(logged.at(-1), { event: "cost_refused", fields: { bound: 500, external: 700, externalInflight: 0, waited: 0, spent: 0, inflight: 0, cap: 1000 } });
+});
+
+test("issue #985: the in-flight reader fails toward refusing, never toward room; it is never more than the outside spend", { timeout: 10_000 }, () => {
+	for (const [label, reader] of [["a throw", () => { throw new Error("unreadable"); }], ["NaN", () => NaN], ["negative", () => -1], ["a string", () => "600"], ["Infinity", () => Infinity], ["undefined", () => undefined]]) {
+		const { guard, within } = waitingGuard({ capMicros: 1000, external: () => 700, externalInflight: reader });
+		assert.equal(guard.admit(sized(500)), COST_CAP, `${label}: 0 in flight, so the 700 counts settled`);
+		within(label);
+	}
+	// A reader that claims more than the outside spend is cut to it: 700 in flight, nothing settled, so the call waits;
+	// admission still counts all 700.
+	let outside = 700;
+	const { guard, timer, within } = waitingGuard({ capMicros: 1000, external: () => outside, externalInflight: () => 5000 });
+	const waiting = queued(guard, 500);
+	within("waiting");
+	timer.tick();
+	assert.deepEqual(waiting.verdicts, [COST_WAIT], "700 + 500 > 1000 still");
+	outside = 500;
+	timer.tick();
+	within("admitted");
+	assert.deepEqual(waiting.verdicts, [COST_WAIT, null]);
+	// An outside external that fails closed is refused as `external`, whatever the in-flight reader says.
+	assert.equal(waitingGuard({ capMicros: 1000, external: () => NaN, externalInflight: () => 0 }).guard.admit(sized(1)), COST_CAP);
+	assert.throws(() => createCostGuard({ capMicros: 1000, externalInflight: () => 0 }), /beside external/, "an in-flight part of nothing");
+	assert.throws(() => createCostGuard({ capMicros: 1000, external: () => 0, externalInflight: 5 }), /must be a function/);
+});
+
+test("issue #985: progress elsewhere for the idle limit: a settled part that rose is progress, a new hold elsewhere alone is not", { timeout: 10_000 }, () => {
+	// A new call elsewhere (the in-flight part rose, nothing settled): no progress, so the waiter is refused at 15 minutes.
+	let outside = 750; // 150 settled elsewhere, 600 in flight
+	let inflight = 600;
+	const quiet = waitingGuard({ capMicros: 1000, external: () => outside, externalInflight: () => inflight });
+	const stuck = queued(quiet.guard, 300); // 0 + 750 + 300 > 1000; 150 + 300 <= 1000 once the 600 settles
+	quiet.clock.now = 10 * 60 * 1000;
+	outside = 760;
+	inflight = 610;
+	quiet.timer.tick();
+	quiet.within("minute 10");
+	quiet.clock.now = COST_WAIT_IDLE_MS;
+	quiet.timer.tick();
+	quiet.within("refused at 15 minutes from the start");
+	assert.deepEqual(stuck.verdicts, [COST_WAIT, COST_CAP], "a rise of the in-flight part is a new hold, not a settle");
+	// A hold elsewhere settled and its process took the room again at once (between two readings): the in-flight part
+	// is unchanged, the settled part rose. That is a settle, so the 15 minutes start again.
+	outside = 750;
+	inflight = 600;
+	const busy = waitingGuard({ capMicros: 1000, external: () => outside, externalInflight: () => inflight });
+	const patient = queued(busy.guard, 300);
+	busy.clock.now = 10 * 60 * 1000;
+	outside = 800; // 200 settled now, 600 in flight again
+	busy.timer.tick();
+	busy.within("minute 10");
+	busy.clock.now = COST_WAIT_IDLE_MS;
+	busy.timer.tick();
+	busy.within("15 minutes from the start");
+	assert.deepEqual(patient.verdicts, [COST_WAIT, COST_WAIT], "not idle: the settle at minute 10 was progress");
+	busy.clock.now = 10 * 60 * 1000 + COST_WAIT_IDLE_MS;
+	busy.timer.tick();
+	busy.within("refused");
+	assert.deepEqual(patient.verdicts, [COST_WAIT, COST_WAIT, COST_CAP]);
+	assert.equal(busy.logged.at(-1).fields.waited, 25 * 60 * 1000);
+});
+
+test("issue #985: the drain timer keeps the process alive only while someone waits with nothing of ours in flight; close() lets go for good", { timeout: 10_000 }, async () => {
+	let outside = 700;
+	let inflight = 600;
+	const { guard, timer, within } = waitingGuard({ capMicros: 1000, external: () => outside, externalInflight: () => inflight });
+	const waiting = queued(guard, 500);
+	assert.equal(timer.alive, true, "a wait for holds elsewhere: nothing else here keeps the event loop alive meanwhile");
+	outside = 300; // 600 in flight elsewhere still, 0 settled: a call of our own fits beside it
+	inflight = 300;
+	const own = hold(guard, 100, { waitable: false }); // a call that may not wait is never held behind the queue
+	timer.tick();
+	within("our own hold in flight");
+	assert.deepEqual(waiting.verdicts, [null], "300 + 100 + 500 <= 1000: admitted");
+	assert.equal(timer.armed, null, "no waiter, no timer");
+	// In-process waiting (PR 1's case) stays unref'd: a call of our own in flight has its socket.
+	const second = queued(guard, 600); // 0 + 600 + 300 + 600 > 1000
+	assert.equal(timer.alive, false, "unref'd while a call of ours is in flight");
+	own.end(message(0.0001));
+	await flush();
+	within("our small hold settled; the 500 is still in flight");
+	assert.equal(timer.alive, false);
+	guard.close();
+	assert.equal(timer.alive, false);
+	outside = 0;
+	inflight = 0;
+	timer.tick();
+	within("still waiting on our 500");
+	assert.deepEqual(second.verdicts, [COST_WAIT, COST_WAIT], "retried at the settle and at the tick");
+	// A waiter with nothing of ours in flight after close(): never ref'd again.
+	const closed = waitingGuard({ capMicros: 1000, external: () => 700, externalInflight: () => 600 });
+	closed.guard.close();
+	queued(closed.guard, 500);
+	assert.equal(closed.timer.alive, false, "after the meter's teardown a waiter never holds the runner past its exit line");
+});
+
+test("issue #985: the meter's teardown closes the guard, so a waiter left queued cannot keep the runner alive", { timeout: 10_000 }, async () => {
+	const timer = fakeTimer();
+	const guard = createCostGuard({ capMicros: 1000, bound: (method, model) => model.bound, external: () => 700, externalInflight: () => 600, setTimer: timer.set, clearTimer: timer.clear });
+	const { handle } = await install({ copy: fakeCopy(["openai-completions"]), meter: createUsageMeter({ maxCostMicros: 1000 }), guard });
+	assert.equal(guard.admit(sized(500)), COST_WAIT);
+	guard.wait(() => {});
+	assert.equal(timer.alive, true);
+	handle.uninstall();
+	assert.equal(timer.alive, false);
+});
+
+test("issue #985: the policy guard hands the cost guard the in-flight reader, its clock and its timer, and passes close() on", { timeout: 10_000 }, () => {
+	const timer = fakeTimer();
+	let outside = 700;
+	let inflight = 600;
+	const policy = createPolicyGuard({ maxCostMicros: 1000, env: {}, external: () => outside, externalInflight: () => inflight, setTimer: timer.set, clearTimer: timer.clear, now: () => 0 });
+	// Input free, 250 output tokens at $2 per million: a bound of 500 micro-dollars, by the real callCostBound.
+	const model = { ...FLAT, cost: { input: 0, output: 2, cacheRead: 0, cacheWrite: 0 }, maxTokens: 250 };
+	assert.equal(callCostBound("streamSimple", model, { messages: [] }, {}, {}), 500);
+	const call = { method: "streamSimple", model, args: [{ messages: [] }, {}], waitable: true, waiter: null };
+	assert.equal(policy.admit(call), COST_WAIT, "waits for the 600 in flight elsewhere");
+	policy.wait(() => {});
+	assert.equal(timer.alive, true);
+	policy.close();
+	assert.equal(timer.alive, false);
+	outside = 0;
+	inflight = 0;
+	assert.equal(policy.admit({ ...call, waitable: false }), null);
+});
+
+test("issue #985: a call that WAITED takes the room it fits in only with the wait claim; without it, it waits on, and a fresh call never asks", { timeout: 10_000 }, async () => {
+	let won = false;
+	let asked = 0;
+	const { guard, clock, timer, logged, within } = waitingGuard({ capMicros: 1000, claim: () => ((asked += 1), won) });
+	const first = hold(guard, 600);
+	assert.equal(asked, 0, "a call that fits at once claims nothing");
+	const waiting = queued(guard, 500); // 0 + 600 + 500 > 1000
+	first.end(message(0.0001)); // 100 + 0 + 500 <= 1000: it fits, but another process may be about to take the same room
+	await flush();
+	within("fits, claim lost");
+	assert.deepEqual([waiting.verdicts, asked, guard.state.inflight], [[COST_WAIT], 1, 0], "it waits on, holding nothing");
+	timer.tick();
+	assert.deepEqual([waiting.verdicts, asked], [[COST_WAIT, COST_WAIT], 2]);
+	won = true;
+	timer.tick();
+	within("claimed and admitted");
+	assert.deepEqual([waiting.verdicts, guard.state.inflight, timer.armed], [[COST_WAIT, COST_WAIT, null], 500, null]);
+	assert.equal(logged.at(-1).event, "cost_waited");
+	// A claim never won and nothing moving: refused at the idle limit, like any wait that cannot end; a throw is a loss.
+	const stuck = waitingGuard({ capMicros: 1000, claim: () => { throw new Error("unreadable"); } });
+	const holder = hold(stuck.guard, 600);
+	const loser = queued(stuck.guard, 500);
+	holder.end(message(0.0001));
+	await flush();
+	assert.deepEqual(loser.verdicts, [COST_WAIT]);
+	stuck.clock.now = COST_WAIT_IDLE_MS;
+	stuck.timer.tick();
+	stuck.within("refused");
+	assert.deepEqual(loser.verdicts, [COST_WAIT, COST_CAP]);
+	assert.deepEqual(stuck.logged.at(-1), { event: "cost_refused", fields: { bound: 500, waited: COST_WAIT_IDLE_MS, spent: 100, inflight: 0, cap: 1000 } });
+	assert.equal(clock.now, 0);
+	assert.throws(() => createCostGuard({ capMicros: 1000, claim: true }), /claim must be a function/);
+});
+
+test("issue #985: while another process waits, a FRESH call that fits takes its turn too; without it, it starts waiting; nobody waiting, it asks for none", { timeout: 10_000 }, () => {
+	let won = false;
+	let others = true;
+	const asked = [];
+	const { guard, logged, within } = waitingGuard({ capMicros: 1000, external: () => 0, claim: (waited) => (asked.push(waited), won), outsideWaiting: () => others });
+	assert.equal(guard.admit(sized(300)), COST_WAIT, "it fits, but another process waits and this generation's turn is taken");
+	within("turn lost");
+	assert.deepEqual([asked, guard.state.inflight], [[false], 0], "asked as a call that did not wait");
+	assert.deepEqual(logged.at(-1), { event: "cost_wait", fields: { why: "turn", bound: 300, spent: 0, inflight: 0, external: 0, cap: 1000, waiting: 0 } });
+	assert.equal(guard.admit(sized(300)), COST_WAIT);
+	won = true;
+	assert.equal(guard.admit(sized(300)), null, "in its turn");
+	within("one admitted");
+	others = false;
+	won = false;
+	asked.length = 0;
+	assert.equal(guard.admit(sized(300)), null, "nobody waits anywhere: admitted as before, no turn asked");
+	assert.deepEqual(asked, []);
+	// The reader fails toward taking the turn: a throw, or anything but false, is someone waiting.
+	for (const reader of [() => { throw new Error("unreadable"); }, () => undefined, () => 0, () => "no"]) {
+		const g = waitingGuard({ capMicros: 1000, external: () => 0, claim: () => false, outsideWaiting: reader });
+		assert.equal(g.guard.admit(sized(300)), COST_WAIT, String(reader));
+	}
+	assert.throws(() => createCostGuard({ capMicros: 1000, outsideWaiting: 1 }), /outsideWaiting must be a function/);
+	assert.throws(() => createCostGuard({ capMicros: 1000, onQueue: 1 }), /onQueue must be a function/);
+});
+
+test("issue #985: onQueue hears when this process starts and stops having a waiter, on a microtask, never inside admit", { timeout: 10_000 }, async () => {
+	const heard = [];
+	const timer = fakeTimer();
+	const guard = createCostGuard({ capMicros: 1000, bound: (method, model) => model.bound, onQueue: (count) => heard.push(count), setTimer: timer.set, clearTimer: timer.clear });
+	const first = hold(guard, 600);
+	const waiting = queued(guard, 600);
+	assert.deepEqual(heard, [], "not synchronously");
+	await flush();
+	assert.deepEqual([heard, guard.waiting()], [[1], 1]);
+	first.end(message(0.0001));
+	await flush();
+	assert.deepEqual([waiting.verdicts, heard, guard.waiting()], [[null], [1, 0], 0], "admitted: the wait is over");
+});
+
+test("issue #985: while anyone waits, a call that may NOT wait (a forward) and has no turn is refused under its own rule, turn, never admitted beside a waiter's turn", { timeout: 10_000 }, () => {
+	let won = false;
+	const { guard, logged, within } = waitingGuard({ capMicros: 1000, external: () => 0, claim: () => won, outsideWaiting: () => true });
+	assert.equal(guard.admit({ ...sized(300), waitable: false }), COST_CAP, "it fits, but another process has this generation's turn");
+	within("refused");
+	assert.deepEqual([guard.state.inflight, guard.refusedWhy()], [0, "turn"], "not over-cap: the call fits, and a higher cap would not help");
+	assert.ok(COST_REFUSALS.includes(guard.refusedWhy()), "a member of the exit line's closed set");
+	assert.deepEqual(logged.at(-1), { event: "cost_refused", fields: { why: "turn", bound: 300, external: 0, spent: 0, inflight: 0, cap: 1000 } });
+	won = true;
+	const other = waitingGuard({ capMicros: 1000, external: () => 0, claim: () => won, outsideWaiting: () => true });
+	assert.equal(other.guard.admit({ ...sized(300), waitable: false }), null, "in its own turn it is admitted");
+	const nobody = waitingGuard({ capMicros: 1000, external: () => 0, claim: () => false, outsideWaiting: () => false });
+	assert.equal(nobody.guard.admit({ ...sized(300), waitable: false }), null, "nobody waits: no turn, admitted as before");
 });

@@ -3206,9 +3206,10 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				// Every other reason the runner gives still reads as runner-policy.
 				const reason = RUNNER_POLICY_REASONS.has(exitReason) && code === 2 ? exitReason : "runner-policy";
 				await comment(job, TERMINAL_COMMENTS[reason]);
-				// Issue #507: which rule of the cost guard refused (`unboundable`, `external`, `over-cap`), as the record's
-				// `why`. parseExitWhy keeps only a member of the closed COST_CAP_WHYS off a `cost-cap` line that said code 2,
-				// and it rides only beside a `cost-cap` reason, so a forged line can at worst name the wrong rule of three.
+				// Issue #507: which rule of the cost guard refused (`unboundable`, `external`, `over-cap`, `final-payload`,
+				// `turn`), as the record's `why`. parseExitWhy keeps only a member of the closed COST_CAP_WHYS off a
+				// `cost-cap` line that said code 2, and it rides only beside a `cost-cap` reason, so a forged line can at
+				// worst name the wrong rule.
 				const why = reason === "cost-cap" && COST_CAP_WHYS.includes(exitWhy) ? { why: exitWhy } : {};
 				return { outcome: "policy", reason, exitCode: code, turns, tokens, usage: usage ?? null, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), budgetReserved: true, ...(dollars ? { dollars } : {}), ...why, ...(resources ? { resources } : {}), ...(progress ? { progress } : {}) };
 			}

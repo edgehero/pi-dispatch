@@ -728,7 +728,8 @@ test("classifyThrow honours the tag of both unenforceable refusals: exit 2, its 
 });
 
 test("costRefusalField: a `why` only on a cost-cap outcome and only from COST_REFUSALS, else nothing at all (#507)", () => {
-	assert.deepEqual([...COST_REFUSALS], ["unboundable", "external", "over-cap", "final-payload"]);
+	assert.deepEqual([...COST_REFUSALS], ["unboundable", "external", "over-cap", "final-payload", "turn"]);
+	assert.deepEqual(costRefusalField({ code: EXIT_POLICY, reason: COST_CAP }, "turn"), { why: "turn" }, "issue #985: a lost turn names its own rule on the exit line");
 	for (const why of COST_REFUSALS) assert.deepEqual(costRefusalField({ code: EXIT_POLICY, reason: COST_CAP }, why), { why });
 	assert.deepEqual(costRefusalField({ code: EXIT_POLICY, reason: COST_CAP }, null), {}, "a cost-cap stop the guard did not refuse");
 	assert.deepEqual(costRefusalField({ code: EXIT_POLICY, reason: COST_CAP }, "something-else"), {});

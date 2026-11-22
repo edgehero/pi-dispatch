@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { CMDLINE_BYTES, createChildWatch, ENVIRON_BYTES, isPiProcess, linuxProc, NO_LEDGER_FINAL_MS, NO_LEDGER_TICKS, PF_FORKNOEXEC, PRELOAD_FLAG, STARTING_CPU_MS, STARTING_FINAL_MS, STARTING_WALL_MS } from "../src/child-watch.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
-import { childLedger, CHILD_LEDGER_MAX_FILES, createCostGuard, createPolicyGuard, createUsageMeter, foldChildLedgers, writeFileAtomic } from "../src/usage-meter.mjs";
+import { childLedger, CHILD_LEDGER_MAX_FILES, claimWait, COST_WAIT, createCostGuard, createPolicyGuard, createUsageMeter, foldChildLedgers, waitClaimName, writeFileAtomic } from "../src/usage-meter.mjs";
 import { dollarSettlement } from "../../../worker/src/dollar-budget.mjs";
 import { parseExitTokens } from "../../../worker/src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -36,6 +36,7 @@ function ledger({ state = "running", metered = true, calls = 1, each = 100, prov
 		costUnreported: 0,
 		longContext: 0,
 		costUnjudged: 0,
+		waiting: 0,
 		...floor,
 	};
 }
@@ -146,8 +147,9 @@ test("under a dollar cap: SPENT is written each tick, external() is the children
 	const name = writeLedger(dir, 9, ledger({ spentMicros: 60_000, inflightMicros: 2_000 }));
 	hook.sample();
 	assert.equal(meter.state.stopReason, null, "960,000 settled is under the cap");
-	assert.deepEqual(JSON.parse(readFileSync(join(dir, "SPENT"), "utf8")), { v: 1, total: 905_000 + 62_000, byLedger: { [name]: 62_000 } });
+	assert.deepEqual(JSON.parse(readFileSync(join(dir, "SPENT"), "utf8")), { v: 1, total: 905_000 + 62_000, byLedger: { [name]: 62_000 }, inflight: 5_000 + 2_000, inflightByLedger: { [name]: 2_000 }, gen: 1, waiting: 0 });
 	assert.equal(hook.external(), 62_000, "the parent's guard sees each child's spent and in-flight");
+	assert.equal(hook.externalInflight(), 2_000, "and which part of it is in flight (issue #985)");
 	own = { spentMicros: 950_000, inflightMicros: 0 };
 	hook.sample();
 	assert.equal(meter.state.stopReason, COST_CAP, "950,000 + 60,000 settled passes 1,000,000");
@@ -211,6 +213,92 @@ test("the cost stop is judged on SETTLED spend: in-flight bounds past the cap do
 	assert.equal(hook.external(), 290_000, "but the parent's guard sees the children's in-flight bounds");
 });
 
+test("issue #985: the parent's guard, wired as run-job wires it, waits for a child's hold in flight and is admitted once the child's ledger shows it settled", () => {
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: 1000, rootSessionId: "root" });
+	const timer = { run: null };
+	let hook = null;
+	const policy = createPolicyGuard({ maxCostMicros: 1000, env: {}, external: () => hook.external(), externalInflight: () => hook.externalInflight(), claim: (waited) => hook.claim(waited), outsideWaiting: () => hook.outsideWaiting(), now: () => 0, setTimer: (run) => ((timer.run = run), { unref() {}, ref() {} }), clearTimer: () => (timer.run = null) });
+	const watched = watch({ meter, guard: () => policy });
+	hook = watched.hook;
+	const { dir } = watched;
+	writeLedger(dir, 9, ledger({ calls: 1, cost: 0.0001, spentMicros: 100, inflightMicros: 600 }));
+	writeLedger(dir, 10, ledger({ calls: 1, cost: 0.0001, state: "done", spentMicros: 100, inflightMicros: 50 }), "fedcba9876543210"); // ended mid-call: its 50 never settles
+	hook.sample();
+	// Input free, 250 output tokens at $2 per million: a bound of 500 micro-dollars.
+	const model = { provider: "fake", id: "m1", api: "openai-completions", baseUrl: "http://127.0.0.1:1", cost: { input: 0, output: 2, cacheRead: 0, cacheWrite: 0 }, maxTokens: 250, compat: { maxTokensField: "max_tokens" } };
+	const call = (waiter = null) => ({ method: "streamSimple", model, args: [{ messages: [] }, {}], waitable: true, waiter });
+	assert.deepEqual([hook.external(), hook.externalInflight()], [850, 600], "the done child's 150 counts settled, the running child's 600 in flight");
+	assert.equal(policy.admit(call()), COST_WAIT, "0 + 850 + 500 > 1000; 250 settled + 500 <= 1000 once the child's 600 settles");
+	const verdicts = [];
+	let waiter = null;
+	waiter = policy.wait(() => {
+		const verdict = policy.admit(call(waiter));
+		verdicts.push(verdict);
+		if (verdict !== COST_WAIT) policy.leave(waiter);
+	});
+	timer.run();
+	assert.deepEqual(verdicts, [COST_WAIT]);
+	writeLedger(dir, 9, ledger({ calls: 2, cost: 0.0001, spentMicros: 200, inflightMicros: 0 })); // settled at 100
+	timer.run();
+	assert.deepEqual(verdicts, [COST_WAIT, COST_WAIT], "not until the next fold: the parent judges its children as of the last tick");
+	hook.sample();
+	timer.run();
+	assert.deepEqual(verdicts, [COST_WAIT, COST_WAIT, COST_WAIT], "it fits now, but generation 2 is the first SPENT to show the parent's wait");
+	hook.sample();
+	timer.run();
+	assert.deepEqual(verdicts, [COST_WAIT, COST_WAIT, COST_WAIT, null], "0 + 0 + 350 + 500 <= 1000, in generation 3's turn");
+	assert.ok(readdirSync(dir).includes("CLAIM.3"), "admitted from a wait in that generation's turn");
+	assert.ok(policy.spend().spentMicros + policy.spend().inflightMicros + hook.external() <= 1000, "the cap across processes");
+	hook.sample();
+	const spent = JSON.parse(readFileSync(join(dir, "SPENT"), "utf8"));
+	assert.deepEqual([spent.total, spent.inflight, spent.inflightByLedger, spent.waiting], [500 + 350, 500, {}, 0], "the children see the parent's new hold, that it is in flight, and that nobody waits now");
+	assert.equal(meter.state.stopReason, null);
+});
+
+test("issue #985: SPENT carries its generation and who waits; the parent's turn is that generation's, won once and kept, lost to a child that took it, never right after another's turn, and removed three generations on", () => {
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: 1000, rootSessionId: "root" });
+	let ownWaiting = 0;
+	const { dir, hook } = watch({ meter, guard: () => ({ spend: () => ({ spentMicros: 0, inflightMicros: 0 }), waiting: () => ownWaiting }) });
+	const claims = () => readdirSync(dir).filter((name) => name.startsWith("CLAIM.")).sort();
+	const spent = () => JSON.parse(readFileSync(join(dir, "SPENT"), "utf8"));
+	assert.equal(hook.claim(), false, "before the first SPENT there is no generation, so no turn");
+	hook.sample();
+	assert.deepEqual([spent().gen, spent().waiting, spent().waitingSince], [1, 0, undefined]);
+	assert.equal(hook.claim(), true, "won");
+	assert.equal(hook.claim(), true, "and kept for every parent admission of that generation");
+	assert.deepEqual(claims(), [waitClaimName(1)]);
+	assert.equal(claimWait({ dir, gen: 1 }), false, "a child judging the same SPENT loses it");
+	hook.sample();
+	assert.equal(hook.claim(), true, "generation 2 follows the parent's own turn");
+	hook.sample();
+	assert.equal(claimWait({ dir, gen: 3 }), true, "a child takes generation 3 first");
+	assert.equal(hook.claim(), false, "so the parent waits on");
+	hook.sample();
+	assert.equal(hook.claim(), false, "and not in generation 4 either: the one right after another process's turn");
+	assert.deepEqual(claims(), [waitClaimName(2), waitClaimName(3)], "generation 1's claim is gone three generations on");
+	hook.sample();
+	assert.equal(hook.claim(), true, "generation 5");
+	// Who waits: the parent's own queue, each child's ledger, and an unknown count as waiting; since when, without a break.
+	ownWaiting = 1;
+	hook.sample();
+	assert.deepEqual([spent().gen, spent().waiting, spent().waitingSince], [6, 1, 6]);
+	assert.equal(hook.claim(true), false, "a call that waited is not admitted in the first generation that shows the wait");
+	ownWaiting = 0;
+	writeLedger(dir, 9, { ...ledger(), waiting: 2 });
+	hook.sample();
+	assert.deepEqual([spent().waiting, spent().waitingSince, hook.outsideWaiting()], [2, 6, true], "a child's two waiters, the wait unbroken since 6");
+	assert.equal(hook.claim(true), true, "generation 7 follows one that showed the wait");
+	const { waiting: _drop, ...older } = ledger();
+	writeLedger(dir, 9, older);
+	hook.sample();
+	assert.deepEqual([spent().waiting, hook.outsideWaiting()], [1, true], "a ledger with no waiting count is counted as waiting");
+	writeLedger(dir, 9, { ...ledger({ calls: 2 }), waiting: 0 });
+	hook.sample();
+	assert.deepEqual([spent().waiting, spent().waitingSince, hook.outsideWaiting()], [0, undefined, false], "nobody waits: no turn");
+	const uncapped = watch({ meter: createUsageMeter({ maxTokens: 10, rootSessionId: "root" }), dir: null });
+	assert.equal(uncapped.hook.claim(), true, "no ledger directory: nobody to take turns with");
+});
+
 test("a child with no cost guard (its spawner dropped PI_MAX_COST_MICROS) is charged its metered cost: the stop, external() and SPENT (issue #500)", () => {
 	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: 1_000_000, rootSessionId: "root" });
 	const { dir, hook } = watch({ meter, guard: () => ({ spend: () => ({ spentMicros: 0, inflightMicros: 0 }) }) });
@@ -219,7 +307,7 @@ test("a child with no cost guard (its spawner dropped PI_MAX_COST_MICROS) is cha
 	hook.sample();
 	assert.equal(meter.state.stopReason, COST_CAP);
 	assert.equal(hook.external(), 1_500_000);
-	assert.deepEqual(JSON.parse(readFileSync(join(dir, "SPENT"), "utf8")), { v: 1, total: 1_500_000, byLedger: { [name]: 1_500_000 } });
+	assert.deepEqual(JSON.parse(readFileSync(join(dir, "SPENT"), "utf8")), { v: 1, total: 1_500_000, byLedger: { [name]: 1_500_000 }, inflight: 0, inflightByLedger: {}, gen: 1, waiting: 0 });
 });
 
 test("SPENT is written only under a dollar cap (issue #500)", () => {
