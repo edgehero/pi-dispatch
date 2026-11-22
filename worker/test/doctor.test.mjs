@@ -368,7 +368,11 @@ const overlayDeps = (out, extra = {}) => ({ out, cwd: tmpdir(), spawn: fakeSpawn
 // -- per-trigger job images (issue #41): presence is the only thing this project can check ------------
 
 const imgEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", ...extra });
-const imgDeps = (out, plan, calls) => ({ out, cwd: tmpdir(), spawn: fakeSpawn(plan, calls), probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0" });
+// `readHosts` is injected for the reason `ghDeps` gives below: the default reads the host registry at the doctor env's
+// VALKEY_URL (127.0.0.1:6379 when unset), the Valkey CI's other test files write, so a host
+// host-registry.integration.test.mjs registered between two runs of one test changed the second report (issue #859's
+// exit-code test compares two).
+const imgDeps = (out, plan, calls) => ({ out, cwd: tmpdir(), spawn: fakeSpawn(plan, calls), probeValkey: async () => true, readHosts: async () => ({ hosts: [] }), fileExists: () => true, nodeVersion: "22.19.0" });
 // The runner entrypoint probe reads --format={{json .Config.Entrypoint}}; this is a conformant answer.
 const RUNNER_ENTRYPOINT = { code: 0, output: '["/entrypoint.sh"]\n' };
 
