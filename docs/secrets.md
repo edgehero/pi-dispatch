@@ -602,8 +602,19 @@ In detail:
   A project bundle's variable of such a name is kept out of that draw the same way. The worker logs
   `run_secret_withheld` with the variable names (and the bundle, for a bundle's), never a value. The secret is still resolved for
   every draw, so a reference that does not resolve refuses them all alike. Every other run secret reaches every job,
-  whatever model it runs on: a job may call an API from a tool on purpose. A fallback list is not a pool: a
-  fallback's key in `run.secrets` reaches every attempt, the primary's included, a subscription primary too.
+  whatever model it runs on: a job may call an API from a tool on purpose.
+- **A fallback's key reaches only the attempts that use it.** Each failover attempt ([model failover](model-failover.md))
+  is a container of its own, built for the model the worker chose for it. A `run.secrets` binding of the API-key
+  variable of a `run.fallbackModels` provider reaches an attempt only when that attempt's provider, or the provider of a
+  model in `run.auxiliaryModels`, reads it. The attempt on that fallback gets it as its key; the primary's attempts do
+  not, a subscription primary's above all (the worker never falls back from a subscription to an API-key model, so pi
+  never spends the key there and only a tool could). The primary's own key works the same way: a fallback's attempt
+  does not get it. A project bundle's variable of such a name is kept out the same way, the worker logs
+  `run_secret_withheld`, and the secret is still resolved for every attempt.
+- **A tool's key goes under its own name.** A candidate's, a fallback's or the primary's API-key variable is withheld
+  from every draw or attempt whose providers do not read it, even when a tool in the job would use it
+  (`CLOUDFLARE_API_KEY` for `wrangler` beside a `cloudflare-workers-ai` fallback), so bind the tool's key under another
+  name.
 - **Only the API-key variable counts**, and only when all of these hold:
   - it is in `run.secrets`, not `run.secretFiles` (a file secret's variable is a path, never the key);
   - it is not on `PI_FORWARD_ENV`;
@@ -624,11 +635,14 @@ In detail:
   model in its `run.auxiliaryModels`, is refused as `secret-name-reserved`: its names exist only once it is read, after
   the credential gates, and one bundle serves every trigger of a project.
 - **The worker says so.** The log line `provider_credential_declared` names the provider and the variable (never
-  the value), and `pi-dispatch doctor` prints a line naming each trigger whose key replaces this host's credential,
-  and where: on every job of the trigger, on a random candidate's draws, or on a fallback's failover attempts. The
-  console's Provider API keys card (Connections) names the same triggers under the provider's slot, resolving model
-  roles as doctor does, and says where this host refuses them (a managed row, or this host's `PI_FORWARD_ENV`) and that
-  another host's forward list or bindings can. Doctor
+  the value), for the main model's key, a watch rule's `decide` model's and an auxiliary model's alike, and
+  `pi-dispatch doctor` prints a line naming each trigger whose key replaces this host's credential, for which of those
+  models, and where: on every job of the trigger, on a random candidate's draws, or on a fallback's failover attempts.
+  The console's Provider API keys card (Connections) names the same triggers under the provider's slot, watch rules
+  included, resolving model roles as doctor does (a watch rule takes none, as in the worker), adds "(for its decide
+  model)" or "(for its auxiliary model)" to a trigger whose own jobs run on another provider, and says where this host
+  refuses them (a managed row, or this host's `PI_FORWARD_ENV`) and that another host's forward list or bindings can.
+  Doctor
   checks each trigger, each random candidate and each fallback the worker would try against that one's own
   provider, so a trigger on `openai` binding `ANTHROPIC_API_KEY` is not a clash, and one on `openrouter` with
   an `anthropic` fallback its allowed-model list admits, binding `ANTHROPIC_OAUTH_TOKEN`, is.

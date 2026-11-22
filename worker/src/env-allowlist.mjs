@@ -286,21 +286,36 @@ export function auxiliaryCredentialNames(job) {
 }
 
 /**
- * The run secrets a random pool's draw withholds from its container (issue #1002), as variable names: each one in
- * `secrets` that is the API-key variable of a pool candidate's provider (`modelSelection.candidates`) and that neither
- * the drawn model's provider (`job.provider`) nor an auxiliary model's provider reads.
+ * The run secrets a random pool's draw or a failover attempt withholds from its container (issues #1002 and #1030), as
+ * variable names: each one in `secrets` that is the API-key variable of a pool candidate's provider
+ * (`modelSelection.candidates`), or of the provider of a model the failover walk may run on (`failoverPrimary`, the
+ * walk's primary as `provider/model`, and `fallbackModels`), and that neither this attempt's provider (`job.provider`,
+ * the drawn model's or the one the walk chose) nor an auxiliary model's provider reads.
  *
  * Since issue #968 a pool may mix a subscription candidate and an API-key candidate, and since issue #967 the API
  * candidate's key may be a run secret. A draw that lands on the subscription candidate would otherwise carry that key
  * as a plain variable beside the subscription: pi does not spend it there (the allowed models exclude it), but any tool
- * the job runs can, outside the cost meter. Narrow on purpose: a name no pool candidate's provider uses as its API key
- * is never withheld, since a job may call an API from a tool on purpose, and nothing outside a random pool changes.
+ * the job runs can, outside the cost meter. A fallback list is the same hazard (issue #1030): each failover attempt is a
+ * container of its own whose env is built for the provider the walk chose for it (model-failover.mjs
+ * `selectFailoverJob`, at the pickup), so the attempt on a fallback still holds that fallback's key, and every other
+ * attempt, a subscription primary's above all (the walk never leaves one for an API-key fallback, `auth-mixed-billing`,
+ * so that key was never spendable by pi there), is passed none. Withholding from every attempt that does not read the
+ * key, and not only from those the walk can never follow with the fallback, needs no subscription state here and still
+ * gives each attempt the walk does make on the fallback its key. The primary's key is the same hazard on a fallback's
+ * attempt, but a failover attempt's job names only its own provider and the fallbacks, never the primary the walk
+ * started from, so the caller hands the primary in (`failoverPrimary`, a dep the pickup computes, never a job field: a
+ * job's data is what a retry re-enqueues). Without it the primary's key stays, as it did before issue #1030.
+ * Narrow on purpose: a name no candidate's, fallback's or primary's provider uses as its API key is never withheld,
+ * since a job may call an API from a tool on purpose, and nothing outside a random pool or a fallback list changes.
  * "Reads" goes by variable, never by provider: pi shares a variable between providers (OPENCODE_API_KEY serves
- * `opencode` and `opencode-go`), so a draw on one reads the other's key as its own credential. The drawn and auxiliary
- * providers' whole candidate lists count, so no variable a provider this draw uses reads is ever withheld. Pure.
+ * `opencode` and `opencode-go`), so a draw on one reads the other's key as its own credential. The attempt's and the
+ * auxiliary providers' whole candidate lists count, so no variable a provider this attempt uses reads is ever
+ * withheld. Pure.
  */
-export function withheldPoolKeys(job, secrets) {
-	const candidates = job?.modelSelection?.candidates;
+export function withheldPoolKeys(job, secrets, { failoverPrimary = null } = {}) {
+	const pool = job?.modelSelection?.candidates;
+	const walk = Array.isArray(job?.fallbackModels) ? [...(typeof failoverPrimary === "string" && failoverPrimary.indexOf("/") > 0 ? [failoverPrimary] : []), ...job.fallbackModels] : null;
+	const candidates = Array.isArray(pool) ? pool : walk;
 	if (!Array.isArray(candidates)) return [];
 	const poolKeys = new Set(candidates.map((ref) => apiKeyVariable(providerKeyCandidates(ref.slice(0, ref.indexOf("/"))))));
 	const used = new Set([job.provider, ...auxiliaryProvidersOf(job)].flatMap((provider) => providerKeyCandidates(provider)));

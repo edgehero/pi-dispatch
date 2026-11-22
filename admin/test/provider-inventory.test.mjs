@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { readProviderInventory, providerInventoryView, providerCanonicalKey, PROVIDER_SLOT_ALIASES, declaredKeyTriggers, declaredKeysView, DECLARED_KEY_TRIGGERS_MAX } from "../src/provider-inventory.mjs";
+import { readProviderInventory, providerInventoryView, providerCanonicalKey, PROVIDER_SLOT_ALIASES, declaredKeyTriggers, declaredKeysView, DECLARED_KEY_TRIGGERS_MAX, DECLARED_KEY_VIA } from "../src/provider-inventory.mjs";
 import { PROVIDER_KEY_NAMES } from "../src/provider-key-names.mjs";
 import { apiKeyVariable, nonApiKeyKind } from "@edgehero/pi-dispatch/provider-key";
 
@@ -288,17 +288,17 @@ test("doctor's placement of an unresolvable folder, its fallback fence, and the 
   assert.deepEqual(noRoles.declaredNotes, []);
 });
 
-test("a watch rule, a fallback the walk never tries and a role the worker refuses bring no key, and the rebuild keeps its bounds", () => {
+test("a fallback the walk never tries and a role the worker refuses bring no key, and the rebuild keeps its bounds", () => {
   const triggers = [
-    { on: { type: "watch" }, run: { provider: "openrouter", secrets: { OPENROUTER_API_KEY: "ref" } } },
+    { on: { type: "watch" }, run: { provider: "openrouter", secrets: { DEEPSEEK_API_KEY: "ref" } } },
     { on: { type: "cron" }, run: { provider: "openrouter", model: "a", fallbackModels: ["deepseek/one"], secrets: { DEEPSEEK_API_KEY: "ref" } } },
     { on: { type: "cron" }, run: { provider: "openrouter", model: "role:code", secrets: { GROQ_API_KEY: "ref", OPENROUTER_API_KEY: "ref" } } },
     { on: { type: "cron" }, run: { provider: "groq", model: "role:missing", secrets: { GROQ_API_KEY: "ref" } } },
     { on: { type: "cron" }, run: { provider: "openrouter", model: "a", models: ["openrouter/a", "deepseek/one"], fallbackModels: ["deepseek/one"], secrets: { DEEPSEEK_API_KEY: "ref" } } },
   ];
   const declared = declaredKeyTriggers(triggers, { defaultProvider: "anthropic", defaultModel: "m", modelRoles: { default: { code: "groq/llama" } } });
-  // A watch rule's jobs keep the host's credential; a failover list no allowed-model list admits refuses every job
-  // before an attempt, and so do a role run.provider contradicts and one the file does not declare. A list that admits
+  // Another provider's key on a watch rule is no declared key; a failover list no allowed-model list admits refuses every
+  // job before an attempt, and so do a role run.provider contradicts and one the file does not declare. A list that admits
   // the fallback makes it an attempt the walk tries, on the key the trigger binds.
   assert.deepEqual([...declared.slots], [["DEEPSEEK_API_KEY", [{ index: 4, cron: null }]]]);
   assert.deepEqual([...declaredKeyTriggers([{ on: { type: "cron" }, run: { secrets: { ANTHROPIC_API_KEY: "ref" } } }], { defaultProvider: null }).slots], [], "an unknown default provider judges no inheriting trigger");
@@ -315,4 +315,79 @@ test("a watch rule, a fallback the walk never tries and a role the worker refuse
   assert.deepEqual(many.notes, ["projects-unread"]);
   const bounded = declaredKeysView({ declaredKeys: [...Array.from({ length: Object.keys(PROVIDER_SLOT_ALIASES).length }, () => ({ key: "PATH", triggers: [{ index: 1 }] })), { key: "GROQ_API_KEY", triggers: [{ index: 1 }] }] });
   assert.equal(bounded.slots.size, 0, "no more rows are read than there are slots");
+  // Issue #1029: a role model is kept only by its closed name, and a position keeps its place without one.
+  const via = declaredKeysView({ declaredKeys: [{ key: "GROQ_API_KEY", triggers: [{ index: 1, via: "decide" }, { index: 2, via: "auxiliary" }, { index: 3, via: "main" }, { index: 4, via: ["decide"] }, { index: 5, via: "__proto__" }] }] });
+  assert.deepEqual(via.slots.get("GROQ_API_KEY").triggers, [{ index: 1, cron: null, via: "decide" }, { index: 2, cron: null, via: "auxiliary" }, { index: 3, cron: null }, { index: 4, cron: null }, { index: 5, cron: null }]);
+  assert.deepEqual(DECLARED_KEY_VIA, ["decide", "auxiliary"]);
+});
+
+const byKey = slots => [...slots].sort(([a], [b]) => a.localeCompare(b));
+const watchDecide = { model: "openrouter/typesafe/jev-1.13", maxCostUsd: "0.001", fields: ["service"], questions: { act: { type: "choice", criteria: { investigate: "failure", ignore: "noise", file_issue: "ask person" } } }, act: { investigate: 0.7, ignore: 0.9, otherwise: "file_issue" } };
+const watchRule = (id, run, decide) => ({ on: { type: "watch", id, source: "prod", fingerprint: ["service"], window: "10m", cooldown: "6h", maxPerDay: 4 }, run: { kind: "local", mode: "investigate", folder: "/srv/app", flow: "triage", task: "t", maxCostUsd: "1", ...(decide ? { issue: { kind: "github", repo: "acme/shop" } } : {}), ...run }, ...(decide ? { decide } : {}) });
+
+test("issue #1029: a watch rule's main and decide models and an auxiliary model are listed under their providers' slots, by the worker's rule", () => {
+  const label = run => ({ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "review", maxCostUsd: "1", ...run } });
+  const triggers = [
+    watchRule("errors", { secrets: { OPENROUTER_API_KEY: SECRET } }, watchDecide),
+    watchRule("latency", { provider: "deepseek", model: "deepseek-chat", secrets: { DEEPSEEK_API_KEY: SECRET } }),
+    watchRule("both", { provider: "openrouter", model: "vendor/model", secrets: { OPENROUTER_API_KEY: SECRET } }, watchDecide),
+    label({ provider: "anthropic", model: "m", models: ["anthropic/m", "openai/gpt-5"], auxiliaryModels: ["openai/gpt-5"], secrets: { OPENAI_API_KEY: SECRET } }),
+    label({ provider: "openai", model: "gpt-5", models: ["openai/gpt-5", "openai/gpt-4o"], auxiliaryModels: ["openai/gpt-4o"], secrets: { OPENAI_API_KEY: SECRET } }),
+    label({ provider: "anthropic", model: "m", models: ["anthropic/m", "openai/gpt-5"], auxiliaryModels: ["openai/gpt-5"], secrets: { STRIPE_KEY: SECRET }, secretFiles: { OPENAI_API_KEY: SECRET } }),
+    label({ provider: "anthropic", model: "m", models: ["anthropic/m", "github-copilot/gpt-4o"], auxiliaryModels: ["github-copilot/gpt-4o"], secrets: { COPILOT_GITHUB_TOKEN: SECRET } }),
+    label({ models: ["opencode/a", "anthropic/m", "opencode-go/b"], modelSelection: { strategy: "random", candidates: ["opencode/a", "anthropic/m"] }, auxiliaryModels: ["opencode-go/b"], secrets: { OPENCODE_API_KEY: SECRET } }),
+    watchRule("oauth", { secrets: { ANTHROPIC_OAUTH_TOKEN: SECRET } }, { ...watchDecide, model: "anthropic/claude-haiku-4-5" }),
+  ];
+  const { slots, notes } = declaredKeyTriggers(triggers, { defaultProvider: "anthropic", defaultModel: "claude-sonnet-4-5" });
+  // The classifier alone reaches openrouter for rule 1 ("for its decide model"), the rule's own model for rule 3, which
+  // its classifier shares; rule 2's own model is a watch rule's main model like any trigger's. The auxiliary model alone
+  // reaches openai for trigger 4; trigger 5 runs on openai, so its auxiliary model shares the main key. A file secret,
+  // a provider that needs host authentication and an OAuth variable stay out, and a pool candidate and an auxiliary
+  // model sharing one slot name the trigger once, as the candidate's main model.
+  assert.deepEqual(byKey(slots), [
+    ["DEEPSEEK_API_KEY", [{ index: 1, cron: null }]],
+    ["OPENAI_API_KEY", [{ index: 3, cron: null, via: "auxiliary" }, { index: 4, cron: null }]],
+    ["OPENCODE_API_KEY", [{ index: 7, cron: null }]],
+    ["OPENROUTER_API_KEY", [{ index: 0, cron: null, via: "decide" }, { index: 2, cron: null }]],
+  ]);
+  assert.deepEqual(notes, []);
+  // A provider this host binds to a subscription is listed for a classifier or an auxiliary model as for a main one: the
+  // card's managed row says the worker refuses those jobs.
+  assert.deepEqual(byKey(declaredKeyTriggers([triggers[0], triggers[3]], { defaultProvider: "anthropic", defaultModel: "m", managed: provider => provider !== "anthropic" }).slots).map(([key]) => key), ["OPENAI_API_KEY", "OPENROUTER_API_KEY"]);
+  // With the projects file unread a role resolves in every scope: where one scope runs the job on the auxiliary model's
+  // provider, the trigger is that provider's main model there, and the line says no more than that.
+  const scoped = declaredKeyTriggers([{ on: { type: "cron", id: "role" }, run: { kind: "local", model: "role:code", auxiliaryModels: ["cerebras/big"], secrets: { CEREBRAS_API_KEY: SECRET } } }], { defaultProvider: "anthropic", defaultModel: "m", modelRoles: { default: { code: "groq/llama" }, team: { code: "cerebras/big" } }, projects: null });
+  assert.deepEqual(byKey(scoped.slots), [["CEREBRAS_API_KEY", [{ index: 0, cron: "role" }]]]);
+  assert.deepEqual(scoped.notes, ["projects-unread"]);
+});
+
+test("issue #1029: a watch rule reads no model role, so a default that is a role refuses it and a role never moves its slot", () => {
+  const roles = { default: { code: "groq/llama" } };
+  const triggers = [
+    watchRule("inherits", { secrets: { ANTHROPIC_API_KEY: SECRET, GROQ_API_KEY: SECRET, OPENROUTER_API_KEY: SECRET } }, watchDecide),
+    watchRule("named", { provider: "deepseek", model: "deepseek-chat", secrets: { DEEPSEEK_API_KEY: SECRET, GROQ_API_KEY: SECRET } }),
+    { on: { type: "cron", id: "cron-role" }, run: { kind: "local", secrets: { GROQ_API_KEY: SECRET } } },
+  ];
+  // With PI_MODEL a role, a watch rule naming no model is refused before any attempt (model-role-unknown, since the worker
+  // gives a watch job no roles), its classifier with it; one naming its model runs on it, never on the role's provider.
+  // A cron trigger naming no model runs on the role, as before.
+  const role = declaredKeyTriggers(triggers, { defaultProvider: "anthropic", defaultModel: "role:code", modelRoles: roles });
+  assert.deepEqual(byKey(role.slots), [["DEEPSEEK_API_KEY", [{ index: 1, cron: null }]], ["GROQ_API_KEY", [{ index: 2, cron: "cron-role" }]]]);
+  // A plain default: the inheriting rule runs on it whatever roles the file declares, and its classifier on openrouter;
+  // the cron trigger runs on it too, and binds no key of it.
+  const plain = declaredKeyTriggers(triggers, { defaultProvider: "anthropic", defaultModel: "claude-sonnet-4-5", modelRoles: roles });
+  assert.deepEqual(byKey(plain.slots).map(([key, rows]) => [key, rows.map(t => t.index)]), [["ANTHROPIC_API_KEY", [0]], ["DEEPSEEK_API_KEY", [1]], ["OPENROUTER_API_KEY", [0]]]);
+  // An unread PI_MODEL with roles declared leaves a rule naming no model unjudged, as any trigger, and says so.
+  const unread = declaredKeyTriggers(triggers, { defaultProvider: "anthropic", defaultModel: null, modelRoles: roles });
+  assert.deepEqual(byKey(unread.slots).map(([key]) => key), ["DEEPSEEK_API_KEY"]);
+  assert.deepEqual(unread.notes, ["default-model-unread"]);
+});
+
+test("issue #1029: a watch rule's classifier is a provider the inventory lists, so its own key has a row to be named under", () => {
+  const document = { version: 9, watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_SECRET" } }, triggers: [watchRule("errors", { secrets: { OPENROUTER_API_KEY: SECRET } }, watchDecide)] };
+  const view = fixture({ document }).read();
+  assert.equal(view.state, "ready");
+  assert.deepEqual(view.rows.map(row => [row.provider, row.usage]), [["anthropic", ["default"]], ["openrouter", ["trigger"]]]);
+  assert.deepEqual(view.declaredKeys, [{ key: "OPENROUTER_API_KEY", triggers: [{ index: 0, cron: null, via: "decide" }], more: 0, forwarded: false }]);
+  assert.ok(!JSON.stringify(view).includes(SECRET));
 });

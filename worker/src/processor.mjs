@@ -2078,14 +2078,21 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				await comment(job, `Refused: the auxiliary provider ${provider} has no usable credentials. Configure its host authentication or a declared run secret. Not run.`);
 				return { outcome: "policy", reason: "provider-unconfigured", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
 			}
+			// Issue #1029: the declared auxiliary key is that model's only credential from here on (`buildContainerEnv` writes it
+			// and reads no host key for the provider), so it is said like the main and the role model's, names only. A name
+			// PI_FORWARD_ENV claims never gets here: the resolver above refused it as reserved (`reservedAuxiliaryNames`).
+			if (declared !== null) log("provider_credential_declared", { provider, name: declared });
 		}
 		// Issue #1002: a random pool's run secret that is another candidate's API key stays out of this draw's container
 		// (`withheldPoolKeys`). A subscription draw would otherwise hold the API candidate's key as a plain variable that
-		// any tool can spend outside the cost meter. Taken out here, after every credential gate has judged the values and
-		// before the venue or the container builder sees them, and the bundle merge below withholds the same kind of name
-		// from the bundle's values, so nothing downstream can hand one on. Still resolved, so a broken reference refuses
-		// every draw alike, as before. Names only in the log, never a value.
-		const withheld = withheldPoolKeys(job, secrets);
+		// any tool can spend outside the cost meter. Issue #1030: a fallback's key, and the walk's primary's, the same way,
+		// out of every failover attempt whose own and auxiliary providers do not read it, the attempt on that model keeping
+		// it. The primary is a dep (`failoverPrimary`, from the pickup that ran the walk), since a fallback's attempt's job
+		// no longer names it. Taken out here, after every credential gate has judged the values and before the venue or the
+		// container builder sees them, and the bundle merge below withholds the same kind of name from the bundle's values,
+		// so nothing downstream can hand one on. Still resolved, so a broken reference refuses every draw and every attempt
+		// alike, as before. Names only in the log, never a value.
+		const withheld = withheldPoolKeys(job, secrets, { failoverPrimary: deps.failoverPrimary ?? null });
 		if (withheld.length > 0) {
 			secrets = Object.fromEntries(Object.entries(secrets).filter(([name]) => !withheld.includes(name)));
 			log("run_secret_withheld", { provider: job.provider ?? null, names: withheld });
@@ -2186,8 +2193,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// Issue #1002: the draw's withholding, applied to the bundle's values too. A trigger value withheld above no longer
 			// shadows a bundle variable of the same name, and a bundle may carry a pool candidate's API key on its own (its
 			// reserved set holds only this draw's provider and the auxiliary ones), so either would reach a subscription draw.
+			// Issue #1030: a fallback's key likewise, and the walk's primary's, on a failover attempt that does not read it.
 			// A bundle file stays, as a `run.secretFiles` one does. The log names the bundle, never a value.
-			const bundleWithheld = withheldPoolKeys(job, bundleRead.vars).filter((name) => !(bundleBinding.files ?? []).includes(name));
+			const bundleWithheld = withheldPoolKeys(job, bundleRead.vars, { failoverPrimary: deps.failoverPrimary ?? null }).filter((name) => !(bundleBinding.files ?? []).includes(name));
 			const bundleVars = Object.fromEntries(Object.entries(bundleRead.vars).filter(([name]) => !bundleWithheld.includes(name)));
 			if (bundleWithheld.length > 0) log("run_secret_withheld", { provider: job.provider ?? null, names: bundleWithheld, bundle: bundleBinding.id });
 			const merged = mergeBundleSecrets(bundleVars, secrets, { bundleFiles: bundleBinding.files ?? [], triggerFiles: secretFiles });

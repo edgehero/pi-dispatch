@@ -1740,3 +1740,30 @@ test("withheldPoolKeys: a pool candidate's API key that neither the drawn nor an
 	assert.deepEqual(withheldPoolKeys(kimi, { MOONSHOT_API_KEY: "kimi" }), []);
 	assert.deepEqual(withheldPoolKeys({ ...kimi, auxiliaryModels: undefined }, { MOONSHOT_API_KEY: "kimi" }), ["MOONSHOT_API_KEY"]);
 });
+
+// --- issue #1030: a fallback's declared key reaches only the failover attempts that read it ---
+
+test("withheldPoolKeys: a fallback's API key that neither the attempt's nor an auxiliary model's provider reads", { skip }, () => {
+	const { withheldPoolKeys } = mod;
+	const walk = { fallbackModels: ["openrouter/deepseek/deepseek-chat", "deepseek/deepseek-chat"] };
+	const secrets = { OPENROUTER_API_KEY: "or", DEEPSEEK_API_KEY: "ds", ANTHROPIC_API_KEY: "ant", STRIPE_KEY: "stripe" };
+	// The primary's attempt, a subscription one or an API-key one alike: no fallback's key; its own and a key no fallback
+	// uses stay (the primary is never in `fallbackModels`, so its own key is no fallback's).
+	assert.deepEqual(withheldPoolKeys({ ...walk, provider: "anthropic", model: "claude-sonnet-4-5" }, secrets), ["OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"]);
+	// Each attempt on a fallback keeps its own key and loses the other fallback's.
+	assert.deepEqual(withheldPoolKeys({ ...walk, provider: "openrouter", model: "deepseek/deepseek-chat" }, secrets), ["DEEPSEEK_API_KEY"]);
+	assert.deepEqual(withheldPoolKeys({ ...walk, provider: "deepseek", model: "deepseek-chat" }, secrets), ["OPENROUTER_API_KEY"]);
+	// An auxiliary model on a fallback's provider reads that key on every attempt.
+	assert.deepEqual(withheldPoolKeys({ ...walk, provider: "anthropic", auxiliaryModels: ["openrouter/deepseek/deepseek-chat"] }, secrets), ["DEEPSEEK_API_KEY"]);
+	assert.deepEqual(withheldPoolKeys({ provider: "anthropic" }, secrets), [], "no fallback list, nothing withheld");
+	// The walk's primary, handed in by the pickup: a fallback's attempt loses the primary's key, the primary's keeps it.
+	const primaryKeyed = { OPENAI_API_KEY: "openai", OPENROUTER_API_KEY: "or", STRIPE_KEY: "stripe" };
+	const one = { fallbackModels: ["openrouter/deepseek/deepseek-chat"] };
+	assert.deepEqual(withheldPoolKeys({ ...one, provider: "openrouter" }, primaryKeyed, { failoverPrimary: "openai/gpt-5" }), ["OPENAI_API_KEY"]);
+	assert.deepEqual(withheldPoolKeys({ ...one, provider: "openai" }, primaryKeyed, { failoverPrimary: "openai/gpt-5" }), ["OPENROUTER_API_KEY"]);
+	assert.deepEqual(withheldPoolKeys({ ...one, provider: "openrouter", auxiliaryModels: ["openai/gpt-5"] }, primaryKeyed, { failoverPrimary: "openai/gpt-5" }), [], "an auxiliary model on the primary's provider reads it");
+	// Without the primary, or with one that is no `provider/model`, only the fallbacks count; a pool ignores it.
+	// "openai:" and "openaiX" have no `/`, so no provider part: sliced as a reference, either would name `openai`.
+	for (const failoverPrimary of [null, "openai", "/gpt-5", "openai:", "openaiX", 7]) assert.deepEqual(withheldPoolKeys({ ...one, provider: "openrouter" }, primaryKeyed, { failoverPrimary }), [], String(failoverPrimary));
+	assert.deepEqual(withheldPoolKeys({ modelSelection: { strategy: "random", candidates: ["openrouter/a", "anthropic/b"] }, provider: "openrouter" }, primaryKeyed, { failoverPrimary: "openai/gpt-5" }), []);
+});

@@ -9,9 +9,11 @@ deployment default, providers in validated trigger/model/fallback/role routes, e
 known slots that are configured but currently unused. Providers sharing one slot appear together.
 
 A row's status is this host's sources alone. A trigger may bring its own key instead: its `run.secrets` binds the
-provider's API-key variable, and its jobs on that provider then spend that key and never read the host's
+provider's API-key variable, and every call its jobs make to that provider, for its own model, a watch rule's
+`decide` model or an auxiliary model, then spends that key and never reads the host's
 ([the provider key as a run secret](secrets.md#the-provider-key-as-a-run-secret)). The row names those triggers (a
-cron trigger by its id, any other by its row) and the variable name, never a value. Where this host refuses those jobs
+cron trigger by its id, any other by its row, with "for its decide model" or "for its auxiliary model" where that is
+the only model on the provider) and the variable name, never a value. Where this host refuses those jobs
 (a managed subscription row, or this host's `PI_FORWARD_ENV` naming the variable) the row says so; another host decides
 that for itself, which the card says once. Saving a key in the slot does not change what they spend.
 

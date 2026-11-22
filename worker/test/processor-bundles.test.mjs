@@ -208,6 +208,25 @@ test("issue #1002: a random pool's draw gets no other candidate's API key from t
 	assert.equal(own.ran.length, 0);
 });
 
+test("issue #1030: a failover attempt gets no fallback's API key from the project bundle, nor the walk's primary's on a fallback's attempt", async () => {
+	const walk = (provider, model) => ({ ...cronJob, provider, model, models: [`${provider}/${model}`], fallbackModels: ["openrouter/deepseek/deepseek-chat"] });
+	const exitAuth = { imagePreflight: async () => ({ ok: true, image: "job:current", capabilities: ["exitAuth"] }) };
+	// The primary's attempt: the bundle's copy of the fallback's key stays out, logged with the bundle, never a value.
+	const primary = deployment({ bundle: "STRIPE_KEY=sk_live_value\nOPENROUTER_API_KEY=sk-or-bundle\n", over: exitAuth });
+	await runJob(walk("anthropic", "claude-sonnet-4-5"), primary.deps);
+	assert.equal(primary.ran.length, 1);
+	assert.equal("OPENROUTER_API_KEY" in primary.ran[0], false);
+	assert.equal(primary.ran[0].STRIPE_KEY, "sk_live_value");
+	assert.deepEqual(primary.logs.find((l) => l.event === "run_secret_withheld" && l.fields.bundle === "shop")?.fields, { provider: "anthropic", names: ["OPENROUTER_API_KEY"], bundle: "shop" });
+	assert.equal(JSON.stringify(primary.logs).includes("sk-or-"), false, "names only, never a value");
+	// A fallback's attempt, told the walk's primary by the pickup: the bundle's copy of the primary's key stays out.
+	const onFallback = deployment({ bundle: "STRIPE_KEY=sk_live_value\nOPENAI_API_KEY=sk-openai-bundle\n", over: { ...exitAuth, failoverPrimary: "openai/gpt-5" } });
+	await runJob(walk("openrouter", "deepseek/deepseek-chat"), onFallback.deps);
+	assert.equal(onFallback.ran.length, 1);
+	assert.equal("OPENAI_API_KEY" in onFallback.ran[0], false);
+	assert.deepEqual(onFallback.logs.find((l) => l.event === "run_secret_withheld" && l.fields.bundle === "shop")?.fields, { provider: "openrouter", names: ["OPENAI_API_KEY"], bundle: "shop" });
+});
+
 test("no bundle value reaches the record, a log line or a comment, on success or on refusal", async () => {
 	const values = ["sk_live_value", "postgres://u:pw@db/shop"];
 	const ok = deployment();

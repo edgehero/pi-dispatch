@@ -6960,9 +6960,9 @@ export function listedProviderCredentialChecks(subjects, { candidatesOf, forward
  * provider is judged by the same rule (issue #997), and (issue #999) every variable of an auxiliary model's provider but
  * the API key the main rule would admit: `auxiliaryOf` is `reservedAuxiliaryNames`, the set the worker's resolver
  * refuses, asked one auxiliary model at a time so the line can name the provider, and a provider `managed` here admits
- * none, as the processor refuses that key too. An admitted name is a fact line, since the trigger's own
- * key then replaces this host's credential for that provider where the subject runs: every job of the trigger, a
- * candidate's draws or a fallback's failover attempts.
+ * none, as the processor refuses that key too. An admitted name is a fact line, the main model's, the decide model's and
+ * (issue #1029) an auxiliary model's alike, since the trigger's own key then replaces this host's credential for that
+ * provider where the subject runs: every job of the trigger, a candidate's draws or a fallback's failover attempts.
  *
  * Subjects with no secret are not judged, nor one whose provider is not a provider id (a malformed PI_PROVIDER the
  * trigger inherits, whose shape row is the one line), nor a fallback the worker never tries (behind a primary bound to
@@ -6994,11 +6994,17 @@ export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf
 		const asJob = { provider, secrets: Object.fromEntries(secretNames.map((name) => [name, ""])), secretFiles: Object.fromEntries(fileNames.map((name) => [name, ""])), ...(s.decisionJob === true ? { watch: true } : {}) };
 		// Each auxiliary model's reserved names, asked of the same job with that one model, so the line can name its
 		// provider; every variable of a provider bound to a subscription here, as for the main one. A name the main
-		// provider also reads is judged as the main provider's below, first.
+		// provider also reads is judged as the main provider's below, first. Issue #1029: and the one name the main rule
+		// admits for that provider, the auxiliary model's declared key (`auxiliaryDeclared`), which the worker spends as that
+		// model's only credential and so is said like the main one's. For a provider bound here every name is in
+		// `auxiliary`, which is judged first, so that key stays a clash.
 		const auxiliary = new Map();
+		const auxiliaryDeclared = new Map();
 		for (const ref of s.auxiliaryModels ?? []) {
 			const auxProvider = splitModelEntry(ref).provider;
 			for (const name of managed(auxProvider) ? candidatesOf(auxProvider) ?? [] : auxiliaryOf({ ...asJob, auxiliaryModels: [ref] }, { forwardEnv: forwarded })) auxiliary.set(name, auxProvider);
+			const auxAdmitted = declaredOf({ ...asJob, provider: auxProvider }, { forwardEnv: forwarded });
+			if (auxAdmitted !== null) auxiliaryDeclared.set(auxAdmitted, auxProvider);
 		}
 		const admitted = managed(provider) ? null : declaredOf(asJob, { forwardEnv: forwarded });
 		// Issue #997: the `decide` model's own declared key, the same rule asked of its provider (a watch job counts since).
@@ -7013,6 +7019,7 @@ export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf
 				else clashes.push(`${s.label}: ${name} (${printable(provider)}; refused ${where})`);
 			} else if (roleNames.includes(name)) declared.push(`${s.label}: ${name} (${printable(roleProvider)}, the watch rule's decide model, ${where})`);
 			else if (auxiliary.has(name)) clashes.push(`${s.label}: ${name} (${printable(auxiliary.get(name))}, an auxiliary model's provider; refused ${where})`);
+			else if (auxiliaryDeclared.has(name)) declared.push(`${s.label}: ${name} (${printable(auxiliaryDeclared.get(name))}, an auxiliary model's provider, ${where})`);
 		}
 	}
 	if (providers.size === 0) return [];
@@ -7021,11 +7028,11 @@ export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf
 		checks.push({
 			ok: false,
 			label: `${clashes.length} trigger secret(s) bind a variable pi reads for the provider an attempt runs on, for a watch rule's decide model, or for an auxiliary model's provider: ${clashes.join("; ")}`,
-			fix: "rename them in the triggers file, or bind only the provider's own API-key variable (in run.secrets, not run.secretFiles, not named in PI_FORWARD_ENV, not on a watch rule, on a provider that needs no host authentication) to make it the credential of the job, or of the auxiliary model, on that provider, and never for a provider, main or auxiliary, bound to a subscription here: until then each job, draw or failover attempt named refuses pre-spend as secret-name-reserved (as provider-unconfigured on a host with no credential of its own for that provider)",
+			fix: "rename them in the triggers file, or bind only the provider's own API-key variable (in run.secrets, not run.secretFiles, not named in PI_FORWARD_ENV, on a provider that needs no host authentication) to make it the credential of the job, of a watch rule's decide model or of an auxiliary model on that provider, and never for a provider bound to a subscription here: until then each job, draw or failover attempt named refuses pre-spend as secret-name-reserved (as provider-unconfigured on a host with no credential of its own for that provider)",
 		});
 	}
 	if (declared.length > 0) {
-		checks.push({ ok: true, label: `${declared.length} trigger secret(s) are the API key of the main model's own provider or of a watch rule's decide model's provider, so each replaces this host's credential for that provider: ${declared.join("; ")}` });
+		checks.push({ ok: true, label: `${declared.length} trigger secret(s) are the API key of the main model's own provider, of a watch rule's decide model's provider or of an auxiliary model's provider, so each replaces this host's credential for that provider: ${declared.join("; ")}` });
 	}
 	if (checks.length === 0) checks.push({ ok: true, label: `No trigger binds a variable pi reads for ${[...providers].sort().map(printable).join(", ")}` });
 	return checks;

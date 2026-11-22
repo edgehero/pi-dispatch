@@ -5251,6 +5251,8 @@ test("doctor: an auxiliary model's OAuth variable is a clash on every job of its
 	assert.match(clash.label, /label trigger #0: ANTHROPIC_OAUTH_TOKEN \(anthropic, an auxiliary model's provider; refused on every job of its trigger\)/);
 	const keyed = await collectChecks({ ...base, PI_TRIGGERS_FILE: panel({ ANTHROPIC_API_KEY: "op://ci/a" }) }, secretsSeams());
 	assert.equal(keyed.some((c) => !c.ok && /variable pi reads for/.test(c.label)), false, "the auxiliary model's declared key");
+	// Issue #1029: and it is said like the main model's, since it replaces this host's credential for that model.
+	assert.match(keyed.find((c) => /replaces this host's credential/.test(c.label))?.label ?? "", /^1 trigger secret\(s\) are the API key of the main model's own provider, of a watch rule's decide model's provider or of an auxiliary model's provider, so each replaces this host's credential for that provider: label trigger #0: ANTHROPIC_API_KEY \(anthropic, an auxiliary model's provider, on every job of its trigger\)$/);
 	// A random pool's draws carry the auxiliary models too; an auxiliary model on the main provider is that provider's.
 	const pool = ["openrouter/deepseek/deepseek-chat", "openai/gpt-5"];
 	const shapes = await collectChecks({ ...base, PI_TRIGGERS_FILE: providerSecretsFile([
@@ -5275,6 +5277,22 @@ test("doctor: an auxiliary model's OAuth variable is a clash on every job of its
 	assert.match(keyedClash(await collectChecks({ ...base, PI_FORWARD_ENV: "ANTHROPIC_API_KEY", PI_TRIGGERS_FILE: panel({ ANTHROPIC_API_KEY: "op://ci/a" }) }, secretsSeams())), auxKey);
 	const subscriptionFactory = () => ({ auth: { async check(provider) { return provider === "anthropic" ? { ok: true, managed: true, provider: "anthropic", connectionId: "claude" } : { ok: true, managed: false }; } } });
 	assert.match(keyedClash(await collectChecks({ ...base, PI_AUTH_CONNECTIONS_FILE: "/srv/pi/connections.json", PI_TRIGGERS_FILE: panel({ ANTHROPIC_API_KEY: "op://ci/a" }) }, { ...secretsSeams(), subscriptionFactory })), auxKey);
+});
+
+test("doctor: an auxiliary model's declared key is named on each draw that carries it, and the clash line's fix no longer leaves out a watch rule (#1029)", { skip: skipNoPi }, async () => {
+	const base = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh" };
+	const pool = ["openrouter/deepseek/deepseek-chat", "openai/gpt-5"];
+	const checks = await collectChecks({ ...base, PI_TRIGGERS_FILE: providerSecretsFile([
+		{ models: [...pool, "anthropic/claude-sonnet-4-5"], modelSelection: { strategy: "random", candidates: pool }, auxiliaryModels: ["anthropic/claude-sonnet-4-5"], maxCostUsd: "1", secrets: { ANTHROPIC_API_KEY: "op://ci/a", ANTHROPIC_OAUTH_TOKEN: "op://ci/oauth" } },
+	]) }, secretsSeams());
+	const info = checks.find((c) => /replaces this host's credential/.test(c.label))?.label ?? "";
+	assert.match(info, /label trigger #0 \(random candidate openrouter\/deepseek\/deepseek-chat\): ANTHROPIC_API_KEY \(anthropic, an auxiliary model's provider, on its draws\)/);
+	assert.match(info, /label trigger #0 \(random candidate openai\/gpt-5\): ANTHROPIC_API_KEY \(anthropic, an auxiliary model's provider, on its draws\)/);
+	const clash = checks.find((c) => !c.ok && /variable pi reads for/.test(c.label));
+	assert.match(clash.label, /ANTHROPIC_OAUTH_TOKEN \(anthropic, an auxiliary model's provider; refused on its draws\)/);
+	// A watch rule's model and its classifier declare keys since issue #997, so the fix names the classifier, not a watch-rule exception.
+	assert.doesNotMatch(clash.fix, /watch rule,/);
+	assert.match(clash.fix, /to make it the credential of the job, of a watch rule's decide model or of an auxiliary model on that provider, and never for a provider bound to a subscription here/);
 });
 
 test("doctor: the provider clash check follows the PROVIDER, so another provider's variable passes", { skip: skipNoPi }, async () => {
