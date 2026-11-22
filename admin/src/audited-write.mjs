@@ -24,6 +24,19 @@ import { makeConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
 export const AUDIT_REFUSAL = "the audit log could not be written, so nothing was changed; check PI_LOGS_DIR";
 
 /**
+ * The closed words an agent's failed write is recorded and answered with, where a person's row carries the sentence
+ * (INT-CONSOLE-AUDIT-LOG): `action-refused` for a write that was refused before it was sent, and `action-unconfirmed`
+ * (issue #961) for one that was sent and not confirmed (a `partial` answer, or a write the console's stop cut):
+ * "refused" was not true of a run that may be queued. Here, beside `auditedWrite`, because its own row for a write that
+ * threw takes them too (issue #965), and the console's action table imports this module, never the other way round.
+ */
+export const AGENT_REFUSED = "action-refused";
+export const AGENT_UNCONFIRMED = "action-unconfirmed";
+/** The tools' word for Valkey out of reach (INT-CONSOLE-AUDIT-LOG); the console's agent words have none of their own. */
+export const AGENT_UNAVAILABLE = "action-unavailable";
+const AGENT_WORDS = Object.freeze([AGENT_REFUSED, AGENT_UNCONFIRMED, AGENT_UNAVAILABLE]);
+
+/**
  * The panel's actor: this account's login name, role `panel`, no session (a terminal has no console session). The
  * name is reduced to a plain charset and capped, so a strange passwd entry cannot carry text into the row (the writer
  * escapes controls anyway; this keeps the name readable as a name). An account with no passwd entry is `unknown`.
@@ -63,6 +76,38 @@ export function defaultFailure(result) {
 }
 
 /**
+ * The reason of a person's row for a write that threw: the error's code, and what the error's mark says became of the
+ * write. `valkeyMayStillRun` (connection.mjs): it reached a Valkey that then stopped answering, so it may still be made.
+ * `valkeyNotSent` (issue #965): the code that threw knows a Valkey read or connect got no answer before anything was
+ * sent (`requestSandboxEnd`'s read of the session, never one Valkey answered with its own error reply; the allocation
+ * writes' `writeClient`), so nothing was changed.
+ */
+function thrownSentence(e) {
+  const code = typeof e?.code === "string" ? e.code : "error";
+  if (e?.valkeyMayStillRun) return `the write threw (${code}); Valkey did not confirm it, so it may or may not have been made`;
+  if (e?.valkeyNotSent) return `the write threw (${code}); Valkey could not be reached, so nothing was changed`;
+  return `the write threw (${code})`;
+}
+
+/**
+ * The closed word of an agent's row for a write that threw (issue #965): a sentence was written there, where
+ * INT-CONSOLE-AUDIT-LOG gives an agent one word. `action-unconfirmed` where it may have been made: the error carries
+ * `valkeyMayStillRun`, or the write is a host setup step, which acts in several steps and whose throw may come after
+ * some of them landed (the console's confirm says so of it). A throw marked `valkeyNotSent` is Valkey out of reach, so
+ * it takes the word the caller's own `failure` gives an answer of `{ unreachable }`: one word for one condition on each
+ * surface (the tools' `action-unavailable`; the console's `action-refused`, which is how its agent rows say an
+ * unreachable answer). `action-refused` for any other throw.
+ */
+function thrownAgentWord(kind, e, failure) {
+  if (e?.valkeyMayStillRun || String(kind).startsWith("setup-")) return AGENT_UNCONFIRMED;
+  if (e?.valkeyNotSent) {
+    const word = failure({ unreachable: true });
+    return AGENT_WORDS.includes(word) ? word : AGENT_REFUSED;
+  }
+  return AGENT_REFUSED;
+}
+
+/**
  * Run `fn`, the write, between audit rows. `audit` is a console audit writer (`makeConsoleAudit`), `actor` the row's
  * actor (`panelActor()`), `kind` the action name (`[a-z0-9-]{1,40}`), `target` what it writes (a file path, a job id,
  * a queue), `beforeDigest`/`afterDigest` optional. `failure(result)` overrides `defaultFailure` for a funnel that says
@@ -75,7 +120,9 @@ export function defaultFailure(result) {
  *      so a synchronous funnel's caller needs no rewrite.
  *   3. When `fn` throws (or rejects), or `failure(result)` names a reason, append the compensating `{ outcome:
  *      "failed", reason }` row with the same ticket, then return the result or rethrow, unchanged. A compensating
- *      append that fails is reported to `log` and swallowed: the write's own outcome is what the caller must see.
+ *      append that fails is reported to `log` and swallowed: the write's own outcome is what the caller must see. A
+ *      throw's reason is a sentence for a person (`thrownSentence`) and one closed word for an agent
+ *      (`thrownAgentWord`, issue #965), whoever the caller is.
  *   4. When the write landed and `note(result)` names a reason (issue #964: a kill switch that switched every queue it
  *      knew over a set of queues that may be short), append a second `{ outcome: "ok", reason }` row with the same
  *      ticket, before an agent's receipt. The write's outcome is still `ok`, so a reader taking the last row for a
@@ -120,7 +167,7 @@ export function auditedWrite({ audit, actor, kind, target, beforeDigest = null, 
     return result;
   };
   const threw = (e) => {
-    compensate(`the write threw (${typeof e?.code === "string" ? e.code : "error"})${e?.valkeyMayStillRun ? "; Valkey did not confirm it, so it may or may not have been made" : ""}`);
+    compensate(actor?.role === "agent" ? thrownAgentWord(kind, e, failure) : thrownSentence(e));
     throw e;
   };
   let result;

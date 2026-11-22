@@ -2620,6 +2620,17 @@ test("createFleetReader on a real Valkey: one queue is paused and resumed alone,
   }
 });
 
+test("createFleetReader: one queue's pause over a registry that could not be read says a host's queue may be missing, never the client's words (#965)", async () => {
+  const words = "connect ECONNREFUSED 10.9.8.7:6379";
+  const { built, asked, mk } = switchQueues();
+  const reader = endingReader(mk, [], { readLiveHostsFn: async () => { throw new Error(words); } });
+  const gone = await reader.pauseQueue({ queue: "pi-jobs@gone", paused: true });
+  assert.deepEqual(gone, { invalid: "\"pi-jobs@gone\" is not a queue this deployment drains (pi-jobs); the host registry could not be read, so a host's queue may be missing from that list. Nothing was changed" });
+  assert.ok(!gone.invalid.includes("10.9.8.7"), "the registry read's own error stays out of a page's sentence");
+  assert.deepEqual([built.map((q) => q.name), asked], [["pi-jobs"], []], "no queue was built or flipped for it");
+  await reader.dispose();
+});
+
 test("createFleetReader: a fleet pause names a held queue discovery no longer finds, and a resume whose registry read failed still reaches the queues it holds (#842)", async () => {
   let registry = () => Promise.resolve({ hosts: [{ name: "hostb", routes: true }] });
   let found = ["pi-jobs@stopped"];

@@ -18,6 +18,7 @@ import { DEFER_BUCKET_WORDS, DEFER_TIME_MAX_MS, DEFER_WHYS } from "@edgehero/pi-
 import { enqueueForgeJob, forgeDeliveryJobId, makeQueue } from "@edgehero/pi-dispatch/queue";
 import { buildRecord, makeRecordWriter, sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
+import { requestSandboxEnd } from "@edgehero/pi-dispatch/sandbox-sessions";
 import { PACKAGE_MOVED_SENTENCE, PACKAGE_NOT_TAKEN_SENTENCE, UPDATES_UNREAD_SENTENCE } from "../src/console/actions.mjs";
 import { switchPartialWords, actionNamed, agentFailure, AGENT_QUEUES_SHORT, AGENT_REFUSED, AGENT_UNCONFIRMED, PAUSE_SNAPSHOT_TIMEOUT_MS, START_USED } from "../src/console/actions.mjs";
 import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, SWITCH_UNREAD_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
@@ -3499,7 +3500,9 @@ test("previews and a steer confirm on a Valkey that stops answering: a failed-jo
     const failed = await clocked(c.act("retry-failed", { jobId: "gh-f1", queue: "pi-jobs" }));
     assert.deepEqual([failed.res.status, failed.res.json().error], [503, "the failed jobs could not be read (is Valkey reachable?); nothing was changed"]);
     const preview = await clocked(c.act("steer", { jobId: "gh-st1", text: STEER_TEXT }));
-    assert.equal(preview.res.json().error, `Nothing was sent: the job or its inbox did not answer within ${FROZEN_STEP_MS / 1000} seconds`);
+    // Valkey's refusal, as the failed job's preview answers the same condition (issue #965): 503, with Try again.
+    assert.deepEqual([preview.res.status, preview.res.json().error], [503, `Nothing was sent: the job or its inbox did not answer within ${FROZEN_STEP_MS / 1000} seconds`]);
+    assert.match(preview.res.json().html, /data-again>Try again</);
     for (const { ms } of [failed, preview]) assert.ok(ms < FROZEN_STEP_MS + 2_000, `${ms} ms: at the bound, not at wake`);
     // The confirm of the preview made before the freeze: its push reaches the socket and is not answered.
     const sent = await clocked(c.confirm("steer", steer.json().ticket));
@@ -3644,6 +3647,48 @@ test("steer and steer-withdraw refuse by the planner's own words before any tick
     assert.equal(v.status, 403, `${name}: a viewer is refused`);
   }
   assert.equal(c.audit.rows.filter((r) => r.action === "write" && r.outcome === "ok").length, 0, "nothing was written");
+});
+
+test("a steer's and a withdrawal's preview that could not read Valkey answer 503 with Try again, as a failed job's does; the run's own refusals stay 400 (#965)", async () => {
+  const { paths } = deployment();
+  const boom = () => { throw new Error("connect ECONNREFUSED 127.0.0.1:1"); };
+  const unread = { redisFn: boom, queueFn: boom, parseConnectionFn: () => ({}) };
+  // The real planners over a registry with no hosts and one queue holding `job`; `inbox` answers each inbox read.
+  const over = (job, inbox) => ({
+    redisFn: () => ({ ...keyedRedis({}), exists: inbox, hget: inbox }),
+    queueFn: (_c, { name }) => ({ name, getJob: async (id) => (job && id === job.id ? job : undefined), close: async () => {} }),
+    parseConnectionFn: () => ({}),
+  });
+  const armed = { id: "gh-s", data: { steer: true }, getState: async () => "active" };
+  // A queue entry with no id of its own names no run, so the inbox refuses the read before it is sent.
+  const idless = { ...over(null, async () => assert.fail("no inbox read is sent")), queueFn: (_c, { name }) => ({ name, getJob: async () => ({ data: { steer: true }, getState: async () => "active" }), close: async () => {} }) };
+  const timedOut = async () => { throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" }); };
+  const id = "a".repeat(32);
+  const cases = [
+    ["steer", unread, 503, /^Nothing was sent: could not read the job or its inbox \(connect ECONNREFUSED/],
+    ["steer", over(armed, timedOut), 503, /^Nothing was sent: the run's inbox could not be read \(Valkey said ETIMEDOUT\)$/],
+    ["steer-withdraw", unread, 503, /^could not read the job or its inbox \(connect ECONNREFUSED/],
+    ["steer-withdraw", over(armed, timedOut), 503, /^the run's inbox could not be read \(Valkey said ETIMEDOUT\); nothing was changed$/],
+    ["steer", over({ ...armed, data: {} }, async () => 1), 400, /^Nothing was sent: it is not steer-armed/],
+    ["steer", over(armed, async () => 0), 400, /^Nothing was sent: the run is not accepting messages/],
+    ["steer", over(null, async () => 1), 400, /^Nothing was sent: no job in 1 queue; job gh-s$/],
+    ["steer-withdraw", over(armed, async () => null), 400, /^no message a{32} in the inbox of gh-s$/],
+    ["steer-withdraw", over(armed, async () => "delivered"), 400, /cannot be withdrawn/],
+    // A state no release writes was read, not missed: trying again reads the same.
+    ["steer-withdraw", over(armed, async () => "bogus"), 400, /^the run's inbox could not be read \(Valkey said bad-reply\)/],
+    // A read the inbox refused before it was sent says its own reason, never Valkey's.
+    ["steer", idless, 400, /^Nothing was sent: no run id$/],
+    ["steer-withdraw", idless, 400, /^Nothing was changed: no run id$/],
+  ];
+  for (const [name, seams, status, error] of cases) {
+    const rm = { ...RM, planSteer: (args) => RM.planSteer({ ...args, ...seams }), planSteerWithdraw: (args) => RM.planSteerWithdraw({ ...args, ...seams }) };
+    const c = await start({ paths, a: { rm } });
+    const out = await c.act(name, name === "steer" ? { jobId: "gh-s", text: "x" } : { jobId: "gh-s", id });
+    assert.equal(out.status, status, `${name}: ${out.text}`);
+    assert.match(out.json().error, error);
+    assert.match(out.json().html, status === 503 ? /data-again>Try again</ : /data-close>Close</);
+    assert.equal(out.json().ticket, undefined);
+  }
 });
 
 test("steer on Valkey: the preview shows the text escaped, no new reserve and the sha256; the confirm pushes it as the session's message; only the digest is audited; withdraw says guaranteed or best effort", live, async () => {
@@ -4013,8 +4058,24 @@ test("sandbox End says nothing was changed only of a request that was not writte
   assert.equal(lost.said, "Valkey did not confirm the sandbox-end change, so it may or may not have been made. Look again once Valkey answers; the console's log has the reason");
   assert.doesNotMatch(lost.bar, /nothing was changed/i);
   assert.deepEqual(lost.rows, [["write", "ok", null], ["write", "failed", "the write threw (ETIMEDOUT); Valkey did not confirm it, so it may or may not have been made"]]);
-  // The read before the request, or a request that was never sent.
-  const unsent = await ending(async () => { throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" }); });
+  // The read of the session, before anything was written, through the real End over a client whose read fails (its
+  // error marked as a read that reached a socket): Valkey's refusal with Try again, and nothing was changed (#965).
+  const timedOut = (mark = {}) => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" }, mark);
+  const readFails = { get: async () => { throw timedOut({ valkeyMayStillRun: true }); }, set: async () => assert.fail("nothing is written after a read that failed") };
+  const unread = await ending((request) => requestSandboxEnd({ redis: readFails, ...request, timeoutMs: null }));
+  assert.equal(unread.status, 503);
+  assert.equal(unread.said, VALKEY_UNREACHABLE);
+  assert.match(unread.bar, /data-again>Try again</);
+  assert.deepEqual(unread.rows, [["write", "ok", null], ["write", "failed", "the write threw (ETIMEDOUT); Valkey could not be reached, so nothing was changed"]]);
+  // Valkey answered the read with an error of its own: it was reached, so the sentence names no cause, as before.
+  const readRefused = { get: async () => { throw Object.assign(new Error("NOPERM this user has no permissions to run the 'get' command"), { name: "ReplyError" }); }, set: async () => assert.fail("nothing is written after a read that failed") };
+  const answered = await ending((request) => requestSandboxEnd({ redis: readRefused, ...request, timeoutMs: null }));
+  assert.equal(answered.status, 500);
+  assert.equal(answered.said, "the sandbox-end change could not be made; nothing was changed, and the console's log has the reason");
+  assert.deepEqual(answered.rows, [["write", "ok", null], ["write", "failed", "the write threw (error)"]]);
+  // A request that was never sent (its SET rejected with no mark): nothing was changed, said as before, naming no cause.
+  const setFails = { get: async () => JSON.stringify({ v: 1, ...shell }), set: async () => { throw timedOut(); } };
+  const unsent = await ending((request) => requestSandboxEnd({ redis: setFails, ...request, timeoutMs: null }));
   assert.equal(unsent.status, 500);
   assert.equal(unsent.said, "the sandbox-end change could not be made; nothing was changed, and the console's log has the reason");
   assert.deepEqual(unsent.rows, [["write", "ok", null], ["write", "failed", "the write threw (ETIMEDOUT)"]]);
@@ -4646,6 +4707,26 @@ test("Budget split envelope preview contains the exact file diff and multi-host 
 });
 
 
+test("an envelope write whose Valkey connect got no answer says the deployment's Valkey could not be reached, as a priorities plan does, and writes nothing (#965)", async () => {
+  const { dir, paths } = deployment();
+  paths.envelopeFile = join(dir, "envelope.json");
+  const before = `${JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { web: "10", _other: "0" }, defaultWeights: { web: 1, _other: 0 }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }, null, 2)}\n`;
+  writeFileSync(paths.envelopeFile, before);
+  // The real `writeEnvelope` with the real default client on an address that refuses the connect (ioredis: "Connection
+  // is closed.", as of a wrong password or a missing database), and over a client whose connect never answers.
+  const frozen = () => ({ status: "wait", on() {}, connect: () => new Promise(() => {}), set: async () => assert.fail("no digest is recorded"), disconnect() {} });
+  for (const [redisFn, connectTimeoutMs] of [[makeRedisClient, 5_000], [frozen, 60]]) {
+    const rm = { ...RM, writeEnvelope: (args) => RM.writeEnvelope({ ...args, redisFn, connectTimeoutMs }) };
+    const c = await start({ paths, a: { rm } });
+    const out = await c.both("envelope-set", { envelope: { totalUsd: "120" } });
+    assert.equal(out.confirm.status, 503, out.confirm.text);
+    assert.equal(out.confirm.json().error, VALKEY_UNREACHABLE);
+    assert.match(out.confirm.json().html, /data-again>Try again</);
+    assert.match(lastTwo(c)[1][2], /^the write threw \(error\); Valkey could not be reached, so nothing was changed$/);
+    assert.equal(read(paths.envelopeFile), before, "the file was not written");
+  }
+});
+
 test("structured allocation fields pack the existing action schemas, including false delegation and zero weights", () => {
   const bodyOf = scriptBodyOf();
   const field = (name, value, type = null) => ({ name, value, disabled: false, getAttribute: () => type });
@@ -4751,12 +4832,16 @@ test("a budget write that was sent and not answered says may or may not have bee
     assert.equal(out.confirm.json().error, `Valkey did not confirm the ${name} change, so it may or may not have been made. Look again once Valkey answers; the console's log has the reason`);
     assert.doesNotMatch(out.confirm.json().html, /nothing was changed/i);
     assert.deepEqual(lastTwo(c), [["write", "ok", null], ["write", "failed", "the write threw (ETIMEDOUT); Valkey did not confirm it, so it may or may not have been made"]]);
-    // A client that never connected sent nothing (`writeClient` throws no mark for it).
+    // A client that never connected sent nothing: the real funnel over one whose connect is refused (`writeClient` marks
+    // it `valkeyNotSent`, issue #965), answered as Valkey's refusal with Try again.
     const unsent = allocationRm({ log });
-    unsent.rm[funnel] = async () => { throw new Error("Valkey did not connect within 6 seconds"); };
+    const refusedConnect = () => ({ status: "wait", on() {}, connect: async () => { throw new Error("connect ECONNREFUSED 127.0.0.1:1"); }, disconnect() {} });
+    unsent.rm[funnel] = (args) => RM[funnel]({ ...args, redisFn: refusedConnect });
     const u = await start({ paths, a: { rm: unsent.rm } });
     const none = await u.both(name, input);
-    assert.equal(none.confirm.json().error, `the ${name} change could not be made; nothing was changed, and the console's log has the reason`);
+    assert.deepEqual([none.confirm.status, none.confirm.json().error], [503, VALKEY_UNREACHABLE]);
+    assert.match(none.confirm.json().html, /data-again>Try again</);
+    assert.deepEqual(lastTwo(u), [["write", "ok", null], ["write", "failed", "the write threw (error); Valkey could not be reached, so nothing was changed"]]);
   }
   // The envelope's digest, sent and not answered: the funnel's own sentence, kept partial through the action.
   const sentence = "the record of the new envelope's digest in alloc:envelope:expected may or may not have been made";
@@ -4863,6 +4948,26 @@ test("an agent's write that was sent and not confirmed is recorded and answered 
   const lost = await r.confirm("rerun", p.json().ticket, agent);
   assert.equal(lost.status, 409, lost.text);
   assert.deepEqual([r.audit.rows.at(-1).outcome, r.audit.rows.at(-1).reason], ["failed", "action-unconfirmed"]);
+});
+
+test("an agent's confirm whose write throws is recorded as one closed word, action-unconfirmed where Valkey may still run it, never a sentence (#965)", async () => {
+  const { paths } = deployment();
+  const grants = { grantsEnv: { PI_DISPATCH_RUN_ROOTS: "/srv/repos", PI_DISPATCH_RUN_PER_HOUR: "3" } };
+  const input = { folder: "/srv/repos/example", flow: "triage", task: "review tests" };
+  const cases = [
+    [() => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true }), 500, "action-unconfirmed"],
+    [() => Object.assign(new Error("Valkey did not connect within 6 seconds"), { valkeyNotSent: true }), 503, "action-refused"],
+    [() => Object.assign(new Error("boom"), { code: "EBOOM" }), 500, "action-refused"],
+  ];
+  for (const [error, status, reason] of cases) {
+    const c = await start({ paths, a: { ...grants, rm: { ...RM, checkDispatchRun: async () => ({}), dispatchRunAlready: async () => null, enqueueDispatchRun: async () => { throw error(); } } } });
+    const agent = await c.cookieFor(AGENT_TOKEN);
+    const p = await c.act("run-enqueue", input, agent);
+    assert.equal(p.status, 200, p.text);
+    const done = await c.confirm("run-enqueue", p.json().ticket, agent);
+    assert.equal(done.status, status, done.text);
+    assert.deepEqual(c.audit.rows.slice(-2).map((r) => [r.actor.role, r.outcome, r.reason ?? null]), [["agent", "ok", null], ["agent", "failed", reason]]);
+  }
 });
 
 test("a canary's preview asks its plan beside the package facts, not after them (#961)", async () => {

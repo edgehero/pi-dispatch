@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { readConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
 import { renewSandboxSession, sandboxEndKey, sandboxSessionKey, sandboxSessionMember, SANDBOX_SESSION_INDEX } from "@edgehero/pi-dispatch/sandbox-sessions";
+import { VALKEY_UNREACHABLE } from "../src/console/actions.mjs";
 import { runCli } from "../src/console/cli.mjs";
 import { SANDBOX_END_UNCONFIRMED } from "../src/sandbox-data.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -113,11 +114,12 @@ test("a sandbox End on a Valkey that stops answering says what is known by where
     assert.deepEqual([atAck.row.kind, atAck.row.outcome, atAck.row.reason], ["sandbox-end", "failed", SANDBOX_END_UNCONFIRMED]);
     assert.deepEqual([atAck.before, atAck.after], [1, 0], "the request stood while Valkey did not answer, and its removal landed at the wake");
 
-    // At the read of the session, before anything was written: nothing was changed, and that is what is said.
+    // At the read of the session, before anything was written: Valkey could not be reached and nothing was changed, and
+    // that is what is said (issue #965), as Valkey's refusal with Try again.
     const atRead = await endWith(commandOn("get", "sandbox:shell:"));
-    assert.equal(atRead.status, 500, atRead.said);
-    assert.equal(atRead.said, "the sandbox-end change could not be made; nothing was changed, and the console's log has the reason");
-    assert.deepEqual([atRead.row.kind, atRead.row.outcome, atRead.row.reason], ["sandbox-end", "failed", "the write threw (ETIMEDOUT)"]);
+    assert.equal(atRead.status, 503, atRead.said);
+    assert.equal(atRead.said, VALKEY_UNREACHABLE);
+    assert.deepEqual([atRead.row.kind, atRead.row.outcome, atRead.row.reason], ["sandbox-end", "failed", "the write threw (ETIMEDOUT); Valkey could not be reached, so nothing was changed"]);
     assert.deepEqual([atRead.before, atRead.after], [0, 0], "no request was written, then or at the wake");
     assert.deepEqual(err.filter((line) => /unexpected failure|TypeError/.test(line)), []);
   } finally {

@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { DISPATCH_RUN_ALLOWANCE_LOST, applyPriorities, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planEnvelopeWrite, planParkedAnswer, planRerun, readEnvelope, revertAllocation, writeEnvelope } from "../src/read-model.mjs";
 import { ALREADY_CUT, ALREADY_MATCH, ALREADY_PER_STATE, ALREADY_UNCHECKED, LOOK_FIRST, CONFIRM_READ_TIMEOUT_MS, PAID_PLAN_TIMEOUT_MS, alreadyQueuedLine, connectedQueue, dispatchRunAlready, enqueueUnconfirmed, enqueueUnread, queuedAlready } from "../src/job-actions.mjs";
 import { enqueueTriggerFire, FIRE_UNCONFIRMED, planTriggerFire } from "../src/trigger-fire.mjs";
@@ -391,7 +392,7 @@ function allocationFiles(tag) {
 /** A write client as `writeClient` builds it: not connected yet, `connect` and each command as `over` says. */
 const writeFake = (made, over) => (_url, options) => (made.push(options), { status: "wait", on() {}, connect: async () => {}, disconnect() { made.dropped = (made.dropped ?? 0) + 1; }, ...over });
 
-test("an envelope write whose digest was sent and not answered says may or may not and writes no file; one that was not sent, or never connected, keeps its sentence (#961)", async () => {
+test("an envelope write whose digest was sent and not answered says may or may not and writes no file; one that was not sent keeps its sentence, and one that never connected throws the not-sent mark (#961, #965)", async () => {
   const files = allocationFiles("pd-961-envelope-");
   const before = readFileSync(files.envelope, "utf8");
   const common = { envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000, change: { totalUsd: "90" }, url: "redis://127.0.0.1:1", connectTimeoutMs: BOUND };
@@ -407,13 +408,18 @@ test("an envelope write whose digest was sent and not answered says may or may n
   const unsent = await writeEnvelope({ ...common, redisFn: writeFake([], { set: () => Promise.reject(new Error("Stream isn't writeable")) }) });
   assert.equal(unsent.partial, undefined);
   assert.match(unsent.invalid, /^could not record the new envelope's digest/);
-  // A client that never connects: nothing was sent, said within the bound, and the client is dropped.
+  // A client that never connects: nothing was sent, said within the bound, and the client is dropped. Its error is thrown
+  // on with `valkeyNotSent` (issue #965), as a priorities plan's is, so the confirm says Valkey could not be reached.
   const never = [];
-  const late = await timed(writeEnvelope({ ...common, redisFn: writeFake(never, { connect: neverAnswers }) }));
-  assert.match(late.res.invalid, /^could not reach Valkey to record the new envelope's digest in alloc:envelope:expected \(Valkey did not connect within 0\.06 seconds\), so the file was not written/);
-  assert.equal(late.res.partial, undefined);
+  const late = await timed(writeEnvelope({ ...common, redisFn: writeFake(never, { connect: neverAnswers }) }).then(() => "wrote", (error) => error));
+  assert.deepEqual([late.res?.message, late.res?.valkeyNotSent, late.res?.valkeyMayStillRun], ["Valkey did not connect within 0.06 seconds", true, undefined]);
   assert.ok(late.ms < 1500, `${late.ms} ms`);
   assert.equal(never.dropped, 1);
+  assert.equal(readFileSync(files.envelope, "utf8"), before);
+  // The real client on an address that refuses the connect: ioredis says "Connection is closed.", as it does of a wrong
+  // password or a database Valkey does not have, so it carries the mark too.
+  const closed = await writeEnvelope({ ...common, connectTimeoutMs: 5_000, redisFn: makeRedisClient }).then(() => "wrote", (error) => error);
+  assert.deepEqual([closed?.message, closed?.valkeyNotSent, closed?.valkeyMayStillRun], ["Connection is closed.", true, undefined]);
   assert.equal(readFileSync(files.envelope, "utf8"), before);
 });
 
@@ -430,16 +436,19 @@ test("a priorities plan or a revert whose client never connects throws no mark w
     const late = await timed(write(writeFake(made, { connect: neverAnswers })).then(() => "wrote", (error) => error));
     assert.equal(late.res?.message, "Valkey did not connect within 0.06 seconds", name);
     assert.equal(late.res.valkeyMayStillRun, undefined, "nothing was sent, so the confirm says nothing was changed");
+    assert.equal(late.res.valkeyNotSent, true, "and that Valkey could not be reached (issue #965)");
     assert.ok(late.ms < 1500, `${late.ms} ms`);
     assert.equal(made.dropped, 1, "and the client is dropped, so nothing is sent later");
     assert.deepEqual(made[0], { failFast: true, lazyConnect: true, commandTimeoutMs: 5000, disconnectTimeoutMs: 0 });
     // A connect that failed sent nothing either, whatever its error carries.
     const refused = await write(writeFake([], { connect: () => Promise.reject(lostAnswer()) })).then(() => "wrote", (error) => error);
     assert.equal(refused.valkeyMayStillRun, undefined, name);
+    assert.equal(refused.valkeyNotSent, true, name);
     // A command that was sent and lost: the client's own error reaches the confirm, which says may or may not.
     const lose = losingClient();
     const lost = await write((_url) => Object.assign(Object.create(lose), { status: "wait", on() {}, connect: async () => {}, disconnect() {} })).then(() => "wrote", (error) => error);
     assert.equal(lost?.valkeyMayStillRun, true, `${name}: ${String(lost?.message ?? lost)}`);
+    assert.equal(lost.valkeyNotSent, undefined, `${name}: a lost command was sent`);
   }
 });
 
