@@ -123,6 +123,18 @@ that comes when it is not its process's turn is refused, because taking the room
 could pass the cap. Before calls could wait, the waiting call would have been refused instead. Raising `maxCostUsd` does
 not help this stop.
 
+The record holds the numbers the refusal judged, beside `why`: `costRefusal`, what had been charged, what other calls
+still held, what the rest of the job had spent and held, and the most the refused call could cost. A refusal inside a
+pi child process (a role's task) that stopped the job is recorded with the child's rule and numbers. For `over-cap` and
+`final-payload` they add up to more than the cap, except for a call refused after waiting 15 minutes with no call
+finishing, whose numbers can fit: raising the cap does not help that stop, so look in the job log for a call that hung.
+There are none for `unboundable`, `external`, a final request that could not be bounded or whose reading of the job's
+other processes failed, or an older image ([what the cap charges](costs.md#what-the-cap-charges)). Its `tokens` say
+what the cap charged in all (`costChargedMicros`) and how much of that was above pi's own price (`costLiftedMicros`),
+which is why a run can stop at its cap while its cost reads far less. A job past 70% of its cap was told once to report
+and, if its flow pushes, to push (`tokens.costWarned` is 1 when that message was queued); a job whose spend goes from
+under 70% to a refusal within one step gets no warning.
+
 What to do: raise the trigger's `run.maxCostUsd`, or the deployment's `PI_MAX_COST_USD`, if the work needs more. For
 `turn`, run the forwarding provider's work outside parallel role tasks, or give the job enough room that no call has to
 wait. See [costs.md](costs.md#parallel-calls).

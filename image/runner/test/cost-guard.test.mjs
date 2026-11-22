@@ -2029,3 +2029,86 @@ test("issue #985: while anyone waits, a call that may NOT wait (a forward) and h
 	const nobody = waitingGuard({ capMicros: 1000, external: () => 0, claim: () => false, outsideWaiting: () => false });
 	assert.equal(nobody.guard.admit({ ...sized(300), waitable: false }), null, "nobody waits: no turn, admitted as before");
 });
+
+// ── Issue #985, part 3: what the cap charged and the refusal's numbers, for the exit line and the record ──────────
+
+test("issue #985: charges() says what the cap charged, the part above pi's own price (lifted) and the calls that waited; the charge less the lift is what pi priced", { timeout: 10_000 }, async () => {
+	const { guard, within } = waitingGuard({ capMicros: 100_000_000 });
+	const settleOne = async (bound, outcome, model = { ...FLAT, bound }) => {
+		const stream = new FakeStream();
+		assert.equal(guard.admit({ ...sized(bound), model }), null);
+		guard.bind(stream);
+		outcome(stream);
+		await flush();
+		within("settled");
+	};
+	await settleOne(1000, (s) => s.end(message(0.0002)));
+	assert.deepEqual(guard.charges(), { spentMicros: 200, liftedMicros: 0, waited: 0 }, "a priced call is charged pi's price: nothing lifted");
+	await settleOne(1000, (s) => s.end(message(0.002)));
+	assert.deepEqual(guard.charges(), { spentMicros: 2200, liftedMicros: 0, waited: 0 }, "above its bound is still pi's price (boundExceeded), not a lift");
+	await settleOne(1000, (s) => s.fail(new Error("transport died")));
+	assert.deepEqual(guard.charges(), { spentMicros: 3200, liftedMicros: 1000, waited: 0 }, "no price: its whole bound is lifted");
+	await settleOne(1000, (s) => s.end({ role: "assistant", stopReason: "error", content: [{ type: "text", text: "partial" }], usage: { input: 10, output: 5, cost: { total: 0.0001 } } }));
+	assert.deepEqual(guard.charges(), { spentMicros: 4200, liftedMicros: 1900, waited: 0 }, "started, then failed: charged its bound, 1000 - 100 above pi's price");
+	await settleOne(1000, (s) => s.end(message(0.0003, { input: 0 })));
+	assert.deepEqual(guard.charges(), { spentMicros: 5200, liftedMicros: 2600, waited: 0 }, "no input reported: its bound, 1000 - 300 above");
+	// Long context on anthropic-messages with no tiers: 2 x input-side and 1.5 x output above pi's base price.
+	await settleOne(50_000_000, (s) => s.end({ role: "assistant", usage: { input: 250_000, output: 10_000, cacheRead: 0, cacheWrite: 0, cost: { input: 0.75, output: 0.15, cacheRead: 0, cacheWrite: 0, total: 0.9 } } }), { ...SONNET_4_5, bound: 50_000_000 });
+	assert.deepEqual(guard.charges(), { spentMicros: 5200 + 1_725_000, liftedMicros: 2600 + 1_725_000 - 900_000, waited: 0 }, "the synthetic tier, 1,725,000, of which 825,000 is above pi's 900,000");
+	assert.equal(guard.charges().spentMicros - guard.charges().liftedMicros, 200 + 2000 + 0 + 100 + 300 + 900_000, "the charge less the lift: each call's own price, rounded up");
+	// A waiter counts once, whether it waited at admission only or also at its final payload.
+	const small = waitingGuard({ capMicros: 1000 });
+	const first = hold(small.guard, 600);
+	const waiting = queued(small.guard, 600);
+	assert.equal(small.guard.charges().waited, 1);
+	first.end(message(0.0001));
+	await flush();
+	assert.deepEqual([waiting.verdicts, small.guard.charges()], [[null], { spentMicros: 100, liftedMicros: 0, waited: 1 }]);
+	// Not in snapshot(): the exit line's cost counters keep their keys, and these follow `modelRefused`.
+	assert.deepEqual(Object.keys(small.guard.snapshot()), ["costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered"]);
+	assert.deepEqual(createPolicyGuard({ maxCostMicros: 1000 }).charges(), { spentMicros: 0, liftedMicros: 0, waited: 0 });
+	assert.equal(createPolicyGuard({ allowedModels: [{ provider: FLAT.provider, model: FLAT.id }] }).charges(), null, "no cap: nothing charged");
+});
+
+test("issue #985: refusal() is the FIRST refusal's numbers (spent, the others' holds, the outside spend, the bound), none for a refusal with no bound, and a final payload's leave out its own hold", { timeout: 10_000 }, async () => {
+	const over = waitingGuard({ capMicros: 1000, external: () => 150 });
+	assert.equal(over.guard.refusal(), null, "nothing refused");
+	const first = hold(over.guard, 500);
+	first.end(message(0.0001));
+	await flush();
+	hold(over.guard, 300, { waitable: false });
+	assert.equal(over.guard.admit({ ...sized(600), waitable: false }), COST_CAP, "100 + 300 + 150 + 600 > 1000, and it may not wait");
+	assert.deepEqual(over.guard.refusal(), { spentMicros: 100, inflightMicros: 300, externalMicros: 150, boundMicros: 600 });
+	assert.equal(over.guard.admit({ ...sized(900), waitable: false }), COST_CAP);
+	assert.deepEqual(over.guard.refusal().boundMicros, 600, "first wins, as refusedWhy");
+	const copy = over.guard.refusal();
+	copy.boundMicros = 1;
+	assert.equal(over.guard.refusal().boundMicros, 600, "a copy");
+	// A first refusal with no bound has no numbers, and a later one does not take its place: they would not be its `why`'s.
+	const unboundable = waitingGuard({ capMicros: 1000 });
+	assert.equal(unboundable.guard.admit({ method: "generateImages", model: FLAT, args: [{}, {}] }), COST_CAP);
+	assert.equal(unboundable.guard.admit({ ...sized(2000), waitable: false }), COST_CAP);
+	assert.deepEqual([unboundable.guard.refusedWhy(), unboundable.guard.refusal()], ["unboundable", null]);
+	const external = waitingGuard({ capMicros: 1000, external: () => Number.NaN });
+	assert.equal(external.guard.admit(sized(10)), COST_CAP);
+	assert.deepEqual([external.guard.refusedWhy(), external.guard.refusal()], ["external", null]);
+	// A final payload: the call holds 600 (its admission), another holds 300, and the body grows it to 900.
+	const policy = createPolicyGuard({ maxCostMicros: 1_200, env: {} });
+	// An operator's own completions server: the body must keep its max_tokens, or it is unboundable (no numbers).
+	const bodyOf = (bytes) => ({ max_tokens: 100, m: "x".repeat(bytes) });
+	const tiny = { ...FLAT, cost: { input: 0.01, output: 0.01, cacheRead: 0, cacheWrite: 0 }, maxTokens: 100 };
+	const request = { method: "streamSimple", model: tiny, args: [{}, { maxTokens: 100 }] };
+	assert.equal(policy.admit(request), null);
+	const options = policy.prepare({ ...request, stop() {} })[1];
+	policy.bind(new FakeStream());
+	const own = policy.spend().inflightMicros;
+	assert.equal(policy.admit(request), null);
+	policy.bind(new FakeStream());
+	const others = policy.spend().inflightMicros - own;
+	await assert.rejects(() => options.onPayload(bodyOf(120_000)));
+	const grown = callCostBound("streamSimple", tiny, {}, { maxTokens: 100 }, {}, bodyOf(120_000));
+	assert.equal(policy.refusedWhy(), "final-payload");
+	assert.deepEqual(policy.refusal(), { spentMicros: 0, inflightMicros: others, externalMicros: 0, boundMicros: grown }, "the others' holds, not its own: the bound it asked to grow to is its part");
+	assert.ok(others + grown > 1_200);
+	assert.equal(createPolicyGuard({ allowedModels: [{ provider: FLAT.provider, model: FLAT.id }] }).refusal(), null);
+});

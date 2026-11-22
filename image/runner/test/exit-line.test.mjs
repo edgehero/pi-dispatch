@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { createExitWriter, drainStdin, EXIT_LINE_LOADED_MAX_BYTES, EXIT_LINE_MAX_BYTES, EXIT_MESSAGE_MAX_BYTES, EXIT_TAIL_BYTES, EXIT_TERMINATED, exitLineJson, exitLineMac, exitLineMaxBytes, readExitKey, signExitLine, SUPERVISOR_LINE_BYTES, writeAllSync } from "../src/exit-line.mjs";
+import { createExitWriter, drainStdin, EXIT_LINE_LOADED_MAX_BYTES, EXIT_LINE_MAX_BYTES, EXIT_LINE_WITH_MESSAGE_FLOOR_MAX_BYTES, EXIT_LINE_WITH_MESSAGE_MAX_BYTES, EXIT_MESSAGE_FLOOR_BYTES, EXIT_MESSAGE_MAX_BYTES, messageRoom, EXIT_TAIL_BYTES, EXIT_TERMINATED, exitLineJson, exitLineMac, exitLineMaxBytes, readExitKey, signExitLine, SUPERVISOR_LINE_BYTES, writeAllSync } from "../src/exit-line.mjs";
 import { buildLoaded, fitLoaded } from "../src/loaded.mjs";
 import { capExitMessage } from "../src/outcome.mjs";
 import { SUBSCRIPTION_QUOTA_CODES } from "../src/provider-failure.mjs";
@@ -405,9 +405,9 @@ test("the numbers INT-RUNNER-EXIT-CODE-PROTOCOL states are measured here: every 
 	// new field moves these, and the spec's sentence with them.
 	const fields = { ...worstFields(), reason: "error" };
 	const line = `\n${signExitLine(JSON.stringify({ event: "exit", jobId: JOB_ID, ...fields, resources: LONGEST_RESOURCES }), KEY)}\n`;
-	assert.equal(line.length, 8004);
+	assert.equal(line.length, 8105);
 	const withSupervisor = line.length + SUPERVISOR_LINE_BYTES + JOB_ID.length;
-	assert.equal(withSupervisor, 8497);
+	assert.equal(withSupervisor, 8598);
 	assert.ok(withSupervisor > EXIT_TAIL_BYTES);
 	const spec = readFileSync(new URL("../../../specs/interfaces.md", import.meta.url), "utf8");
 	const section = spec.slice(spec.indexOf("**The whole line has a limit of its own (issue #800)"), spec.indexOf("**The job user cannot read its own inputs (issue #341)**"));
@@ -432,14 +432,31 @@ test("a maximal line stays at or under 7,680 bytes and verifies, with the code, 
 	assert.deepEqual(parsed.steer, fields.steer, "every other field survives whole: only the message was cut");
 	assert.deepEqual(parsed.providerFailure, fields.providerFailure, "the longest quota code is signed whole");
 	assert.deepEqual(parsed.usage.models.length, 9);
-	assert.match(parsed.message, /\.\.\. \[truncated \d+ chars\]$/);
+	// Issue #985: its other fields alone pass 6 KiB, so the message keeps its head, 256 bytes as written, while the line
+	// stays under 7 KiB (messageRoom): the numbers INT-RUNNER-EXIT-CODE-PROTOCOL states.
+	assert.match(parsed.message, /^403 [\s\S]*\.\.\. \[truncated \d+ chars\]$/);
+	assert.ok(exitLineJson(parsed.message).length - 2 <= EXIT_MESSAGE_FLOOR_BYTES);
+	assert.ok(exitLineJson(parsed.message).length - 2 > EXIT_MESSAGE_FLOOR_BYTES - 6, "the floor, spent");
+	assert.equal(Buffer.byteLength(line), 6655);
+	assert.equal(Buffer.byteLength(line) + SUPERVISOR_LINE_BYTES + JOB_ID.length, 7148, "inside the tail with the supervisor's line, 1 KiB to spare");
+});
+
+test("issue #985: the message's room is the line's own, a 256-byte head while the line stays under 7 KiB, and past that the marker alone, never an empty message while the marker fits", () => {
+	assert.deepEqual([1000, 4500, 6000, 6400, 7000, 7300].map(messageRoom), [2048, 1644, 256, 256, 168, -132], "min(2048, max(6144 - base, min(256, 7168 - base)))");
+	const message = "m".repeat(1700);
+	const sized = (pad, maxBytes = EXIT_LINE_MAX_BYTES) => bodyOf(writeOne({ code: 2, reason: "error", message, pad: "p".repeat(pad) }, { maxBytes, resources: () => null }));
+	const base = bytesOf(writeOne({ code: 2, reason: "error", message: "", pad: "" }, { resources: () => null }));
+	assert.equal(sized(0).message, message, "few keys: the whole ceiling");
+	assert.equal(sized(7300 - base).message, `... [truncated ${message.length} chars]`, "a base past 7 KiB: the marker alone");
+	assert.equal(sized(7300 - base, 7300 + 10).message, "", "and when even that would pass the hard cap, nothing");
 });
 
 test("a message of non-ASCII characters, which capExitMessage counts as one each and the line spells in six, is cut to fit on a whole code point", async () => {
 	const message = "\ud83d\ude00\u201c".repeat(4000);
-	const fields = worstFields(message);
+	const fields = capExitMessage({ code: 2, reason: "error", message });
 	assert.ok(fields.message.length > 1000);
 	const line = writeOne(fields);
+	assert.ok(Buffer.byteLength(line) < EXIT_LINE_WITH_MESSAGE_MAX_BYTES, "held to its own 2 KiB first, inside the line's 6 KiB");
 	assert.ok(Buffer.byteLength(line) <= EXIT_LINE_MAX_BYTES);
 	assert.equal((await throughSink(line)).exitAuth, "verified");
 	const parsed = JSON.parse(authenticExitLines(line, KEY));
@@ -619,7 +636,7 @@ test("the worst line has no room for even the smallest form beside the lower lim
 	assert.deepEqual(body.tokens, fields.tokens);
 	assert.deepEqual(body.usage, fields.usage);
 	assert.deepEqual(body.resources, LONGEST_RESOURCES);
-	assert.match(body.message, /\[truncated \d+ chars\]$/);
+	assert.match(body.message, /\[truncated \d+ chars\]$/, "issue #985: past 6 KiB without it, the message keeps its 256-byte head");
 	const read = await throughSink(`${"agent noise\n".repeat(900)}${line}`);
 	assert.equal(read.exitAuth, "verified");
 	assert.equal(read.tokens.total, 99_999_999);
@@ -695,7 +712,9 @@ test("a form of `loaded` grows the line only to its own limit, past which the fi
 	assert.ok(bytesOf(linedWith(fields(bare - 500, over), { maxBytes: EXIT_LINE_MAX_BYTES })) <= EXIT_LINE_LOADED_MAX_BYTES);
 	const whole = at(bare + 1, over);
 	assert.equal(Object.hasOwn(whole, "loaded"), false);
-	assert.equal(whole.message, message, "with the field gone, this line fits the hard cap as it is");
+	// Issue #985: the message is held to what the line leaves under 6 KiB, the same limit as the field's.
+	assert.match(whole.message, /^m+\.\.\. \[truncated \d+ chars\]$/);
+	assert.ok(bytesOf(linedWith(fields(bare + 1, over), { maxBytes: EXIT_LINE_MAX_BYTES })) <= EXIT_LINE_WITH_MESSAGE_FLOOR_MAX_BYTES);
 
 	// 7680 stays the limit of a line with no `loaded`, noted or not.
 	const hardFit = EXIT_LINE_MAX_BYTES - bytesOf(linedWith(fields(0), { note: false, maxBytes: EXIT_LINE_MAX_BYTES }));

@@ -42,16 +42,29 @@ export const AWAITING_APPROVAL = "awaiting-approval";
  * finally built would, issue #985) or `turn` (issue #985: a call that may not wait, such as a forwarding provider's,
  * fitted the cap while another process of the job had a call waiting, and it was not this process's turn). CLOSED, because the worker copies it into the PII-free run record: it keeps
  * a `why` only when it is a member of its own copy, which a worker test pins to this list. A `cost-cap` stop the guard
- * did not refuse (a displaced compat entry, a child's spend or refusal, an unmetered child) writes no `why`.
+ * did not refuse (a displaced compat entry, a child's spend, an unmetered child) writes no `why`. Since issue #985 a pi
+ * child's refusal that stopped the job writes the child's own rule (and numbers), read off its ledger.
  */
 export const COST_REFUSALS = Object.freeze(["unboundable", "external", "over-cap", "final-payload", "turn"]);
 
 /**
- * The exit line's `why` for a decided outcome: `{ why }` when the outcome is a `cost-cap` stop and `why` is one of
- * COST_REFUSALS, else `{}`, so every other exit line stays byte-identical. Both exit-line paths of run-job.mjs spread it.
+ * The numbers of the refusal a `costRefusal` carries (issue #985), in this order: what the job had spent, what other
+ * calls held in flight, the spend outside the refusing process's guard (its pi children's, or for a child the rest of
+ * the job's) and the refused call's bound, each whole micro-dollars. The worker restates them (run-history.mjs
+ * COST_REFUSAL_KEYS, pinned to this list by a test that reads this source).
  */
-export function costRefusalField(outcome, why) {
-	return outcome?.reason === COST_CAP && COST_REFUSALS.includes(why) ? { why } : {};
+export const COST_REFUSAL_NUMBERS = Object.freeze(["spentMicros", "inflightMicros", "externalMicros", "boundMicros"]);
+
+/**
+ * The exit line's `why` for a decided outcome: `{ why }` when the outcome is a `cost-cap` stop and `why` is one of
+ * COST_REFUSALS, else `{}`, so every other exit line stays byte-identical. Every exit-line path of run-job.mjs spreads it.
+ * Issue #985: beside it the first refusal's numbers as `costRefusal` (the cost guard's refusal()), only beside a `why`
+ * and only when each of COST_REFUSAL_NUMBERS is a whole number, rebuilt in that order: a refusal with no bound has none.
+ */
+export function costRefusalField(outcome, why, numbers = null) {
+	if (outcome?.reason !== COST_CAP || !COST_REFUSALS.includes(why)) return {};
+	const whole = numbers !== null && typeof numbers === "object" && COST_REFUSAL_NUMBERS.every((key) => Number.isSafeInteger(numbers[key]) && numbers[key] >= 0);
+	return whole ? { why, costRefusal: Object.fromEntries(COST_REFUSAL_NUMBERS.map((key) => [key, numbers[key]])) } : { why };
 }
 
 /**
@@ -400,12 +413,17 @@ export async function loadRetryPredicate({ module = null, candidates = [], load 
  * control bytes serialize to 12000 and lose the label anyway. It is NOT what the line finally spends on it: since
  * issue #800 the line is written in ASCII, so a non-ASCII character counted as one here is six there. The writer holds
  * that itself (exit-line.mjs: `EXIT_MESSAGE_MAX_BYTES` as written, then `EXIT_LINE_MAX_BYTES` for the whole line).
- * 1700 escaped characters plus the worst-case ledger, context, session and resources keeps a line whose message is
- * ASCII under 6 KiB, a 2 KiB margin inside the tail; worker/test/run-history.test.mjs measures exactly that line.
+ * It is the CEILING. Since issue #985 the line's own writer gives the message only what the fully built line leaves under
+ * 6 KiB as written (exit-line.mjs `EXIT_LINE_WITH_MESSAGE_MAX_BYTES`), so the worst-case line stays under 6 KiB, a 2 KiB
+ * margin inside the tail, with the message filling whatever remains, and a line with fewer keys keeps all 1700; a line
+ * whose other fields alone pass 6 KiB keeps a 256-byte head up to 7 KiB, then the marker alone (`messageRoom`);
+ * worker/test/run-history.test.mjs measures the first two through that writer.
  * It was 2000 until issue #596's `swapPeak` took the worst-case line past 6 KiB, then 1900 until the test was
  * found measuring the line unsigned and with a shorter reason than the longest: signed, at the longest runner
  * policy reason, 1900 left 9 characters, then 1800 until issue #796's `providerBilled` took 26 more characters on
- * each of nine rows. The margin is the tail's, so the diagnostic message gives way rather than the label's safety.
+ * each of nine rows, then 1700. Issue #985's four `tokens` keys under a cap took 101 more, and rather than a fifth
+ * global cut the room became the line's own. The margin is the tail's, so the diagnostic message gives way rather
+ * than the label's safety.
  */
 export const EXIT_MESSAGE_MAX_CHARS = 1700;
 

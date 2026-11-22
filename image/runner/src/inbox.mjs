@@ -533,6 +533,13 @@ export function createInbox({ dir = INBOX_DIR, fs: fsys = fs, exitKey, runId, lo
 				}
 			}
 		},
+		/**
+		 * Whether one of ours is queued in pi and not yet delivered (issue #985): the cost warning holds its own message back
+		 * then, so it never waits behind ours in pi's one-at-a-time steering queue.
+		 */
+		queued() {
+			return inFlight !== null;
+		},
 		/** The exit line's `steer` object: integers, and the delivered ids (32 hex each, never text). */
 		counts() {
 			return { delivered, pending: pending(), deliveredIds: deliveredIds.slice() };

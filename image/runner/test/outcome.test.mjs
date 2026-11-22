@@ -12,6 +12,7 @@ import {
 	COST_CAP,
 	COST_CAP_UNENFORCEABLE,
 	COST_REFUSALS,
+	COST_REFUSAL_NUMBERS,
 	costRefusalField,
 	decideExit,
 	EXIT_COMPLETED,
@@ -524,9 +525,9 @@ test("capExitMessage bounds the exit line's message and marks the cut; shorter o
 	for (const outcome of [{ code: 0, reason: "stop" }, { code: 2, reason: "x", message: 5 }, null, undefined]) assert.equal(capExitMessage(outcome), outcome);
 });
 
-test("the exit-line message budget is 1700 characters AS SERIALIZED, whatever the body escapes to", () => {
-	// The literal, pinned: every other test here derives from the constant, so a raised cap would pass them
-	// all while the worker's tail lost the label. worker/test/run-history.test.mjs measures the real line.
+test("the exit-line message ceiling is 1700 characters AS SERIALIZED, whatever the body escapes to", () => {
+	// The literal, pinned: every other test here derives from the constant. Since issue #985 it is the ceiling, and the
+	// writer gives a line's message only the room it leaves under 6 KiB; worker/test/run-history.test.mjs measures both.
 	assert.equal(EXIT_MESSAGE_MAX_CHARS, 1700);
 	const escaped = (message) => JSON.stringify(message).length - 2;
 	// A quote or newline serializes to 2 characters and a control byte to 6: the budget is what the tail
@@ -587,7 +588,7 @@ test("run-job.mjs caps every exit line and hands decideExit the pinned retry pre
 	assert.equal(exitLines.length, 5, "the runner has chat, deterministic watch classifier, answer classifier/pass, the unsettled activity stop (issue #888) and preflight-throw exit paths");
 	for (const line of exitLines.slice(0, 4)) assert.match(line, /\.\.\.capExitMessage\(outcome\)/, "every classifier, activity and chat outcome is capped");
 	assert.match(exitLines[0], /\.\.\.capExitMessage\(outcome\)/, "the decided outcome's exit line must be capped");
-	assert.match(src, /const capped = capExitMessage\(outcome\);\s*exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\), \.\.\.activityExitFields\(\) \}\)/, "the throw path's exit line must be capped");
+	assert.match(src, /const capped = capExitMessage\(outcome\);\s*exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\), costRefusalNumbers\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\), \.\.\.activityExitFields\(\) \}\)/, "the throw path's exit line must be capped");
 	assert.match(src, /loadRetryPredicate\(\{ module: usageMeter\.ok \? usageMeter\.module : null, candidates: resolvePiAiCompat\(\) \}\)/);
 	assert.match(src, /decideExit\(\{[\s\S]*?\n\t\tisRetryable,\n\t\trejected,\n[\s\S]*?\n\t\tparked: awaitInput !== null && parkedTerminal\(terminal\),\n\t\}\);/, "decideExit must receive isRetryable, the classified rejection, and whether the run parked (issue #625)");
 });
@@ -737,4 +738,21 @@ test("costRefusalField: a `why` only on a cost-cap outcome and only from COST_RE
 		assert.deepEqual(costRefusalField({ code: EXIT_POLICY, reason }, "unboundable"), {}, reason);
 	}
 	assert.deepEqual(costRefusalField(undefined, "unboundable"), {});
+});
+
+test("costRefusalField: beside the `why`, and only beside it, the refusal's four whole numbers as costRefusal, rebuilt in order; every exit path passes them (issue #985)", () => {
+	assert.deepEqual([...COST_REFUSAL_NUMBERS], ["spentMicros", "inflightMicros", "externalMicros", "boundMicros"]);
+	const numbers = { boundMicros: 600, externalMicros: 150, inflightMicros: 300, spentMicros: 100, extra: "/Users/x" };
+	const field = costRefusalField({ code: EXIT_POLICY, reason: COST_CAP }, "over-cap", numbers);
+	assert.equal(JSON.stringify(field), '{"why":"over-cap","costRefusal":{"spentMicros":100,"inflightMicros":300,"externalMicros":150,"boundMicros":600}}', "the runner's order, nothing else carried");
+	assert.deepEqual(costRefusalField({ code: EXIT_POLICY, reason: COST_CAP }, null, numbers), {}, "no `why`, no numbers");
+	assert.deepEqual(costRefusalField({ code: EXIT_POLICY, reason: TOKEN_BUDGET }, "over-cap", numbers), {});
+	for (const broken of [null, { ...numbers, spentMicros: -1 }, { ...numbers, boundMicros: 1.5 }, { ...numbers, externalMicros: Infinity }, { ...numbers, inflightMicros: "300" }, { spentMicros: 1 }]) {
+		assert.deepEqual(costRefusalField({ code: EXIT_POLICY, reason: COST_CAP }, "final-payload", broken), { why: "final-payload" }, JSON.stringify(broken));
+	}
+	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const calls = src.split("...costRefusalField(").slice(1);
+	assert.equal(calls.length, 5, "the five exit paths that carry a `why`");
+	for (const call of calls) assert.ok(call.startsWith("outcome, costRefusalWhy(), costRefusalNumbers())"), call.slice(0, 60));
+	assert.match(src, /costRefusalNumbers = \(\) => jobRefusal\(\)\?\.numbers \?\? null;/);
 });

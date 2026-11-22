@@ -89,6 +89,36 @@ export const EXIT_LINE_LOADED_MAX_BYTES = 6 * 1024;
  */
 export const EXIT_MESSAGE_MAX_BYTES = 2048;
 /**
+ * The most a line may take for the sake of its `message` (issue #985): 6 KiB as written, the 2 KiB of the tail every line
+ * had to spare before its fields grew, as a form of `loaded` is held to (`EXIT_LINE_LOADED_MAX_BYTES`). The message gets
+ * what the fully built line, with an empty message and no form of `loaded` (its BASE), leaves under it, and never more than
+ * `EXIT_MESSAGE_MAX_BYTES` (nor than capExitMessage's 1700 escaped characters, applied before). Counted as written, so a
+ * non-ASCII character costs its six bytes. A line with few keys keeps the whole message; the worst-case line, the one
+ * worker/test/run-history.test.mjs builds, stays under 6 KiB with the message filling what remains, and the label stays
+ * 2 KiB inside the worker's tail. A line whose base already passes it keeps the head of its message, at most
+ * `EXIT_MESSAGE_FLOOR_BYTES`, while the whole line stays at or under `EXIT_LINE_WITH_MESSAGE_FLOOR_MAX_BYTES`, and past that
+ * the `... [truncated N chars]` marker alone, so a cut message never reads as no message (`messageRoom`).
+ * REJECTED: another global cut of the 1700 (2000, 1900, 1800 and 1700 so far, each when a field grew the worst case),
+ * which took the message from every line for the sake of the largest.
+ */
+export const EXIT_LINE_WITH_MESSAGE_MAX_BYTES = 6 * 1024;
+/**
+ * The head of a message a line keeps when its base passes `EXIT_LINE_WITH_MESSAGE_MAX_BYTES` (issue #985): 256 bytes as
+ * written, enough for a provider's status and the start of its sentence, while the whole line stays at or under
+ * `EXIT_LINE_WITH_MESSAGE_FLOOR_MAX_BYTES`, 7 KiB, which still leaves the tail 1 KiB past the supervisor's line.
+ */
+export const EXIT_MESSAGE_FLOOR_BYTES = 256;
+export const EXIT_LINE_WITH_MESSAGE_FLOOR_MAX_BYTES = 7 * 1024;
+
+/**
+ * The room a message gets on a line whose base (the line as written with an empty message) is `base` bytes:
+ * `min(EXIT_MESSAGE_MAX_BYTES, max(6 KiB - base, min(256, 7 KiB - base)))`, which can be 0 or less (then the writer
+ * keeps the marker alone).
+ */
+export function messageRoom(base) {
+	return Math.min(EXIT_MESSAGE_MAX_BYTES, Math.max(EXIT_LINE_WITH_MESSAGE_MAX_BYTES - base, Math.min(EXIT_MESSAGE_FLOOR_BYTES, EXIT_LINE_WITH_MESSAGE_FLOOR_MAX_BYTES - base)));
+}
+/**
  * The supervisor's longest line with its job id taken out: `oom-killed` beside `SIGKILL`, every `resources` key at the
  * largest safe integer, signed, with both newlines. Pinned against the real writer in exit-line.test.mjs.
  */
@@ -256,7 +286,7 @@ function lastResortFields(fields, { usage }) {
  * `[null]` for a line with nothing noted. A form of `loaded` is held to `loadedMaxBytes` and everything else to `maxBytes`,
  * so the line with no form on it is the one that can still use the room the field may not.
  */
-function fitExitLine({ compose, forms, message, maxBytes, loadedMaxBytes, lastResort, smallest }) {
+function fitExitLine({ compose, forms, message, atomic = false, maxBytes, loadedMaxBytes, lastResort, smallest }) {
 	const size = (line) => Buffer.byteLength(line, "utf8");
 	const limitOf = (form) => (form === null ? maxBytes : loadedMaxBytes);
 	for (const form of forms) {
@@ -268,7 +298,8 @@ function fitExitLine({ compose, forms, message, maxBytes, loadedMaxBytes, lastRe
 		if (size(whole) <= limitOf(form)) return whole;
 		if (typeof message !== "string") continue;
 		const room = limitOf(form) - size(compose(form, { message: "" }));
-		if (room >= 0) return compose(form, { message: cutExitMessage(message, room) });
+		// A message that is already the marker alone (`atomic`) is not cut again: a cut marker would count its own characters.
+		if (room >= 0) return compose(form, { message: atomic ? "" : cutExitMessage(message, room) });
 	}
 	for (const usage of [true, false]) {
 		const resort = lastResort({ usage });
@@ -294,8 +325,9 @@ function fitExitLine({ compose, forms, message, maxBytes, loadedMaxBytes, lastRe
  * still verifies and an oversized one reads as no line at all. If even that is over (a `reason` or `tokens` nothing bounded),
  * the line is `{ event, code, lineCut }`, under any limit a real job id leaves: it names no job id, and with no tokens it
  * settles at the floor, which fails closed. A noted `loaded` that did not make it is said with `loadedCut: true` on the line
- * that went without it, on every one of these, so it never reads like an older image's silence. `maxBytes` is a seam for
- * the harness that proves a write past a pipe's buffer survives.
+ * that went without it, on every one of these, so it never reads like an older image's silence. Before any of that, the
+ * message gets only what `messageRoom` leaves it (issue #985), and at least its marker. `maxBytes` is a seam
+ * for the harness that proves a write past a pipe's buffer survives.
  */
 export function createExitWriter({ key = null, jobId, write, exit, resources = () => null, maxBytes = exitLineMaxBytes(jobId) }) {
 	let written = false;
@@ -327,12 +359,20 @@ export function createExitWriter({ key = null, jobId, write, exit, resources = (
 		const { loaded, ...notes } = noted;
 		const forms = loaded === undefined ? [null] : loadedForms(loaded);
 		const cutOff = loaded === undefined ? {} : { loadedCut: true };
-		// Before any form is chosen, so an error's length cannot be what costs the record.
-		const said = typeof fields?.message === "string" ? { ...fields, message: cutExitMessage(fields.message, EXIT_MESSAGE_MAX_BYTES) } : fields;
-		const compose = (form, over = {}) => lineOf({ event: "exit", jobId, ...notes, ...(form === null ? cutOff : { loaded: form }), ...said, ...over, ...usedField });
+		const compose = (form, over = {}, given = fields) => lineOf({ event: "exit", jobId, ...notes, ...(form === null ? cutOff : { loaded: form }), ...given, ...over, ...usedField });
+		// Before any form is chosen, so an error's length cannot be what costs the record: what messageRoom gives this line's
+		// base (issue #985), and when that is too little even for the marker, the marker alone, which fitExitLine then keeps
+		// whole or drops under the hard cap.
+		let said = fields;
+		let atomic = false;
+		if (typeof fields?.message === "string") {
+			const kept = cutExitMessage(fields.message, messageRoom(Buffer.byteLength(compose(null, { message: "" }), "utf8")));
+			atomic = kept === "" && fields.message !== "";
+			said = { ...fields, message: atomic ? `... [truncated ${fields.message.length} chars]` : kept };
+		}
 		const lastResort = (keep) => lineOf({ event: "exit", jobId, ...lastResortFields(said, keep), lineCut: true, ...cutOff });
 		const smallest = () => lineOf({ event: "exit", ...(Number.isSafeInteger(said?.code) ? { code: said.code } : {}), lineCut: true, ...cutOff });
-		write(fitExitLine({ compose, forms, message: said?.message, maxBytes, loadedMaxBytes: Math.min(maxBytes, EXIT_LINE_LOADED_MAX_BYTES), lastResort, smallest }));
+		write(fitExitLine({ compose: (form, over = {}) => compose(form, over, said), forms, message: said?.message, atomic, maxBytes, loadedMaxBytes: Math.min(maxBytes, EXIT_LINE_LOADED_MAX_BYTES), lastResort, smallest }));
 		return true;
 	}
 	function terminate(fields = {}) {

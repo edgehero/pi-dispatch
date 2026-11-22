@@ -267,10 +267,10 @@ test("run-job installs the meter and the guards before any extension loads, and 
 	// that spent before a later refusal (command-unregistered) must reach the settlement.
 	const armed = src.indexOf("\t\tmeteredExitFields = () => {");
 	assert.ok(armed > install && armed < loader, "the exit fields are armed right after the install, before any extension loads");
-	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\), \.\.\.activityExitFields\(\) \}\);/, "the outer catch's exit line carries the meter's fields (and, issue #888, the activity watch's)");
+	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\), costRefusalNumbers\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\), \.\.\.activityExitFields\(\) \}\);/, "the outer catch's exit line carries the meter's fields (and, issue #888, the activity watch's)");
 	assert.match(src, /const tokens = usageMeter\.ok \? meteredExitFields\(\)\.tokens :/, "the success line reads the same fields");
 	// `usage` rides only when a call was observed: a run with none keeps the key absent, never `usage: null`.
-	assert.match(src, /\{ tokens: \{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? childWatch\.guardFields\(policyGuard\.snapshot\(\)\) : \{\}\) \}, \.\.\.\(usage \? \{ usage \} : \{\}\) \}/, "usage is omitted when no call was observed");
+	assert.match(src, /\{ tokens: \{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? childWatch\.guardFields\(policyGuard\.snapshot\(\)\) : \{\}\), \.\.\.charged \}, \.\.\.\(usage \? \{ usage \} : \{\}\) \}/, "usage is omitted when no call was observed");
 	// A throw after a stop (a refused load-time call, then command-unregistered) exits with the stop, as decideExit ranks it.
 	assert.match(src, /meterStopAtExit = \(\) => \(meter\.state\.stopReason === null \? null : decideExit\(\{ budgetAborted: false, meterStop: meter\.state\.stopReason \}\)\);/, "the stop is decided by decideExit");
 	assert.match(src, /const thrown = classifyThrow\(error\);\n(?:[^\n]*\n){0,6}?\t\t\tconst stopped = meterStopAtExit\(\) \?\? activityStopAtExit\(\);/, "the throw is classified and the stop read (the meter's first, then the activity watch's, issue #888)");
@@ -302,7 +302,9 @@ test("run-job refuses an unenforceable cost cap or model list after the meter in
 	assert.match(src, /const policyGuard = createPolicyGuard\(\{ maxCostMicros: cfg\.maxCostMicros, allowedModels: cfg\.allowedModels, log, external: \(\) => childWatch\.external\(\), externalInflight: \(\) => childWatch\.externalInflight\(\), claim: \(waited\) => childWatch\.claim\(waited\), outsideWaiting: \(\) => childWatch\.outsideWaiting\(\), subscriptionAdmission: subscriptionRegistration \? \(provider\) => subscriptionRegistration\.admitted\(provider\) : null, subscriptions: subscriptionEntries, refreshCredentials: \(\) => credentialRefresher\?\.apply\(\) \}\);/, "the guard reads a pending drop before judging and injecting the runner's verified credentials");
 	assert.ok(src.indexOf("const policyGuard =") < install, "the guard exists before the install that hands it to both halves");
 	assert.match(src, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch \}\)/);
-	assert.match(src, /\{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? childWatch\.guardFields\(policyGuard\.snapshot\(\)\) : \{\}\) \}/, "the policy fields ride the exit line only when a policy is set, the children's counters added");
+	assert.match(src, /\{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? childWatch\.guardFields\(policyGuard\.snapshot\(\)\) : \{\}\), \.\.\.charged \}/, "the policy fields ride the exit line only when a policy is set, the children's counters added");
+	// Issue #985: after them, and only under a cap, what the cap charged (the children's added) and whether it warned.
+	assert.match(src, /const charged = policyGuard\?\.cost \? \{ \.\.\.childWatch\.chargeFields\(policyGuard\.charges\(\)\), costWarned: costWarnings\?\.warned\(COST_CAP\) === true \? 1 : 0 \} : \{\};/, "the cap's charge keys ride only under a cap");
 	assert.doesNotMatch(src, /createCostGuard|createModelGuard/, "no guard built beside the policy guard, which fixes their order");
 	assert.match(src, /maxCostMicros: cfg\.maxCostMicros,\s*allowedModels: cfg\.allowedModels,\s*rootSessionId/, "the meter carries both policies, so the brake is armed for them");
 	assert.match(src, /meterStop: usageMeter\.ok \? meter\.state\.stopReason : null,/, "the exit decision reads the meter's stop by reason");
@@ -384,6 +386,9 @@ test("every exit-line path of run-job.mjs names the cost guard's rule on a cost-
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	const writes = src.match(/exitWriter\.writeExit\([^\n]*/g) ?? [];
 	assert.equal(writes.length, 5, "chat, deterministic watch classifier, answer classifier/pass, the activity stop that did not settle (issue #888) and throw exit lines");
-	for (const line of writes) assert.match(line, /\.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\)/, line);
-	assert.match(src, /costRefusalWhy = \(\) => policyGuard\?\.refusedWhy\(\) \?\? null;/);
+	for (const line of writes) assert.match(line, /\.\.\.costRefusalField\(outcome, costRefusalWhy\(\), costRefusalNumbers\(\)\)/, line);
+	// Issue #985: the job's first refusal, a child's when its refusal stopped the job, else the guard's own, with its numbers.
+	assert.match(src, /const jobRefusal = \(\) => childWatch\.refusal\(\) \?\? \(policyGuard\?\.refusedWhy\(\) \? \{ why: policyGuard\.refusedWhy\(\), numbers: policyGuard\.refusal\(\) \} : null\);/);
+	assert.match(src, /costRefusalWhy = \(\) => jobRefusal\(\)\?\.why \?\? null;/);
+	assert.match(src, /costRefusalNumbers = \(\) => jobRefusal\(\)\?\.numbers \?\? null;/);
 });

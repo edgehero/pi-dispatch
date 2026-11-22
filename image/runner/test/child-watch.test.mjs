@@ -981,3 +981,93 @@ test("linuxProc: a command line is read only to CMDLINE_BYTES, and a scan stops 
 	// One realpath per process (its script), plus the six targets once: never one per argument.
 	assert.equal(resolves, cmdlines() + 6, `${resolves} realpath calls`);
 });
+
+test("issue #985: the exit line's charge keys add the children's settled spend, their charge above pi's price and their calls that waited, from their ledgers; a ledger without those keys counts 0 and is not malformed", async () => {
+	const cap = 10_000_000;
+	const M1 = { provider: "fake", id: "m1", api: "openai-completions", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, compat: { maxTokensField: "max_tokens" } };
+	// A child: one call charged its bound of 1000 (no price), one at pi's price (500), and one call that waited.
+	const childMeter = createUsageMeter({ maxTokens: null, rootSessionId: "child" });
+	const childGuard = createCostGuard({ capMicros: cap, bound: () => 1000 });
+	for (const message of [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }], usage: { input: 10, output: 1, cost: {} } }, { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }], usage: { input: 495, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 500, cost: { total: 0.0005 } } }]) {
+		const stream = { result: () => Promise.resolve(message) };
+		assert.equal(childGuard.admit({ method: "streamSimple", model: M1, args: [{}, {}] }), null);
+		childGuard.bind(stream);
+		childMeter.observe(stream, { sessionId: "s", provider: M1.provider, modelId: M1.id, model: M1 });
+		await new Promise((resolve) => setImmediate(resolve));
+	}
+	childGuard.leave(childGuard.wait(() => {}));
+	const written = childLedger({ state: "running", meter: childMeter, guard: childGuard });
+	assert.deepEqual([written.waited, written.liftedMicros, written.spentMicros], [1, 1000, 1500], "the child's ledger carries its guard's charges()");
+	// The parent: one call of its own at pi's price (200), and nobody waited.
+	const parent = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
+	const parentGuard = createPolicyGuard({ maxCostMicros: cap, env: {} });
+	const { dir, hook } = watch({ meter: parent, guard: () => parentGuard });
+	assert.equal(parentGuard.admit({ method: "streamSimple", model: { ...M1, maxTokens: 10 }, args: [{}, {}] }), null);
+	parentGuard.bind({ result: () => Promise.resolve({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }], usage: { input: 195, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 200, cost: { total: 0.0002 } } }) });
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(hook.chargeFields(parentGuard.charges()), { costChargedMicros: 200, costLiftedMicros: 0, costWaited: 0 }, "no children yet");
+	writeLedger(dir, 12, written);
+	// A second child from before the keys: its file is read whole, and counts them 0. It holds 5000 in flight.
+	writeLedger(dir, 13, ledger({ spentMicros: 300, cost: 0.0003, inflightMicros: 5000 }));
+	hook.sample();
+	assert.equal(hook.view().unmetered, 0, "neither file is malformed");
+	assert.equal(hook.settled(), 1500 + 300, "the fold's settledMicros: each ledger's settled spend, never what it holds in flight");
+	assert.deepEqual(hook.chargeFields(parentGuard.charges()), { costChargedMicros: 200 + 1500 + 300, costLiftedMicros: 1000, costWaited: 1 });
+	// A count that is not one reads 0, and a retired child's counts stay in the sum.
+	const fold = foldChildLedgers({ dir, retire: () => true });
+	assert.deepEqual([fold.waited, fold.liftedMicros, fold.retired.count], [1, 1000, 2]);
+	writeLedger(dir, 14, { ...ledger(), waited: -1, liftedMicros: "1000" });
+	assert.deepEqual([foldChildLedgers({ dir, prev: fold }).waited, foldChildLedgers({ dir, prev: fold }).liftedMicros, foldChildLedgers({ dir, prev: fold }).unmetered], [1, 1000, 0]);
+});
+
+test("issue #985: a child's cost refusal that stops the job is the job's refusal, its rule and numbers off the child's real ledger; the parent's own refusal first keeps its own; a malformed refusal is absent", async () => {
+	const cap = 1000;
+	const M1 = { provider: "fake", id: "m1", api: "openai-completions", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, compat: { maxTokensField: "max_tokens" } };
+	/** A child whose guard refused one call against 700 spent elsewhere: its ledger, as childLedger writes it. */
+	const refusingChild = () => {
+		const childMeter = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "child" });
+		const childGuard = createCostGuard({ capMicros: cap, bound: () => 400, external: () => 700, externalInflight: () => 0 });
+		assert.equal(childGuard.admit({ method: "streamSimple", model: M1, args: [{}, {}], waitable: true }), COST_CAP);
+		childMeter.stop(COST_CAP);
+		return childLedger({ state: "running", meter: childMeter, guard: childGuard });
+	};
+	const written = refusingChild();
+	assert.deepEqual([written.refusedWhy, written.costRefusal], ["over-cap", { spentMicros: 0, inflightMicros: 0, externalMicros: 700, boundMicros: 400 }]);
+	// The parent folds it: the child's refusal stops the job, and is the job's.
+	const parent = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
+	const parentGuard = createPolicyGuard({ maxCostMicros: cap, env: {} });
+	const { dir, hook } = watch({ meter: parent, guard: () => parentGuard });
+	assert.equal(hook.refusal(), null);
+	writeLedger(dir, 12, written);
+	hook.sample();
+	assert.equal(parent.state.stopReason, COST_CAP);
+	assert.deepEqual(hook.refusal(), { why: "over-cap", numbers: written.costRefusal });
+	// Another child refusing later changes nothing: the first one the fold read stays.
+	const later = { ...refusingChild(), refusedWhy: "unboundable" };
+	delete later.costRefusal;
+	writeLedger(dir, 13, later);
+	hook.sample();
+	assert.deepEqual(hook.refusal(), { why: "over-cap", numbers: written.costRefusal });
+	// The fold keeps the first it read through `prev`, though that file is not read again.
+	const alone = tempDir("pi-dispatch-watch-");
+	writeLedger(alone, 12, written);
+	const once = foldChildLedgers({ dir: alone });
+	writeLedger(alone, 13, later);
+	assert.deepEqual(foldChildLedgers({ dir: alone, prev: once }).refusal, { why: "over-cap", numbers: written.costRefusal });
+	// The parent's own guard refused first: its meter was stopped, so a child's refusal folded after is not the job's.
+	const first = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
+	const own = watch({ meter: first, guard: () => parentGuard });
+	first.stop(COST_CAP);
+	writeLedger(own.dir, 12, written);
+	own.hook.sample();
+	assert.equal(own.hook.refusal(), null);
+	// A rule outside the set, or numbers that are not four whole ones, are absent, and the file is still read whole.
+	for (const [bad, want] of [[{ refusedWhy: "qwen2.5:3b" }, null], [{ costRefusal: { ...written.costRefusal, boundMicros: -1 } }, { why: "over-cap", numbers: null }], [{ refusedWhy: undefined }, null]]) {
+		const meter = createUsageMeter({ maxTokens: null, maxCostMicros: cap, rootSessionId: "root" });
+		const run = watch({ meter, guard: () => parentGuard });
+		writeLedger(run.dir, 12, { ...written, ...bad });
+		run.hook.sample();
+		assert.equal(run.hook.view().unmetered, 0, JSON.stringify(bad));
+		assert.deepEqual(run.hook.refusal(), want, JSON.stringify(bad));
+	}
+});

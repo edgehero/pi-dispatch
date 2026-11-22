@@ -831,6 +831,34 @@ const recordSummary = withRun("Run", (r, view, source) => {
   ])}`;
 });
 
+/** A whole count of micro-dollars, or null: the shape of every issue #985 amount the record carries. */
+const microsOf = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : null);
+
+/**
+ * The cap's own facts on the run page (issue #985), from a capped run's `tokens` and its `costRefusal`: what the cap
+ * charged (the run and its subprocesses, which can be far above `Cost`), the part of it above pi's price, the calls that
+ * waited for room, whether the warning at 70% was queued, and the numbers the first refusal judged. Each row only when its
+ * key is there and well formed, so a run with no cap, or from before these keys, renders as it did. Numbers and fixed
+ * words only. Not floor counters: no settlement reads them (costs.mjs).
+ */
+function capChargeRows(r) {
+  const t = r.tokens ?? null;
+  const charged = microsOf(t?.costChargedMicros);
+  const lifted = microsOf(t?.costLiftedMicros);
+  const waited = microsOf(t?.costWaited);
+  const n = r.costRefusal ?? null;
+  const parts = n && typeof n === "object" ? [n.spentMicros, n.inflightMicros, n.externalMicros, n.boundMicros].map(microsOf) : [];
+  const refusal = parts.length === 4 && parts.every((part) => part !== null) ? parts : null;
+  const sum = refusal ? refusal.reduce((a, b) => a + b, 0) : null;
+  return [
+    ["Charged against the cap", charged !== null ? `${usdText(charged)}, this run and its subprocesses` : null],
+    ["Above pi's price", lifted !== null ? (lifted > 0 ? `${usdText(lifted)}: calls charged their most (failed or cut after they started, with broken usage, without a price, or a provider's forward) or the long-context rate` : usdText(0)) : null],
+    ["Calls that waited", waited !== null ? `${count(waited)} waited for room under the cap` : null],
+    ["Cost warning", t?.costWarned === 1 ? "queued for the agent at 70% of the cap" : t?.costWarned === 0 ? "not queued" : null],
+    ["Refused at", refusal && Number.isSafeInteger(sum) ? `${usdText(refusal[0])} spent + ${usdText(refusal[1])} held by calls in flight + ${usdText(refusal[2])} elsewhere in the job + ${usdText(refusal[3])} for the refused call = ${usdText(sum)}, against the ${usdText(capMicrosOf(r))} cap` : null],
+  ];
+}
+
 /** Dollar windows have no soft hold; these are settlement facts, never a promise to spend again. */
 export function settlementText(basis) {
   return ({ metered: "settled from the reported model cost", floor: "the window keeps the whole hold because the full cost was not known", refunded: "the hold was released before the run spent", unreserved: "no dollar hold was reserved" })[basis] ?? "no settlement explanation was recorded";
@@ -850,6 +878,7 @@ export const runCostPanel = withRun("Tokens and dollars", (r, view) => {
     ["Total tokens", t ? count(t.total) : "-"],
     ["Model calls", t ? cell(t.calls) : "-"],
     ["Job cap", usdText(capMicrosOf(r))],
+    ...capChargeRows(r),
     ["Reserved", d ? usdText(d.reservedMicros) : "no dollar window applied"],
     ["Settled", d && d.settledMicros !== null && d.settledMicros !== undefined ? `${usdText(d.settledMicros)}: ${settlementText(d.basis)}` : null],
     ["Released at the end", d && Number.isFinite(d.reservedMicros) && Number.isFinite(d.settledMicros) ? usdText(Math.max(0, d.reservedMicros - d.settledMicros)) : null],

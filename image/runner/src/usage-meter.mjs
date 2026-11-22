@@ -10,7 +10,7 @@ import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readPidNamespace, runnerIdentity } from "./child-route.mjs";
 import { parseAllowedModels, parseCostMicros } from "./config.mjs";
-import { configError, COST_CAP, COST_CAP_UNENFORCEABLE, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE, TOKEN_BUDGET } from "./outcome.mjs";
+import { configError, COST_CAP, COST_CAP_UNENFORCEABLE, COST_REFUSAL_NUMBERS, COST_REFUSALS, MODEL_NOT_ALLOWED, MODEL_POLICY_UNENFORCEABLE, TOKEN_BUDGET } from "./outcome.mjs";
 
 /**
  * Process-wide usage meter (issue #58; REQ-TOKEN-ACCOUNTING-AND-CAPS, CONST-BUDGET-BEFORE-TOKENS).
@@ -2514,6 +2514,11 @@ export function unreportedUsage(message, api) {
  * A non-waitable
  * call keeps the refusal. An onPayload that throws (refused, aborted, or the caller's hook threw) WITHHELD its request:
  * the provider awaits it before sending, so the call's settle does not count it `costUnanswered`.
+ *
+ * WHAT IT SAYS AFTERWARDS (issue #985). The job log was the only place a refusal's numbers were, and a run record's
+ * `tokens.cost` could be a quarter of what the cap had charged with nothing saying why. So the guard keeps what it
+ * charged (charges(): its spent, the part of it above pi's own price, `lifted`, and the calls that waited) and the first
+ * refusal's numbers (refusal()), both read for the exit line and neither in snapshot().
  */
 /** Whether the call's model carries the pinned entry's api, cost (tiers included) and compat (fallbacks, maxTokensField). */
 function pricedAsPinned(model, pinned) {
@@ -2535,9 +2540,10 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 	if (claim !== null && typeof claim !== "function") throw new Error("createCostGuard: claim must be a function");
 	if (outsideWaiting !== null && typeof outsideWaiting !== "function") throw new Error("createCostGuard: outsideWaiting must be a function");
 	if (onQueue !== null && typeof onQueue !== "function") throw new Error("createCostGuard: onQueue must be a function");
-	// `waited` (issue #985) counts the calls that waited, each once (at admission, at its final payload, or both), for a
-	// later exit-line key; not in snapshot().
-	const state = { spent: 0, inflight: 0, refused: 0, boundExceeded: 0, longContext: 0, unjudged: 0, unanswered: 0, waited: 0, why: null };
+	// Issue #985, none of them in snapshot() (charges() and refusal() read them): `waited` counts the calls that waited,
+	// each once (at admission, at its final payload, or both); `lifted` what settles charged above pi's own price (settle);
+	// `refusal` the first refusal's numbers (refuse).
+	const state = { spent: 0, inflight: 0, refused: 0, boundExceeded: 0, longContext: 0, unjudged: 0, unanswered: 0, waited: 0, lifted: 0, refusal: null, why: null };
 	let pending = null;
 	// The waiters (issue #985), FIFO: `{ retry, since }`, the front retried first. See WAITING in the header.
 	const queue = [];
@@ -2608,12 +2614,25 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		return { outside, outsideInflight };
 	}
 
-	function refuse(fields) {
+	/**
+	 * Refuse a call: `fields` is what `cost_refused` logs. `seen` holds the in-flight sum and the outside spend the call
+	 * was judged against, when they are not the log's (a final payload's: the in-flight sum without its own hold).
+	 */
+	function refuse(fields, seen = null) {
 		state.refused += 1;
 		// The FIRST refusal's rule (issue #507), the one that stopped the job: a refusal stops the meter, and a stopped
 		// meter answers every later call before the guard is asked. The log line below stays as it was (an over-cap
 		// refusal logs its `bound`, not a `why`); the exit line names the rule through refusedWhy().
 		state.why ??= fields.why ?? "over-cap";
+		// And its NUMBERS (issue #985, the exit line's `costRefusal`), so the run record says why the cap refused without
+		// the job log: what the job had spent, what other calls held in flight, the spend outside this guard and the call's
+		// bound. The first refusal's only, as `why`; none for a refusal with no bound (`unboundable`, `external`: its `why`
+		// says why), and none unless each is a whole number once rounded up (rounding up only overstates the refusal).
+		if (state.refused === 1 && typeof fields.bound === "number" && Number.isFinite(fields.bound)) {
+			const numbers = { spentMicros: state.spent, inflightMicros: seen?.inflight ?? state.inflight, externalMicros: seen?.external ?? fields.external ?? 0, boundMicros: fields.bound };
+			const rounded = Object.fromEntries(Object.entries(numbers).map(([key, value]) => [key, Math.ceil(value)]));
+			state.refusal = Object.values(rounded).every((value) => Number.isSafeInteger(value) && value >= 0) ? rounded : null;
+		}
 		log("cost_refused", { ...fields, spent: state.spent, inflight: state.inflight, cap: capMicros });
 		// The refusal stops the job: let the waiters see it now (each gets its hard stop) rather than at the next tick.
 		scheduleDrain();
@@ -2793,13 +2812,18 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		const usage = message?.usage;
 		state.inflight -= ticket.bound;
 		const price = usage?.cost?.total;
+		// `lifted` (issue #985, the exit line's costLiftedMicros): what the cap charges a call above pi's own price, its
+		// whole bound for a call with no price, else its charge less that price rounded up, never below zero. So the
+		// charge less the lift is what pi priced, call by call, and the lift is what the rules below add.
 		if (typeof price !== "number" || !Number.isFinite(price)) {
 			state.spent += ticket.bound;
+			state.lifted += ticket.bound;
 			return;
 		}
 		// Never below zero: calculateCost's short-write term goes negative when a provider reports more 1h writes
 		// than writes (PR #534's review), and a negative charge would hand the cap room nobody paid for.
-		let charged = Math.max(0, Math.ceil(price * 1e6));
+		const priced = Math.max(0, Math.ceil(price * 1e6));
+		let charged = priced;
 		// A FAILED or ABORTED call (PR #534's review). Its usage is partial: openai-completions and openai-responses
 		// report usage only at the stream's end, anthropic-messages what message_start carried (the input and one
 		// output token) until message_delta, so a stream cut after 2,000 output deltas settles at about 0, and pi then
@@ -2831,6 +2855,7 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		}
 		if (charged > ticket.bound) state.boundExceeded += 1;
 		state.spent += charged;
+		state.lifted += charged - priced;
 	}
 
 	/**
@@ -2950,8 +2975,10 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 				else reject(error);
 				scheduleDrain();
 			};
-			const refuseFinal = (fields) => {
-				refuse({ why: "final-payload", ...fields });
+			// The ticket holds nothing while it waits, so the in-flight sum is the others' holds; the outside spend is the
+			// last reading's (the record's `costRefusal`, issue #985).
+			const refuseFinal = (fields, external = lastOutside) => {
+				refuse({ why: "final-payload", ...fields }, { inflight: state.inflight, external });
 				stop(COST_CAP);
 				end(new Error(STOP_MESSAGES[COST_CAP]));
 			};
@@ -2962,17 +2989,17 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 					if (reason !== null && Object.hasOwn(STOP_MESSAGES, reason)) return end(new Error(STOP_MESSAGES[reason]));
 					if (ticket.settled) return refuseFinal({ bound: enlarged, waited: now() - waiter.since });
 					const reading = outsideNow();
-					if (!Number.isFinite(reading.outside)) return refuseFinal({ bound: enlarged, waited: now() - waiter.since });
+					if (!Number.isFinite(reading.outside)) return refuseFinal({ bound: enlarged, waited: now() - waiter.since }, reading.outside);
 					if (state.spent + state.inflight + reading.outside + enlarged <= capMicros) {
 						// As at admission: a call that waited takes its room only in its turn.
-						if (!claimed(true)) return idle(waiter) ? refuseFinal({ bound: enlarged, waited: now() - waiter.since }) : undefined;
+						if (!claimed(true)) return idle(waiter) ? refuseFinal({ bound: enlarged, waited: now() - waiter.since }, reading.outside) : undefined;
 						state.inflight += enlarged;
 						ticket.bound = enlarged;
 						log("cost_waited", { waitedMs: now() - waiter.since });
 						return end(null);
 					}
 					if (waitHelps(enlarged, reading, state.inflight, false) && !idle(waiter)) return undefined;
-					return refuseFinal({ bound: enlarged, waited: now() - waiter.since });
+					return refuseFinal({ bound: enlarged, waited: now() - waiter.since }, reading.outside);
 				},
 			};
 			queue.unshift(waiter);
@@ -3030,7 +3057,7 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 					const turnLost = fits && enlarged > ticket.bound && mustTakeTurn() && !claimed(false);
 					if (turnLost && signalAborted(given.signal)) throw new Error(WAIT_ABORTED_MESSAGE);
 					if (turnLost && !ticket.waitable) {
-						refuse({ why: "turn", bound: enlarged });
+						refuse({ why: "turn", bound: enlarged }, { inflight: others, external: outside });
 						stop(COST_CAP);
 						throw new Error(STOP_MESSAGES[COST_CAP]);
 					}
@@ -3055,7 +3082,8 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 						return sent;
 					}
 				}
-				refuse({ why: "final-payload", bound: Number.isFinite(enlarged) ? enlarged : null });
+				// The record's numbers (issue #985) are the others' holds: this call's own is the bound it asked to grow.
+				refuse({ why: "final-payload", bound: Number.isFinite(enlarged) ? enlarged : null }, { inflight: ticket.settled ? state.inflight : state.inflight - ticket.bound, external: outside });
 				stop(COST_CAP);
 				throw new Error(STOP_MESSAGES[COST_CAP]);
 			} catch (error) {
@@ -3094,6 +3122,26 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 	}
 
 	/**
+	 * The first refusal's numbers (issue #985), `{ spentMicros, inflightMicros, externalMicros, boundMicros }` whole
+	 * micro-dollars, or null: nothing refused, or a first refusal with none (see refuse). The exit line's `costRefusal`,
+	 * beside `why` (costRefusalField), so NOT in snapshot().
+	 */
+	function refusal() {
+		return state.refusal === null ? null : { ...state.refusal };
+	}
+
+	/**
+	 * What this guard charged against the cap (issue #985): `spentMicros` (its settled spend, spend()'s), `liftedMicros`
+	 * (the part of it above pi's own price: calls charged their bound, the long-context tier) and `waited` (the calls that
+	 * waited for room). The exit line's costChargedMicros, costLiftedMicros and costWaited are these with the children's
+	 * added (child-watch.mjs chargeFields). An accessor, NOT part of snapshot(), so its keys follow `modelRefused` on the
+	 * line; like spend() it settles no pending slot, so the exit line reads it after snapshot(), which does.
+	 */
+	function charges() {
+		return { spentMicros: state.spent, liftedMicros: state.lifted, waited: state.waited };
+	}
+
+	/**
 	 * The meter's teardown (issue #985): the drain timer is never ref'd again (keepAlive), so a waiter left queued past
 	 * the session that made it cannot keep the runner up after its exit line. Waiters still drain on the unref'd timer.
 	 */
@@ -3107,7 +3155,7 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		return queue.length;
 	}
 
-	return { enforces: Object.freeze([COST_CAP]), admit, prepare, bind, wait, leave, close, waiting, snapshot, spend, unjudged, refusedWhy, state };
+	return { enforces: Object.freeze([COST_CAP]), admit, prepare, bind, wait, leave, close, waiting, snapshot, spend, charges, unjudged, refusedWhy, refusal, state };
 }
 
 // ── Issue #502, part 4: the allowed-model list, checked before every provider call ────────────────────────
@@ -3540,6 +3588,13 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 		refusedWhy() {
 			return cost ? cost.refusedWhy() : null;
 		},
+		/** The cost guard's refusal() and charges() (issue #985), null without a cap. */
+		refusal() {
+			return cost ? cost.refusal() : null;
+		},
+		charges() {
+			return cost ? cost.charges() : null;
+		},
 		snapshot() {
 			return { ...(cost ? cost.snapshot() : {}), ...(model ? model.snapshot() : {}) };
 		},
@@ -3564,7 +3619,8 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 //         "rows": [ { "provider", "model", "calls", "input", "output", "cacheRead", "cacheWrite", "cacheWrite1h",
 //                     "reasoning", "total", "cost", "unpriced" } ],
 //         "spentMicros", "inflightMicros", "costRefused", "modelRefused",
-//         "boundExceeded", "costUnanswered", "costUnreported", "longContext", "costUnjudged", "waiting" }
+//         "boundExceeded", "costUnanswered", "costUnreported", "longContext", "costUnjudged", "waiting",
+//         "waited", "liftedMicros", "refusedWhy", "costRefusal" }
 //     `starting` is the preload's stub (zeros, `metered: true`), written before the meter installs; `running` once
 //     it has; `done` at exit. `metered: false` says the child's meter did not install. `totals` is the child meter's
 //     snapshot, `rows` its rows() (first-seen order, at most CHILD_LEDGER_ROWS written and CHILD_LEDGER_MAX_ROWS
@@ -3576,7 +3632,15 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 //     malformed (unmetered), so a child from an older image floors the job rather than hiding a call it did not count.
 //     `waiting` (issue #985: how many calls wait in the child) is additive and optional: no version, and a file without
 //     it, or with anything but a count, is read whole and counted as WAITING (ledgerWaiting), so every process takes its
-//     turn rather than none.
+//     turn rather than none. `waited` and `liftedMicros` (issue #985: how many of the child's calls waited for room, and
+//     what its cost guard charged above pi's own price, both from its guard's charges()) are additive and optional the
+//     same way, for the parent's exit line only (costWaited, costLiftedMicros): a file without them, or with anything but
+//     a count, is read whole and counts them 0. No rule decides by them, so a floor of them misleads nothing.
+//     `refusedWhy` and `costRefusal` (issue #985) are the child's cost guard's FIRST refusal: its rule (a COST_REFUSALS
+//     member) and, when it had them, its four numbers (COST_REFUSAL_NUMBERS, whole micro-dollars), written only once the
+//     guard refused. Optional the same way: a rule outside the set is absent, numbers that are not four whole ones are
+//     absent, numbers without a rule are absent, and the file is read whole. The fold keeps the first one it reads
+//     (`refusal`), which the parent records as the job's when that child's refusal is what stopped the job.
 //   - Numbers only. Token amounts and `cost` are numbers from 0 to Number.MAX_SAFE_INTEGER; `calls`, `unresolved`,
 //     `unpriced`, `sessions` and the guard counters are safe integers at least 0. Ids are printable ASCII and
 //     match USAGE_ID_PATTERN after lowercasing, the worker's rule. The rows partition the totals: their calls sum to
@@ -3665,7 +3729,7 @@ const rowKey = (row) => (row.provider === null ? "" : `${row.provider}\u0000${ro
 
 /** A ledger with nothing in it: the contribution of a file that was never good. */
 function emptyLedger() {
-	return { state: null, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: new Map(), spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0 };
+	return { state: null, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: new Map(), spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0, waited: 0, liftedMicros: 0 };
 }
 
 /**
@@ -3727,6 +3791,13 @@ export function parseChildLedger(text) {
 	// or above zero, or its absence (a child from before it), is null, unknown, which the fold counts as waiting
 	// (ledgerWaiting), never as not; it is not a reason to call the file malformed.
 	ledger.waiting = Number.isSafeInteger(raw.waiting) && raw.waiting >= 0 ? raw.waiting : null;
+	// `waited` and `liftedMicros` (issue #985), additive too: absent or not a count reads 0 (the exit line's own counts,
+	// never a decision), and the file is not malformed for it.
+	ledger.waited = whole(raw.waited) ? raw.waited : 0;
+	ledger.liftedMicros = whole(raw.liftedMicros) ? raw.liftedMicros : 0;
+	// The child's first cost refusal (issue #985), additive too: a malformed part is absent, never a malformed file.
+	ledger.refusedWhy = COST_REFUSALS.includes(raw.refusedWhy) ? raw.refusedWhy : null;
+	ledger.costRefusal = ledger.refusedWhy !== null && isPlain(raw.costRefusal) && COST_REFUSAL_NUMBERS.every((key) => whole(raw.costRefusal[key])) ? Object.fromEntries(COST_REFUSAL_NUMBERS.map((key) => [key, raw.costRefusal[key]])) : null;
 	return ledger;
 }
 
@@ -3821,7 +3892,7 @@ const DEFAULT_LEDGER_FS = { readdirSync, lstatSync, openSync, fstatSync, readSyn
  *     listing held.
  * Returns `{ processes, unmetered, flooded, totals, rows, spentMicros, inflightMicros, costRefused, modelRefused,
  * boundExceeded, costUnanswered, costUnreported, longContext, costUnjudged, settledMicros, chargeMicros,
- * liveInflightMicros, liveWaiting, missing, files, retired }`:
+ * liveInflightMicros, liveWaiting, waited, liftedMicros, refusal, missing, files, retired }`:
  * `processes` the ledger files ever seen (flooded and retired ones included), `unmetered` those counted unmetered
  * (flooded ones included), `totals` and the counters summed over every file's mark and the retired aggregate, `rows`
  * merged by pair (the model-less row last, ids null), `settledMicros` the sum of each ledger's ledgerSettled() and
@@ -3829,7 +3900,8 @@ const DEFAULT_LEDGER_FS = { readdirSync, lstatSync, openSync, fstatSync, readSyn
  * part of `chargeMicros` a settle can still free) and `liveWaiting` of its ledgerWaiting(), `missing` true when the directory could not be listed, `files` the per-file
  * state for the next call (a Map by name of `{ pid, state, unmetered, why, high, sig }`, `why` one of `malformed`,
  * `unmetered`, `shrank`, `vanished`), which the detector reads for a file's pid and state, and `retired` the
- * aggregate (`{ count, names, pids, high, charge, settled }`). `meter.setChildren()` takes the result as it is.
+ * aggregate (`{ count, names, pids, high, charge, settled }`). `refusal` is the first child cost refusal a fold read,
+ * `{ why, numbers }` (issue #985), or null. `meter.setChildren()` takes the result as it is.
  */
 export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, retire = null } = {}) {
 	const files = new Map(prev?.files ?? []);
@@ -3844,6 +3916,8 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 		missing = true;
 	}
 	const present = new Set();
+	// The first child cost refusal any fold read (issue #985), kept through `prev`; in one pass, the first by file name.
+	let refusal = prev?.refusal ?? null;
 	let open = 0;
 	for (const entry of files.values()) if (!entry.unmetered && entry.state !== "done") open += 1;
 	let beyond = 0;
@@ -3870,6 +3944,7 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 		const next = why === null
 			? { pid, state: ledger.state, unmetered: false, why: null, high: ledger, sig: read.sig }
 			: { pid, state: ledger?.state ?? before?.state ?? null, unmetered: true, why, high, sig: null };
+		if (why === null && refusal === null && ledger.refusedWhy !== null) refusal = { why: ledger.refusedWhy, numbers: ledger.costRefusal };
 		const wasOpen = before !== null && !before.unmetered && before.state !== "done";
 		const isOpen = !next.unmetered && next.state !== "done";
 		open += (isOpen ? 1 : 0) - (wasOpen ? 1 : 0);
@@ -3918,7 +3993,7 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 	merged.delete("");
 	const rows = [...merged.values(), ...(modelless ? [modelless] : [])];
 	const counters = Object.fromEntries(LEDGER_GUARD_COUNTS.map((key) => [key, sum[key]]));
-	return { processes: files.size + flooded + retired.count, unmetered, flooded, totals: sum.totals, rows, ...counters, settledMicros, chargeMicros, liveInflightMicros, liveWaiting, missing, files, retired };
+	return { processes: files.size + flooded + retired.count, unmetered, flooded, totals: sum.totals, rows, ...counters, settledMicros, chargeMicros, liveInflightMicros, liveWaiting, waited: sum.waited, liftedMicros: sum.liftedMicros, refusal, missing, files, retired };
 }
 
 /** A copy of a ledger mark, its rows copied too. */
@@ -3930,6 +4005,8 @@ function cloneLedger(ledger) {
 function addLedger(into, from) {
 	for (const key of Object.keys(into.totals)) into.totals[key] += from.totals[key];
 	for (const key of LEDGER_GUARD_COUNTS) into[key] += from[key];
+	// Issue #985's two optional counts: a mark from before them (none) adds nothing.
+	for (const key of ["waited", "liftedMicros"]) into[key] = saturatingAdd(into[key] ?? 0, from[key] ?? 0);
 	for (const [key, row] of from.rows) {
 		const there = into.rows.get(key);
 		if (there) foldRow(there, row);
@@ -4059,6 +4136,10 @@ export function childLedger({ state, metered = true, meter = null, guard = null 
 	const snap = metered && meter ? meter.snapshot() : null;
 	const spend = metered && guard?.spend ? guard.spend() : { spentMicros: 0, inflightMicros: 0 };
 	const refused = metered && guard ? guard.snapshot() : {};
+	const charges = metered && typeof guard?.charges === "function" ? guard.charges() : null;
+	// Issue #985: the cost guard's first refusal, its rule and its numbers, only once it refused.
+	const refusedWhy = metered && typeof guard?.refusedWhy === "function" ? guard.refusedWhy() : null;
+	const numbers = COST_REFUSALS.includes(refusedWhy) && typeof guard?.refusal === "function" ? guard.refusal() : null;
 	return {
 		v: CHILD_LEDGER_VERSION,
 		state,
@@ -4085,6 +4166,10 @@ export function childLedger({ state, metered = true, meter = null, guard = null 
 		costUnjudged: refused.costUnjudged ?? 0,
 		// Issue #985: the calls waiting in this child, so every other process takes its turn while it waits.
 		waiting: metered && typeof guard?.waiting === "function" ? guard.waiting() : 0,
+		// Issue #985: the calls that waited and the charge above pi's price, for the parent's exit line (0 without a cap).
+		waited: charges?.waited ?? 0,
+		liftedMicros: charges?.liftedMicros ?? 0,
+		...(COST_REFUSALS.includes(refusedWhy) ? { refusedWhy, ...(numbers !== null ? { costRefusal: numbers } : {}) } : {}),
 	};
 }
 
@@ -4617,6 +4702,11 @@ export async function startChildMeter({
 				...(policy?.model ? { modelRefused: policy.model.snapshot().modelRefused } : {}),
 			}),
 			spend: () => (policy ? policy.spend() : { spentMicros: 0, inflightMicros: 0 }),
+			// Issue #985: what the ledger's `waited` and `liftedMicros` are made of (null without a cap: written as 0), and
+			// its first refusal (the ledger's `refusedWhy` and `costRefusal`, none without a cap or a refusal).
+			charges: () => (policy ? policy.charges() : null),
+			refusedWhy: () => (policy ? policy.refusedWhy() : null),
+			refusal: () => (policy ? policy.refusal() : null),
 		};
 		// After a failed write, nothing more goes out: the ledger can no longer record it.
 		const isStopped = () => (child.failed ? TOKEN_BUDGET : readStop({ dir, fs }));

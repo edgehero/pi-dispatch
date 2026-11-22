@@ -4,7 +4,7 @@ import { constants as fsConstants, lstatSync, readdirSync, readFileSync, symlink
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { createHmac, randomBytes } from "node:crypto";
-import { authenticExitLines, parseExitLoaded, AWAIT_INPUT_RUNNER_REASONS, EXCLUDE_RUNNER_REASONS, PROGRESS_RUNNER_REASONS, STEER_RUNNER_REASONS, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, RECORD_CORE_FIELDS, RECORD_TMP_MAX_AGE_MS, RECORD_TMP_RE, RUN_RECORD_VERSION, earlierFrom, recordOfThisJob, recordReadable, recordVerdict, recordVersionOf, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_COMPLETED_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { authenticExitLines, parseExitLoaded, AWAIT_INPUT_RUNNER_REASONS, EXCLUDE_RUNNER_REASONS, PROGRESS_RUNNER_REASONS, STEER_RUNNER_REASONS, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, RECORD_CORE_FIELDS, RECORD_TMP_MAX_AGE_MS, RECORD_TMP_RE, RUN_RECORD_VERSION, earlierFrom, recordOfThisJob, recordReadable, recordVerdict, recordVersionOf, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitCostRefusal, costRefusalOf, COST_REFUSAL_KEYS, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_COMPLETED_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -391,7 +391,7 @@ test("parseExitTokens round-trips a conformant runner's object BYTE-IDENTICALLY"
 	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(metered)}}`)), JSON.stringify(metered));
 	const fallback = { input: 1, output: 2, total: 3, cost: 0.5, metered: false };
 	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(fallback)}}`)), JSON.stringify(fallback));
-	// An omitted key stays OMITTED rather than becoming null: the fallback carries five of the twenty-two, and
+	// An omitted key stays OMITTED rather than becoming null: the fallback carries five of the twenty-seven, and
 	// a null would read as "measured zero" for a number nobody measured.
 	assert.ok(!("otherTotal" in parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(fallback)}}`)));
 });
@@ -402,13 +402,29 @@ test("the policy counters (issues #501, #502) survive the rebuild, in emission o
 	// settlement reads these to decide whether a metered cost is complete, so a dropped counter would read as
 	// an honest zero. Each one asserted by name, so dropping any single entry fails here.
 	const policy = { costCapMicros: 2_000_000, costRefused: 1, boundExceeded: 0, longContext: 2, costUnjudged: 4, costUnanswered: 5, modelRefused: 3 };
-	assert.deepEqual(TOKEN_KEYS.slice(-7), Object.keys(policy), "appended after unpriced, in the runner's emission order");
+	const at = TOKEN_KEYS.indexOf("costCapMicros");
+	assert.deepEqual(TOKEN_KEYS.slice(at, at + 7), Object.keys(policy), "appended after unpriced, in the runner's emission order");
 	const metered = { input: 1, output: 2, total: 3, cost: 0.5, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 4, unresolved: 0, unpriced: 0, ...policy };
 	const out = parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(metered)}}`);
 	assert.equal(JSON.stringify(out), JSON.stringify(metered), "byte-identical round trip, key order included");
 	for (const key of Object.keys(policy)) assert.equal(out[key], policy[key], key);
 	assert.equal(parseExitTokens('{"event":"exit","tokens":{"total":1,"costRefused":"many"}}').costRefused, undefined, "a string in a policy slot is dropped like any other");
 	assert.ok(Object.isFrozen(TOKEN_KEYS));
+});
+
+test("issue #985's cap keys survive the rebuild after modelRefused, in the runner's order, numbers only, with or without a model list, and are no floor counters", () => {
+	const charged = { costChargedMicros: 1_160_000, costLiftedMicros: 900_000, costWaited: 7, costWarned: 1 };
+	assert.deepEqual(TOKEN_KEYS.slice(-4), Object.keys(charged), "the last four, after modelRefused");
+	const capped = { input: 1, output: 2, total: 3, cost: 0.26, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 4, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costUnreported: 0, costCapMicros: 2_000_000, costRefused: 1, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 };
+	for (const tokens of [{ ...capped, ...charged }, { ...capped, modelRefused: 0, ...charged }]) {
+		const out = parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(tokens)}}`);
+		assert.equal(JSON.stringify(out), JSON.stringify(tokens), "byte-identical round trip, key order included");
+	}
+	assert.equal(parseExitTokens('{"event":"exit","tokens":{"total":1,"costChargedMicros":"lots","costWarned":true}}').costChargedMicros, undefined, "numbers only");
+	assert.equal(Object.hasOwn(parseExitTokens('{"event":"exit","tokens":{"total":1,"costWarned":true}}'), "costWarned"), false);
+	// The worker before them drops them: its list ends at modelRefused, and the rebuild keeps only listed keys.
+	const older = TOKEN_KEYS.slice(0, TOKEN_KEYS.indexOf("modelRefused") + 1);
+	assert.deepEqual(Object.keys(Object.fromEntries(older.filter((key) => Object.hasOwn({ ...capped, ...charged }, key)).map((key) => [key, 1]))).includes("costWarned"), false);
 });
 
 test("costUnreported (issue #571) survives the rebuild after the child keys and before the policy counters, on a line with or without a cap", () => {
@@ -1861,6 +1877,58 @@ test("COST_CAP_WHYS is the runner's COST_REFUSALS, read from its source (the wor
 	for (const why of COST_CAP_WHYS) assert.match(why, /^[a-z][a-z0-9-]{0,63}$/, "every member passes the record's own `why` charset");
 });
 
+// Issue #985: the refusal's numbers reached the job log alone (`cost_refused`), so a record could not say why a job was
+// stopped at a fifth of its cap.
+test("parseExitCostRefusal keeps the four whole numbers only beside a why the record keeps, rebuilt in order, and null on any violation (issue #985)", () => {
+	const numbers = { spentMicros: 47_770_000, inflightMicros: 91_420_000, externalMicros: 0, boundMicros: 27_550_000 };
+	const line = (fields) => exitLine({ code: 2, reason: "cost-cap", why: "over-cap", costRefusal: numbers, ...fields });
+	assert.deepEqual(parseExitCostRefusal(line({})), numbers);
+	assert.equal(JSON.stringify(parseExitCostRefusal(line({ costRefusal: { boundMicros: 4, externalMicros: 3, inflightMicros: 2, spentMicros: 1, path: "/Users/x" } }))), '{"spentMicros":1,"inflightMicros":2,"externalMicros":3,"boundMicros":4}', "rebuilt: its own order, an unknown key dropped");
+	for (const [fields, label] of [
+		[{ why: undefined }, "no why: nothing to stand beside"],
+		[{ why: "qwen2.5:3b" }, "a why the record would not keep"],
+		[{ reason: "model-not-allowed" }, "only beside cost-cap"],
+		[{ code: 1 }, "only on a line that says code 2"],
+		[{ costRefusal: { ...numbers, spentMicros: -1 } }, "negative"],
+		[{ costRefusal: { ...numbers, boundMicros: 1.5 } }, "a fraction"],
+		[{ costRefusal: { ...numbers, externalMicros: "0" } }, "a string"],
+		[{ costRefusal: { ...numbers, inflightMicros: 2 ** 53 } }, "past a safe integer"],
+		[{ costRefusal: { spentMicros: 1, inflightMicros: 2, externalMicros: 3 } }, "a key missing"],
+		[{ costRefusal: [1, 2, 3, 4] }, "an array"],
+		[{ costRefusal: null }, "null"],
+	]) {
+		assert.equal(parseExitCostRefusal(line(fields)), null, label);
+	}
+	assert.equal(parseExitCostRefusal(line({}) + exitLine({ code: 2, reason: "cost-cap", why: "over-cap" })), null, "the LAST exit line decides");
+	for (const text of [undefined, null, 42, "", "{not json"]) assert.equal(parseExitCostRefusal(text), null);
+	assert.equal(costRefusalOf(undefined), null);
+	// The worker restates the runner's list; a test reads that source.
+	const runnerSrc = readFileSync(new URL("../../image/runner/src/outcome.mjs", import.meta.url), "utf8");
+	const m = runnerSrc.match(/export const COST_REFUSAL_NUMBERS = Object\.freeze\((\[[^\]]*\])\);/);
+	assert.ok(m, "image/runner/src/outcome.mjs no longer declares COST_REFUSAL_NUMBERS in a form this pin can read");
+	assert.deepEqual([...COST_REFUSAL_KEYS], JSON.parse(m[1]));
+});
+
+test("makeLogSink close carries exitCostRefusal only when the line had one, and the record keeps it as a conditional key before v, rebuilt (issue #985)", async () => {
+	const fs = makeFakeFs({ stream: makeFakeStream() });
+	const numbers = { spentMicros: 118_940_000, inflightMicros: 30_780_000, externalMicros: 0, boundMicros: 15_100_000 };
+	const named = makeLogSink({ logsDir: "/logs", enabled: false, fs })("gh-refusal");
+	named.write(Buffer.from(exitLine({ code: 2, reason: "cost-cap", why: "over-cap", costRefusal: numbers })));
+	const closed = await named.close();
+	assert.deepEqual([closed.exitWhy, closed.exitCostRefusal], ["over-cap", numbers]);
+	const plain = makeLogSink({ logsDir: "/logs", enabled: false, fs })("gh-plain");
+	plain.write(Buffer.from(exitLine({ code: 2, reason: "cost-cap", why: "over-cap" })));
+	assert.equal(Object.hasOwn(await plain.close(), "exitCostRefusal"), false, "every other close returns the object it always did");
+	const job = { id: "gh-1", name: "github", data: { kind: "github" }, attemptsMade: 0 };
+	const record = buildRecord({ job, result: { outcome: "policy", reason: "cost-cap", why: "over-cap", costRefusal: { ...numbers, note: "dropped" } }, startedAt: null, endedAt: null });
+	assert.deepEqual(record.costRefusal, numbers);
+	assert.deepEqual(Object.keys(record).slice(-2), ["costRefusal", "v"]);
+	for (const costRefusal of [undefined, null, { ...numbers, boundMicros: -5 }]) {
+		const without = buildRecord({ job, result: { outcome: "policy", reason: "cost-cap", why: "over-cap", ...(costRefusal !== undefined ? { costRefusal } : {}) }, startedAt: null, endedAt: null });
+		assert.equal(Object.hasOwn(without, "costRefusal"), false, JSON.stringify(costRefusal));
+	}
+});
+
 test("makeLogSink close carries exitWhy only when the line named one, so every other close returns the object it always did (#507)", async () => {
 	const fs = makeFakeFs({ stream: makeFakeStream() });
 	const named = makeLogSink({ logsDir: "/logs", enabled: false, fs })("gh-why");
@@ -1881,33 +1949,43 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 	// Issue #437 review. The runner writes the terminal errorMessage onto the exit line, and the worker
 	// reads that line from the LAST 8 KiB of stdout. An HTML 403 page is easily 15 KB; uncapped, the line's
 	// head (where `code` and `reason` sit) falls out of the tail and the record says runner-policy. The
-	// runner's own capExitMessage is imported here (outcome.mjs has no imports of its own), so this test
-	// exercises the function run-job.mjs calls, through the real sink.
+	// runner's own capExitMessage and its own writer are imported here, so this test builds the line run-job.mjs
+	// writes, and reads it through the real sink.
 	const { capExitMessage, EXIT_MESSAGE_MAX_CHARS } = await import("../../image/runner/src/outcome.mjs");
-	assert.equal(EXIT_MESSAGE_MAX_CHARS, 1700, "the literal is pinned here too: this test's margin is measured against it");
+	const { createExitWriter, EXIT_LINE_WITH_MESSAGE_MAX_BYTES } = await import("../../image/runner/src/exit-line.mjs");
+	assert.equal(EXIT_MESSAGE_MAX_CHARS, 1700, "the ceiling is pinned here too");
+	assert.equal(EXIT_LINE_WITH_MESSAGE_MAX_BYTES, 6 * 1024, "and the line's own room: what the message may grow a line to");
 
 	// The rest of the line as run-job.mjs builds it, at its WORST CASE, so the budget is not flattered:
 	// the maximal ledger usage-meter.test.mjs builds (8 named rows of 64-character provider and model ids
-	// plus the folded "other" row, 8-digit counts everywhere), every tokens key at 8 digits, the context
+	// plus the folded "other" row, 8-digit counts everywhere), every tokens key at 8 digits and the micro-dollar ones at
+	// 13 (the largest accepted cap, $1,000,000, is 13 digits of micro-dollars; a $150 cap is 9), the context
 	// block, the longest session reason, and the longest job-id shape (a cron id). `tokens` holds every TOKEN_KEYS key,
-	// the child keys and the policy counters included (issue #571 added one).
+	// the child keys, the policy counters and issue #985's four included.
 	const wide = (prefix, i) => `${prefix}-${i}`.padEnd(64, "x");
 	const N = 99_999_999;
+	const MICROS = 9_999_999_999_999;
 	const row = (provider, model) => ({ provider, model, calls: N, input: N, output: N, cacheRead: N, cacheWrite: N, cacheWrite1h: N, reasoning: N, total: N, cost: 99_999.99, unpriced: N, providerBilled: 0 });
+	const tokenValue = (key) => (key === "metered" ? true : key === "cost" ? 99_999.99 : key.endsWith("Micros") ? MICROS : N);
 	const rest = {
 		turns: 4096,
 		retryTurns: 4096,
-		tokens: Object.fromEntries(TOKEN_KEYS.map((key) => [key, key === "metered" ? true : key === "cost" ? 99_999.99 : N])),
+		tokens: Object.fromEntries(TOKEN_KEYS.map((key) => [key, tokenValue(key)])),
 		usage: { v: 1, piAi: "88.88.88", truncated: 1, models: [...Array.from({ length: 8 }, (_, i) => row(wide("provider", i), wide("model", i))), row("other", "other")] },
 		context: { tokens: N, window: N },
 		session: { resumed: false, reason: "resume-chain-too-long" },
-		// Issue #596: every resources key at the largest safe integer, the most any one can serialise to.
-		resources: Object.fromEntries(RESOURCE_KEYS.map((key) => [key, Number.MAX_SAFE_INTEGER])),
 	};
+	// Issue #596: every resources key at the largest safe integer, the most any one can serialise to; the writer adds them.
+	const resources = Object.fromEntries(RESOURCE_KEYS.map((key) => [key, Number.MAX_SAFE_INTEGER]));
 	const jobId = "repeat:very-long-schedule-name:1767225600000";
-	// Every keyed line also ends in `,"auth":"<64 hex>"` (signExitLine): a 64-character field stands in for
-	// it, because the budget is the SIGNED line's and a test of the unsigned one flattered it by 75 characters.
-	const line = (fields) => `\n${JSON.stringify({ event: "exit", jobId, ...fields, ...rest, auth: "f".repeat(64) })}\n`;
+	// Signed, as every keyed line is (the budget is the SIGNED line's), by the runner's own writer.
+	const write = (fields) => {
+		const out = [];
+		createExitWriter({ key: "ab".repeat(32), jobId, write: (text) => out.push(text), exit: () => {}, resources: () => resources }).writeExit(fields);
+		return out[0];
+	};
+	// The same line composed raw, with no writer between: the premise below.
+	const raw = (fields) => `\n${JSON.stringify({ event: "exit", jobId, ...fields, ...rest, resources, auth: "f".repeat(64) })}\n`;
 	// The longest runner policy reason, so the label measured is the widest one that can head the line.
 	const reason = [...RUNNER_POLICY_REASONS].reduce((a, b) => (b.length > a.length ? b : a));
 
@@ -1925,14 +2003,27 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 	for (const body of [`<html><body>${'<p class="x">Forbidden.</p>\n'.repeat(600)}</body></html>`, "\u0001".repeat(16000)]) {
 		const outcome = { code: 2, reason, message: `403 ${body}` };
 		assert.ok(outcome.message.length > 16000);
-		const capped = line(capExitMessage(outcome));
+		const line = write({ ...capExitMessage(outcome), ...rest });
 		// 8 KiB is the tail; the line must stay under 6 KiB of it, so a later field (a ledger column, a new
-		// exit-line key) has 2 KiB to grow into before the label is at risk again.
-		assert.ok(capped.length <= 6 * 1024, `the worst-case capped exit line is ${capped.length} characters`);
-		assert.equal(await drive(capped), reason);
+		// exit-line key) has 2 KiB to grow into before the label is at risk again. Issue #985: WITH the message filling
+		// whatever the rest leaves, to within one escaped character and the marker's spare digits.
+		assert.ok(line.length <= 6 * 1024, `the worst-case capped exit line is ${line.length} characters`);
+		assert.ok(line.length > 6 * 1024 - 16, `and the message fills the room: ${line.length} characters`);
+		assert.match(JSON.parse(line.trim()).message, /^403 [\s\S]+\.\.\. \[truncated \d+ chars\]$/);
+		assert.equal(await drive(line), reason);
 		// The premise, so this test cannot pass for a reason other than the cap: uncapped, the label is lost.
-		assert.equal(await drive(line(outcome)), null);
+		assert.equal(await drive(raw(outcome)), null);
 	}
+	// A line with few keys keeps the whole ceiling: 1700 characters of a provider's error and the marker.
+	const kept = capExitMessage({ code: 2, reason, message: `403 ${"m".repeat(5000)}` });
+	assert.equal(kept.message.indexOf("..."), EXIT_MESSAGE_MAX_CHARS);
+	assert.equal(JSON.parse(write({ ...kept, turns: 3, tokens: { input: 1, output: 2, total: 3, cost: 0.5 } }).trim()).message, kept.message);
+	// Issue #985: a `cost-cap` line carries `why` and `costRefusal` and no `message` (decideExit gives a stop none), so it
+	// is measured on its own, every number at the largest safe integer.
+	const M = Number.MAX_SAFE_INTEGER;
+	const refused = write({ code: 2, reason: "cost-cap", why: "final-payload", costRefusal: { spentMicros: M, inflightMicros: M, externalMicros: M, boundMicros: M }, ...rest });
+	assert.ok(refused.length <= 6 * 1024, `the worst-case cost-cap exit line is ${refused.length} characters`);
+	assert.equal(await drive(refused), "cost-cap");
 });
 
 test("the record's dollars (#501) is REBUILT from named fields: four keys, integers and a fixed basis, else null", () => {
@@ -1995,9 +2086,9 @@ test("parseExitCode: the LAST exit line's own integer code, else null; the sink 
 
 test("the runner writes the code it exits with on BOTH exit lines (pinned: the settlement compares it with the container's)", () => {
 	const src = readFileSync(new URL("../../image/runner/run-job.mjs", import.meta.url), "utf8");
-	assert.match(src, /exitWriter\.writeExit\(\{ \.\.\.capExitMessage\(outcome\), \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), turns: /, "the decided path spreads the outcome, whose `code` is the exit code");
+	assert.match(src, /exitWriter\.writeExit\(\{ \.\.\.capExitMessage\(outcome\), \.\.\.costRefusalField\(outcome, costRefusalWhy\(\), costRefusalNumbers\(\)\), turns: /, "the decided path spreads the outcome, whose `code` is the exit code");
 	assert.match(src, /\n\treturn outcome\.code;\n\}/, "and returns that same code as the process exit code");
-	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\), \.\.\.activityExitFields\(\) \}\)/, "the catch path writes its code too (and, after the meter installed, its counts: issue #543)");
+	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\), costRefusalNumbers\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\), \.\.\.activityExitFields\(\) \}\)/, "the catch path writes its code too (and, after the meter installed, its counts: issue #543)");
 	assert.match(src, /const outcome = \{ code: EXIT_POLICY, reason \};\n\t+exitWriter\.writeExit\(\{ \.\.\.capExitMessage\(outcome\), /, "the activity stop that did not settle writes the policy code it exits with (issue #888)");
 	assert.match(src, /\n\t+process\.exit\(EXIT_POLICY\);/, "and exits with it");
 });

@@ -1201,6 +1201,8 @@ export function makeRunContainer({
 				let exitLineCode = null;
 				// Issue #507: the cost guard's rule on a `cost-cap` line, already filtered by parseExitWhy to COST_CAP_WHYS.
 				let exitWhy = null;
+				// Issue #985: that refusal's numbers, beside it, already rebuilt by parseExitCostRefusal.
+				let exitCostRefusal = null;
 				let providerFailure = null;
 				let modelRoles = null;
 				let toolsStarted = null;
@@ -1225,7 +1227,7 @@ export function makeRunContainer({
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ canaryLoad = null, loaded: lineLoaded = null, turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, modelRoles = null, providerFailure = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null, answerDraftDigest = null, questionRefDigest = null } = await sink.close());
+					({ canaryLoad = null, loaded: lineLoaded = null, turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitCostRefusal = null, modelRoles = null, providerFailure = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null, answerDraftDigest = null, questionRefDigest = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -1236,6 +1238,7 @@ export function makeRunContainer({
 					approval = null;
 					exitLineCode = null;
 					exitWhy = null;
+					exitCostRefusal = null;
 					providerFailure = null;
 					modelRoles = null;
 					toolsStarted = null;
@@ -1261,6 +1264,7 @@ export function makeRunContainer({
 					approval = null;
 					exitLineCode = null;
 					exitWhy = null;
+					exitCostRefusal = null;
 					providerFailure = null;
 					modelRoles = null;
 					toolsStarted = null;
@@ -1276,8 +1280,9 @@ export function makeRunContainer({
 				const auth = exitKey !== null ? { exitAuth: exitAuthResult } : {};
 				if (job.answerDraft && code === 0 && exitKey !== null && exitAuthResult === "verified" && /^[a-f0-9]{64}$/.test(answerDraftDigest ?? "")) Object.defineProperty(prepared, "answerDraftDigest", { value: answerDraftDigest, configurable: true });
 				if (job.awaitInput && code === 0 && exitReason === "awaiting-input" && exitKey !== null && exitAuthResult === "verified" && /^[a-f0-9]{64}$/.test(questionRefDigest ?? "")) Object.defineProperty(prepared, "questionRefDigest", { value: questionRefDigest, configurable: true });
-				// `exitWhy` only when the line named one, so every other run resolves the object it always did.
-				const why = { ...(exitKey !== null && exitAuthResult === "verified" && modelRoles ? { modelRoles } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(exitKey !== null && exitAuthResult === "verified" && providerFailure ? { providerFailure } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof toolsStarted === "boolean" ? { toolsStarted } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof replaySafe === "boolean" ? { replaySafe } : {}) };
+				// `exitWhy` only when the line named one, so every other run resolves the object it always did, and its numbers
+				// (`exitCostRefusal`, issue #985) the same.
+				const why = { ...(exitKey !== null && exitAuthResult === "verified" && modelRoles ? { modelRoles } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(exitCostRefusal !== null ? { exitCostRefusal } : {}), ...(exitKey !== null && exitAuthResult === "verified" && providerFailure ? { providerFailure } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof toolsStarted === "boolean" ? { toolsStarted } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof replaySafe === "boolean" ? { replaySafe } : {}) };
 				// `resources` (issue #596) only when the exit line carried a block, so every other run resolves the object it always did.
 				// `memoryLimit` only beside the OOM report, the one place it is read, for the same reason.
 				const used = { ...(resources !== null && resources !== undefined ? { resources } : {}), ...(exitOomKilled === true ? { exitOomKilled: true, memoryLimit } : {}) };

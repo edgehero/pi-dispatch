@@ -45,6 +45,7 @@ import {
 	classifyPromptRejection,
 	classifyThrow,
 	configError,
+	COST_CAP,
 	costRefusalField,
 	decideExit,
 	EXIT_INFRA,
@@ -70,6 +71,7 @@ import { awaitInputShadow, createAwaitInput, parkedTerminal } from "./src/await-
 import { createRoleSubagents, readRoleInputs, roleSubagentShadow } from "./src/model-roles.mjs";
 import { createReportProgress, reportProgressShadow } from "./src/report-progress.mjs";
 import { assertSteerReady, createInbox } from "./src/inbox.mjs";
+import { createCostWarnings, steersQueued } from "./src/cost-warning.mjs";
 import { FRAME_FD, frameFdOpen, isolateStdin, openFrameReader } from "./src/steer-frames.mjs";
 import { RECOVERY_PROMPT, recoverSession } from "./src/recover.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
@@ -139,10 +141,13 @@ let meteredExitFields = () => ({ ...roleExitFields() });
  */
 let meterStopAtExit = () => null;
 /**
- * The cost guard's first refusal rule (issue #507, outcome.mjs COST_REFUSALS), or null. Set once the guard exists. Both
- * exit-line paths spread costRefusalField(outcome, costRefusalWhy()), so a `cost-cap` line names which rule refused.
+ * The job's first cost refusal rule (issue #507, outcome.mjs COST_REFUSALS), or null, and its numbers (issue #985), or
+ * null: the cost guard's own, or since issue #985 a pi child's whose refusal stopped the job. Set once the guard exists. Every exit-line path spreads
+ * costRefusalField(outcome, costRefusalWhy(), costRefusalNumbers()), so a `cost-cap` line names which rule refused, and
+ * on what numbers.
  */
 let costRefusalWhy = () => null;
+let costRefusalNumbers = () => null;
 /**
  * The turn count and the session as they stand, for an exit line written by the SIGTERM handler (issue #545). Empty
  * until the turn budget is attached; then set, so a line written on a stop carries what the decided line would have.
@@ -377,6 +382,9 @@ async function main() {
 	if (childLedger.error !== undefined) log("child_ledger_unavailable", { reason: childLedger.error });
 	// Declared before the meter so its onStop can write STOP at once (the hook rewrites it on every tick anyway).
 	let childWatch = null;
+	// The cost warning (issue #985, src/cost-warning.mjs), declared before the meter's exit fields read whether it was
+	// sent (`costWarned`), and built with the extensions below.
+	let costWarnings = null;
 	const stopHandler = meterStopHandler({ onTokenAbort, abort: () => void session?.abort() });
 
 	const failureObserver = installProviderFailureObserver({ ModelRuntime, rootSessionId, ...(subscriptionCredentials && credentialRefresher ? { fetch: subscriptionRefreshFetch({ credentials: subscriptionCredentials, refresh: () => credentialRefresher.apply() }) } : {}) });
@@ -407,7 +415,11 @@ async function main() {
 	// children.
 	childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });
 	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), externalInflight: () => childWatch.externalInflight(), claim: (waited) => childWatch.claim(waited), outsideWaiting: () => childWatch.outsideWaiting(), subscriptionAdmission: subscriptionRegistration ? (provider) => subscriptionRegistration.admitted(provider) : null, subscriptions: subscriptionEntries, refreshCredentials: () => credentialRefresher?.apply() });
-	costRefusalWhy = () => policyGuard?.refusedWhy() ?? null;
+	// The job's first refusal (issue #985): a child's, when its refusal is what stopped the job (childWatch.refusal), else
+	// this guard's own, each a rule with its own numbers.
+	const jobRefusal = () => childWatch.refusal() ?? (policyGuard?.refusedWhy() ? { why: policyGuard.refusedWhy(), numbers: policyGuard.refusal() } : null);
+	costRefusalWhy = () => jobRefusal()?.why ?? null;
+	costRefusalNumbers = () => jobRefusal()?.numbers ?? null;
 	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch });
 	// The price table the meter pinned from this runtime, before any extension loads, handed to pi children (issue #587's
 	// review): a child prices every capped call from it. A table that cannot be written leaves a child with none, which
@@ -423,7 +435,11 @@ async function main() {
 		meteredExitFields = () => {
 			const usage = meter.usageSnapshot();
 			// The guard's counters with the children's added (childWatch.guardFields): a child's partial count floors the job.
-			const fields = { tokens: { ...meter.snapshot(), ...(policyGuard ? childWatch.guardFields(policyGuard.snapshot()) : {}) }, ...(usage ? { usage } : {}) };
+			// Under a cap, after them (and after `modelRefused`), issue #985's: what the cap charged, the part of it above
+			// pi's own price and the calls that waited, the children's added (chargeFields, read after snapshot() settled a
+			// pending slot), and whether the warning at 70% was queued.
+			const charged = policyGuard?.cost ? { ...childWatch.chargeFields(policyGuard.charges()), costWarned: costWarnings?.warned(COST_CAP) === true ? 1 : 0 } : {};
+			const fields = { tokens: { ...meter.snapshot(), ...(policyGuard ? childWatch.guardFields(policyGuard.snapshot()) : {}), ...charged }, ...(usage ? { usage } : {}) };
 			return { ...fields, ...roleExitFields() };
 		};
 		finishMeter = () => usageMeter.uninstall();
@@ -449,7 +465,7 @@ async function main() {
 		finally { usageMeter.uninstall(); failureObserver.uninstall(); subscriptionCredentials?.uninstall(); subscriptionRegistration?.uninstall(); }
 		const stop = meterStopAtExit();
 		const outcome = stop ?? (result.ok ? { code: 0, reason: "stop" } : { code: 2, reason: result.reason });
-		exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), ...meteredExitFields(), turns: 0, retryTurns: 0, toolsStarted: 0, replaySafe: false });
+		exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy(), costRefusalNumbers()), ...meteredExitFields(), turns: 0, retryTurns: 0, toolsStarted: 0, replaySafe: false });
 		return outcome.code;
 	}
 
@@ -480,20 +496,28 @@ async function main() {
 	// parked, so it reads the await tool's flag.
 	// env-internal PI_JOB_ID: set by the worker on the container (its container name, `pi-job-<queue id>`).
 	// Issue #686: on a copying venue its messages come as frames on stdin (`frames`), else from the /inbox mount.
-	const inbox = cfg.steer ? createInbox({ exitKey: exitKey.key, runId: process.env.PI_JOB_ID, log, isParked: () => awaitInput?.state.called === true || requestApproval?.state.called === true, ...(exitKey.frames === true ? { frames: frameChannel } : {}) }) : null;
+	const isParked = () => awaitInput?.state.called === true || requestApproval?.state.called === true;
+	const inbox = cfg.steer ? createInbox({ exitKey: exitKey.key, runId: process.env.PI_JOB_ID, log, isParked, ...(exitKey.frames === true ? { frames: frameChannel } : {}) }) : null;
 	// Issue #686: the frame channel (fd 3) is open from here on, the moment the inbox exists: the key left the pipe at the
 	// top of this file, and a frame is only verified and held, never run. It is read synchronously at the inbox's own
 	// moments (steer-frames.mjs openFrameReader says why), so a frame the worker wrote at the spawn is read at the first
 	// agent_start at the latest; the seed below drops whatever the transcript already delivered. A no-op on the mount
 	// transport.
 	inbox?.listen();
-	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(requestApproval?.factories ?? []), ...(reportProgress?.factories ?? []), ...(roleSubagents?.factories ?? []), ...(inbox ? [inbox.factory] : [])];
+	// The warning before the cost cap (issue #985, src/cost-warning.mjs): for every job with a cap above 0, steerable or
+	// not (the inbox is for steerable jobs only), once, at 70% of the cap by what the job has settled, its own spent and
+	// its children's, never what calls hold in flight. It parks as the inbox does, and holds back while a steer is queued
+	// in pi, the inbox's or any other (last in the list, so its turn_end handler runs after the inbox's). A read-only watch or
+	// answer-draft run's loader takes none of these factories, and a classifier run returned above.
+	costWarnings = createCostWarnings({ rootSessionId, isParked, queuedElsewhere: () => inbox?.queued() === true || steersQueued(session), log });
+	if (policyGuard?.cost && cfg.maxCostMicros > 0) costWarnings.watch({ name: COST_CAP, limit: cfg.maxCostMicros, settled: () => policyGuard.spend().spentMicros + childWatch.settled() });
+	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(requestApproval?.factories ?? []), ...(reportProgress?.factories ?? []), ...(roleSubagents?.factories ?? []), ...(inbox ? [inbox.factory] : []), ...(costWarnings.armed() ? [costWarnings.factory] : [])];
 	const watchTools = watchReadOnly ? createWatchTools({ config: watchToolsConfig, runtime: modelRuntime }) : null;
 	const answerTools = answerDraftInput ? createAnswerDraftTools({ input: answerDraftInput, runtime: modelRuntime }) : null;
 	if (answerTools && !await answerTools.initialize()) {
 		usageMeter.uninstall(); failureObserver.uninstall(); subscriptionCredentials?.uninstall(); subscriptionRegistration?.uninstall();
 		const outcome = meterStopAtExit() ?? { code: 0, reason: "stop" };
-		exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), ...meteredExitFields(), turns: 0, retryTurns: 0, toolsStarted: 0, replaySafe: false, answerDraftDigest: answerTools.state.receipt });
+		exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy(), costRefusalNumbers()), ...meteredExitFields(), turns: 0, retryTurns: 0, toolsStarted: 0, replaySafe: false, answerDraftDigest: answerTools.state.receipt });
 		return outcome.code;
 	}
 	// Teed, so an extension is failed or dropped on the record exactly when the log says so (issue #800).
@@ -829,7 +853,7 @@ async function main() {
 							// the line is written whatever the teardown did
 						}
 						const outcome = { code: EXIT_POLICY, reason };
-						exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), ...liveExitFields(), ...meteredExitFields() });
+						exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy(), costRefusalNumbers()), ...liveExitFields(), ...meteredExitFields() });
 						process.exit(EXIT_POLICY);
 					}, activitySettleMs(activityLimits));
 					activitySettle.unref?.();
@@ -991,7 +1015,7 @@ async function main() {
 	} catch {}
 	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
 	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
-	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, ...roleExitFields(), tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...(outcome.reason === "awaiting-approval" ? { approval } : {}), ...(outcome.reason === "awaiting-input" && awaitInput?.state.questionRefDigest ? { questionRefDigest: awaitInput.state.questionRefDigest } : {}), replaySafe, toolsStarted: toolStarts.toolsStarted, ...(providerFailure ? { providerFailure } : {}), ...(answerTools?.state.receipt ? { answerDraftDigest: answerTools.state.receipt } : {}), ...activityExitFields(), ...recoveryField(), ...steerField() });
+	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy(), costRefusalNumbers()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, ...roleExitFields(), tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...(outcome.reason === "awaiting-approval" ? { approval } : {}), ...(outcome.reason === "awaiting-input" && awaitInput?.state.questionRefDigest ? { questionRefDigest: awaitInput.state.questionRefDigest } : {}), replaySafe, toolsStarted: toolStarts.toolsStarted, ...(providerFailure ? { providerFailure } : {}), ...(answerTools?.state.receipt ? { answerDraftDigest: answerTools.state.receipt } : {}), ...activityExitFields(), ...recoveryField(), ...steerField() });
 	return outcome.code;
 }
 
@@ -1094,7 +1118,7 @@ if (!nestedRunner) {
 			await stopMcp().catch(() => undefined);
 			const outcome = stopped ?? thrown;
 			const capped = capExitMessage(outcome);
-			exitWriter.writeExit({ code: capped.code, reason: capped.reason, ...costRefusalField(outcome, costRefusalWhy()), message: capped.message, ...meteredExitFields(), ...activityExitFields() });
+			exitWriter.writeExit({ code: capped.code, reason: capped.reason, ...costRefusalField(outcome, costRefusalWhy(), costRefusalNumbers()), message: capped.message, ...meteredExitFields(), ...activityExitFields() });
 			process.exitCode = outcome.code ?? EXIT_INFRA;
 		});
 }

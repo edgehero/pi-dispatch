@@ -110,6 +110,31 @@ Two things keep the old token: a process the job started before the renewal (a s
 and the forge's own MCP server ([MCP](mcp.md)), which reads its token when it starts. After the token's hour such a
 process's GitHub calls fail, while new commands keep working.
 
+## A warning before the cost cap
+
+A job that reaches its cost cap is stopped between two AI calls, and what it had not pushed or reported by then is
+lost. So a job with a cost cap above 0 is told once, when what it has spent reaches 70% of the cap, to write its report
+now and, if its flow pushes, to commit and push its work, and to start no new parallel work. The message is a fixed
+sentence, the same for every job.
+
+- **What counts** is what the cap has charged for calls that finished, the job's and its pi child processes'
+  ([what the cap charges](costs.md#what-the-cap-charges)). What calls still running hold does not count: it is the most
+  they could cost, and they usually finish far below it.
+- **When it arrives**: at the end of the AI's next step that ran tools, before its next model call, so it costs no call
+  of its own. It is not sent after a step with no tool calls (the AI is finishing), nor to a run parked on a question or
+  an approval, nor to a subagent's session.
+- **It waits for a clear queue**: while a steer for the AI is queued (a message to the run), it waits for the next
+  step's end, so it does not arrive after a later step's tool results, such as a question or an approval request. A
+  queued follow-up does not hold it back, and after three steps held in a row it is sent anyway.
+- **The record** says whether it was queued for the AI: `tokens.costWarned` is 1 or 0 on a capped run, and the run page
+  shows it. 1 means it was handed over; a run stopped right after that step's end never read it.
+- **A jump** from under 70% to a refusal within one step gets no warning: what has been spent is read at step ends.
+- **A resumed or recovered run** reads an earlier attempt's warning in its transcript, though its own cap starts afresh,
+  and can be warned again at its own 70%.
+
+It is a warning and not a stop: the cap still stops the job when the next call could pass it. The turn limit
+(`maxTurns`) and the time limits above have no warning; they stop the job when reached.
+
 ## What the run record says
 
 Every job that took a slot carries `limits` in its record: the three limits it ran under, `basis` (`activity` or

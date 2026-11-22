@@ -2572,6 +2572,26 @@ test("pi keeps steering and follow-ups in two queues, each drained one message a
 	assert.match(piFunction(loop, "runLoop"), /^function runLoop\([^)]*\) \{\n(?:\s*(?:let|\/\/)[^\n]*\n)*\s*let pendingMessages = \(await config\.getSteeringMessages\?\.\(\)\) \|\| \[\];\n\s*\/\/ Outer loop/, "the loop no longer polls steering before its first model call");
 });
 
+test("a session's agent holds every queued steer, and only steers, in its steeringQueue, whose hasItems() the cost warning reads (issue #985)", { skip }, () => {
+	// src/cost-warning.mjs steersQueued: `session.agent.steeringQueue.hasItems()`. pi's public readers count follow-ups
+	// too (Agent.hasQueuedMessages, the extension context's hasPendingMessages over the session's two text lists), and a
+	// follow-up, delivered only when the agent would stop, must not hold the warning back.
+	const agent = agentCoreDistFile("agent.js");
+	assert.match(agent, /this\.steeringQueue = new PendingMessageQueue\(/, "the agent no longer keeps its steers in steeringQueue");
+	assert.match(piMethod(agent, "steer"), /this\.steeringQueue\.enqueue\(message\);/, "Agent.steer no longer queues on steeringQueue");
+	assert.match(piMethod(agent, "followUp"), /this\.followUpQueue\.enqueue\(message\);/, "a follow-up no longer goes to its own queue");
+	const start = agent.indexOf("class PendingMessageQueue {");
+	const queue = agent.slice(start, agent.indexOf("\n}\n", start) + 2);
+	assert.match(queue, /hasItems\(\) \{\n\s*return this\.messages\.length > 0;\n\s*\}/, "PendingMessageQueue.hasItems changed");
+	const session = agentDistFile("core", "agent-session.js");
+	// The session's own steers and a custom message delivered as a steer (the inbox's, the warning's) reach Agent.steer.
+	assert.match(piMethod(session, "async _queueSteer"), /this\.agent\.steer\(message\);/);
+	assert.match(piMethod(session, "async sendCustomMessage"), /this\.agent\.steer\(appMessage\);/);
+	assert.match(agentDistFile("core", "agent-session.d.ts"), /\n {4}readonly agent: Agent;\n/, "the session no longer exposes its agent");
+	// And the extension context's reader is the one that counts follow-ups, which is why it is not the one read.
+	assert.match(session, /get pendingMessageCount\(\) \{\n\s*return this\._steeringMessages\.length \+ this\._followUpMessages\.length;/);
+});
+
 test("a message renderer is read only by the interactive TUI, so the inbox needs no shadow guard (issue #646)", { skip }, () => {
 	const dist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 	const readers = [];
