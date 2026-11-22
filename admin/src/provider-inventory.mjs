@@ -36,6 +36,8 @@ export function providerCanonicalKey(provider) {
 export const PROVIDER_SLOT_ALIASES = Object.freeze(Object.fromEntries([...new Set(Object.keys(PROVIDER_KEY_NAMES).map(providerCanonicalKey).filter(Boolean))].sort().map(key => [key, Object.freeze(Object.keys(PROVIDER_KEY_NAMES).filter(provider => providerCanonicalKey(provider) === key).sort())])));
 /** Issue #1000: the trigger positions one slot's own-key line names; the rest are counted, never dropped silently. */
 export const DECLARED_KEY_TRIGGERS_MAX = 16;
+/** Issue #1029: the role models a trigger may reach a slot by alone, a watch rule's classifier or an auxiliary model. */
+export const DECLARED_KEY_VIA = Object.freeze(["decide", "auxiliary"]);
 /** Issue #1000: where the own-key lines are incomplete or wider than the workers' answer, each said once on the card. */
 export const DECLARED_KEY_NOTES = Object.freeze({
   "projects-unread": "The projects file could not be read, so a model role is resolved in every project the triggers file names, and a trigger may be listed under a provider its jobs never run on.",
@@ -72,7 +74,7 @@ function metadataBytes(path, fs, uid, max = 1_048_576) {
 
 /**
  * Issue #1000: the triggers that bring their own key, from the triggers file: `{ slots, notes }`, `slots` a
- * `Map<slot, [{ index, cron }]>` (a cron trigger's id, the name doctor gives it, else null) and `notes` the
+ * `Map<slot, [{ index, cron, via? }]>` (a cron trigger's id, the name doctor gives it, else null) and `notes` the
  * `DECLARED_KEY_NOTES` that say where the answer is incomplete or wider than the workers'. Since issue #967 a trigger
  * whose `run.secrets` binds the API-key variable of the provider a job runs on makes that value the job's credential,
  * and the host's key for that provider is not read, so a slot read from this host's sources alone could say "Not set"
@@ -82,13 +84,19 @@ function metadataBytes(path, fs, uid, max = 1_048_576) {
  * attempts doctor's line asks it of (`modelSubjects` with fallbacks), through the same resolver
  * (`resolveConfiguredModelRuns` over the runs doctor builds, with the projects file): the provider a trigger's jobs run
  * on (its own, the deployment default it inherits, or its model role's in the project the job lands in), each random
- * candidate's, and each fallback the walk would try (`failoverListUsable`). The name must be the provider's slot
- * (`providerCanonicalKey`, never an OAuth or bearer variable), a key of `run.secrets` and not of `run.secretFiles`; a
- * watch rule's jobs and a provider that needs host authentication never count. The rest is each host's own, its
- * PI_FORWARD_ENV and its subscription bindings, which the caller and the card say, but for the one fence doctor applies
- * too: `managed(provider)` is this host's subscription binding, and behind a primary bound to a subscription the walk
- * skips every fallback that is not (`auth-mixed-billing`, model-failover.mjs `selectFailoverJob`), so such a fallback
- * runs no attempt here and brings no key.
+ * candidate's, and each fallback the walk would try (`failoverListUsable`). Issue #1029: and the providers the worker
+ * judges by the same rule beside them, each marked by `via` where it is the only way the trigger reaches the slot: a
+ * watch rule's `decide` model (`via: "decide"`, issue #997) and each model in `run.auxiliaryModels`
+ * (`via: "auxiliary"`, issue #999, the rule `reservedAuxiliaryNames` asks). A watch rule counts since issue #997, its
+ * main model as any trigger's, but outside the model roles: the worker reads none for a watch job (index.mjs), so its
+ * main model is its own or the deployment default, and a default that is a role refuses it (`model-role-unknown`)
+ * before any attempt. The name must be the provider's slot (`providerCanonicalKey`, never an OAuth or bearer variable),
+ * a key of `run.secrets` and not of `run.secretFiles`; a provider that needs host authentication never counts. The rest
+ * is each host's own, its PI_FORWARD_ENV and its subscription bindings, which the caller and the card say, but for the
+ * one fence doctor applies too: `managed(provider)` is this host's subscription binding, and behind a primary bound to
+ * a subscription the walk skips every fallback that is not (`auth-mixed-billing`, model-failover.mjs
+ * `selectFailoverJob`), so such a fallback runs no attempt here and brings no key. A decide or auxiliary provider bound
+ * here is listed, as a main one is: the worker refuses those jobs, which the card's managed row says.
  *
  * Two inputs may be unknown. `projects` null is a projects file that could not be read: a role then resolves in every
  * scope the triggers file names, which can list a trigger under a provider its jobs never run on, and says so, rather
@@ -101,10 +109,17 @@ export function declaredKeyTriggers(triggers, { defaultProvider = null, defaultM
   const list = Array.isArray(triggers) ? triggers : [];
   const notes = new Set();
   const runs = [];
+  // Watch rules beside the resolver, never through it: the worker applies no model role to a watch job.
+  const watched = [];
   list.forEach((row, index) => {
     const run = row?.run;
-    if (row?.on?.type === "watch" || run?.secrets === null || typeof run?.secrets !== "object") return;
+    if (run?.secrets === null || typeof run?.secrets !== "object") return;
     if (withRoles && defaultModel === null && run.modelSelection === undefined && run.model === undefined) { notes.add("default-model-unread"); return; }
+    if (row?.on?.type === "watch") {
+      if (run.model === undefined && typeof defaultModel === "string" && defaultModel.startsWith("role:")) return;
+      watched.push({ sourceIndex: index, provider: typeof run.provider === "string" ? run.provider : defaultProvider });
+      return;
+    }
     // doctor's `modelRuns` fields (readTriggerFacts), so the resolver reaches each trigger's project as doctor's does.
     runs.push({ sourceIndex: index, label: `trigger ${index + 1}`, kind: run.kind, folder: run.folder, repository: run.repository, provider: typeof run.provider === "string" ? run.provider : undefined, model: typeof run.model === "string" ? run.model : undefined, models: Array.isArray(run.models) ? run.models : undefined, fallbackModels: Array.isArray(run.fallbackModels) ? run.fallbackModels : undefined, ...(run.modelSelection ? { modelSelection: run.modelSelection } : {}) });
   });
@@ -127,33 +142,44 @@ export function declaredKeyTriggers(triggers, { defaultProvider = null, defaultM
     });
   }
   const slots = new Map();
-  for (const run of resolved) {
+  for (const run of [...resolved, ...watched]) {
     const trigger = list[run.sourceIndex];
-    const providers = new Set();
-    const add = entry => { const ref = splitModelEntry(entry); if (ref) providers.add(ref.provider); };
+    // provider -> `via`: null where an attempt runs on it as its main model, else the one role model that reaches it.
+    const providers = new Map();
+    const reach = (provider, via = null) => { if (via === null || !providers.has(provider)) providers.set(provider, via); };
+    const add = entry => { const ref = splitModelEntry(entry); if (ref) reach(ref.provider); };
     // A pool is physical and reviewed: each candidate is the main model of the draws that land on it, and the default it
     // would otherwise inherit is never one of them (model-observation.mjs).
     if (run.modelSelection) for (const entry of run.modelSelection.candidates ?? []) add(entry);
     else {
       const primary = run.provider ?? deployment.provider;
-      providers.add(primary);
+      reach(primary);
       if (run.fallbackModels !== undefined && failoverListUsable({ fallbackModels: run.fallbackModels, models: run.models ?? envList })) {
         for (const entry of run.fallbackModels) {
           const ref = splitModelEntry(entry);
           // Doctor's fence, by its primary: the walk never leaves a subscription for an API-key fallback.
-          if (ref && !(managed(primary) && !managed(ref.provider))) providers.add(ref.provider);
+          if (ref && !(managed(primary) && !managed(ref.provider))) reach(ref.provider);
         }
       }
     }
+    // The role models every attempt of the trigger carries, each judged for its own provider (the worker's
+    // `credentialJobs` and auxiliary gate): a watch rule's classifier and the auxiliary models. One on a provider an
+    // attempt runs on shares that attempt's key, which the main entry already names.
+    const decide = trigger.on?.type === "watch" ? splitModelEntry(trigger.decide?.model) : null;
+    if (decide) reach(decide.provider, "decide");
+    for (const entry of Array.isArray(trigger.run.auxiliaryModels) ? trigger.run.auxiliaryModels : []) { const ref = splitModelEntry(entry); if (ref) reach(ref.provider, "auxiliary"); }
     const secrets = trigger.run.secrets;
     const files = trigger.run.secretFiles;
-    for (const provider of providers) {
+    for (const [provider, via] of providers) {
       if (typeof provider !== "string" || needsHostAuthentication(provider)) continue;
       const key = providerCanonicalKey(provider);
       if (!key || !Object.hasOwn(secrets, key)) continue;
       if (files !== null && typeof files === "object" && Object.hasOwn(files, key)) continue;
       if (!slots.has(key)) slots.set(key, []);
-      if (!slots.get(key).some(t => t.index === run.sourceIndex)) slots.get(key).push({ index: run.sourceIndex, cron: trigger.on?.type === "cron" && cronId(trigger.on.id) ? trigger.on.id : null });
+      // Providers sharing a slot (OPENCODE_API_KEY serves two) name a trigger once, as its main model's where either is.
+      const held = slots.get(key).find(t => t.index === run.sourceIndex);
+      if (held) { if (via === null) delete held.via; continue; }
+      slots.get(key).push({ index: run.sourceIndex, cron: trigger.on?.type === "cron" && cronId(trigger.on.id) ? trigger.on.id : null, ...(via ? { via } : {}) });
     }
   }
   for (const rows of slots.values()) rows.sort((a, b) => a.index - b.index);
@@ -166,14 +192,16 @@ const cronId = value => typeof value === "string" && value.length <= CRON_ID_MAX
 /**
  * The own-key facts the Connections card draws (issue #1000), rebuilt from any DTO: `{ slots, notes }`, each slot a
  * provider slot with trigger positions and cron ids only, at most `DECLARED_KEY_TRIGGERS_MAX` of them (the rest counted),
- * and whether this host's PI_FORWARD_ENV names the variable (`forwarded`, null when it could not be read).
+ * each with the role model it reaches the slot by alone (`via`, issue #1029, one of `DECLARED_KEY_VIA`, absent for an
+ * attempt's main model), and whether this host's PI_FORWARD_ENV names the variable (`forwarded`, null when it could not
+ * be read).
  */
 export function declaredKeysView(raw) {
   const slots = new Map();
   for (const row of (Array.isArray(raw?.declaredKeys) ? raw.declaredKeys : []).slice(0, Object.keys(PROVIDER_SLOT_ALIASES).length)) {
     if (typeof row?.key !== "string" || !Object.hasOwn(PROVIDER_SLOT_ALIASES, row.key) || slots.has(row.key)) continue;
     const seen = new Set();
-    const triggers = (Array.isArray(row.triggers) ? row.triggers : []).filter(t => Number.isSafeInteger(t?.index) && t.index >= 0 && !seen.has(t.index) && seen.add(t.index)).map(t => ({ index: t.index, cron: cronId(t.cron) })).sort((a, b) => a.index - b.index);
+    const triggers = (Array.isArray(row.triggers) ? row.triggers : []).filter(t => Number.isSafeInteger(t?.index) && t.index >= 0 && !seen.has(t.index) && seen.add(t.index)).map(t => ({ index: t.index, cron: cronId(t.cron), ...(DECLARED_KEY_VIA.includes(t.via) ? { via: t.via } : {}) })).sort((a, b) => a.index - b.index);
     if (triggers.length === 0) continue;
     const more = Number.isSafeInteger(row.more) && row.more >= 0 ? row.more : 0;
     slots.set(row.key, { triggers: triggers.slice(0, DECLARED_KEY_TRIGGERS_MAX), more: more + Math.max(0, triggers.length - DECLARED_KEY_TRIGGERS_MAX), forwarded: typeof row.forwarded === "boolean" ? row.forwarded : null });
@@ -254,6 +282,9 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
     const doc = parseTriggersDocument(typeof raw === "string" ? raw : JSON.stringify(raw), path);
     for (const row of doc.triggers) {
       if (row.run.provider) use(row.run.provider, "trigger");
+      // Issue #1029: a watch rule's classifier needs its provider's credential like the rule's own model, and may bring
+      // its own key, which the card can name only under a row.
+      if (row.decide?.model) model(row.decide.model, "trigger");
       for (const entry of row.run.models ?? []) model(entry, "allowed-model");
       for (const entry of row.run.modelSelection?.candidates ?? []) model(entry, "trigger");
       for (const entry of row.run.fallbackModels ?? []) model(entry, "fallback");

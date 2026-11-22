@@ -13,6 +13,7 @@ import { computeZeroTouch } from "../src/zero-touch.mjs";
 import { configError } from "../src/config.mjs";
 import { makeGitHubHost } from "../src/github-host.mjs";
 import { REFUSAL_COMMENTS } from "../src/comment-tables.mjs";
+import { buildContainerEnv } from "../src/env-allowlist.mjs";
 
 // The job-count ledger list the processor takes (issue #499 part B), from a `budgetCapsFor`-shaped object.
 const asLedgers = (c) => (c ? [{ scope: c.scope, keyPrefix: scopeKeyPrefix(c.scope), caps: c.caps, reason: "scope-cap" }] : []);
@@ -3378,4 +3379,83 @@ test("issue #1002: a subscription draw's container gets no other candidate's API
 	const panel = await run(draw("anthropic", "claude-sonnet-4-5", { models: pool.candidates, auxiliaryModels: ["openrouter/deepseek/deepseek-chat"], maxCostMicros: 1_000_000 }));
 	assert.deepEqual(panel.secrets, resolved);
 	assert.deepEqual(panel.withheld, []);
+});
+
+// --- Issue #1030: a fallback's run secret reaches only the failover attempts that read it ---
+
+test("issue #1030: each failover attempt's container, built by the real container builder, holds a fallback's key only where its own or an auxiliary provider reads it", async () => {
+	const resolved = { OPENROUTER_API_KEY: "sk-or-fallback-private", STRIPE_KEY: "stripe-private" };
+	const attempt = (provider, model, over = {}) => ({ ...ghJob, provider, model, models: [`${provider}/${model}`], fallbackModels: ["openrouter/deepseek/deepseek-chat"], secrets: { OPENROUTER_API_KEY: "op://ci/or/key", STRIPE_KEY: "op://ci/stripe" }, ...over });
+	// The wired gate's answers (start.mjs): a bound provider is managed, the openrouter attempt declares its key.
+	const run = async (job, { bound = null, failoverPrimary } = {}) => {
+		const envs = [];
+		const logs = [];
+		const { deps: d } = deps({
+			...(failoverPrimary ? { failoverPrimary } : {}),
+			imagePreflight: async () => ({ ok: true, image: "job:current", capabilities: ["exitAuth"] }),
+			checkProviderCredential: (candidate) => (candidate.provider === bound ? { ok: true, managed: true } : candidate.provider === "openrouter" ? { ok: true, declared: "OPENROUTER_API_KEY" } : candidate.provider === "openai" && Object.hasOwn(candidate.secrets ?? {}, "OPENAI_API_KEY") ? { ok: true, declared: "OPENAI_API_KEY" } : { ok: true }),
+			...(bound ? { prepareSubscriptionAuth: async () => ({ ok: true, snapshots: [{ provider: bound, env: { ANTHROPIC_OAUTH_TOKEN: "subscription" } }] }), validateSubscriptionAuth: async () => true } : {}),
+			resolveSecrets: async () => ({ ok: true, secrets: { ...resolved } }),
+			runContainer: async (ctx) => {
+				envs.push(buildContainerEnv({ provider: ctx.job.provider, model: ctx.job.model, maxTurns: ctx.job.maxTurns, jobId: "attempt", githubToken: ctx.token ?? undefined, forgeKind: ctx.job.kind, hostEnv: { OPENAI_API_KEY: "host-openai" }, allowedModels: ctx.job.models, auxiliaryModels: ctx.job.auxiliaryModels ?? null, subscriptionAuth: ctx.subscriptionAuth ?? [], secrets: ctx.secrets, mainCredential: ctx.mainCredential ?? null }));
+				return { code: 0, aborted: false };
+			},
+			log: (event, fields) => logs.push({ event, fields }),
+		});
+		const result = await runJob(job, d);
+		assert.equal(envs.length, 1, JSON.stringify(result));
+		return { env: envs[0], withheld: logs.filter((row) => row.event === "run_secret_withheld").map((row) => row.fields), logs };
+	};
+	// A subscription primary: the walk never leaves it for the API-key fallback, and its container holds no key of it.
+	const primary = await run(attempt("anthropic", "claude-sonnet-4-5"), { bound: "anthropic" });
+	assert.equal("OPENROUTER_API_KEY" in primary.env, false, "the subscription primary's container");
+	assert.equal(primary.env.ANTHROPIC_OAUTH_TOKEN, "subscription");
+	assert.equal(primary.env.STRIPE_KEY, "stripe-private", "a key no fallback uses still reaches the job");
+	assert.deepEqual(primary.withheld, [{ provider: "anthropic", names: ["OPENROUTER_API_KEY"] }]);
+	assert.equal(JSON.stringify(primary.logs).includes("sk-or-fallback-private"), false, "names only, never the value");
+	// The failover attempt on the fallback is a container of its own, built for its provider, and spends its key.
+	const onFallback = await run(attempt("openrouter", "deepseek/deepseek-chat"));
+	assert.equal(onFallback.env.OPENROUTER_API_KEY, "sk-or-fallback-private");
+	assert.deepEqual(onFallback.withheld, []);
+	// An all-API list the same way: the primary's attempt on the host's key holds no fallback's key.
+	const api = await run(attempt("openai", "gpt-5"));
+	assert.equal("OPENROUTER_API_KEY" in api.env, false);
+	assert.equal(api.env.OPENAI_API_KEY, "host-openai");
+	assert.deepEqual(api.withheld, [{ provider: "openai", names: ["OPENROUTER_API_KEY"] }]);
+	// An auxiliary model on the fallback's provider reads the key on every attempt, the subscription primary's included.
+	const aux = await run(attempt("anthropic", "claude-sonnet-4-5", { models: ["anthropic/claude-sonnet-4-5", "openrouter/deepseek/deepseek-chat"], auxiliaryModels: ["openrouter/deepseek/deepseek-chat"], maxCostMicros: 1_000_000 }), { bound: "anthropic" });
+	assert.equal(aux.env.OPENROUTER_API_KEY, "sk-or-fallback-private");
+	assert.deepEqual(aux.withheld, []);
+	// The primary declares its own key too. Its attempt spends it; the fallback's attempt, told the walk's primary by the
+	// pickup (`failoverPrimary`, a dep), holds only its own.
+	resolved.OPENAI_API_KEY = "sk-openai-primary-private";
+	const keyed = (provider, model) => attempt(provider, model, { secrets: { OPENAI_API_KEY: "op://ci/openai/key", OPENROUTER_API_KEY: "op://ci/or/key", STRIPE_KEY: "op://ci/stripe" } });
+	const ownPrimary = await run(keyed("openai", "gpt-5"), { failoverPrimary: "openai/gpt-5" });
+	assert.equal(ownPrimary.env.OPENAI_API_KEY, "sk-openai-primary-private");
+	assert.deepEqual(ownPrimary.withheld, [{ provider: "openai", names: ["OPENROUTER_API_KEY"] }]);
+	const fallbackOnly = await run(keyed("openrouter", "deepseek/deepseek-chat"), { failoverPrimary: "openai/gpt-5" });
+	assert.equal(fallbackOnly.env.OPENROUTER_API_KEY, "sk-or-fallback-private");
+	assert.equal("OPENAI_API_KEY" in fallbackOnly.env, false, "the primary's declared key on the fallback's attempt");
+	assert.deepEqual(fallbackOnly.withheld, [{ provider: "openrouter", names: ["OPENAI_API_KEY"] }]);
+	assert.equal(JSON.stringify(fallbackOnly.logs).includes("sk-openai-primary-private"), false);
+});
+
+// --- Issue #1029: an auxiliary model's declared key is said like the main one's ---
+
+test("issue #1029: an auxiliary model's declared key is logged by provider and name, once, and never by value", async () => {
+	const panel = { ...ghJob, provider: "anthropic", model: "claude-sonnet-4-5", models: ["anthropic/claude-sonnet-4-5", "openrouter/deepseek/deepseek-chat"], auxiliaryModels: ["openrouter/deepseek/deepseek-chat"], maxCostMicros: 1_000_000 };
+	const run = async (job, resolved) => {
+		const logs = [];
+		const { deps: d } = deps({ checkProviderCredential: (candidate) => (candidate.provider === "openrouter" && job.secrets.OPENROUTER_API_KEY ? { ok: true, declared: "OPENROUTER_API_KEY" } : { ok: true }), resolveSecrets: async () => ({ ok: true, secrets: { ...resolved } }), log: (event, fields) => logs.push({ event, fields }) });
+		const result = await runJob(job, d);
+		assert.equal(result.outcome, "completed", JSON.stringify(result));
+		return { declared: logs.filter((row) => row.event === "provider_credential_declared").map((row) => row.fields), text: JSON.stringify(logs) };
+	};
+	const aux = await run({ ...panel, secrets: { OPENROUTER_API_KEY: "op://ci/or/key" } }, { OPENROUTER_API_KEY: "sk-or-aux-private" });
+	assert.deepEqual(aux.declared, [{ provider: "openrouter", name: "OPENROUTER_API_KEY" }]);
+	assert.equal(aux.text.includes("sk-or-aux-private") || aux.text.includes("op://ci/or/key"), false, "names only");
+	// An auxiliary model on the host's credential says nothing, and one on the main provider shares the main line.
+	assert.deepEqual((await run({ ...panel, secrets: { STRIPE_KEY: "op://ci/stripe" } }, { STRIPE_KEY: "x" })).declared, []);
+	const shared = await run({ ...panel, provider: "openrouter", model: "deepseek/deepseek-chat", models: ["openrouter/deepseek/deepseek-chat", "openrouter/qwen/qwen3"], auxiliaryModels: ["openrouter/qwen/qwen3"], secrets: { OPENROUTER_API_KEY: "op://ci/or/key" } }, { OPENROUTER_API_KEY: "sk-or-aux-private" });
+	assert.deepEqual(shared.declared, [{ provider: "openrouter", name: "OPENROUTER_API_KEY" }]);
 });

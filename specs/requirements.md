@@ -3318,11 +3318,18 @@ writes retain their existing interactive confirmation. This adds no unattended p
     one (the trigger's own or inherited provider, its model role's in the project its job lands in as doctor resolves
     it with the projects file, each random candidate's, each fallback its allowed-model list admits and the walk would
     try, never an unbound one behind a primary this host binds to a subscription), each linked, a cron trigger by its id
-    and any other by its row, with the variable's name and never a value. A watch rule, an
-    OAuth or bearer variable, a file secret and a provider that needs host authentication never count, as in the
-    worker's `declaredProviderKey` (`REQ-TRIGGER-SECRETS`). The line says their jobs on that provider spend that key,
-    not this host's credential; on a row this console shows as managed, or where this host's `PI_FORWARD_ENV` names
-    the variable, it says this host refuses those jobs before they spend instead. Once per card it says that another
+    and any other, a watch rule included, by its row, with the variable's name and never a value. An OAuth or bearer
+    variable, a file secret and a provider that needs host authentication never count, as in the worker's
+    `declaredProviderKey` (`REQ-TRIGGER-SECRETS`). CORRECTED 2026-11-22 (#1029): this said a watch rule never counts,
+    which has been false since #997. A watch rule's own model counts as any trigger's, outside the model roles (the
+    worker resolves none for a watch job, so a rule naming no model while the default model is a role reference names
+    none), and so do the providers the worker judges by the same rule beside an attempt's: a watch rule's `decide`
+    model's (#997) and each `run.auxiliaryModels` model's (#999). A trigger that reaches a slot only through one of
+    those says which ("for its decide model", "for its auxiliary model"), and a `decide` model's provider is a row of
+    the card, as the rule's own provider is. The line says every call their jobs make to that provider spends that
+    key, not this host's credential (it said "their jobs on that provider", which a classifier or an auxiliary model
+    on another provider than its job's is not); on a row this console shows as managed, or where this host's
+    `PI_FORWARD_ENV` names the variable, it says this host refuses those jobs before they spend instead. Once per card it says that another
     host refuses them where its own forward list or bindings do, since no host publishes either. A projects file that
     cannot be read resolves a role in every scope the triggers file names and says so; a `PI_MODEL` line that cannot be
     read leaves a trigger naming no model unjudged while roles are declared, and says so, and blanks nothing else; one of
@@ -8363,8 +8370,8 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   (`withheldPoolKeys`): the worker still resolves it, removes it after every credential gate and before the venue
   and the container builder, keeps a project bundle's variable of such a name out of that draw too, and logs
   `run_secret_withheld` with the names, never a value. Every other run
-  secret is unaffected, a file secret included, and so is a fallback list (`run.fallbackModels`), whose keys reach
-  every attempt. Tests: `worker/test/env-allowlist.test.mjs`,
+  secret is unaffected, a file secret included, and so was a fallback list (`run.fallbackModels`), whose keys reached
+  every attempt until #1030 (below). Tests: `worker/test/env-allowlist.test.mjs`,
   `worker/test/secrets.test.mjs`, `worker/test/secret-bundles.test.mjs`, `worker/test/processor.test.mjs`,
   `worker/test/doctor.test.mjs`.
   AMENDED 2026-11-21 (#997), the role models: a watch job counts as a trigger's job for the declared credential,
@@ -8381,6 +8388,24 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   line and fails every other binding of the classifier's provider. Tests: `worker/test/env-allowlist.test.mjs`,
   `worker/test/processor.test.mjs`, `worker/test/run-container.test.mjs`, `worker/test/secrets.test.mjs`,
   `worker/test/start-wiring.test.mjs`, `worker/test/doctor.test.mjs`.
+  AMENDED 2026-11-22 (#1029, #1030), where a declared key is said and which attempts hold a fallback's: every declared
+  key the worker spends is named by the same rule. The worker logs `provider_credential_declared` (provider and
+  name) for an auxiliary model's declared key too, as it does for the main model's and the classifier's; `doctor`'s
+  fact line names an auxiliary model's declared key beside the main model's and the classifier's, and its clash line's
+  fix no longer tells the operator a watch rule cannot declare one; the console's Provider API keys card names them all
+  (`REQ-OPERATOR-CONSOLE-SCREENS`). A fallback's key follows the random pool's rule: a `run.secrets` binding of the
+  API-key variable of a `run.fallbackModels` provider reaches a failover attempt only when that attempt's provider or
+  an auxiliary model's provider reads it, each attempt being a container of its own built for the provider the walk
+  chose. The attempt on that fallback holds it; every other attempt, the primary's (a subscription primary's above
+  all, which the walk never leaves for an API-key fallback) and another fallback's, does not, and the worker logs
+  `run_secret_withheld` with the names. The primary's own key follows the same rule: a fallback's attempt does not
+  hold the primary's declared key, which the pickup that ran the walk names to the processor (a dep, since that
+  attempt's job names only its own model and the fallbacks), whether the primary is the trigger's model, the deployment
+  default or a model role's. A project bundle's variable of such a name is kept out alike, and the secret is still
+  resolved for every attempt. A tool's key under such a name is withheld with it, so a tool's own key belongs under
+  another name. Tests: `worker/test/env-allowlist.test.mjs`, `worker/test/processor.test.mjs`,
+  `worker/test/processor-bundles.test.mjs`, `worker/test/model-failover.test.mjs`, `worker/test/doctor.test.mjs`,
+  `admin/test/provider-inventory.test.mjs`, `admin/test/provider-keys-panels.test.mjs`.
 
 ## REQ-BROWSER-FIRST-RUN-SETUP
 
@@ -9585,6 +9610,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-22 (#1029, #1030) | **`REQ-OPERATOR-CONSOLE-SCREENS` CORRECTED**, (g6) Connections, the #1000 paragraph in place: it said a watch rule never counts, as in the worker's `declaredProviderKey`, false since #997. The card names a watch rule's own model (outside the model roles, which the worker gives no watch job), its `decide` model's provider and each `run.auxiliaryModels` provider under their slots, a trigger reaching a slot only through a role model saying which, a `decide` model's provider is an inventory row, and the line says every call their jobs make to that provider spends the key (it said "their jobs on that provider"). **`REQ-TRIGGER-SECRETS` AMENDED**, a dated paragraph after #997's: an auxiliary model's declared key is logged `provider_credential_declared` and named on doctor's fact line, doctor's fix no longer excludes a watch rule (#1029); a fallback's declared key, and the walk's primary's on a fallback's attempt, reaches only the failover attempts whose own or auxiliary providers read it, withheld from every other attempt with `run_secret_withheld`, a bundle's variable alike, the primary named to the processor by the pickup as a dep (#1030); the #999/#1002 paragraph's fallback sentence put in the past. CHANGED beside it: the provider inventory behind Setup and `dispatch_connections` gains a row (usage `trigger`) for a provider only a watch rule's `decide` model names; neither carries an own-key fact. UNCHANGED, checked: the reason enum, `REQ-MODEL-POLICY` (no walk, class or cap rule moves). **Code evidence**: admin/src/provider-inventory.mjs -> declaredKeyTriggers, declaredKeysView, DECLARED_KEY_VIA, readProviderInventory; admin/src/console/panels/provider-keys.mjs -> triggerLink, declaredLine; worker/src/env-allowlist.mjs -> withheldPoolKeys; worker/src/index.mjs -> failoverPrimary; worker/src/processor.mjs -> provider_credential_declared, withheld; worker/src/doctor.mjs -> triggerSecretProviderChecks. |
 | 2026-11-22 (#964, #965) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, the Valkey outage bullet: a fleet pause answers within about 6 seconds (it said 5; the step's own bound is 6) and a resume within about 12 (9 measured), item 1 of #965; every surface that switches the fleet, the agent tools and `pi-dispatch pause` and `resume` among them, says that the list of queues may be short and what to do, also of a switch that reached every queue it found, and a part-way switch starts with that and with what may or may not have been made; and the switch reaches this host's own queue when the deployment's `.env` declares `PI_WORKER_NAME`, only on the deployment's Valkey, none when an environment sets another name (said in the preview), never written by a preview or a resume before it exists, and named in the restart banner's kill switch exception. **Code evidence**: admin/src/words.mjs -> switchShortNote; admin/src/console/actions.mjs -> fleetSwitch, changeOf; admin/src/audited-write.mjs -> auditedWrite (note); admin/src/tool-actions.mjs -> toolWriteResult, switchPartialRefusal; admin/src/dashboard.ts -> switchNote, switchUnconfirmed; admin/src/index.ts -> the `/dispatch pause` and `resume` command; admin/src/read-model.mjs -> ownQueueNamesOf, deploymentOwnQueues, deploymentOwnQueue, createFleetReader, setQueuePaused, killSwitchSet, SWITCH_STEP_TIMEOUT_MS; admin/src/console/cli.mjs -> serve (ownQueueNamesFn, ownQueueProblemFn); admin/src/console/restart-notice.mjs -> restartReasons; worker/src/cli.mjs -> killSwitch, ownQueueOf, deploymentValkeyUrl. |
 | 2026-11-21 (#997) | **`REQ-TRIGGER-SECRETS` AMENDED**, its acceptance, by a dated paragraph after #999's: a watch job counts as a trigger's job for the declared credential, so its investigation's provider and its `decide` model's provider each take their API key from `run.secrets` on the main rule (exclusive, an empty value or a subscription token refused as `provider-unconfigured`, the resolver refusing an empty value as `secret-unresolved` first, a bound provider's binding as `secret-name-reserved`, the OAuth and bearer variables reserved); the answer decision model and the question grouping model keep the host's credential, since an answer rule and the `zeroTouch` settings carry no `run.secrets`. UNCHANGED, checked: the triggers file and job data versions (no field added), the reason enum, `REQ-WATCH-DECISION-STEP` and `REQ-PARKED-ANSWERER` (no route, admission or cap moves). **Code evidence**: worker/src/env-allowlist.mjs -> declaredProviderKey, buildContainerEnv; worker/src/processor.mjs -> roleDeclared, secondaryCredentialNames; worker/src/run-container.mjs; worker/src/doctor.mjs -> triggerSecretProviderChecks. |
 | 2026-11-21 (#1000) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (g6) Connections: the Provider API keys card names under a slot the triggers whose `run.secrets` binds that slot's variable for a provider their attempts run on as the main one (own or inherited provider, a model role's in the project its job lands in, as doctor resolves it with the projects file, a random candidate's, a fallback its list admits and the walk would try past this host's subscription bindings), linked by cron id or row with the variable's name, never a value, and says their jobs on that provider spend that key and not this host's credential, or that this host refuses them where this console shows the row managed or this host's `PI_FORWARD_ENV` names the variable, with one line per card for other hosts; it read this host's sources alone, so a slot could say Not set while triggers spent on it. An unread projects file resolves roles in every scope and says so; an unread `PI_MODEL` line leaves only a trigger naming no model unjudged while roles are declared, and says so. Nothing when the `.env` is not read; Setup and `dispatch_connections` unchanged. **`REQ-TRIGGER-SECRETS` UNCHANGED, checked**: the worker's rule (`declaredProviderKey`), its log line and doctor's fact line are as they were; the card states the file's half of that rule and names the host's half as a condition. **Code evidence**: admin/src/provider-inventory.mjs -> declaredKeyTriggers, declaredKeysView, readProviderInventory; admin/src/console/panels/provider-keys.mjs -> declaredLine, declaredNotes, connectionsProviderKeys; admin/test/provider-inventory.test.mjs; admin/test/provider-keys-panels.test.mjs |

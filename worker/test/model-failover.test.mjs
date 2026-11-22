@@ -337,6 +337,93 @@ test("pickup retries a signed 429 on fallback, transports singleton models and r
 	assert.equal(fixture.records[1].result.modelWhy, "fallback-cooldown");
 });
 
+test("issue #1030: the pickup hands the walk's primary to the processor, so the fallback's attempt holds its own declared key and not the primary's, a default primary included", async () => {
+	// No provider or model in the job's data: the primary is the deployment default, which the data alone does not name.
+	const secrets = { OPENAI_API_KEY: "op://ci/openai", ANTHROPIC_API_KEY: "op://ci/anthropic", STRIPE_KEY: "op://ci/stripe" };
+	const declaredKey = { openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY" };
+	const saw = [];
+	let attempt = 0;
+	const fixture = pickupFixture({
+		data: { provider: undefined, model: undefined, secrets },
+		extraDeps: {
+			checkProviderCredential: (candidate) => (Object.hasOwn(candidate.secrets ?? {}, declaredKey[candidate.provider]) ? { ok: true, declared: declaredKey[candidate.provider] } : { ok: true }),
+			resolveSecrets: async (queued) => ({ ok: true, secrets: Object.fromEntries(Object.keys(queued.secrets).map((name) => [name, `value-${name}`])) }),
+		},
+		container: async (ctx) => {
+			saw.push([ctx.job.provider, ctx.mainCredential ?? null, Object.keys(ctx.secrets).sort()]);
+			return ++attempt === 1 ? { code: 1, exitLineCode: 1, exitAuth: "verified", aborted: false, providerFailure: { kind: "rate-limited", resetAt: NOW + 120_000 }, toolsStarted: false, replaySafe: true } : { code: 0, aborted: false };
+		},
+	});
+	await assert.rejects(fixture.run, { name: "InfraRetry" });
+	fixture.queueJob.attemptsMade = 1;
+	assert.equal((await fixture.run()).outcome, "completed");
+	assert.deepEqual(saw, [
+		["openai", "OPENAI_API_KEY", ["OPENAI_API_KEY", "STRIPE_KEY"]],
+		["anthropic", "ANTHROPIC_API_KEY", ["ANTHROPIC_API_KEY", "STRIPE_KEY"]],
+	]);
+});
+
+/** The wired credential gate's declared answer and a resolver that hands back a value per bound name, for the #1030 pickups. */
+const keyedDeps = (declaredKey) => ({
+	checkProviderCredential: (candidate) => (Object.hasOwn(candidate.secrets ?? {}, declaredKey[candidate.provider] ?? "") ? { ok: true, declared: declaredKey[candidate.provider] } : { ok: true }),
+	resolveSecrets: async (queued) => ({ ok: true, secrets: Object.fromEntries(Object.keys(queued.secrets).map((name) => [name, `value-${name}`])) }),
+});
+const rateLimited = { code: 1, exitLineCode: 1, exitAuth: "verified", aborted: false, providerFailure: { kind: "rate-limited", resetAt: NOW + 120_000 }, toolsStarted: false, replaySafe: true };
+
+test("issue #1030: a model role's primary is the one the walk starts from, so its declared key stays out of the fallback's attempt", async () => {
+	// The role names the primary and its fallback list; the deployment default is another provider, which the job's data
+	// (`model: "role:coder"`, no provider) would point at if the primary were taken before the role resolved.
+	const roles = { default: { coder: { model: "openai/primary", fallbackModels: ["openrouter/fallback"] } } };
+	const secrets = { OPENAI_API_KEY: "op://ci/openai", OPENROUTER_API_KEY: "op://ci/or", ANTHROPIC_API_KEY: "op://ci/anthropic" };
+	const saw = [];
+	let attempt = 0;
+	const fixture = pickupFixture({
+		data: { provider: undefined, model: "role:coder", models: undefined, fallbackModels: undefined, secrets },
+		extraDeps: { ...keyedDeps({ openai: "OPENAI_API_KEY", openrouter: "OPENROUTER_API_KEY", anthropic: "ANTHROPIC_API_KEY" }), stageModelRoleInputs: async () => {} },
+		extraOptions: { readModelRoles: () => roles, getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 5, dailyCap: 10, concurrency: 3, softHoldPct: null }) },
+		container: async (ctx) => {
+			saw.push([ctx.job.provider, ctx.mainCredential ?? null, Object.keys(ctx.secrets).sort()]);
+			return ++attempt === 1 ? rateLimited : { code: 0, aborted: false };
+		},
+	});
+	await assert.rejects(fixture.run, { name: "InfraRetry" });
+	fixture.queueJob.attemptsMade = 1;
+	assert.equal((await fixture.run()).outcome, "completed");
+	// ANTHROPIC_API_KEY is no model's of this walk, so it reaches both attempts as any run secret does.
+	assert.deepEqual(saw, [
+		["openai", "OPENAI_API_KEY", ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]],
+		["openrouter", "OPENROUTER_API_KEY", ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]],
+	]);
+});
+
+test("issue #1030: a recovery whose checkpoint ran on the fallback keeps the walk's primary's declared key out, though the recovery pins the fallback's model first", async () => {
+	const host = "h1";
+	const base = "b".repeat(40);
+	const manifest = { v: 1, runId: "old", seq: 4, attempt: 1, host, kind: "live", quiesced: "frozen", at: 1, transcript: { bytes: 1, sha256: "0".repeat(64) }, workspace: { commit: "c".repeat(40), baseSha: base, objectFormat: "sha1", partial: false, ignoredDropped: false, counts: {}, git: {} }, piVersion: "1.2.0", imageDigest: null, venue: "local", provider: "anthropic", model: "fallback" };
+	const saw = [];
+	const fixture = pickupFixture({
+		data: { recover: true, recoveryOf: "old", recovery: 1, secrets: { OPENAI_API_KEY: "op://ci/openai", ANTHROPIC_API_KEY: "op://ci/anthropic", STRIPE_KEY: "op://ci/stripe" } },
+		extraOptions: { hostName: host },
+		extraDeps: {
+			...keyedDeps({ openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY" }),
+			hostName: host,
+			imagePreflight: async () => ({ ok: true, image: "job:current", piVersion: "1.2.0", imageDigest: `sha256:${"d".repeat(64)}`, capabilities: ["exitAuth", "modelPolicy", "modelFailover", "recover"] }),
+			prepareWorkspace: async () => ({ workspaceDir: "/w", workspace: "/j/workspace", jobDir: "/j", sha: base }),
+			workspaceCheckpointer: { readManifest: async () => ({ ok: true, manifest, transcriptPath: "/store/t.jsonl" }), restore: async () => ({ written: 1, removed: 0 }), primeBase: async () => ({ ok: true }), baseSourceUrl: (id) => `file:///store/${id}/repo.git`, remove: async () => ({ removed: true }) },
+			runBudgetLedger: { claimSlot: async () => "carried", nextSeq: async () => 5, recordHold: async () => ({ ok: true }), settle: async () => "moved", release: async () => "moved", settleCrashed: async () => ({ settled: [] }), remove: async () => ({ ok: true }) },
+			readCheckpointPointer: async () => ({ v: 1, host, hostQueue: null, seq: 4, attempt: 1, at: 1, jobDir: "job-abc" }),
+			removeCheckpointPointer: async () => true,
+			enqueueRecovery: async () => ({ enqueued: true, jobId: "old.r2", n: 2 }),
+			stageRecovered: async () => ({ hostDir: "/j/session", key: null, resume: true, reason: "recovered", bytes: 1 }),
+			resetTrustPaths: async () => ({ deleted: 0, written: 0 }),
+			baseHasExtensions: async () => false,
+		},
+		container: async (ctx) => (saw.push([ctx.job.provider, ctx.mainCredential ?? null, Object.keys(ctx.secrets).sort()]), { code: 0, aborted: false }),
+	});
+	assert.equal((await fixture.run()).outcome, "completed");
+	assert.deepEqual(saw, [["anthropic", "ANTHROPIC_API_KEY", ["ANTHROPIC_API_KEY", "STRIPE_KEY"]]]);
+});
+
 test("pickup cannot switch on tool activity, missing auth, missing replay proof or mismatched exit code", async () => {
 	for (const override of [{ toolsStarted: true }, { exitAuth: "unverified" }, { replaySafe: undefined }, { exitLineCode: 0 }]) {
 		const fixture = pickupFixture({ container: async () => ({ code: 1, exitLineCode: 1, exitAuth: "verified", aborted: false, providerFailure: { kind: "overloaded" }, toolsStarted: false, replaySafe: true, ...override }) });

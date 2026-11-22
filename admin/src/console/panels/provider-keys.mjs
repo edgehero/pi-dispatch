@@ -13,14 +13,18 @@ const name = provider => providerHelp(provider).label === "Custom provider" ? pr
 const can = (view, action) => view.role === "operator" && !view.readOnly && setupFacts(view.data?.setup, { role: view.role }).actions.includes(action);
 const actionFor = mode => mode === "replace" ? "setup-provider-key-replace" : "setup-provider-key";
 const guideId = provider => `provider-help-${provider}`;
-// A cron trigger by its id, the name doctor gives it; any other by its row. The id may be long and unbroken, so it
-// wraps as the slot's own key does (`pk-key`).
-const triggerLink = t => html`<a class="link" href="${`/config/trigger?index=${t.index}`}">${t.cron ? html`cron <span class="code pk-key">${t.cron}</span>` : `trigger ${t.index + 1}`}</a>`;
+// A cron trigger by its id, the name doctor gives it; any other, a watch rule included, by its row. The id may be long
+// and unbroken, so it wraps as the slot's own key does (`pk-key`). Issue #1029: a trigger that reaches the slot only
+// through a role model says which, since its jobs run on another provider.
+const VIA = Object.freeze({ decide: " (for its decide model)", auxiliary: " (for its auxiliary model)" });
+const triggerLink = t => html`<a class="link" href="${`/config/trigger?index=${t.index}`}">${t.cron ? html`cron <span class="code pk-key">${t.cron}</span>` : `trigger ${t.index + 1}`}</a>${Object.hasOwn(VIA, t.via ?? "") ? VIA[t.via] : null}`;
 
 /**
  * Issue #1000: the triggers that bring their own key for this slot (`declaredKeysView`), by name and the variable,
  * never a value. The row's badge and source sentence are this host's sources alone, so without this a slot can read
  * Not set while triggers spend on it with their own key, or name the deployment key while some of them use another.
+ * Issue #1029: "every call their jobs make to this provider", not "their jobs on this provider", since a watch rule's
+ * classifier and an auxiliary model spend the key from a job that runs on another provider.
  * Where this host is known to refuse those jobs, the line says so instead: a row this console shows as managed (its
  * subscription check comes first, so the declared name stays reserved) and a variable this host's PI_FORWARD_ENV names
  * (the operator's host value claims it); an unread forward list leaves that open, and the line says on what. Other
@@ -34,8 +38,8 @@ function declaredLine(item, own) {
   if (item.status === "managed") return html`<p class="pk-note" data-provider-declared="refused">${who}, but this host binds the provider to a subscription, so it refuses ${theirs} jobs before they spend.</p>`;
   if (own.forwarded === true) return html`<p class="pk-note" data-provider-declared="refused">${who}, but this host's PI_FORWARD_ENV names it too, so it refuses ${theirs} jobs before they spend.</p>`;
   // This host's forward list unread: the key is spent unless this host refuses, which the card's note says is not known.
-  if (own.forwarded === null) return html`<p class="pk-note" data-provider-declared="unknown">${who}, so ${theirs} jobs on this provider spend that key, not this host's credential, unless this host's PI_FORWARD_ENV names it.</p>`;
-  return html`<p class="pk-note" data-provider-declared="spent">${who}, so ${theirs} jobs on this provider spend that key, not this host's credential.</p>`;
+  if (own.forwarded === null) return html`<p class="pk-note" data-provider-declared="unknown">${who}, so every call ${theirs} jobs make to this provider spends that key, not this host's credential, unless this host's PI_FORWARD_ENV names it.</p>`;
+  return html`<p class="pk-note" data-provider-declared="spent">${who}, so every call ${theirs} jobs make to this provider spends that key, not this host's credential.</p>`;
 }
 
 /** Once per card: what a spent line cannot know, and why a line may be missing or too wide (`DECLARED_KEY_NOTES`). */

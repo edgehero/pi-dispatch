@@ -1191,6 +1191,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		let selectionWait = null;
 		let failoverSnapshot = null;
 		let chosenModel = null;
+		// Issue #1030: the failover walk's primary as `provider/model`, for the processor to keep its declared key out of a
+		// fallback's attempt (`withheldPoolKeys`); null for a job with no fallback list.
+		let failoverPrimary = null;
 		const randomSelectionId = identityForModelSelection(job, { queueName: job.queueName ?? QUEUE });
 		// Set by the selection when a retry can be judged only by a record a newer pi-dispatch wrote (issue #761): the job
 		// then waits below, outside this block's `try`, instead of being refused.
@@ -1220,6 +1223,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				const aliases = roleMapFor(roles, project);
 				let effective = base.modelSelection === undefined ? resolveModelRoles(base, roles, project, { authoredProvider: job.data.provider }) : { ...base, ...(Object.keys(aliases).length ? { modelRoles: aliases } : {}) };
 				selectedEffective = effective;
+				// Taken here, before a recovery pins the checkpoint's model below: the primary is the model the trigger, the
+				// deployment default or a model role names, which the job's data alone does not say (`provider` is absent when
+				// the default or a role chose it), and a fallback's attempt's job no longer names it.
+				failoverPrimary = effective.modelSelection === undefined && Array.isArray(effective.fallbackModels) && typeof effective.provider === "string" && typeof effective.model === "string" ? `${effective.provider}/${effective.model}` : null;
 				if (effective.modelSelection !== undefined || effective.fallbackModels !== undefined || (effective.recover === true && effective.recoveryOf)) {
 					const endpoints = modelEndpoints?.() ?? [];
 					let models;
@@ -1858,6 +1865,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				},
 				deploymentMaxCostUsd: settings.maxCostUsd,
 				rawApprovalJob: job.data,
+				// Issue #1030: the walk's primary, a dep for the reason above, so a fallback's attempt holds no key of it.
+				failoverPrimary,
 				redis,
 				// Issue #761: the tag of the Valkey the dollar counters are in, for the record's `dollars.reservedIn`.
 				valkeyTag,
