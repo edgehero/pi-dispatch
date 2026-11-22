@@ -1845,6 +1845,8 @@ test("parseExitWhy keeps a cost-cap line's why only from the closed set, only on
 	// The LAST exit line decides, as for parseExitReason.
 	assert.equal(parseExitWhy(exitLine({ code: 2, reason: "cost-cap", why: "unboundable" }) + exitLine({ code: 2, reason: "cost-cap" })), null);
 	assert.equal(parseExitWhy(exitLine({ code: 2, reason: "cost-cap" }) + "agent noise\n" + exitLine({ code: 2, reason: "cost-cap", why: "over-cap" })), "over-cap");
+	// Issue #985: the rules waiting added, a final payload's and a lost turn's, reach the record by name.
+	for (const why of ["final-payload", "turn"]) assert.equal(parseExitWhy(exitLine({ code: 2, reason: "cost-cap", why })), why);
 	for (const text of [undefined, null, 42, "", "{not json", '{"event":"start","code":2,"reason":"cost-cap","why":"unboundable"}']) {
 		assert.doesNotThrow(() => parseExitWhy(text));
 		assert.equal(parseExitWhy(text), null, JSON.stringify(text));

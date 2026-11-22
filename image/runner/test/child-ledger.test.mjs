@@ -15,6 +15,8 @@ import {
 	createUsageMeter,
 	externalFor,
 	foldChildLedgers,
+	inflightFor,
+	ledgerInflight,
 	parseChildLedger,
 	spentFile,
 	USAGE_ID_PATTERN,
@@ -465,7 +467,7 @@ test("a forged done with unchanged numbers cannot freeze a live child's ledger (
 test("SPENT: the parent's spend plus each ledger's spent and in-flight, and a child's external spend excludes its own", () => {
 	const fs = fakeFs({ [NAME_A]: json({ ...ledger({ calls: 1, cost: 0.0001 }), spentMicros: 300, inflightMicros: 50 }), [NAME_B]: json({ ...ledger({ calls: 1, cost: 0.0001 }), spentMicros: 1000, inflightMicros: 0 }) });
 	const spent = spentFile(fold(fs), 2000);
-	assert.deepEqual(spent, { v: 1, total: 3350, byLedger: { [NAME_A]: 350, [NAME_B]: 1000 } });
+	assert.deepEqual(spent, { v: 1, total: 3350, byLedger: { [NAME_A]: 350, [NAME_B]: 1000 }, inflight: 50, inflightByLedger: { [NAME_A]: 50 } });
 	const read = JSON.parse(JSON.stringify(spent));
 	assert.equal(externalFor(read, NAME_A), 3000, "the rest of the job, not counting itself twice");
 	assert.equal(externalFor(read, NAME_B), 2350);
@@ -473,7 +475,7 @@ test("SPENT: the parent's spend plus each ledger's spent and in-flight, and a ch
 	// A ledger whose metered cost is above its guard's spend (a child whose spawner dropped its cost cap: no guard, so
 	// spentMicros 0) is charged its cost (issue #500 part E's review).
 	const unguarded = spentFile(fold(fakeFs({ [NAME_A]: json({ ...ledger({ calls: 1, cost: 0.004 }), spentMicros: 0, inflightMicros: 7 }) })), 0);
-	assert.deepEqual(unguarded, { v: 1, total: 4007, byLedger: { [NAME_A]: 4007 } });
+	assert.deepEqual(unguarded, { v: 1, total: 4007, byLedger: { [NAME_A]: 4007 }, inflight: 7, inflightByLedger: { [NAME_A]: 7 } });
 	for (const bad of [null, [], { v: 2, total: 1, byLedger: {} }, { v: 1, total: -1, byLedger: {} }, { v: 1, total: 1.5, byLedger: {} }, { v: 1, total: 5, byLedger: [] }, { v: 1, total: 5, byLedger: { [NAME_A]: 9 } }, { v: 1, total: 5, byLedger: { [NAME_A]: "1" } }]) {
 		assert.equal(externalFor(bad, NAME_A), Infinity, JSON.stringify(bad));
 	}
@@ -481,6 +483,44 @@ test("SPENT: the parent's spend plus each ledger's spent and in-flight, and a ch
 	const fractional = JSON.parse(JSON.stringify(spentFile(fold(fs), 1999.25)));
 	assert.equal(fractional.total, 3350, "a fractional parent spend rounds up to a whole micro-dollar");
 	assert.equal(externalFor(fractional, NAME_A), 3000, "so the writer never emits a file its own reader refuses");
+});
+
+test("SPENT's in-flight part (issue #985): the parent's own and each open, metered ledger's; a done, unmetered or retired ledger's hold counts settled", () => {
+	const NAME_C = "303.00112233445566ff.json";
+	const NAME_D = "404.ffeeddccbbaa9988.json";
+	const NAME_E = "505.0a0b0c0d0e0f1011.json";
+	const fs = fakeFs({
+		[NAME_A]: json({ ...ledger({ calls: 1, cost: 0.0001 }), spentMicros: 100, inflightMicros: 600 }), // open, a call in flight
+		[NAME_B]: json({ ...ledger({ calls: 1, cost: 0.0001, state: "done" }), spentMicros: 100, inflightMicros: 30 }), // its process ended mid-call
+		[NAME_C]: json({ ...ledger({ calls: 1, cost: 0.0001 }), metered: false, spentMicros: 0, inflightMicros: 0 }), // unmetered
+		[NAME_D]: json({ ...ledger({ calls: 1, cost: 0.0001 }), spentMicros: 100, inflightMicros: 0 }), // open, nothing in flight
+		[NAME_E]: json({ ...ledger({ calls: 1, cost: 0.0001 }), spentMicros: 100, inflightMicros: 40 }), // its process is gone: retired
+	});
+	const folded = foldChildLedgers({ dir: "/run/meter", fs, retire: (pid) => pid === 505 });
+	assert.deepEqual([folded.chargeMicros, folded.liveInflightMicros], [700 + 130 + 0 + 100 + 140, 600], "the charge counts every hold; the live part only the open ones");
+	assert.deepEqual([ledgerInflight(folded.files.get(NAME_A)), ledgerInflight(folded.files.get(NAME_B)), ledgerInflight(folded.files.get(NAME_C)), ledgerInflight(folded.files.get(NAME_D)), ledgerInflight(undefined)], [600, 0, 0, 0, 0]);
+	const spent = spentFile(folded, 2000, 400); // the parent: 1600 settled, 400 in flight
+	assert.deepEqual(spent, { v: 1, total: 2000 + 140 + 700 + 130 + 0 + 100, byLedger: { [NAME_A]: 700, [NAME_B]: 130, [NAME_C]: 0, [NAME_D]: 100 }, inflight: 400 + 600, inflightByLedger: { [NAME_A]: 600 } });
+	const read = JSON.parse(JSON.stringify(spent));
+	// A child judges the rest of the job; its own folded hold is its guard's, live, so it is not counted twice.
+	assert.deepEqual([externalFor(read, NAME_A), inflightFor(read, NAME_A)], [3070 - 700, 400], "A: the parent's 400 in flight elsewhere, not its own 600");
+	assert.deepEqual([externalFor(read, NAME_D), inflightFor(read, NAME_D)], [3070 - 100, 1000], "D: the parent's and A's");
+	assert.deepEqual([externalFor(read, "999.0000000000000000.json"), inflightFor(read, "999.0000000000000000.json")], [3070, 1000], "a child not folded yet: all of it");
+	// The reader from before issue #985's second part reads only v, total and byLedger: the same answer with or without the new keys.
+	const { inflight, inflightByLedger, ...older } = read;
+	for (const name of [NAME_A, NAME_B, NAME_D, "999.0000000000000000.json"]) assert.equal(externalFor(read, name), externalFor(older, name), name);
+	assert.ok(inflight <= read.total && Object.keys(inflightByLedger).every((name) => inflightByLedger[name] <= read.byLedger[name]), "each in-flight part within its charge");
+	assert.equal(inflightFor(older, NAME_A), 0, "a SPENT from a parent before issue #985's second part: nothing to wait for");
+	assert.equal(spentFile(folded, 2000).inflight, 600, "no parent in-flight given: 0 of the parent's own");
+	assert.equal(spentFile(folded, 100, 5000).inflight, 100 + 600, "the parent's in-flight part never passes its own total");
+	// Malformed in-flight keys fail toward 0 (a refusal, as before), never toward room; a malformed SPENT is 0 too.
+	for (const bad of [{ inflight: -1 }, { inflight: 1.5 }, { inflight: "1000" }, { inflightByLedger: [] }, { inflightByLedger: null }, { inflightByLedger: { [NAME_A]: "600" } }, { inflightByLedger: { [NAME_A]: 2000 } }, { inflightByLedger: { [NAME_A]: -5 } }]) {
+		assert.equal(inflightFor({ ...read, ...bad }, NAME_A), 0, JSON.stringify(bad));
+	}
+	assert.equal(inflightFor({ ...read, total: -1 }, NAME_A), 0);
+	assert.equal(inflightFor(null, NAME_A), 0);
+	// Never more than the outside spend: a forged in-flight part above it is cut to it.
+	assert.equal(inflightFor({ v: 1, total: 900, byLedger: { [NAME_A]: 800 }, inflight: 5000, inflightByLedger: {} }, NAME_A), 100);
 });
 
 test("childLedger: the writer's object round-trips through the fold; a meter that did not install writes zeros and metered:false", async () => {

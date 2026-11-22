@@ -519,7 +519,7 @@ test("exit 2 with any reason outside the closed set, or none, stays runner-polic
 });
 
 test("a cost-cap exit names the guard's rule in the record's why, from the closed set only, and nothing else gets one (#507)", async () => {
-	for (const exitWhy of ["unboundable", "external", "over-cap"]) {
+	for (const exitWhy of ["unboundable", "external", "over-cap", "final-payload", "turn"]) {
 		const { deps: d } = deps({ runContainer: async () => ({ code: 2, aborted: false, turns: 1, tokens: { total: 0 }, exitReason: "cost-cap", exitWhy }) });
 		const r = await runJob(ghJob, d);
 		assert.equal(r.reason, "cost-cap");

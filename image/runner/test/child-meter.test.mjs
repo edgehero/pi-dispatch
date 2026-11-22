@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { closeSync as closeSyncReal, constants as constantsReal, fstatSync as fstatSyncReal, mkdirSync, openSync as openSyncReal, readdirSync, readFileSync, renameSync as renameSyncReal, rmSync as rmSyncReal, statSync, symlinkSync, writeFileSync, writeSync as writeSyncReal } from "node:fs";
+import { closeSync as closeSyncReal, constants as constantsReal, fstatSync as fstatSyncReal, lstatSync as lstatSyncReal, mkdirSync, openSync as openSyncReal, readdirSync, readFileSync, readSync as readSyncReal, renameSync as renameSyncReal, rmSync as rmSyncReal, statSync, symlinkSync, writeFileSync, writeSync as writeSyncReal } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
@@ -15,12 +15,20 @@ import {
 	publishPriceTable,
 	readExternal,
 	readPriceTable,
+	readSpent,
 	readStop,
 	RUNNER_PID_ENV,
 	spentFile,
 	startChildMeter,
 	stopFile,
 	writeFileAtomic,
+	COST_WAIT,
+	makeDeferredStream,
+	makeHardStopStream,
+	STOP_MESSAGES,
+	claimWait,
+	waitClaimName,
+	wrapModelRuntime,
 } from "../src/usage-meter.mjs";
 import * as usageMeter from "../src/usage-meter.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
@@ -124,6 +132,36 @@ test("SPENT: missing is 0, the job's total less this ledger's own part, malforme
 	assert.equal(readExternal({ dir, name: own }), 1100, "the parent's 1000 and the other child's 100, never its own 320");
 	writeFileAtomic({ dir, name: "SPENT", text: "{" });
 	assert.equal(readExternal({ dir, name: own }), Infinity);
+});
+
+test("readSpent (issue #985): the outside spend and its in-flight part from ONE read; 0 in flight from a parent that writes none", () => {
+	const dir = tempDir("pi-dispatch-spent-");
+	const own = "7.0123456789abcdef.json";
+	assert.deepEqual(readSpent({ dir, name: own }), { external: 0, inflight: 0, gen: null, present: false, waiting: false, waitingSince: null }, "nothing written yet");
+	const fold = { files: new Map([[own, { state: "running", high: { spentMicros: 300, inflightMicros: 20 } }], ["8.fedcba9876543210.json", { state: "running", high: { spentMicros: 100, inflightMicros: 40 } }]]) };
+	writeFileAtomic({ dir, name: "SPENT", text: JSON.stringify(spentFile(fold, 1000, 250, 7)) });
+	assert.deepEqual(readSpent({ dir, name: own }), { external: 1140, inflight: 290, gen: 7, present: true, waiting: false, waitingSince: null }, "the parent's 250 and the other child's 40 in flight, never its own 20; the file's generation; nobody waits");
+	writeFileAtomic({ dir, name: "SPENT", text: JSON.stringify(spentFile(fold, 1000, 250, 7, 2, 5)) });
+	assert.deepEqual(readSpent({ dir, name: own }), { external: 1140, inflight: 290, gen: 7, present: true, waiting: true, waitingSince: 5 }, "two calls wait in the job, since generation 5");
+	writeFileAtomic({ dir, name: "SPENT", text: JSON.stringify({ v: 1, total: 1140, byLedger: {} }) });
+	assert.deepEqual(readSpent({ dir, name: own }), { external: 1140, inflight: 0, gen: null, present: true, waiting: false, waitingSince: null }, "a parent from before issue #985's second part: no turn to take");
+	for (const gen of [0, -1, 1.5, "7", null]) {
+		writeFileAtomic({ dir, name: "SPENT", text: JSON.stringify({ ...spentFile(fold, 1000, 250), gen }) });
+		assert.equal(readSpent({ dir, name: own }).gen, null, `a generation of ${JSON.stringify(gen)} is none`);
+	}
+	// With a generation, a count that is missing or not a count says someone may wait: fail toward taking the turn.
+	for (const waiting of [undefined, -1, 1.5, "0", null]) {
+		const { waiting: _drop, ...rest } = spentFile(fold, 1000, 250, 7);
+		writeFileAtomic({ dir, name: "SPENT", text: JSON.stringify(waiting === undefined ? rest : { ...rest, waiting }) });
+		assert.equal(readSpent({ dir, name: own }).waiting, true, `a waiting count of ${JSON.stringify(waiting)}`);
+	}
+	writeFileAtomic({ dir, name: "SPENT", text: JSON.stringify({ ...spentFile(fold, 1000, 250, 7, 1, 5), waitingSince: 9 }) });
+	assert.equal(readSpent({ dir, name: own }).waitingSince, null, "a waitingSince after its own generation is none");
+	writeFileAtomic({ dir, name: "SPENT", text: "{" });
+	assert.deepEqual(readSpent({ dir, name: own }), { external: Infinity, inflight: 0, gen: null, present: true, waiting: true, waitingSince: null });
+	const fifoDir = tempDir("pi-dispatch-spent-fifo-");
+	execFileSync("mkfifo", [join(fifoDir, "SPENT")]);
+	assert.throws(() => readSpent({ dir: fifoDir, name: own }), /unreadable SPENT/, "the cost guard reads the throw as Infinity");
 });
 
 
@@ -379,6 +417,482 @@ test("startChildMeter: the policy guard still decides first; a refused call writ
 	const { guard } = fake.calls[0];
 	assert.equal(guard.admit({ method: "streamSimple", model: { provider: "fake", id: "m1" }, args: [] }), MODEL_NOT_ALLOWED);
 	assert.equal(read().totals.calls, 0);
+});
+
+// ── Issue #985: a child's call waits for holds in other processes ───────────────────────────────────────────
+
+/** Input free, 250 output tokens at $2 per million: a bound of 500 micro-dollars by the real callCostBound. */
+const CHILD_MODEL = Object.freeze({ provider: "fake", id: "m1", api: "openai-completions", baseUrl: "http://127.0.0.1:1", cost: { input: 0, output: 2, cacheRead: 0, cacheWrite: 0 }, maxTokens: 250, compat: { maxTokensField: "max_tokens" } });
+const childCall = (waiter = null, model = CHILD_MODEL) => ({ method: "streamSimple", model, args: [{ messages: [] }, {}], waitable: true, waiter });
+/**
+ * A SPENT as the parent writes it: `total` outside, `inflight` of it in flight in other processes, its generation, and
+ * how many calls wait in the job since which generation (the parent publishes a child's waiting from its ledger).
+ */
+const spentOf = (total, inflight, { gen = 1, waiting = 0, since = null } = {}) => JSON.stringify({ v: 1, total, byLedger: {}, inflight, inflightByLedger: {}, gen, waiting, ...(since === null ? {} : { waitingSince: since }) });
+/** The ledger's reservation fields: what a call that waits must not change. */
+const reservation = (ledger) => ({ calls: ledger.totals.calls, unresolved: ledger.totals.unresolved, inflightMicros: ledger.inflightMicros });
+const microtask = () => new Promise((resolve) => setImmediate(resolve));
+
+/** A fake interval for the child cost guard's drain, run by hand (`tick()`). */
+function handTimer() {
+	const timer = { armed: null };
+	timer.set = (run) => (timer.armed = { run, unref() {}, ref() {} });
+	timer.clear = (handle) => {
+		if (timer.armed === handle) timer.armed = null;
+	};
+	timer.tick = () => timer.armed?.run();
+	return timer;
+}
+
+/** A capped child (cap `cap`) in a fresh directory with a hand-run drain timer and a SPENT of `total`/`inflight`. */
+async function waitingChild({ cap = 1000, total, inflight, writeFs } = {}) {
+	const fake = fakeInstall();
+	const timer = handTimer();
+	const dir = tempDir("pi-dispatch-child-wait-");
+	const name = "96.0123456789abcdef.json";
+	writeFileAtomic({ dir, name: "SPENT", text: spentOf(total, inflight) });
+	const child = await startChildMeter({ ModelRuntime: ChildRuntime, compat: FAKE_COMPAT, env: { PI_MAX_COST_MICROS: String(cap) }, dir, name, install: fake.install, onExit: () => {}, now: () => 0, setTimer: timer.set, clearTimer: timer.clear, ...(writeFs ? { writeFs } : {}) });
+	const read = () => JSON.parse(readFileSync(join(dir, name), "utf8"));
+	return { child, dir, name, read, timer, ...fake.calls[0] };
+}
+
+/**
+ * A stream as pi's EventStream behaves for these tests: push() queues an event and a terminal one resolves result();
+ * end() resolves result() with what it is given and ends the iteration.
+ */
+class ChildStream {
+	constructor() {
+		this.events = [];
+		this.waiting = [];
+		this.done = false;
+		this.final = new Promise((resolve) => (this.resolve = resolve));
+	}
+	push(event) {
+		if (this.done) return;
+		if (event.type === "done" || event.type === "error") {
+			this.done = true;
+			this.resolve(event.type === "done" ? event.message : event.error);
+		}
+		const waiter = this.waiting.shift();
+		if (waiter) waiter({ value: event, done: false });
+		else this.events.push(event);
+	}
+	end(result) {
+		this.done = true;
+		if (result !== undefined) this.resolve(result);
+		for (const waiter of this.waiting.splice(0)) waiter({ value: undefined, done: true });
+	}
+	async *[Symbol.asyncIterator]() {
+		while (true) {
+			if (this.events.length > 0) yield this.events.shift();
+			else if (this.done) return;
+			else {
+				const next = await new Promise((resolve) => this.waiting.push(resolve));
+				if (next.done) return;
+				yield next.value;
+			}
+		}
+	}
+	result() {
+		return this.final;
+	}
+}
+
+/** Whether `promise` settles within a few event-loop turns. */
+async function settlesSoon(promise) {
+	const hung = new Promise((resolve) => setTimeout(() => resolve("hung"), 50));
+	return Promise.race([Promise.resolve(promise).then(() => "settled", () => "settled"), hung]);
+}
+
+test("startChildMeter (issue #985): a call refused only by holds in other processes waits; COST_WAIT writes no reservation, its waiting is published, and the retry admitted in its turn writes its reservation before its dispatch", async () => {
+	const { dir, read, guard, timer } = await waitingChild({ total: 700, inflight: 600 });
+	assert.deepEqual([typeof guard.wait, typeof guard.leave, typeof guard.close, typeof guard.waiting], ["function", "function", "function", "function"], "the child's guard offers the cost guard's queue");
+	const before = read();
+	assert.equal(guard.admit(childCall()), COST_WAIT, "0 + 700 + 500 > 1000; 100 settled elsewhere + 500 <= 1000 once the 600 settles");
+	assert.deepEqual(read(), before, "nothing written for a call that waits: it is not going out");
+	const verdicts = [];
+	let waiter = null;
+	waiter = guard.wait(() => {
+		const verdict = guard.admit(childCall(waiter));
+		verdicts.push(verdict);
+		// Admitted: its reservation is on disk already, before anything could be dispatched.
+		if (verdict === null) verdicts.push(reservation(read()));
+		if (verdict !== COST_WAIT) guard.leave(waiter);
+	});
+	await microtask();
+	assert.deepEqual([reservation(read()), read().waiting], [reservation(before), 1], "no reservation; the wait itself is published, so every other process takes its turn");
+	timer.tick();
+	assert.deepEqual(verdicts, [COST_WAIT]);
+	// The hold elsewhere settled at 50; the parent's next SPENT shows this child's waiting, since this generation.
+	writeFileAtomic({ dir, name: "SPENT", text: spentOf(150, 0, { gen: 2, waiting: 1, since: 2 }) });
+	timer.tick();
+	assert.deepEqual(verdicts, [COST_WAIT, COST_WAIT], "it fits, but not in the first generation that shows the wait: a call elsewhere may have been admitted then without its turn");
+	writeFileAtomic({ dir, name: "SPENT", text: spentOf(150, 0, { gen: 3, waiting: 1, since: 2 }) });
+	timer.tick();
+	assert.deepEqual(verdicts, [COST_WAIT, COST_WAIT, null, { calls: 1, unresolved: 1, inflightMicros: 500 }], "one reservation, written by the admission itself");
+	assert.ok(readdirSync(dir).includes(waitClaimName(3)), "in generation 3's turn");
+	await microtask();
+	assert.equal(read().waiting, 0, "and the end of its wait published");
+	assert.equal(timer.armed, null);
+});
+
+test("startChildMeter (issue #985): the ledger shows the hold a call is sent under, written again as its onPayload returns; a write that fails then refuses the call", async () => {
+	let failing = false;
+	const writeFs = { ...realWriteFs(), openSync: (...args) => {
+		if (failing) throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+		return realWriteFs().openSync(...args);
+	} };
+	const { read, guard, isStopped } = await waitingChild({ cap: 100_000, total: 0, inflight: 0, writeFs });
+	const prepared = () => {
+		const call = childCall();
+		assert.equal(guard.admit(call), null);
+		const [, options] = guard.prepare({ ...call, stop: () => {}, stopped: () => null });
+		guard.bind(new ChildStream());
+		return options;
+	};
+	const first = prepared();
+	assert.equal(read().inflightMicros, 500, "the pre-dispatch write: the admission's bound");
+	// 1000 output tokens at $2 per million: the hold grows from 500 to 2000.
+	assert.deepEqual(await first.onPayload({ model: "m1", max_tokens: 1000 }), { model: "m1", max_tokens: 1000 });
+	assert.equal(read().inflightMicros, 2000, "on disk before the provider sends: the hold it is sent under");
+	const second = prepared();
+	failing = true;
+	await assert.rejects(second.onPayload({ model: "m1", max_tokens: 1000 }), (error) => error.message === STOP_MESSAGES[TOKEN_BUDGET], "the write failed, so the hook throws and nothing is sent");
+	failing = false;
+	assert.equal(isStopped(), TOKEN_BUDGET, "and the child stops, as for a failed pre-dispatch write");
+});
+
+test("startChildMeter (issue #985): a parent's STOP reaches a child call waiting for room: the drain timer wakes it, it ends with the stop's hard stop, and the provider is never called", async () => {
+	const { dir, read, meter, guard, isStopped, timer } = await waitingChild({ total: 700, inflight: 600 });
+	const dispatched = [];
+	class Runtime {
+		streamSimple(model) {
+			dispatched.push(model.id);
+			return new ChildStream();
+		}
+	}
+	const layer = wrapModelRuntime({ ModelRuntime: Runtime, meter, hardStop: makeHardStopStream({ createStream: () => new ChildStream() }), guard, isStopped, deferred: makeDeferredStream({ createStream: () => new ChildStream() }) });
+	try {
+		const before = read();
+		const answer = new Runtime().streamSimple(CHILD_MODEL, { messages: [] }, {});
+		timer.tick();
+		assert.equal(await settlesSoon(answer.result()), "hung", "waiting: answered with a placeholder that has not ended");
+		assert.deepEqual([dispatched, meter.state.stopReason, guard.snapshot().costRefused], [[], null, 0], "not dispatched, not refused, nothing stopped");
+		assert.deepEqual([reservation(read()), read().waiting], [reservation(before), 1], "no reservation for it; its wait published");
+		writeFileAtomic({ dir, name: "STOP", text: JSON.stringify(stopFile(COST_CAP)) });
+		timer.tick();
+		const final = await answer.result();
+		assert.deepEqual({ stopReason: final.stopReason, errorMessage: final.errorMessage, total: final.usage.totalTokens }, { stopReason: "aborted", errorMessage: STOP_MESSAGES[COST_CAP], total: 0 });
+		assert.deepEqual([dispatched, meter.state.stopReason, timer.armed], [[], COST_CAP, null], "the parent's stop is the child's, and the provider was never called");
+	} finally {
+		layer.restore();
+	}
+});
+
+test("startChildMeter (issue #985): a parent's STOP reaches a child call waiting at its final payload, which holds the front of the queue, and it is never sent", async () => {
+	const { dir, meter, guard, isStopped, timer } = await waitingChild({ total: 500, inflight: 500 });
+	const sent = [];
+	const failed = [];
+	class Runtime {
+		streamSimple(model, context, options) {
+			const stream = new ChildStream();
+			(async () => {
+				try {
+					// 350 output tokens at $2 per million: the final hold is 700, and 500 + 700 > 1000 while the parent's 500 is in flight.
+					sent.push(await options.onPayload({ model: "m1", max_tokens: 350 }, model));
+				} catch (error) {
+					failed.push(error.message);
+					const message = { role: "assistant", content: [], usage: { input: 0, output: 0, totalTokens: 0, cost: { total: 0 } }, stopReason: "aborted", errorMessage: error.message };
+					stream.push({ type: "error", reason: "aborted", error: message });
+				}
+			})();
+			return stream;
+		}
+	}
+	const layer = wrapModelRuntime({ ModelRuntime: Runtime, meter, hardStop: makeHardStopStream({ createStream: () => new ChildStream() }), guard, isStopped, deferred: makeDeferredStream({ createStream: () => new ChildStream() }) });
+	try {
+		const answer = new Runtime().streamSimple({ ...CHILD_MODEL, maxTokens: 150 }, { messages: [] }, {}); // admitted at 300
+		await settlesSoon(null);
+		assert.deepEqual([sent, failed, guard.spend().inflightMicros], [[], [], 0], "waiting at the final payload, its 300 given back");
+		timer.tick();
+		assert.deepEqual([sent, failed], [[], []]);
+		writeFileAtomic({ dir, name: "STOP", text: JSON.stringify(stopFile(COST_CAP)) });
+		timer.tick();
+		await settlesSoon(answer.result());
+		assert.deepEqual([sent, failed, meter.state.stopReason, timer.armed], [[], [STOP_MESSAGES[COST_CAP]], COST_CAP, null], "ended by the parent's stop, never sent");
+	} finally {
+		layer.restore();
+	}
+});
+
+test("claimWait (issue #985): one winner per generation, a planted name only loses it, and nothing invalid is ever won", () => {
+	const dir = tempDir("pi-dispatch-claim-");
+	assert.equal(waitClaimName(3), "CLAIM.3");
+	assert.equal(CHILD_LEDGER_NAME.test(waitClaimName(3)), false, "never a ledger name: the fold does not read it");
+	assert.equal(claimWait({ dir, gen: 3 }), true);
+	assert.equal(claimWait({ dir, gen: 3 }), false, "taken");
+	assert.equal(claimWait({ dir, gen: 4 }), true, "the next generation is a new name");
+	execFileSync("mkfifo", [join(dir, waitClaimName(5))]);
+	symlinkSync(join(dir, "elsewhere"), join(dir, waitClaimName(6)));
+	assert.deepEqual([claimWait({ dir, gen: 5 }), claimWait({ dir, gen: 6 })], [false, false], "a FIFO or a link at the name is a lost claim, never opened");
+	assert.equal(readdirSync(dir).includes("elsewhere"), false, "and the link's target is never created");
+	for (const gen of [0, -1, 1.5, "7", null]) assert.equal(claimWait({ dir, gen }), false, JSON.stringify(gen));
+	assert.equal(claimWait({ dir: join(dir, "gone"), gen: 1 }), false, "a directory that is gone: lost, the waiter waits on");
+});
+
+/** Children started in one ledger directory, each with its guard, meter and hand-run drain timer. */
+async function childrenIn(dir, pids, { writeFsOf = () => undefined } = {}) {
+	const children = [];
+	for (const [pid, nonce] of pids) {
+		const fake = fakeInstall();
+		const timer = handTimer();
+		const name = `${pid}.${nonce}.json`;
+		const writeFs = writeFsOf(name);
+		await startChildMeter({ ModelRuntime: ChildRuntime, compat: FAKE_COMPAT, env: { PI_MAX_COST_MICROS: "1000" }, dir, name, install: fake.install, onExit: () => {}, now: () => 0, setTimer: timer.set, clearTimer: timer.clear, ...(writeFs ? { writeFs } : {}) });
+		children.push({ name, timer, guard: fake.calls[0].guard, meter: fake.calls[0].meter, verdicts: [], stream: null });
+	}
+	return children;
+}
+
+/** Queue a child's call the way the wrappers do: offered, told COST_WAIT, queued; bound and observed once admitted. */
+function queueChildCall(child) {
+	let waiter = null;
+	waiter = child.guard.wait(() => {
+		const verdict = child.guard.admit(childCall(waiter));
+		child.verdicts.push(verdict);
+		if (verdict === null) admitted(child);
+		if (verdict !== COST_WAIT) child.guard.leave(waiter);
+	});
+}
+
+/** An admitted child call, bound and observed as the wrapper does, so its settle reaches the ledger through the meter. */
+function admitted(child) {
+	child.guard.bind((child.stream = new ChildStream()));
+	child.meter.observe(child.stream, { provider: "fake", model: "m1", sessionId: child.name });
+}
+
+/**
+ * The parent's tick as child-watch writes SPENT: its own spend and in-flight, every child ledger folded (the real fold),
+ * the generation, how many calls wait in the job (the real ledgerWaiting sum) and since which generation.
+ */
+function parentTicks(dir, parent) {
+	const tick = { gen: 0, since: null, onOpen: null };
+	// The fold's reads: `tick.onOpen(name)` runs right after a ledger is opened, so a test can land a step INSIDE the
+	// tick, between the fold's read of a ledger (the file as it was) and the SPENT write.
+	const foldFs = { readdirSync, lstatSync: lstatSyncReal, fstatSync: fstatSyncReal, readSync: readSyncReal, closeSync: closeSyncReal, constants: constantsReal, openSync: (path, flags) => {
+		const fd = openSyncReal(path, flags);
+		tick.onOpen?.(String(path).split("/").at(-1));
+		return fd;
+	} };
+	tick.run = () => {
+		tick.gen += 1;
+		const fold = usageMeter.foldChildLedgers({ dir, fs: foldFs });
+		tick.since = fold.liveWaiting > 0 ? (tick.since ?? tick.gen) : null;
+		writeFileAtomic({ dir, name: "SPENT", text: JSON.stringify(spentFile(fold, parent.spent + parent.inflight, parent.inflight, tick.gen, fold.liveWaiting, tick.since)) });
+	};
+	return tick;
+}
+
+const holding = (children, parent) => parent.spent + parent.inflight + children.reduce((sum, child) => sum + child.guard.spend().spentMicros + child.guard.spend().inflightMicros, 0);
+const settleChild = async (child) => {
+	child.stream.push({ type: "done", reason: "stop", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }], usage: { input: 10, output: 1, totalTokens: 11, cost: { total: 0.00005 } } } });
+	await microtask();
+};
+
+test("startChildMeter (issue #985): children waiting for the same room take turns, one per SPENT generation, so the room is never taken twice", async () => {
+	const dir = tempDir("pi-dispatch-child-turns-");
+	const children = await childrenIn(dir, [[11, "00000000000000aa"], [12, "00000000000000bb"]]);
+	const parent = { spent: 0, inflight: 600 };
+	const tick = parentTicks(dir, parent);
+	const within = (label) => assert.ok(holding(children, parent) <= 1000, `${label}: the job holds ${holding(children, parent)} > 1000`);
+	tick.run();
+	for (const child of children) {
+		assert.equal(child.guard.admit(childCall()), COST_WAIT, `${child.name}: 600 + 500 > 1000, 0 + 500 <= 1000 once the parent's 600 settles`);
+		queueChildCall(child);
+	}
+	await microtask(); // both children publish their waiting
+	Object.assign(parent, { spent: 100, inflight: 0 }); // the parent's call settled: room for ONE child call (100 + 500 + 500 > 1000)
+	tick.run(); // the first generation that shows the waiting: no call that waited is admitted in it
+	const [a, b] = children;
+	a.timer.tick();
+	assert.deepEqual(a.verdicts, [COST_WAIT]);
+	tick.run();
+	a.timer.tick();
+	within("the first child took the room");
+	b.timer.tick();
+	within("the second child judged the same SPENT");
+	assert.deepEqual([a.verdicts, b.verdicts], [[COST_WAIT, null], [COST_WAIT]], "one generation, one turn: the second waits though the room looked free to it");
+	assert.deepEqual(readdirSync(dir).filter((file) => file.startsWith("CLAIM.")), [waitClaimName(tick.gen)]);
+	tick.run(); // the next generation holds the first child's 500
+	b.timer.tick();
+	within("the next generation");
+	assert.deepEqual(b.verdicts, [COST_WAIT, COST_WAIT], "100 + 500 + 500 > 1000: still no room");
+	await settleChild(a);
+	tick.run();
+	b.timer.tick();
+	within("the first child's call settled at 50");
+	assert.deepEqual(b.verdicts, [COST_WAIT, COST_WAIT, null], "150 + 500 <= 1000");
+});
+
+test("startChildMeter (issue #985): while a child waits, a FRESH call in another child takes its turn too, so a waiter's turn and a fresh call never take one room in the same generation, in either order", async () => {
+	for (const freshFirst of [false, true]) {
+		const dir = tempDir("pi-dispatch-child-fresh-");
+		const [waiting, fresh] = await childrenIn(dir, [[21, "00000000000000cc"], [22, "00000000000000dd"]]);
+		const children = [waiting, fresh];
+		const parent = { spent: 0, inflight: 600 };
+		const tick = parentTicks(dir, parent);
+		const within = (label) => assert.ok(holding(children, parent) <= 1000, `${freshFirst ? "fresh first" : "waiter first"}, ${label}: the job holds ${holding(children, parent)} > 1000`);
+		tick.run();
+		assert.equal(waiting.guard.admit(childCall()), COST_WAIT);
+		queueChildCall(waiting);
+		await microtask();
+		Object.assign(parent, { spent: 100, inflight: 0 }); // room for ONE call of 500
+		tick.run();
+		tick.run(); // two generations that show the wait: the waiter's turn is open
+		const freshCall = () => {
+			const verdict = fresh.guard.admit(childCall());
+			fresh.verdicts.push(verdict);
+			if (verdict === null) admitted(fresh);
+		};
+		if (freshFirst) freshCall();
+		waiting.timer.tick();
+		if (!freshFirst) freshCall();
+		within("one generation");
+		const admittedNow = [waiting.verdicts.at(-1), fresh.verdicts.at(-1)].filter((verdict) => verdict === null).length;
+		assert.equal(admittedNow, 1, `${freshFirst ? "fresh first" : "waiter first"}: exactly one call takes the room (waiter ${String(waiting.verdicts.at(-1))}, fresh ${String(fresh.verdicts.at(-1))})`);
+		assert.equal(freshFirst ? waiting.verdicts.at(-1) : fresh.verdicts.at(-1), COST_WAIT, "the other waits for its turn");
+	}
+});
+
+test("startChildMeter (issue #985): while a child waits, a FORWARD in another child (a call that may not wait) with no turn is refused, never admitted beside the waiter's turn", async () => {
+	const dir = tempDir("pi-dispatch-child-forward-");
+	const [waiting, forwarding] = await childrenIn(dir, [[23, "00000000000000ee"], [24, "00000000000000ff"]]);
+	const parent = { spent: 0, inflight: 600 };
+	const tick = parentTicks(dir, parent);
+	tick.run();
+	assert.equal(waiting.guard.admit(childCall()), COST_WAIT);
+	queueChildCall(waiting);
+	await microtask();
+	Object.assign(parent, { spent: 100, inflight: 0 }); // room for ONE call of 500
+	tick.run();
+	tick.run();
+	waiting.timer.tick();
+	assert.deepEqual(waiting.verdicts, [null], "the waiter took the room in its turn");
+	assert.equal(forwarding.guard.admit({ ...childCall(), waitable: false }), COST_CAP, "the forward fits by its SPENT, but the turn is the waiter's: refused, as before waiting existed");
+	assert.ok(holding([waiting, forwarding], parent) <= 1000, `the job holds ${holding([waiting, forwarding], parent)}`);
+});
+
+test("startChildMeter (issue #985): no process takes the generation right after another's turn: what that turn admitted inside the parent's tick is missing from the next SPENT", async () => {
+	const dir = tempDir("pi-dispatch-child-after-turn-");
+	const [waiting, fresh] = await childrenIn(dir, [[27, "0000000000000c0c"], [28, "0000000000000d0d"]]);
+	const parent = { spent: 0, inflight: 600 };
+	const tick = parentTicks(dir, parent);
+	const within = (label) => assert.ok(holding([waiting, fresh], parent) <= 1000, `${label}: the job holds ${holding([waiting, fresh], parent)} > 1000`);
+	tick.run();
+	assert.equal(waiting.guard.admit(childCall()), COST_WAIT);
+	queueChildCall(waiting);
+	await microtask();
+	Object.assign(parent, { spent: 100, inflight: 0 }); // room for ONE call of 500
+	tick.run();
+	tick.run(); // generation 3: the waiter's turn is open
+	// The parent's tick for generation 4 opens the waiter's ledger; right then the waiter takes generation 3's turn and is
+	// admitted. The fold read the file as it was, so SPENT 4 holds 100, not 600.
+	tick.onOpen = (file) => {
+		if (file !== waiting.name) return;
+		tick.onOpen = null;
+		waiting.timer.tick();
+	};
+	tick.run();
+	assert.deepEqual(waiting.verdicts, [null], "admitted in generation 3's turn, inside the tick");
+	assert.equal(JSON.parse(readFileSync(join(dir, "SPENT"), "utf8")).total, 100, "the premise: SPENT 4 misses it");
+	const verdict = fresh.guard.admit(childCall());
+	within("the generation after the turn");
+	assert.equal(verdict, COST_WAIT, "generation 4 follows the waiter's turn: the fresh call waits for the next");
+	tick.run();
+	assert.equal(fresh.guard.admit(childCall()), COST_WAIT, "SPENT 5 shows the 500: 100 + 500 + 500 > 1000");
+	within("the next generation");
+});
+
+test("startChildMeter (issue #985): a call that waited is not admitted in the first generation that shows the wait: a call admitted without a turn inside that tick is missing from it", async () => {
+	const dir = tempDir("pi-dispatch-child-first-gen-");
+	const [waiting, fresh] = await childrenIn(dir, [[29, "0000000000000e0e"], [30, "0000000000000f0f"]]);
+	const parent = { spent: 0, inflight: 600 };
+	const tick = parentTicks(dir, parent);
+	const within = (label) => assert.ok(holding([waiting, fresh], parent) <= 1000, `${label}: the job holds ${holding([waiting, fresh], parent)} > 1000`);
+	const small = { ...CHILD_MODEL, maxTokens: 200 }; // a bound of 400
+	tick.run(); // generation 1: nobody waits
+	assert.equal(waiting.guard.admit(childCall()), COST_WAIT, "600 + 500 > 1000");
+	queueChildCall(waiting);
+	await microtask(); // the wait is in the waiter's ledger, not yet in any SPENT
+	Object.assign(parent, { spent: 200, inflight: 0 }); // the parent's call settled at 200
+	// Inside the parent's tick for generation 2, the other child, judging SPENT 1 (nobody waits, 600 + 400 <= 1000), is
+	// admitted with no turn; the fold had already read its ledger, so SPENT 2, the first to show the wait, misses its 400.
+	tick.onOpen = (file) => {
+		if (file !== fresh.name) return;
+		tick.onOpen = null;
+		const verdict = fresh.guard.admit(childCall(null, small));
+		fresh.verdicts.push(verdict);
+		if (verdict === null) admitted(fresh);
+	};
+	tick.run();
+	const spent = JSON.parse(readFileSync(join(dir, "SPENT"), "utf8"));
+	assert.deepEqual([fresh.verdicts, spent.total, spent.waitingSince], [[null], 200, 2], "the premise: SPENT 2 shows the wait and misses the 400");
+	waiting.timer.tick();
+	within("the first generation that shows the wait");
+	assert.deepEqual(waiting.verdicts, [COST_WAIT], "it fits by SPENT 2 (200 + 500), but a call admitted without a turn may be missing from it");
+	tick.run();
+	waiting.timer.tick();
+	within("the next generation");
+	assert.deepEqual(waiting.verdicts, [COST_WAIT, COST_WAIT], "SPENT 3 shows the 400: 200 + 400 + 500 > 1000");
+});
+
+test("startChildMeter (issue #985): a turn is never won twice across a generation boundary: a claim made on an older SPENT that a newer one overtook is lost", async () => {
+	const dir = tempDir("pi-dispatch-child-boundary-");
+	const hooked = { name: null, run: null };
+	const writeFsOf = (name) => ({ ...realWriteFs(), openSync: (path, ...rest) => {
+		if (name === hooked.name && String(path).includes("/CLAIM.") && hooked.run) {
+			const run = hooked.run;
+			hooked.run = null;
+			run();
+		}
+		return realWriteFs().openSync(path, ...rest);
+	} });
+	const [waiting, fresh] = await childrenIn(dir, [[25, "0000000000000a0a"], [26, "0000000000000b0b"]], { writeFsOf });
+	const parent = { spent: 0, inflight: 600 };
+	const tick = parentTicks(dir, parent);
+	const within = (label) => assert.ok(holding([waiting, fresh], parent) <= 1000, `${label}: the job holds ${holding([waiting, fresh], parent)} > 1000`);
+	tick.run();
+	assert.equal(waiting.guard.admit(childCall()), COST_WAIT);
+	queueChildCall(waiting);
+	await microtask();
+	Object.assign(parent, { spent: 100, inflight: 0 }); // room for ONE call of 500
+	tick.run();
+	tick.run(); // generation 3: the waiter's turn is open
+	// As the waiter creates generation 3's claim, the parent writes generation 4 and the other child calls: it finds no
+	// claim for 3 (not created yet), takes 4, and is admitted.
+	hooked.name = waiting.name;
+	hooked.run = () => {
+		tick.run();
+		const verdict = fresh.guard.admit(childCall());
+		fresh.verdicts.push(verdict);
+		if (verdict === null) admitted(fresh);
+	};
+	waiting.timer.tick();
+	within("both judged");
+	assert.deepEqual([fresh.verdicts, waiting.verdicts], [[null], [COST_WAIT]], "the fresh call took generation 4's turn; the waiter's claim on 3 was overtaken, so it waits");
+	assert.deepEqual(readdirSync(dir).filter((file) => file.startsWith("CLAIM.")).sort(), [waitClaimName(3), waitClaimName(4)]);
+});
+
+test("startChildMeter (issue #985): a child's turn is never the generation right after another process's turn, nor, for a call that waited, the first generation that shows the wait", async () => {
+	const { dir, read, guard } = await waitingChild({ total: 0, inflight: 0 });
+	writeFileAtomic({ dir, name: "SPENT", text: spentOf(0, 0, { gen: 5, waiting: 1, since: 3 }) }); // another child waits
+	writeFileSync(join(dir, waitClaimName(4)), ""); // and another process took generation 4's turn
+	assert.equal(guard.admit(childCall()), COST_WAIT, "it fits, but generation 5 follows another process's turn");
+	assert.equal(reservation(read()).calls, 0);
+	rmSyncReal(join(dir, waitClaimName(4)));
+	assert.equal(guard.admit(childCall()), null, "with generation 4 free, it takes generation 5's turn");
+	assert.ok(readdirSync(dir).includes(waitClaimName(5)));
+	assert.equal(guard.admit(childCall()), null, "and keeps it for its next admission in generation 5");
 });
 
 /** The real fs functions writeFileAtomic uses, for a test that wraps one of them. */

@@ -290,7 +290,7 @@ export function approvalRecordOf(value) {
  * `COST_REFUSALS` (`image/runner/src/outcome.mjs`), restated because the shipped worker cannot import the runner, and
  * pinned to it by a test that reads that source. CLOSED, because the value reaches the PII-free record.
  */
-export const COST_CAP_WHYS = Object.freeze(["unboundable", "external", "over-cap", "final-payload"]);
+export const COST_CAP_WHYS = Object.freeze(["unboundable", "external", "over-cap", "final-payload", "turn"]);
 
 /**
  * The `why` off the decisive exit line (`decisiveExitLine`), or `null`: a member of `COST_CAP_WHYS`, and only when that
@@ -299,7 +299,7 @@ export const COST_CAP_WHYS = Object.freeze(["unboundable", "external", "over-cap
  * The line is container-written, so nothing it carries is trusted as text: a value outside the closed set is null,
  * never a string copied through. It feeds no classification. The processor reads it only in its exit-2 branch, and
  * only beside a `cost-cap` reason, where it becomes the record's `why`: the worst a forged line can do is name the
- * wrong rule of the three.
+ * wrong rule.
  */
 /** Bounded refusal diagnostics: hashes and closed reasons only, never agent-authored names. */
 export const MODEL_ROLE_REFUSAL_REASONS = Object.freeze(["unknown-role", "model-not-allowed", "unknown-agent", "invalid-arguments", "aborted"]);

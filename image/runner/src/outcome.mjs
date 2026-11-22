@@ -37,12 +37,14 @@ export const AWAITING_APPROVAL = "awaiting-approval";
 /**
  * Which rule of the cost guard refused the call that stopped a `cost-cap` job (issue #507), as the exit line's `why`:
  * `unboundable` (the call has no cost bound, most often an openai-completions model whose output cap is not sent as
- * `max_tokens`), `external` (the children's spend could not be read, so the guard failed closed) or `over-cap` (the
- * bound would take the job past its cap). CLOSED, because the worker copies it into the PII-free run record: it keeps
+ * `max_tokens`), `external` (the children's spend could not be read, so the guard failed closed), `over-cap` (the
+ * bound would take the job past its cap even after every call in flight settles), `final-payload` (the request as
+ * finally built would, issue #985) or `turn` (issue #985: a call that may not wait, such as a forwarding provider's,
+ * fitted the cap while another process of the job had a call waiting, and it was not this process's turn). CLOSED, because the worker copies it into the PII-free run record: it keeps
  * a `why` only when it is a member of its own copy, which a worker test pins to this list. A `cost-cap` stop the guard
  * did not refuse (a displaced compat entry, a child's spend or refusal, an unmetered child) writes no `why`.
  */
-export const COST_REFUSALS = Object.freeze(["unboundable", "external", "over-cap", "final-payload"]);
+export const COST_REFUSALS = Object.freeze(["unboundable", "external", "over-cap", "final-payload", "turn"]);
 
 /**
  * The exit line's `why` for a decided outcome: `{ why }` when the outcome is a `cost-cap` stop and `why` is one of

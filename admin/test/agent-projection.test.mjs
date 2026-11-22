@@ -95,3 +95,8 @@ test("an agent's and a viewer's pages over a file that cannot be read each say s
     if (role === "agent") assert.ok(!trigger.includes("EISDIR") && !config.includes("EISDIR"), "the code stays out of an agent's copy");
   }
 });
+
+test("a cost-cap record's why reaches an agent by name for every rule of the cost guard, issue #985's final-payload and turn included", () => {
+  for (const why of ["unboundable", "external", "over-cap", "final-payload", "turn"]) assert.deepEqual(agentReadProjection({ run: { reason: "cost-cap", why } }), { run: { reason: "cost-cap", why } }, why);
+  assert.deepEqual(agentReadProjection({ run: { reason: "cost-cap", why: "qwen2.5:3b" } }), { run: { reason: "cost-cap", why: null } }, "anything else is no why");
+});

@@ -106,14 +106,26 @@ What to do: check the provider key on the worker and what it is allowed to use, 
 ### cost-cap
 
 The next AI call could have taken the run past its cost limit, so the runner did not make it. A call that is held back
-only by other calls still running in the same process waits for them first, so the run stops only when waiting cannot
-make room, or after 15 minutes with no call finishing. Calls of a pi child process, such as a role's task, do not wait:
-spend in other processes counts as already spent. The record's `why` says which rule refused: the call's cost could not be bounded
-(`unboundable`), its bound would have passed the cap (`over-cap`), the request as finally built for the provider would
-have passed it (`final-payload`), or the spend of the job's subprocesses could not be read (`external`).
+only by other calls still running, in the job or in its pi child processes (a role's tasks), waits for them first. What
+the job and its children already spent counts as spent. The record's `why` says which rule refused:
 
-What to do: raise the trigger's `run.maxCostUsd`, or the deployment's `PI_MAX_COST_USD`, if the work needs more. See
-[costs.md](costs.md).
+- `unboundable`: the call's cost could not be bounded;
+- `over-cap`: the call's most would have passed the cap, and waiting could not help: what was already spent left no
+  room even once the calls still running finished, it waited 15 minutes with no call finishing, or it was a call that
+  cannot wait (one made inside another call) and the calls still running left no room;
+- `final-payload`: the request as finally built for the provider would have passed the cap, the same way;
+- `external`: the spend of the job's subprocesses could not be read;
+- `turn`: a call that cannot wait fitted the cap, but it was not its turn, below.
+
+`turn` is rare. A call made inside another call, such as a provider that forwards to another model, cannot wait. While a
+call in another process of the same job waits, every new call takes its turn, one process at a time, and such a call
+that comes when it is not its process's turn is refused, because taking the room the waiting call is about to take
+could pass the cap. Before calls could wait, the waiting call would have been refused instead. Raising `maxCostUsd` does
+not help this stop.
+
+What to do: raise the trigger's `run.maxCostUsd`, or the deployment's `PI_MAX_COST_USD`, if the work needs more. For
+`turn`, run the forwarding provider's work outside parallel role tasks, or give the job enough room that no call has to
+wait. See [costs.md](costs.md#parallel-calls).
 
 ### model-not-allowed
 

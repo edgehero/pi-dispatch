@@ -9,7 +9,7 @@ import { NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE } from "./newer-release.
 import { isOutcomeNote, outcomeNote } from "./loaded-words.mjs";
 // These are source enums, not a grammar claiming that arbitrary single-word prose is safe.
 const REASON_TOKENS = new Set([...Object.keys(REASONS), ...Object.keys(SESSION_REASON_TEXT), ...Object.keys(PLAN_REASON_TEXT), ...Object.keys(DEFER_WHYS), ...MEMORY_REASONS, ...CPU_REASONS]);
-const WHY_TOKENS = new Set([...REASON_TOKENS, "fallback-unlisted", "unboundable", "external", "over-cap"]);
+const WHY_TOKENS = new Set([...REASON_TOKENS, "fallback-unlisted", "unboundable", "external", "over-cap", "final-payload", "turn"]);
 export const agentReasonToken = (value) => typeof value === "string" && REASON_TOKENS.has(value) ? value : null;
 const ID = /^[A-Za-z0-9_][A-Za-z0-9._:@/+#!~-]{0,299}$/;
 const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;

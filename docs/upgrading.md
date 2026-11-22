@@ -439,6 +439,15 @@ Release numbers come from the git tags.
 
 See [is it running](polling.md#is-it-running).
 
+### Unreleased: waiting under the cost cap (#985)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Run records | A `cost-cap` record's `why` can be `final-payload` or `turn` (a call that cannot wait refused while another process's call waited), each from the worker's closed list. Nothing moves: older records keep their values. |
+| Mixed versions | A worker older than this release drops a `why` it does not know, so a newer job image's `turn` or `final-payload` stop is recorded as `cost-cap` with no `why`; the stop itself is the same. The job image and the worker ship in one window ([the order](#the-order)). |
+
+See [reasons.md](reasons.md#cost-cap).
+
 ### 5.4.2
 
 #### Completed label-job receipts (#920)
