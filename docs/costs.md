@@ -308,6 +308,49 @@ fits but waits for its turn has `why: "turn"` on its `cost_wait`. `cost_wait` an
 `externalInflight`, the part of the children's spend still running, beside `external`. A refusal after a wait carries
 `waited` on its `cost_refused` line. All three hold numbers only.
 
+### What the cap charges
+
+The cap is judged against what the runner charges each call, and that is not always pi's price for it. A capped run's
+record says both, under `tokens` (issue #985):
+
+| key | what it is |
+|---|---|
+| `costChargedMicros` | what the cap charged: every settled call of the run and of its pi child processes, in micro-dollars |
+| `costLiftedMicros` | the part of that above pi's own price |
+| `costWaited` | calls that waited for room ([Parallel calls](#parallel-calls)) |
+| `costWarned` | 1 when the warning at 70% of the cap was queued for the agent, else 0 ([job limits](job-limits.md#a-warning-before-the-cost-cap)) |
+
+`tokens.cost` is pi's price for each call, added up. `costChargedMicros` less `costLiftedMicros` is the same amount,
+each call rounded up to the micro-dollar. The lift comes from two rules that keep the cap a hard limit where pi's price
+is not the whole cost:
+
+- **A call charged its most** (the bound under [Parallel calls](#parallel-calls)): one that failed or was cut after its
+  answer started, since its usage is partial and pi sends it again; one whose answer reported broken usage
+  ([A call that reports no usage](#a-call-that-reports-no-usage)); one with no price at all; and the call of a provider
+  that forwarded to another model, or whose dispatch threw.
+- **The long-context rate**: an Anthropic call past 200,000 input tokens is charged twice the input rates and 1.5 times
+  the output rate, which pi does not price ([Long context](#long-context)).
+
+So a run can stop at its cap while `tokens.cost` reads a fraction of it. A large `costLiftedMicros` says the cap went on
+these rules, not on pi's price: look for cut or failed calls and long contexts in the job log.
+
+When the cap refuses a call, the record's `costRefusal` holds the numbers that refusal judged, in micro-dollars:
+`spentMicros` (what the refusing process had been charged), `inflightMicros` (what its other calls still held),
+`externalMicros` (what the rest of the job had spent and held: the run's pi child processes, or, for a refusal inside a
+child, the run and the other children) and `boundMicros` (the most the refused call could cost). A refusal inside a pi
+child process, such as a role's task, that stopped the job is recorded as the job's, with the child's rule and numbers
+(it leaves no `cost_refused` line in the job log: a child's output goes to the tool that started it).
+
+- For `over-cap` and `final-payload` the four add up to more than the cap, except for a call refused after waiting 15
+  minutes with no call of the job finishing: its numbers can fit, and its `cost_refused` line carries `waited`. Raising
+  the cap does not help that stop; look in the job log for a call that hung.
+- For `turn` they fit, and raising the cap does not help that stop either.
+- There are none for `unboundable` and `external` (no bound, or no reading of the other processes, to give), for a
+  `final-payload` refusal whose final request could not be bounded or whose reading of the job's other processes
+  failed, and from an older image. The record's `why` is there all the same.
+
+Before this, the numbers were only on the job log's `cost_refused` line.
+
 ### How a run settles
 
 `dollars.basis` is one of four words:

@@ -52,7 +52,7 @@
  * The parent's cost guard reads `external()`: every child's ledgerCharge() (settled plus in flight) as of the last
  * fold, `externalInflight()`, the part of it a child's settle can still free, and `claim()` and `outsideWaiting()`, the
  * turn its admissions take while anyone in the job waits (issue #985). The exit line's cost and model counters add the children's
- * (`guardFields`).
+ * (`guardFields`), and so do its issue #985 charge keys (`chargeFields`). The cost warning reads `settled()`.
  */
 import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
@@ -100,7 +100,7 @@ const GUARD_FIELDS = Object.freeze(["costRefused", "boundExceeded", "longContext
 
 /** The fold of a directory with nothing in it: what setChildren gets before the first tick, so the keys are there. */
 function emptyFold() {
-	return { processes: 0, unmetered: 0, flooded: 0, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: [], spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0, settledMicros: 0, chargeMicros: 0, liveInflightMicros: 0, liveWaiting: 0, missing: false, files: new Map(), retired: null };
+	return { processes: 0, unmetered: 0, flooded: 0, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: [], spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0, settledMicros: 0, chargeMicros: 0, liveInflightMicros: 0, liveWaiting: 0, waited: 0, liftedMicros: 0, refusal: null, missing: false, files: new Map(), retired: null };
 }
 
 /** Whether a ledger's mark holds any spend at all. */
@@ -275,10 +275,12 @@ export function linuxProc({
  * written, and the detector alone sees the children). `guard()` returns the parent's policy guard or null (late, because
  * the guard's `external` is this hook's). `now` is a monotonic clock in ms (the wall-time grace off Linux, where a
  * proc with no `cpuMs` is used). Everything that touches the system is injected for the tests.
- * Returns `{ sample, teardown, external, externalInflight, claim, outsideWaiting, stopped, guardFields, view }`: the two
- * hook methods, the parent cost guard's `external`, `externalInflight`, `claim` and `outsideWaiting`, `stopped()` for the meter's onStop (writes STOP
- * at once rather than on the next tick), `guardFields()` (the exit line's guard counters plus the children's), and
- * `view()` (the counts).
+ * Returns `{ sample, teardown, external, externalInflight, claim, outsideWaiting, settled, refusal, stopped,
+ * guardFields, chargeFields, view }`: the two hook methods, the parent cost guard's `external`, `externalInflight`,
+ * `claim` and `outsideWaiting`, `settled()` (the children's settled spend, issue #985), `refusal()` (the child cost
+ * refusal that stopped the job, issue #985), `stopped()` for the meter's onStop (writes STOP at once rather than on the
+ * next tick), `guardFields()` (the exit line's guard counters plus the children's), `chargeFields()` (its issue #985
+ * charge keys, the children's included), and `view()` (the counts).
  */
 export function createChildWatch({
 	dir,
@@ -321,6 +323,8 @@ export function createChildWatch({
 	let claimedGen = 0;
 	let waitingSince = null;
 	let firstWhy = null;
+	// The child cost refusal that stopped the job (issue #985): `{ why, numbers }` off its ledger, or null.
+	let stoppedFor = null;
 	let warned = false;
 	let count = 0;
 	// After teardown nothing is written.
@@ -403,6 +407,9 @@ export function createChildWatch({
 		meter.setChildren({ ...view, processes: view.processes + detected, unmetered: count });
 		if (meter.costCap !== null) {
 			const own = guard()?.spend?.() ?? { spentMicros: 0 };
+			// A child's refusal that stops the job here is the job's refusal (issue #985): the parent's guard refused nothing
+			// before it, or the meter would already be stopped. The first one the fold read, with its rule and numbers.
+			if (view.costRefused > 0 && meter.state.stopReason === null && view.refusal) stoppedFor = view.refusal;
 			if (own.spentMicros + view.settledMicros > meter.costCap || view.costRefused > 0) meter.stop(COST_CAP);
 		}
 		if (meter.allowed !== null && (view.modelRefused > 0 || view.rows.some(offList))) meter.stop(MODEL_NOT_ALLOWED);
@@ -618,6 +625,22 @@ export function createChildWatch({
 			const view = current();
 			return view.liveWaiting > 0 || view.missing === true;
 		},
+		/**
+		 * What the children SETTLED as of the last fold (issue #985: the fold's settledMicros, what the parent's stop rule
+		 * already adds to its own spent), never what they hold in flight. The cost warning's measure beside the parent's
+		 * own spent.
+		 */
+		settled() {
+			return current().settledMicros;
+		},
+		/**
+		 * The child cost refusal that stopped the job (issue #985): `{ why, numbers }`, the first child refusal the fold read,
+		 * when it stopped a meter nothing had stopped yet; null otherwise (the parent's own refusal came first, a child's
+		 * spend stopped it, or the child's ledger had no refusal keys). The exit line's `why` and `costRefusal` then.
+		 */
+		refusal() {
+			return stoppedFor;
+		},
 		stopped(reason) {
 			if (!closed) writeStop(reason);
 		},
@@ -627,6 +650,17 @@ export function createChildWatch({
 			const out = { ...snapshot };
 			for (const key of GUARD_FIELDS) if (typeof out[key] === "number") out[key] += view[key] ?? 0;
 			return out;
+		},
+		/**
+		 * The exit line's issue #985 charge keys from the parent guard's charges(): `costChargedMicros`, what the cap
+		 * charged (the parent's settled spend plus the children's, settled()), `costLiftedMicros`, the part of it above
+		 * pi's own price (the children's from their ledgers' `liftedMicros`), and `costWaited`, the calls that waited for
+		 * room (their ledgers' `waited`). In that order, after `modelRefused` (the worker's TOKEN_KEYS).
+		 */
+		chargeFields(own) {
+			const view = current();
+			const add = (a, b) => Math.min(Number.MAX_SAFE_INTEGER, (a ?? 0) + (b ?? 0));
+			return { costChargedMicros: add(own?.spentMicros, view.settledMicros), costLiftedMicros: add(own?.liftedMicros, view.liftedMicros), costWaited: add(own?.waited, view.waited) };
 		},
 		view: () => ({ unmetered: count, seen: seen.size, peak, dirLost, writeFailed }),
 	};

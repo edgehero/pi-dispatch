@@ -142,3 +142,19 @@ test("issue #888: resources say what bounded the run, and why it kept the 30-min
   assert.match(String(runResources(view({ run: { record: kept } }))), /idle 15 min, stall off, ceiling 60 min; kept the 30-minute limit because it signed in to its model with a subscription/);
   assert.doesNotMatch(String(runResources(view({ run: { record: record({}) } }))), /Limits|Last step seen/, "a record without limits shows no row");
 });
+
+test("a capped run's cost panel says what the cap charged, the part above pi's price, the calls that waited, the warning and the refusal's numbers; a run without them renders as before (issue #985)", () => {
+  const tokens = { input: 1000, output: 100, total: 1100, cost: 27.51, metered: true, calls: 663, costCapMicros: 150_000_000, costRefused: 1, costChargedMicros: 118_940_000, costLiftedMicros: 91_420_000, costWaited: 12, costWarned: 1 };
+  const capped = record({ outcome: "policy", reason: "cost-cap", why: "over-cap", tokens, costRefusal: { spentMicros: 118_940_000, inflightMicros: 30_780_000, externalMicros: 0, boundMicros: 15_100_000 } });
+  const out = String(runCostPanel(view({ run: { record: capped } })));
+  assert.match(out, /Charged against the cap/); assert.match(out, /\$118\.94, this run and its subprocesses/);
+  assert.match(out, /Above pi&#39;s price|Above pi's price/); assert.match(out, /\$91\.42: calls charged their most \(failed or cut after they started, with broken usage, without a price, or a provider&#39;s forward\)/);
+  assert.match(out, /Calls that waited/); assert.match(out, /12 waited for room under the cap/);
+  assert.match(out, /Cost warning/); assert.match(out, /queued for the agent at 70% of the cap/);
+  assert.match(out, /Refused at/); assert.match(out, /\$118\.94 spent \+ \$30\.78 held by calls in flight \+ \$0\.00 elsewhere in the job \+ \$15\.10 for the refused call = \$164\.82, against the \$150\.00 cap/);
+  const quiet = String(runCostPanel(view({ run: { record: record({ outcome: "completed", reason: null, tokens: { ...tokens, costLiftedMicros: 0, costWarned: 0 } }) } })));
+  assert.match(quiet, /<dt>Above pi&#39;s price<\/dt><dd>\$0\.00<\/dd>/); assert.match(quiet, /not queued/); assert.doesNotMatch(quiet, /Refused at/);
+  const before = { input: 1000, output: 100, total: 1100, cost: 27.51, metered: true, calls: 663, costCapMicros: 150_000_000, costRefused: 1 };
+  const older = String(runCostPanel(view({ run: { record: record({ outcome: "policy", reason: "cost-cap", why: "over-cap", tokens: before, costRefusal: { spentMicros: 1, inflightMicros: -2, externalMicros: 0, boundMicros: 4 } }) } })));
+  for (const label of ["Charged against the cap", "Above pi", "Calls that waited", "Cost warning", "Refused at"]) assert.doesNotMatch(older, new RegExp(label), `${label}: no row for a record from before the keys, or a malformed refusal`);
+});

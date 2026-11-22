@@ -1484,9 +1484,12 @@ test("no builtin: extension (MCP, codemode, tool-search, llama.cpp) is loaded in
 		assert.ok(!loaderSrc.includes(name), `loader.mjs names ${name}`);
 	}
 	assert.ok(!/builtInExtensions|\bbuiltin:\s*true\s*[,}]/.test(runJob + loaderSrc + mcpSrc), "a factory is marked built-in");
-	// Only the reviewed inline factories: MCP, await-input, approval, progress, role subagents and steer.
-	// Role inputs are read from the immutable worker snapshot; ordinary jobs receive no new factory.
-	assert.match(runJob, /const extensionFactories = \[\.\.\.\(jobMcp\?\.factories \?\? \[\]\), \.\.\.\(awaitInput\?\.factories \?\? \[\]\), \.\.\.\(requestApproval\?\.factories \?\? \[\]\), \.\.\.\(reportProgress\?\.factories \?\? \[\]\), \.\.\.\(roleSubagents\?\.factories \?\? \[\]\), \.\.\.\(inbox \? \[inbox\.factory\] : \[\]\)\];/, "run-job.mjs passes extensionFactories other than from the job's document, run.awaitInput, run.gates, run.progress, immutable role inputs and run.steer");
+	// Only the reviewed inline factories: MCP, await-input, approval, progress, role subagents, steer and, under a cost cap
+	// above 0, the cost warning (issue #985). Role inputs are read from the immutable worker snapshot; a job with none of
+	// these receives no factory.
+	assert.match(runJob, /const extensionFactories = \[\.\.\.\(jobMcp\?\.factories \?\? \[\]\), \.\.\.\(awaitInput\?\.factories \?\? \[\]\), \.\.\.\(requestApproval\?\.factories \?\? \[\]\), \.\.\.\(reportProgress\?\.factories \?\? \[\]\), \.\.\.\(roleSubagents\?\.factories \?\? \[\]\), \.\.\.\(inbox \? \[inbox\.factory\] : \[\]\), \.\.\.\(costWarnings\.armed\(\) \? \[costWarnings\.factory\] : \[\]\)\];/, "run-job.mjs passes extensionFactories other than from the job's document, run.awaitInput, run.gates, run.progress, immutable role inputs, run.steer and the cost cap");
+	assert.match(runJob, /costWarnings = createCostWarnings\(\{ rootSessionId, isParked, queuedElsewhere: \(\) => inbox\?\.queued\(\) === true \|\| steersQueued\(session\), log \}\);/, "it holds back while a steer is queued, the inbox's or pi's");
+	assert.match(runJob, /if \(policyGuard\?\.cost && cfg\.maxCostMicros > 0\) costWarnings\.watch\(\{ name: COST_CAP, limit: cfg\.maxCostMicros, settled: \(\) => policyGuard\.spend\(\)\.spentMicros \+ childWatch\.settled\(\) \}\);/, "the warning watches a cap above 0, by settled spend only");
 	assert.equal(runJob.split("extensionFactories").length - 1, 3, "extensionFactories is built once and passed once");
 	assert.match(runJob, /\.\.\.\(extensionFactories\.length > 0 && \{ extensionFactories \}\)/);
 	assert.match(runJob, /const awaitInput = cfg\.awaitInput \? createAwaitInput\(\{ sessionFile: cfg\.sessionFile \}\) : null;/);

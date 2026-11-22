@@ -443,10 +443,11 @@ See [is it running](polling.md#is-it-running).
 
 | Stored state | What changes and how to move it |
 |---|---|
-| Run records | A `cost-cap` record's `why` can be `final-payload` or `turn` (a call that cannot wait refused while another process's call waited), each from the worker's closed list. Nothing moves: older records keep their values. |
-| Mixed versions | A worker older than this release drops a `why` it does not know, so a newer job image's `turn` or `final-payload` stop is recorded as `cost-cap` with no `why`; the stop itself is the same. The job image and the worker ship in one window ([the order](#the-order)). |
+| Run records | A `cost-cap` record's `why` can be `final-payload` or `turn` (a call that cannot wait refused while another process's call waited), each from the worker's closed list. A capped run's `tokens` gain `costChargedMicros`, `costLiftedMicros`, `costWaited` and `costWarned`, and a `cost-cap` record with a `why` gains `costRefusal`, the refusal's four numbers. Nothing moves: older records keep their values and show none of these rows on the run page. |
+| Jobs | A job with a cost cap above 0 is told once, at 70% of the cap by what it has spent, to report and, if its flow pushes, to push ([job limits](job-limits.md#a-warning-before-the-cost-cap)). Nothing to set. |
+| Mixed versions | A worker older than this release drops a `why` it does not know, so a newer job image's `turn` or `final-payload` stop is recorded as `cost-cap` with no `why`; the stop itself is the same. It also drops the four new `tokens` keys and `costRefusal`. An older job image writes none of them and sends no warning. The job image and the worker ship in one window ([the order](#the-order)). |
 
-See [reasons.md](reasons.md#cost-cap).
+See [reasons.md](reasons.md#cost-cap) and [what the cap charges](costs.md#what-the-cap-charges).
 
 ### 5.4.2
 

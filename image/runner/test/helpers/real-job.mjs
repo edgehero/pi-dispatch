@@ -19,32 +19,46 @@ export const JOB_MODEL = "m1";
 /**
  * An OpenAI-compatible endpoint answering one short text reply, or, with `hold`, none at all until `release()`, so a
  * test can stop a run while its first call is out. `calls` counts what reached it: a test that means no spend reads it.
+ * `replies` (issue #985) scripts the answers instead, one per call and the last repeating: `{ toolCall }` (a tool name and
+ * its arguments) or `{ content }`, each with the `promptTokens` it reports (10 by default), so a priced model spends what
+ * the test says. `bodies()` is every request body it was sent, parsed.
  */
-export async function chatServer({ hold = false } = {}) {
+export async function chatServer({ hold = false, replies = null } = {}) {
 	const held = [];
 	const waiting = [];
+	const bodies = [];
 	let calls = 0;
-	const reply = (res) => {
+	const reply = (res, n) => {
+		const spec = replies ? replies[Math.min(n - 1, replies.length - 1)] : { content: "done" };
 		const chunk = (payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
+		const delta = spec.toolCall ? { role: "assistant", tool_calls: [{ index: 0, id: `call-${n}`, type: "function", function: { name: spec.toolCall.name, arguments: JSON.stringify(spec.toolCall.arguments ?? {}) } }] } : { role: "assistant", content: spec.content ?? "done" };
+		const promptTokens = spec.promptTokens ?? 10;
 		res.writeHead(200, { "content-type": "text/event-stream" });
-		chunk({ id: "r", object: "chat.completion.chunk", created: 0, model: JOB_MODEL, choices: [{ index: 0, delta: { role: "assistant", content: "done" }, finish_reason: null }] });
-		chunk({ id: "r", object: "chat.completion.chunk", created: 0, model: JOB_MODEL, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 } });
+		chunk({ id: "r", object: "chat.completion.chunk", created: 0, model: JOB_MODEL, choices: [{ index: 0, delta, finish_reason: null }] });
+		chunk({ id: "r", object: "chat.completion.chunk", created: 0, model: JOB_MODEL, choices: [{ index: 0, delta: {}, finish_reason: spec.toolCall ? "tool_calls" : "stop" }], usage: { prompt_tokens: promptTokens, completion_tokens: 3, total_tokens: promptTokens + 3 } });
 		res.write("data: [DONE]\n\n");
 		res.end();
 	};
 	const server = createServer((req, res) => {
-		req.resume();
+		let body = "";
+		req.on("data", (chunk) => (body += chunk));
 		req.on("end", () => {
 			calls++;
+			try {
+				bodies.push(JSON.parse(body));
+			} catch {
+				bodies.push(null);
+			}
 			for (const wake of waiting.splice(0)) wake();
 			if (hold) held.push(res);
-			else reply(res);
+			else reply(res, calls);
 		});
 	});
 	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 	return {
 		base: `http://127.0.0.1:${server.address().port}/v1`,
 		calls: () => calls,
+		bodies: () => bodies.slice(),
 		firstCall: () => new Promise((resolve) => (calls > 0 ? resolve() : waiting.push(resolve))),
 		close: () => {
 			for (const res of held) res.destroy();

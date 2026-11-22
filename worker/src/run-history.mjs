@@ -338,6 +338,36 @@ export function parseExitWhy(text) {
 }
 
 /**
+ * The numbers a `costRefusal` holds (issue #985): the runner's `COST_REFUSAL_NUMBERS` (`image/runner/src/outcome.mjs`),
+ * restated because the shipped worker cannot import the runner, and pinned to it by a test that reads that source. What
+ * the job had spent, what other calls held in flight, the spend outside the refusing guard and the refused call's bound,
+ * each whole micro-dollars.
+ */
+export const COST_REFUSAL_KEYS = Object.freeze(["spentMicros", "inflightMicros", "externalMicros", "boundMicros"]);
+
+/**
+ * A `costRefusal` rebuilt: the four COST_REFUSAL_KEYS, each a safe integer at least 0, as a fresh literal in that order,
+ * or null on ANY violation (a missing key, a string, a fraction, a negative); a key it does not name is dropped. The one
+ * rule the exit line's parse and the record's builder both apply.
+ */
+export function costRefusalOf(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+	if (!COST_REFUSAL_KEYS.every((key) => Number.isSafeInteger(value[key]) && value[key] >= 0)) return null;
+	return Object.fromEntries(COST_REFUSAL_KEYS.map((key) => [key, value[key]]));
+}
+
+/**
+ * The first cost refusal's numbers off the decisive exit line (issue #985), or `null`: only beside a `why` that
+ * parseExitWhy keeps (a member of COST_CAP_WHYS on a `cost-cap` line that said code 2), rebuilt by costRefusalOf. NEVER
+ * throws. Container-written, so numbers only, and it feeds no classification: the processor records it beside `why`.
+ */
+export function parseExitCostRefusal(text) {
+	const parsed = decisiveExitLine(text);
+	if (parsed === null) return null;
+	return parsed?.code === 2 && parsed?.reason === "cost-cap" && COST_CAP_WHYS.includes(parsed?.why) ? costRefusalOf(parsed?.costRefusal) : null;
+}
+
+/**
  * The decisive exit line's own `code` (`decisiveExitLine`), an integer, or `null` (issue #501, PR #542's review round
  * 3). Read off the same line as its siblings, and NEVER throws.
  *
@@ -885,8 +915,14 @@ function rebuildResources(r) {
  * writes the first six whenever a cost cap is set, and the model guard `modelRefused` whenever a list is. All seven are on
  * this closed list because a key missing from it is DROPPED, and the dollar settlement reads them to decide
  * whether a metered cost is complete: a dropped counter would read as an honest zero.
+ *
+ * Then four more under a cost cap (issue #985), after `modelRefused`, in the runner's order: `costChargedMicros` (what the
+ * cap charged, the job's settled spend and its children's), `costLiftedMicros` (the part of it above pi's own price:
+ * calls charged their bound, the long-context tier), `costWaited` (calls that waited for room) and `costWarned` (1 when
+ * the warning at 70% of the cap was queued for the agent, else 0). They say why `cost` can be far below the cap a job was stopped at; no
+ * settlement reads them, and they are no floor counters (`FLOOR_COUNTERS`). A worker before them drops all four.
  */
-export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "childTotal", "childProcesses", "unmeteredChildren", "costUnreported", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused"]);
+export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "childTotal", "childProcesses", "unmeteredChildren", "costUnreported", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused", "costChargedMicros", "costLiftedMicros", "costWaited", "costWarned"]);
 
 /**
  * Rebuild the billed totals from a closed key list rather than passing the container's object through.
@@ -900,7 +936,7 @@ export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "me
  * did not, and the asymmetry was an oversight rather than a decision.
  *
  * A key the runner omitted stays OMITTED rather than becoming null: the fallback shape legitimately
- * carries only five of the twenty-three, and a null there would read as "measured zero" for a number nobody
+ * carries only five of the twenty-seven, and a null there would read as "measured zero" for a number nobody
  * measured. `typeof === "number"` rather than `Number.isFinite`, deliberately, so this narrows WHICH
  * KEYS survive and never which objects are admitted -- the admission gate above is unchanged.
  */
@@ -1397,6 +1433,12 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// manifest. CONDITIONAL, after `limits`: present only for a run that kept or dropped a file, so every other record is
 		// byte-identical. Additive, so `v` stays.
 		...(artifacts !== null ? { artifacts } : {}),
+		// The first cost refusal's numbers (issue #985, INT-RUN-HISTORY-FILE-CONTRACT): `{ spentMicros, inflightMicros,
+		// externalMicros, boundMicros }`, REBUILT (`costRefusalOf`), four integers, so PII-free by construction. The
+		// processor sets it only beside a `cost-cap` record's `why`, off the same verified exit line. CONDITIONAL, after
+		// `artifacts`: present only on such a record whose line carried the numbers, so every other record is
+		// byte-identical. Additive, so `v` stays.
+		...(costRefusalOf(source.costRefusal) !== null ? { costRefusal: costRefusalOf(source.costRefusal) } : {}),
 		// The record's version (issue #761, `RUN_RECORD_VERSION`), the LAST key on every record and after every conditional
 		// key, so it stays last whatever a record carries and every earlier position is untouched. Unconditional: a reader
 		// asks one key, and a missing one reads as 1.
@@ -1734,6 +1776,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			const questionRefDigest = keyed && exitAuth === "verified" ? parseExitQuestionRefDigest(exitText) : null;
 			const exitLineCode = parseExitCode(exitText);
 			const exitWhy = parseExitWhy(exitText);
+			const exitCostRefusal = parseExitCostRefusal(exitText);
 			const modelRoles = keyed && exitAuth === "verified" ? parseExitModelRoles(exitText) : null;
 			const providerFailure = keyed && exitAuth === "verified" ? parseExitProviderFailure(exitText) : null;
 			const toolsStarted = keyed && exitAuth === "verified" ? parseExitToolsStarted(exitText) : null;
@@ -1778,10 +1821,10 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 				log("log_sink_error", { jobId, reason: err?.message });
 			}
 			// `exitAuth` only when a key was issued, so a keyless close returns exactly the object it always did. `exitWhy`
-			// (issue #507) only when the line named one, for the same reason.
+			// (issue #507) only when the line named one, for the same reason, and `exitCostRefusal` (issue #985) the same.
 			// `resources` (issue #596) only when the line carried a block, and `exitOomKilled` only when true, for the same reason.
 			// `recovery` (issue #645) only when the line carried one, for the same reason, and `steer` (issue #646) the same.
-			return { ...(canaryLoad !== null ? { canaryLoad } : {}), ...(loaded !== null ? { loaded } : {}), turns, tokens, session, usage, context, exitReason, exitLineCode, ...(answerDraftDigest ? { answerDraftDigest } : {}), ...(questionRefDigest ? { questionRefDigest } : {}), ...(modelRoles ? { modelRoles } : {}), ...(providerFailure ? { providerFailure } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
+			return { ...(canaryLoad !== null ? { canaryLoad } : {}), ...(loaded !== null ? { loaded } : {}), turns, tokens, session, usage, context, exitReason, exitLineCode, ...(answerDraftDigest ? { answerDraftDigest } : {}), ...(questionRefDigest ? { questionRefDigest } : {}), ...(modelRoles ? { modelRoles } : {}), ...(providerFailure ? { providerFailure } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(exitCostRefusal !== null ? { exitCostRefusal } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };

@@ -999,10 +999,14 @@ test("exitWhy reaches the result off a cost-cap exit line, and is absent from ev
 	const { makeLogSink } = await import("../src/run-history.mjs");
 	const fs = { mkdirSync() {}, createWriteStream: () => null };
 	const line = (fields) => `\n${JSON.stringify({ event: "exit", jobId: "j1", ...fields })}\n`;
-	for (const [chunk, want] of [
+	// Issue #985: the refusal's numbers beside it, the same way.
+	const numbers = { spentMicros: 1, inflightMicros: 2, externalMicros: 3, boundMicros: 4 };
+	for (const [chunk, want, wantNumbers] of [
 		[line({ code: 2, reason: "cost-cap", why: "unboundable" }), "unboundable"],
 		[line({ code: 2, reason: "cost-cap", why: "free text" }), undefined],
 		[line({ code: 2, reason: "cost-cap" }), undefined],
+		[line({ code: 2, reason: "cost-cap", why: "over-cap", costRefusal: numbers }), "over-cap", numbers],
+		[line({ code: 2, reason: "cost-cap", costRefusal: numbers }), undefined],
 	]) {
 		const runContainer = mod.makeRunContainer({
 			image: "pi-job:x",
@@ -1015,6 +1019,8 @@ test("exitWhy reaches the result off a cost-cap exit line, and is absent from ev
 		assert.equal(result.exitReason, "cost-cap");
 		assert.equal(result.exitWhy, want, chunk);
 		assert.equal(Object.hasOwn(result, "exitWhy"), want !== undefined, chunk);
+		assert.deepEqual(result.exitCostRefusal, wantNumbers, chunk);
+		assert.equal(Object.hasOwn(result, "exitCostRefusal"), wantNumbers !== undefined, chunk);
 	}
 });
 
@@ -1142,7 +1148,9 @@ test("exitAuth: a key minted per run goes to stdin with -i and PI_EXIT_AUTH=stdi
 });
 
 test("exitAuth: a sink that verified nothing (or predates the field) nulls every exit field: tokens unknown, settlement at the floor", { skip }, async () => {
-	for (const closed of [{ turns: 3, tokens: { total: 0 }, exitLineCode: 0, exitAuth: "unverified" }, { turns: 3, tokens: { total: 0 }, exitLineCode: 0 }]) {
+	// Issue #985: a cost refusal's rule and numbers on such a line are a tool's too.
+	const refused = { exitWhy: "over-cap", exitCostRefusal: { spentMicros: 1, inflightMicros: 2, externalMicros: 3, boundMicros: 4 } };
+	for (const closed of [{ turns: 3, tokens: { total: 0 }, exitLineCode: 0, exitAuth: "unverified", ...refused }, { turns: 3, tokens: { total: 0 }, exitLineCode: 0, ...refused }]) {
 		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnStdin({}), mintExitKey: () => MINTED, openJobLog: () => ({ write() {}, close: async () => closed }) });
 		const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
 		assert.deepEqual(result, { code: 0, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null, exitAuth: "unverified" }, JSON.stringify(closed));

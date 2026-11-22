@@ -147,8 +147,10 @@ test("the inbox pushes nothing before agent_start, one at a time in file order, 
 	inbox.poll();
 	assert.equal(api.sent.length, 0, "no run is active yet");
 	assert.deepEqual(inbox.counts(), { delivered: 0, pending: 2, deliveredIds: [] }, "only names of the contract's shape are read");
+	assert.equal(inbox.queued(), false);
 	api.handlers.agent_start();
 	assert.equal(api.sent.length, 1);
+	assert.equal(inbox.queued(), true, "issue #985: one of ours is queued in pi, so the cost warning holds back");
 	assert.deepEqual(api.sent[0], {
 		message: { customType: INBOX_CUSTOM_TYPE, content: [{ type: "text", text: "first" }], display: true, details: { id: id(1), mode: "steer", source: "cli", ack: expectedAck(KEY, RUN_ID, id(1)) } },
 		options: { deliverAs: "steer" },
@@ -164,6 +166,7 @@ test("the inbox pushes nothing before agent_start, one at a time in file order, 
 	assert.deepEqual(api.sent[1].options, { deliverAs: "steer" });
 	assert.equal(api.sent[1].message.details.id, id(2));
 	deliver(1);
+	assert.equal(inbox.queued(), false, "delivered: nothing of ours queued");
 	assert.deepEqual(inbox.counts(), { delivered: 2, pending: 0, deliveredIds: [id(1), id(2)] });
 	assert.deepEqual(logs.filter((line) => line.event === "steer_delivered"), [
 		{ event: "steer_delivered", id: id(1), mode: "steer", source: "cli" },
@@ -933,7 +936,8 @@ test("run-job: the steer refusals run pre-spend, the inbox is seeded before and 
 	// Issue #686: on the stdin frame channel the frame source is checked instead of /inbox, and handed to the inbox.
 	const ready = src.indexOf("assertSteerReady({ steer: cfg.steer, exitKey: exitKey.key, ...(exitKey.frames === true ? { frames: frameChannel } : {}) });");
 	assert.ok(ready > 0 && ready < src.indexOf("readPrompt(PROMPT_PATH)") && ready < src.indexOf("createJobModelRuntime({"), "before the prompt is read and before any model lookup");
-	assert.match(src, /const inbox = cfg\.steer \? createInbox\(\{ exitKey: exitKey\.key, runId: process\.env\.PI_JOB_ID, log, isParked: \(\) => awaitInput\?\.state\.called === true \|\| requestApproval\?\.state\.called === true, \.\.\.\(exitKey\.frames === true \? \{ frames: frameChannel \} : \{\}\) \}\) : null;/);
+	// The parked reader is shared with the cost warning (issue #985), which holds back the same way.
+	assert.match(src, /const isParked = \(\) => awaitInput\?\.state\.called === true \|\| requestApproval\?\.state\.called === true;\n\tconst inbox = cfg\.steer \? createInbox\(\{ exitKey: exitKey\.key, runId: process\.env\.PI_JOB_ID, log, isParked, \.\.\.\(exitKey\.frames === true \? \{ frames: frameChannel \} : \{\}\) \}\) : null;/);
 	const seed = src.indexOf("inbox?.seed(sessionManager);");
 	assert.ok(seed > src.indexOf("await createAgentSession({") && seed < src.indexOf("inbox?.start();"), "seeded from the transcript before it starts reading");
 	// The frame stream is read from the moment the inbox exists: before the loader and the session are built (their I/O is

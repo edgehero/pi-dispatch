@@ -538,6 +538,21 @@ test("a cost-cap exit names the guard's rule in the record's why, from the close
 	assert.equal(Object.hasOwn(await runJob(ghJob, d0), "why"), false);
 });
 
+test("a cost-cap exit's refusal numbers ride beside its why into the record, and never without it (issue #985)", async () => {
+	const exitCostRefusal = { spentMicros: 47_770_000, inflightMicros: 91_420_000, externalMicros: 0, boundMicros: 27_550_000 };
+	const { deps: d } = deps({ runContainer: async () => ({ code: 2, aborted: false, turns: 1, tokens: { total: 0 }, exitReason: "cost-cap", exitWhy: "over-cap", exitCostRefusal }) });
+	const r = await runJob(ghJob, d);
+	assert.deepEqual([r.why, r.costRefusal], ["over-cap", exitCostRefusal]);
+	const record = buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, result: r, startedAt: null, endedAt: null });
+	assert.deepEqual(record.costRefusal, exitCostRefusal, "the record carries it");
+	for (const [code, exitReason, exitWhy] of [[2, "cost-cap", undefined], [2, "cost-cap", "qwen2.5:3b"], [2, "model-not-allowed", "over-cap"], [0, "cost-cap", "over-cap"]]) {
+		const { deps: other } = deps({ runContainer: async () => ({ code, aborted: false, exitReason, exitWhy, exitCostRefusal }) });
+		assert.equal(Object.hasOwn(await runJob(ghJob, other), "costRefusal"), false, JSON.stringify([code, exitReason, exitWhy]));
+	}
+	const { deps: none } = deps({ runContainer: async () => ({ code: 2, aborted: false, exitReason: "cost-cap", exitWhy: "unboundable" }) });
+	assert.equal(Object.hasOwn(await runJob(ghJob, none), "costRefusal"), false, "a why with no numbers (an older image, an unboundable call)");
+});
+
 test("an InfraRetry throw comments NOTHING from runJob -- once-ness for the infra class lives at the terminal seam", async () => {
 	for (const code of [1, 99, 125]) {
 		const { deps: d, calls } = deps({ runContainer: async () => ({ code, aborted: false }) });

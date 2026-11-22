@@ -533,7 +533,20 @@ test("startChildMeter (issue #985): a call refused only by holds in other proces
 	assert.ok(readdirSync(dir).includes(waitClaimName(3)), "in generation 3's turn");
 	await microtask();
 	assert.equal(read().waiting, 0, "and the end of its wait published");
+	assert.equal(read().waited, 1, "issue #985, part 3: the ledger counts the call that waited, for the parent's costWaited");
 	assert.equal(timer.armed, null);
+});
+
+test("startChildMeter (issue #985): a child's first cost refusal reaches its ledger, its rule and its four numbers, for the parent to record", async () => {
+	const { read, guard, child } = await waitingChild({ total: 900, inflight: 0 });
+	assert.equal(Object.hasOwn(read(), "refusedWhy"), false, "nothing refused yet: no key");
+	assert.equal(guard.admit(childCall()), COST_CAP, "0 + 0 + 900 + 500 > 1000, and the 900 elsewhere is settled: waiting cannot help");
+	// The wrapper stops the child's meter on a refusal, which writes the ledger at once.
+	child.meter.stop(COST_CAP);
+	const ledger = read();
+	assert.equal(ledger.refusedWhy, "over-cap");
+	assert.deepEqual(ledger.costRefusal, { spentMicros: 0, inflightMicros: 0, externalMicros: 900, boundMicros: 500 });
+	assert.equal(ledger.costRefused, 1);
 });
 
 test("startChildMeter (issue #985): the ledger shows the hold a call is sent under, written again as its onPayload returns; a write that fails then refuses the call", async () => {
