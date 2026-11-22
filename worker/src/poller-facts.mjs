@@ -23,7 +23,10 @@
  *  - `local`: why this host's half could not be judged (a setting this shell and `.env` disagree on, an unreadable or
  *    missing file), never a value.
  *
- * Never throws and never fails `status`: every half that cannot be read is said, and `status` exits 0 as before.
+ * Never throws and never fails `status`: every half that cannot be read is said, and what `pollers` says never changes
+ * `status`'s exit code (a queue that did not answer does, issue #1003).
+ * `timeoutMs` bounds the heartbeat read (`readPollerStatus`'s own two seconds when not given); `status` passes what is
+ * left of its deadline when that is sooner (issue #1003).
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -92,10 +95,10 @@ function hostNote(host, who, local) {
 	return null;
 }
 
-export async function readPollerFacts(redis, { env = process.env, cwd = process.cwd(), platform = process.platform, now = Date.now, read = readPollerStatus, judge = judgeDeploymentTriggers, readEnv = (p) => readFileSync(p), readText = (p) => readFileSync(p, "utf8") } = {}) {
+export async function readPollerFacts(redis, { env = process.env, cwd = process.cwd(), platform = process.platform, now = Date.now, timeoutMs, read = readPollerStatus, judge = judgeDeploymentTriggers, readEnv = (p) => readFileSync(p), readText = (p) => readFileSync(p, "utf8") } = {}) {
 	let polled;
 	try {
-		polled = await read(redis, { now });
+		polled = await read(redis, { now, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
 	} catch {
 		polled = null;
 	}
