@@ -1487,13 +1487,122 @@ test("doctor: both key sources set FAILS, since the worker will refuse to boot",
 	assert.match(text(), /✗ GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY_PATH are both set -- the worker, the receiver and the poller refuse to start \(exit 2\)\n {4}→ unset one of them/);
 });
 
-test("doctor: an inline value that is not a PEM warns, and its contents are never echoed", async () => {
-	const { out, text } = capture();
-	const code = await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: `junk ${KEY_BODY}` }), appDeps(out));
-	assert.equal(code, 0);
-	// The whole line (issue #1001): every reader's loader refuses a key that is not a PEM, not the worker's alone.
-	assert.ok(text().includes('⚠ GITHUB_APP_PRIVATE_KEY does not look like a PEM (does not begin "-----BEGIN ...") -- the worker, the receiver and the poller refuse to start (exit 2); contents not shown\n'), text());
-	assert.doesNotMatch(text(), new RegExp(KEY_BODY), "not even a malformed key's bytes may reach output");
+test("doctor judges an inline App key by the loaders' own rule: a value they refuse is a ✗ naming every reader, one they take a ✓, contents never shown (issue #1028)", async () => {
+	// It asked only that the value begin with "-----BEGIN", so a paste cut short after its header was a ✓ while the
+	// worker, `serve` and `poll` exit 2 on it (`normalizeAppPrivateKey`). Each shape's verdict is the worker loader's own.
+	const whole = `-----BEGIN RSA PRIVATE KEY-----\n${KEY_BODY}\n-----END RSA PRIVATE KEY-----`;
+	const shapes = [
+		["junk", `junk ${KEY_BODY}`, false],
+		["a header alone", "-----BEGIN RSA PRIVATE KEY-----", false],
+		["no END line", `-----BEGIN RSA PRIVATE KEY-----\n${KEY_BODY}`, false],
+		["a public key", `-----BEGIN PUBLIC KEY-----\n${KEY_BODY}\n-----END PUBLIC KEY-----`, false],
+		["whole", whole, true],
+		["flattened, its newlines as \\n", whole.replace(/\n/g, "\\n"), true],
+	];
+	const refusal = '✗ GITHUB_APP_PRIVATE_KEY is not a PEM private key (it must begin "-----BEGIN ... PRIVATE KEY-----" and end "-----END ... PRIVATE KEY-----") -- the worker, the receiver and the poller refuse to start (exit 2); contents not shown\n';
+	for (const [name, key, taken] of shapes) {
+		const env = appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: key });
+		let loads = true;
+		try {
+			loadConfig(env, { fileExists: () => false });
+		} catch (err) {
+			loads = !/^GITHUB_APP_PRIVATE_KEY is not a PEM private key/.test(err.message);
+		}
+		assert.equal(loads, taken, `${name}: the loader's own verdict`);
+		const { out, text } = capture();
+		const code = await runDoctor(env, appDeps(out));
+		assert.equal(code, taken ? 0 : 1, `${name}: ${text()}`);
+		assert.equal(text().includes("✓ GitHub App private key supplied inline (GITHUB_APP_PRIVATE_KEY)\n"), taken, name);
+		assert.equal(text().includes(refusal), !taken, `${name}: ${text()}`);
+		assert.doesNotMatch(text(), new RegExp(KEY_BODY), `${name}: not even a malformed key's bytes may reach output`);
+	}
+});
+
+test("doctor reads the inline App key in the .env forms the docs offer and judges it as the loaders do; a line outside them is not judged, never unset (issue #1028)", async () => {
+	// The documented multi-line PEM, in either quote, and `\n` escapes inside double quotes: doctor's general reader takes
+	// none of them, so doctor failed on a line every loader reads and then said no key was set, where the worker, serve
+	// and poll start. Read by one narrow rule, the key is judged by the loaders' own: a whole one passes with no ✗ at all
+	// (exit 0), one cut short fails, and one beside a key file is the "both set" the loaders refuse.
+	const cwd = scaffoldedCwd();
+	const readEnvFile = (path) => readFileSync(path, "utf8");
+	const ids = "GITHUB_AUTH_SOURCE=app\nGITHUB_APP_ID=4242\nGITHUB_APP_INSTALLATION_ID=987654\n";
+	const pem = `-----BEGIN RSA PRIVATE KEY-----\n${KEY_BODY}\n-----END RSA PRIVATE KEY-----`;
+	const run = async (envText, shell = {}, extra = {}) => {
+		writeFileSync(join(cwd, ".env"), envText);
+		const { out, text } = capture();
+		const code = await runDoctor(imgEnv(shell), { ...scaffoldDeps(out, cwd), readEnvFile, ...extra });
+		assert.ok(!text().includes(KEY_BODY), "the key's contents never reach output");
+		return { code, text: text() };
+	};
+	for (const line of [`GITHUB_APP_PRIVATE_KEY="${pem}"`, `GITHUB_APP_PRIVATE_KEY='${pem}'`, `GITHUB_APP_PRIVATE_KEY="${pem.replace(/\n/g, "\\n")}"`]) {
+		const { code, text } = await run(`${ids}${line}\n`);
+		assert.equal(code, 0, `${line.slice(0, 26)}: ${text}`);
+		assert.doesNotMatch(text, /✗/);
+		assert.ok(text.includes("✓ GitHub App private key supplied inline (GITHUB_APP_PRIVATE_KEY)\n"), text);
+		assert.match(text, /\(this shell does not set them\): GITHUB_AUTH_SOURCE, GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY\n/);
+	}
+	const cut = await run(`${ids}GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n${KEY_BODY}"\n`);
+	assert.equal(cut.code, 1);
+	assert.match(cut.text, /✗ GITHUB_APP_PRIVATE_KEY is not a PEM private key .* -- the worker, the receiver and the poller refuse to start \(exit 2\); contents not shown\n/);
+	const keyFile = join(cwd, "app.pem");
+	writeFileSync(keyFile, `${pem}\n`, { mode: 0o600 });
+	const both = await run(`${ids}GITHUB_APP_PRIVATE_KEY_PATH=${keyFile}\nGITHUB_APP_PRIVATE_KEY="${pem}"\n`);
+	assert.equal(both.code, 1);
+	assert.match(both.text, /✗ GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY_PATH are both set -- the worker, the receiver and the poller refuse to start \(exit 2\)\n/);
+	assert.doesNotMatch(both.text, /✓ GitHub App private key present/);
+	// Outside the rule: a `$` the shells expand and systemd does not, and a key under a line systemd reads differently (a
+	// lone carriage return, with the source and ids in this shell). The key is said to be unjudged, never unset.
+	const unjudged = `⚠ GITHUB_AUTH_SOURCE=app and ${join(cwd, ".env")} assigns GITHUB_APP_PRIVATE_KEY in a form doctor does not read, so the App key is not judged here: the worker, the receiver and the poller refuse to start (exit 2) if what their loader reads there is not a key they take\n`;
+	const dollar = await run(`${ids}GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n$HOME\n-----END RSA PRIVATE KEY-----"\n`);
+	assert.ok(dollar.text.includes(unjudged), dollar.text);
+	assert.match(dollar.text, /assigns GITHUB_APP_PRIVATE_KEY \(line 4\) in a form the service's loader may read differently/);
+	const skipped = await run(`NOTE=a\rb\nGITHUB_APP_PRIVATE_KEY="${pem}"\n`, { GITHUB_AUTH_SOURCE: "app", GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654" }, { readEnvFile: (path) => readFileSync(path), platform: "linux" });
+	assert.ok(skipped.text.includes(unjudged), skipped.text);
+	for (const { text } of [dollar, skipped]) assert.doesNotMatch(text, /neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set/);
+	// A key line inside another value's multi-line quote is that value's text to every loader, never an assignment, so the
+	// key is as absent to doctor as it is to the services.
+	const inside = await run(`${ids}NOTE="see\nGITHUB_APP_PRIVATE_KEY='${pem.replace(/\n/g, "\\n")}'\n"\n`);
+	assert.doesNotMatch(inside.text, /✓ GitHub App private key supplied inline|assigns GITHUB_APP_PRIVATE_KEY in a form doctor does not read/, inside.text);
+	assert.match(inside.text, /✗ GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker, the receiver and the poller refuse to start \(exit 2\)\n/);
+});
+
+test("doctor reads the inline App key as the deployment's own loader does: a quote opened mid-word, a comment after the value, a blank value, an unread key path, a key this shell sets (issue #1028)", async () => {
+	const cwd = scaffoldedCwd();
+	const readEnvFile = (path) => readFileSync(path, "utf8");
+	const ids = "GITHUB_AUTH_SOURCE=app\nGITHUB_APP_ID=4242\nGITHUB_APP_INSTALLATION_ID=987654\n";
+	const pem = `-----BEGIN RSA PRIVATE KEY-----\n${KEY_BODY}\n-----END RSA PRIVATE KEY-----`;
+	const run = async (envText, { shell = {}, platform } = {}) => {
+		writeFileSync(join(cwd, ".env"), envText);
+		const { out, text } = capture();
+		const code = await runDoctor(imgEnv(shell), { ...scaffoldDeps(out, cwd), readEnvFile, ...(platform ? { platform } : {}) });
+		assert.ok(!text().includes(KEY_BODY), "the key's contents never reach output");
+		return { code, text: text() };
+	};
+	const inline = "✓ GitHub App private key supplied inline (GITHUB_APP_PRIVATE_KEY)\n";
+	const neither = /✗ GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker, the receiver and the poller refuse to start \(exit 2\)\n/;
+	const unjudged = (names) => `⚠ GITHUB_AUTH_SOURCE=app and ${join(cwd, ".env")} assigns ${names} in a form doctor does not read, so the App key is not judged here: the worker, the receiver and the poller refuse to start (exit 2) if what their loader reads there is not a key they take\n`;
+	// `/bin/sh` (the macOS wrapper) opens a quote at the apostrophe of O'Brien and closes it at it's, so the key line is
+	// text to it and the services start with no key; systemd takes the key. Each platform's answer is its loader's.
+	const midword = `${ids}GIT_NOTE=O'Brien\nGITHUB_APP_PRIVATE_KEY="${pem}"\nOTHER_NOTE=it's\n`;
+	const darwin = await run(midword, { platform: "darwin" });
+	assert.ok(!darwin.text.includes(inline), darwin.text);
+	assert.match(darwin.text, neither);
+	assert.ok((await run(midword, { platform: "linux" })).text.includes(inline));
+	// systemd keeps what follows a closing quote, so its value ends in the comment and the loaders refuse it.
+	const comment = await run(`${ids}GITHUB_APP_PRIVATE_KEY="${pem}" # the App key\n`, { platform: "linux" });
+	assert.ok(!comment.text.includes(inline) && comment.text.includes(unjudged("GITHUB_APP_PRIVATE_KEY")), comment.text);
+	// A value of blanks over two lines trims to nothing, which the loaders read as unset.
+	const blank = await run(`${ids}GITHUB_APP_PRIVATE_KEY="  \n  "\n`);
+	assert.match(blank.text, neither);
+	assert.doesNotMatch(blank.text, /in a form doctor does not read/);
+	// Beside a key path doctor did not read, the services may see both and refuse "both set": no ✓.
+	const path = await run(`${ids}GITHUB_APP_PRIVATE_KEY_PATH=$HOME/app.pem\nGITHUB_APP_PRIVATE_KEY="${pem}"\n`);
+	assert.ok(!path.text.includes(inline) && path.text.includes(unjudged("GITHUB_APP_PRIVATE_KEY_PATH")), path.text);
+	// This shell's key wins, as for every key: the file's never replaces it, so this cut-short one is judged.
+	const shell = await run(`GITHUB_APP_PRIVATE_KEY="${pem}"\n`, { shell: { GITHUB_AUTH_SOURCE: "app", GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: "-----BEGIN RSA PRIVATE KEY-----" } });
+	assert.equal(shell.code, 1);
+	assert.ok(!shell.text.includes(inline), shell.text);
+	assert.match(shell.text, /✗ GITHUB_APP_PRIVATE_KEY is not a PEM private key /);
 });
 
 // The key file's mode protects it from other users on this host and does nothing at all once the file is
@@ -1547,7 +1656,7 @@ test("doctor judges app auth on the service's .env where this shell sets none, n
 	const cwd = scaffoldedCwd();
 	const readEnvFile = (path) => readFileSync(path, "utf8");
 	const envPath = join(cwd, ".env").replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-	writeFileSync(join(cwd, ".env"), `GITHUB_AUTH_SOURCE=app\nGITHUB_APP_ID=4242\nGITHUB_APP_INSTALLATION_ID=987654\nGITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----${KEY_BODY}"\n`);
+	writeFileSync(join(cwd, ".env"), `GITHUB_AUTH_SOURCE=app\nGITHUB_APP_ID=4242\nGITHUB_APP_INSTALLATION_ID=987654\nGITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----${KEY_BODY}-----END PRIVATE KEY-----"\n`);
 	const good = capture();
 	const code = await runDoctor(imgEnv(), { ...scaffoldDeps(good.out, cwd), readEnvFile });
 	assert.equal(code, 0, good.text());
@@ -1675,7 +1784,7 @@ test("a set PI_TRIGGERS_FILE that names no file, or is empty, is a ✗; unset ke
 });
 
 test("doctor trims GITHUB_APP_PRIVATE_KEY_PATH as loadGitHubAuth does: blank beside an inline key is not 'both set' (PR #466 gate round 2)", async () => {
-	const inline = `-----BEGIN PRIVATE KEY-----${KEY_BODY}`;
+	const inline = `-----BEGIN PRIVATE KEY-----${KEY_BODY}-----END PRIVATE KEY-----`;
 	const beside = capture();
 	assert.equal(await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: inline, GITHUB_APP_PRIVATE_KEY_PATH: "   " }), appDeps(beside.out)), 0);
 	assert.doesNotMatch(beside.text(), /are both set/);
@@ -3110,7 +3219,7 @@ test("doctor: forge triggers without WEBHOOK_SECRET warn that the receiver will 
 	const { out, text } = capture();
 	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("github") }), imgDeps(out, green));
 	assert.equal(code, 0, "mid-setup is legitimate -- warn, never fail");
-	assert.match(text(), /⚠ triggers\.json has github triggers but WEBHOOK_SECRET is unset -- the receiver will refuse to start/);
+	assert.match(text(), /⚠ triggers\.json has github triggers but WEBHOOK_SECRET is unset or blank -- the receiver will refuse to start/);
 	assert.match(text(), /openssl rand -hex 32/, "the fix shows how to mint one");
 	assert.match(text(), /pi-dispatch-receiver/, "the fix names the bin that starts the receiver");
 });
@@ -3204,7 +3313,7 @@ test("doctor: GITHUB_INGEST=webhook or both needs WEBHOOK_SECRET with no rule, a
 		const { out, text } = capture();
 		await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile(), GITHUB_INGEST: ingest }), imgDeps(out, green));
 		assert.match(text(), new RegExp(`✓ \`pi-dispatch-receiver serve\` serves GitHub at / .*\\(GITHUB_INGEST=${ingest}\\)`));
-		assert.match(text(), new RegExp(`⚠ GITHUB_INGEST=${ingest} but WEBHOOK_SECRET is unset -- the receiver will refuse to start`));
+		assert.match(text(), new RegExp(`⚠ GITHUB_INGEST=${ingest} but WEBHOOK_SECRET is unset or blank -- the receiver will refuse to start`));
 		assert.doesNotMatch(text(), /set GITHUB_INGEST=poll/, "the operator chose the webhook; the fix is the secret");
 	}
 });
@@ -3213,7 +3322,7 @@ test("doctor: unset GITHUB_INGEST keeps the inference, names it, and offers poll
 	const { out, text } = capture();
 	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("github") }), imgDeps(out, green));
 	assert.match(text(), /✓ `pi-dispatch-receiver serve` will serve GitHub at \/ \(inferred, since GITHUB_INGEST is unset: triggers\.json has github triggers\); if `pi-dispatch-receiver poll` brings GitHub's events instead, set GITHUB_INGEST=poll/);
-	assert.match(text(), /⚠ triggers\.json has github triggers but WEBHOOK_SECRET is unset -- the receiver will refuse to start/);
+	assert.match(text(), /⚠ triggers\.json has github triggers but WEBHOOK_SECRET is unset or blank -- the receiver will refuse to start/);
 	assert.match(text(), /if no GitHub webhook comes to this deployment \(`pi-dispatch-receiver poll` brings GitHub's events, or none are wanted\), set GITHUB_INGEST=poll and `serve` needs none/);
 	assert.doesNotMatch(text(), /delete the GITHUB_AUTH_SOURCE=gh line/, "the triggers armed it, not a default-repeating line");
 	// An explicit source alone arms it too, as the receiver reads it: the GitLab-only folder an older scaffold made, whose
@@ -3221,7 +3330,7 @@ test("doctor: unset GITHUB_INGEST keeps the inference, names it, and offers poll
 	// warning with the secret set too (`up` writes one), where the route it arms is one nobody delivers to.
 	const { out: o2, text: t2 } = capture();
 	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("gitlab"), GITHUB_AUTH_SOURCE: "gh" }), imgDeps(o2, green));
-	assert.match(t2(), /⚠ GITHUB_AUTH_SOURCE is set but WEBHOOK_SECRET is unset -- the receiver will refuse to start/);
+	assert.match(t2(), /⚠ GITHUB_AUTH_SOURCE is set but WEBHOOK_SECRET is unset or blank -- the receiver will refuse to start/);
 	assert.match(t2(), /or delete the GITHUB_AUTH_SOURCE=gh line, which only repeats the default/);
 	const { out: o4, text: t4 } = capture();
 	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("gitlab"), GITHUB_AUTH_SOURCE: "gh", WEBHOOK_SECRET: "from-up" }), imgDeps(o4, green));

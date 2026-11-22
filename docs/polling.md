@@ -49,9 +49,10 @@ GitHub trigger, or a set `GITHUB_AUTH_SOURCE`, to mean it serves GitHub, and ref
 Everything else is shared with `serve`: the same `triggers.json` (`PI_TRIGGERS_FILE`), the same GitHub
 auth block, the same queue. The poller reads `triggers.json` again at the start of each cycle and before it judges
 each event, so an edit applies without a restart. A bad edit keeps the last copy that loaded: the poller logs
-`triggers_reload_invalid` once, with the reason and `"kept": true`, goes on polling with the rules it had, and logs
-`triggers_reloaded` when a good file is back. A poller started on an invalid file exits 2 instead, as `serve` and the
-worker do. Pair it with `pi-dispatch setup github --no-webhook`, which mints
+`triggers_reload_invalid` each time the text it refuses changes, with the reason and `"kept": true` (it compares each
+read with the one before, so a bad file left alone is said once, and a return to a text it refused earlier is said
+again), goes on polling with the rules it had, and logs `triggers_reloaded` when a good file is back. A poller
+started on an invalid file exits 2 instead, as `serve` and the worker do. Pair it with `pi-dispatch setup github --no-webhook`, which mints
 credentials without asking you for a public URL, and writes `GITHUB_INGEST=poll` with them. The App it creates has
 its webhook switched off. GitHub requires a
 webhook URL all the same, so the App names `https://no-webhook.invalid/`, an address that never resolves. The ping

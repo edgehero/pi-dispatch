@@ -63,8 +63,8 @@ import { basename, dirname, isAbsolute, join, posix, resolve, win32 } from "node
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, FORGE_WEBHOOK_NAMES, accountTempRoot, configError, forgeWebhookFaults, forgeWebhookNamed, githubIngestFrom, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, modelFrom, providerFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, privateEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir, workerName as workerNameFrom } from "./config.mjs";
-import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, FORGE_WEBHOOK_NAMES, accountTempRoot, configError, forgeWebhookFaults, forgeWebhookNamed, githubIngestFrom, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, modelFrom, providerFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, normalizeAppPrivateKey, privateEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir, workerName as workerNameFrom } from "./config.mjs";
+import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envFileValueLines, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits, scopedLimitsVersionFor } from "./scoped-limits.mjs";
 import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
 import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs";
@@ -1139,6 +1139,27 @@ function settingsRead(fromFile) {
 }
 
 /**
+ * Issue #1028: the value of a `GITHUB_APP_PRIVATE_KEY` assignment that starts on 1-based `line` of a deployment `.env`,
+ * where it is one quoted value in an alphabet systemd's `EnvironmentFile=` and `/bin/sh` read the same way: base64, the
+ * PEM's dashes, `=`, spaces and real newlines, and the two characters `\n` (a backslash is kept before `n` inside double
+ * quotes by both, and single quotes keep everything). Nothing may follow the closing quote but blanks. That is every form
+ * the docs offer for the inline key, so doctor can judge it with `normalizeAppPrivateKey` as the loaders do. Anything
+ * else (a `$`, another escape, a CR, a second quote) returns null and stays a line doctor does not read: the general
+ * reader (`readEnvAssignments`) is deliberately strict, and widening it for every key is not this rule's to do. A line
+ * that `loader` reads as part of a value above it (`envFileValueLines`) is no assignment to it, so it is null too. Asked
+ * of the deployment's own loader, never systemd's alone: `/bin/sh`, the macOS wrapper's, also opens a quote mid-word
+ * (`NAME=O'Brien`), and a key line under such a quote, which systemd reads as an assignment, is text to the shell, so
+ * the services there start with no key.
+ */
+function quotedAppKeyAt(text, line, loader) {
+	const lines = String(text ?? "").split("\n");
+	if (!Number.isInteger(line) || line < 1 || line > lines.length) return null;
+	if (envFileValueLines(text, { loader })[line - 1] === true) return null;
+	const m = /^GITHUB_APP_PRIVATE_KEY=(["'])((?:[A-Za-z0-9+\/= \n-]|\\n)*)\1[ \t]*(?:\n|$)/.exec(lines.slice(line - 1).join("\n"));
+	return m ? m[2] : null;
+}
+
+/**
  * Issue #471: what the service-key resolution has to say, as check lines: where the file supplied keys (one ✓, names
  * only), where this shell and the file disagree (one ✗: doctor judged this shell's values, which a worker started by
  * hand from this shell runs, while the service runs the file's), and a line doctor could not read (one ✗, the line
@@ -1884,6 +1905,18 @@ export async function collectChecks(shellVars, seams) {
 	const valkeyUnread = service.unread.find((u) => u.key === "VALKEY_URL" && !u.shellSet);
 	const unreadValkey = valkeyUnread ? readValkeyKeys(serviceEnvFile.text, { loader: serviceEnvFile.loader, path: serviceEnvFile.path }).error : null;
 	if (unreadValkey) valkeyUnread.skip = true;
+	// Issue #1028: the inline App key in the forms `.env.example`, docs/secrets.md and docs/podman.md offer (a PEM in quotes
+	// over several lines, or with `\n` escapes inside double quotes) is a line the general reader declines, so doctor failed
+	// on a line every loader reads and judged no key at all. It is read here by one narrow rule (`quotedAppKeyAt`) and judged
+	// below with the loaders' own; a line outside that rule stays unread and its key unjudged. Not under the cmd wrapper,
+	// which keeps quotes as part of the value, and only where this shell sets no key of its own, as for every other key.
+	const appKeyUnread = service.unread.find((u) => u.key === "GITHUB_APP_PRIVATE_KEY" && !u.shellSet);
+	const appKeyRead = appKeyUnread && serviceEnvFile && serviceEnvFile.loader !== "cmd" ? quotedAppKeyAt(serviceEnvFile.text, appKeyUnread.line, serviceEnvFile.loader) : null;
+	if (appKeyRead !== null) {
+		appKeyUnread.skip = true;
+		env.GITHUB_APP_PRIVATE_KEY = appKeyRead;
+		service.fromFile.GITHUB_APP_PRIVATE_KEY = appKeyRead;
+	}
 	const valkeyUrl = env.VALKEY_URL ?? DEFAULT_VALKEY_URL;
 	// PR #478's gate: a VALKEY_URL path that names no database (`/abc`) crashed doctor with an unhandled rejection from
 	// ioredis's SELECT. It is a ✗ of its own, the worker's refusal (exit 2), and nothing below contacts a Valkey.
@@ -2730,8 +2763,10 @@ export async function collectChecks(shellVars, seams) {
 						ok: false,
 						warn: true,
 						// The receiver alone (issue #1006): the poller and the watch collector load as commands that do not listen and
-						// never read it, a secret of spaces included, as `pi-dispatch triggers check` names it.
-						label: `${githubServe.why} but WEBHOOK_SECRET is unset -- the receiver will refuse to start`,
+						// never read it, a secret of spaces included, as `pi-dispatch triggers check` names it. "Unset or blank", the
+						// words of that check and the forge lines below: the receiver trims the secret, so a value of spaces is refused
+						// as an absent one is, and this said "unset" of a line that sets it.
+						label: `${githubServe.why} but WEBHOOK_SECRET is unset or blank -- the receiver will refuse to start`,
 						// The way out an inferred answer leaves (issue #879): a deployment whose GitHub events come from the poller
 						// needs no secret, and said here because this is the line such an operator meets. An operator who set
 						// GITHUB_INGEST to webhook or both chose the webhook, so the fix is the secret alone. Where only a
@@ -2996,15 +3031,29 @@ export async function collectChecks(shellVars, seams) {
 		// PEM itself in GITHUB_APP_PRIVATE_KEY for a deployment whose environment comes from a secrets
 		// manager. The hygiene pass below belongs to the PATH variant -- there is no mode to check and no
 		// file to stat on a value that only ever exists in this process's environment, and whoever supplies
-		// that environment owns its hygiene. What survives for both is the shape sniff, and the rule that
-		// nothing from the key reaches output.
+		// that environment owns its hygiene. What survives for both is a shape check (the loaders' own rule for the
+		// inline value, a first-bytes sniff of the file), and the rule that nothing from the key reaches output.
 		const keyPath = env.GITHUB_APP_PRIVATE_KEY_PATH;
 		const inlineKey = (env.GITHUB_APP_PRIVATE_KEY ?? "").trim();
 		// Blank counts as unset, as `loadGitHubAuth` trims it (PR #466 gate round 2): a path of spaces beside an inline key
 		// is not "both set", and alone it is "neither set".
 		const keyPathSet = (keyPath ?? "").trim() !== "";
-		// The three key lines `loadGitHubAuth` refuses the worker's boot on (both forms set, neither set, a path that does not
-		// exist) FAIL, as the two ids do (PR #466 gate round 1); the hygiene lines below (mode, PEM shape) still warn.
+		// The key's two names where the `.env` assigns them on a line doctor did not read and this shell sets neither: a
+		// line the reader declines (`unread`, unless `quotedAppKeyAt` read it after all) or one under a line it cannot read
+		// at all (`hazardSkipped`). A line the service's loader reads as part of a value above it assigns nothing, so it is
+		// left out: the key is then as absent to doctor as it is to the services.
+		const valueLines = serviceEnvFile && serviceEnvFile.loader !== "cmd" ? envFileValueLines(serviceEnvFile.text, { loader: serviceEnvFile.loader }) : [];
+		const keyLinesUnread = ["GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_PRIVATE_KEY_PATH"].filter((k) => (service.hazardSkipped ?? []).includes(k) || (service.unread ?? []).some((u) => u.key === k && !u.shellSet && !u.skip && valueLines[u.line - 1] !== true));
+		// Said where a key line was not read (see the branch that uses it): never "neither is set" and never a ✓ beside it.
+		const keyUnjudged = () => ({
+			ok: false,
+			warn: true,
+			label: `GITHUB_AUTH_SOURCE=app and ${envPathShown} assigns ${keyLinesUnread.join(" and ")} in a form doctor does not read, so the App key is not judged here: ${githubAuthRefusers} refuse to start (exit 2) if what their loader reads there is not a key they take`,
+			fix: "to have doctor judge it, point GITHUB_APP_PRIVATE_KEY_PATH at the key file instead, or write the value in a form doctor reads, as the ✗ naming that line says (docs/secrets.md)",
+		});
+		// The key lines `loadGitHubAuth` refuses the worker's boot on (both forms set, neither set, a path that does not exist,
+		// and since issue #1028 an inline value it refuses) FAIL, as the two ids do (PR #466 gate round 1); the key file's
+		// hygiene lines below (mode, PEM sniff) still warn, since the boot reads no file.
 		if (inlineKey !== "" && keyPathSet) {
 			checks.push({
 				ok: false,
@@ -3012,18 +3061,36 @@ export async function collectChecks(shellVars, seams) {
 				fix: "unset one of them: the inline value for a deployment fed by a secrets manager, the path for a key on disk (docs/secrets.md)",
 			});
 		} else if (inlineKey !== "") {
-			// A flattened key still starts with the header -- the `\n` escapes come after it -- so one sniff
-			// covers both accepted forms.
-			if (inlineKey.startsWith("-----BEGIN")) {
+			// Issue #1028: judged by the loaders' own rule (`normalizeAppPrivateKey`), which takes a flattened key's `\n`
+			// escapes and refuses a value that does not begin with a private key's BEGIN line AND end with its END line. This
+			// asked only that the value begin with "-----BEGIN", so a paste cut short after its header was a ✓ on a deployment
+			// where every reader exits 2. A FAILURE, as the other key lines the boot refuses on are, never the hygiene ⚠ it
+			// was. The refusal never carries the value, and neither does this line.
+			let refused = false;
+			try {
+				normalizeAppPrivateKey(inlineKey);
+			} catch {
+				refused = true;
+			}
+			// Beside a key path line doctor did not read, a key the loaders take is still unjudged: they may read a path there
+			// too, and refuse "both set". One they refuse fails either way.
+			if (!refused && keyLinesUnread.includes("GITHUB_APP_PRIVATE_KEY_PATH")) {
+				checks.push(keyUnjudged());
+			} else if (!refused) {
 				checks.push({ ok: true, label: "GitHub App private key supplied inline (GITHUB_APP_PRIVATE_KEY)" });
 			} else {
 				checks.push({
 					ok: false,
-					warn: true,
-					label: `GITHUB_APP_PRIVATE_KEY does not look like a PEM (does not begin "-----BEGIN ...") -- ${githubAuthRefusers} refuse to start (exit 2); contents not shown`,
+					label: `GITHUB_APP_PRIVATE_KEY is not a PEM private key (it must begin "-----BEGIN ... PRIVATE KEY-----" and end "-----END ... PRIVATE KEY-----") -- ${githubAuthRefusers} refuse to start (exit 2); contents not shown`,
 					fix: "check for a truncated paste, or point GITHUB_APP_PRIVATE_KEY_PATH at the key file instead (docs/secrets.md)",
 				});
 			}
+		} else if (!keyPathSet && keyLinesUnread.length > 0) {
+			// Issue #1028: the `.env` assigns the key on a line doctor did not read: one outside `quotedAppKeyAt`'s rule (a `$`,
+			// a CR, another escape) or one under a line it cannot read at all. The service's loader reads that line itself
+			// and may well take it, so "neither is set" would tell a deployment that may start that it does not. Doctor
+			// cannot judge a value it did not read, and says so.
+			checks.push(keyUnjudged());
 		} else if (!keyPathSet) {
 			checks.push(credentialAbsent({ subject: "GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set", names: "GITHUB_APP_PRIVATE_KEY_PATH or GITHUB_APP_PRIVATE_KEY", refusal: `${githubAuthRefusers} refuse to start (exit 2)`, fix: setupFix }));
 		} else if (!fileExists(keyPath)) {

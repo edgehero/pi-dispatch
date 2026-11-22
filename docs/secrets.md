@@ -1110,8 +1110,13 @@ disagree safely.
 
 `GITHUB_APP_PRIVATE_KEY` takes the PEM itself, which is what makes App auth reachable for a deployment
 with no key file at all. Real newlines and `\n` escapes both work, and it is checked at load, so a
-truncated paste refuses at boot instead of failing at the first mint. **Set exactly one of it and
-`GITHUB_APP_PRIVATE_KEY_PATH`**: both set is a refusal, not a precedence rule.
+truncated paste refuses at boot instead of failing at the first mint. `pi-dispatch doctor` checks it by the
+same rule, a BEGIN line and an END line that name a private key, and fails on one the worker, `serve` and
+`poll` would refuse, without printing it. In a `.env` on Linux and macOS it reads the PEM in single or double
+quotes, over several lines or on one line with `\n` escapes (the Windows wrapper takes the value unquoted, on one
+line). A value with anything else in it (a `$`, another backslash escape, a CRLF line ending) is one the services
+may read differently from doctor, so doctor says so and does not judge the key. **Set exactly one of it and `GITHUB_APP_PRIVATE_KEY_PATH`**: both set is a
+refusal, not a precedence rule, and doctor fails on it too.
 
 **Never list it in `PI_FORWARD_ENV`.** The worker refuses that at load, and the reason is worth knowing:
 the App's signing key mints installation tokens for every repository the App is installed on, so putting

@@ -21,27 +21,63 @@ const CHECKPOINT = "if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end redi
  */
 export const WATCH_PULL_CURSOR_TTL_MS = 35 * 86_400_000;
 
-/** One bounded cycle, also the test seam for restart, partial enqueue and concurrent-producer behavior. */
-export async function pollWatchSources({ cfg, redis, store, enqueue, adapterFactory = makeWatchPullAdapter, env = process.env, now = () => Date.now(), log = () => {}, due = new Map() }) {
+/**
+ * One bounded cycle, also the test seam for restart, partial enqueue and concurrent-producer behavior.
+ *
+ * A SOURCE THAT FAILS WAITS ITS INTERVAL (issue #1027), as one that checkpointed does: whichever step fails once its
+ * lease is held (`stage`: reading its cursor, its own `poll`, the batch's bounds, a finding's ingest or enqueue, the
+ * checkpoint, a lease lost included), it is next due `intervalSeconds` later with its cursor kept. It used to stay due,
+ * so the loop asked a failing remote once a second whatever its interval. A lease another collector holds is that
+ * collector's turn, not a failure: nothing is said and the source stays due.
+ *
+ * A FAILURE IS SAID ONCE PER CHANGE: `watch_pull_source_failed` names the source and the stage, and a source that goes on
+ * failing at the same stage says nothing more until it checkpoints or fails at another. Its next `watch_pull_cycle`,
+ * which every checkpoint logs, is the recovery's line, so a recovery needs no line of its own: a log alert pairs the two
+ * by `source`. Each pass said the failure twice before, once for the source and once more for the pass.
+ *
+ * `due` and `failing` are the loop's, keyed by the source's identity (its name and pull block, as its lease and cursor
+ * are), so a source edited in place is due at once and its first failure is said, whatever the copy before it did, and
+ * a source removed from the file leaves nothing behind. This throws only for what is no source's: at once when Valkey
+ * answers a lease request with an error (out of memory, say), and after every source's turn when it answered a release
+ * with one. A Valkey that stops answering at all holds the pass, with nothing said, until it answers: this client, like
+ * every long-running client of the receiver, queues its commands and bounds none (`parseConnection` gives a command
+ * bound to a short-lived failFast client only).
+ */
+export async function pollWatchSources({ cfg, redis, store, enqueue, adapterFactory = makeWatchPullAdapter, env = process.env, now = () => Date.now(), log = () => {}, due = new Map(), failing = new Map() }) {
 	const sources = cfg.triggers?.watchSources ?? cfg.watchSources ?? {};
-	for (const known of due.keys()) if (!Object.hasOwn(sources, known)) due.delete(known);
-	let failures = 0;
-	for (const [source, declaration] of Object.entries(sources)) {
-		if (!declaration.pull || (due.get(source) ?? 0) > now()) continue;
-		const identity = hash([source, declaration.pull]); const leaseKey = `watch:pull:lease:${identity}`; const cursorKey = `watch:pull:cursor:${identity}`; const token = randomUUID();
+	const pulled = Object.entries(sources).filter(([, declaration]) => declaration.pull).map(([source, declaration]) => ({ source, declaration, identity: hash([source, declaration.pull]) }));
+	const live = new Set(pulled.map(({ identity }) => identity));
+	for (const kept of [due, failing]) for (const known of kept.keys()) if (!live.has(known)) kept.delete(known);
+	let unreleased = 0;
+	for (const { source, declaration, identity } of pulled) {
+		if ((due.get(identity) ?? 0) > now()) continue;
+		const leaseKey = `watch:pull:lease:${identity}`; const cursorKey = `watch:pull:cursor:${identity}`; const token = randomUUID();
 		if (!await redis.set(leaseKey, token, "NX", "PX", 15000)) continue;
+		let stage = "cursor";
 		try {
 			const raw = await redis.get(cursorKey); const cursor = raw ? JSON.parse(raw) : {};
+			stage = "poll";
 			const adapter = adapterFactory(declaration.pull, { env, now });
 			const batch = await adapter.poll(cursor);
+			stage = "batch";
 			if (!Array.isArray(batch.findings) || !Array.isArray(batch.deliveries) || batch.findings.length !== batch.deliveries.length || batch.findings.length > 100 || Buffer.byteLength(JSON.stringify(batch.cursor)) > 32768) throw new Error("invalid watch pull batch");
+			stage = "ingest";
 			for (const [index, finding] of batch.findings.entries()) await ingestWatchFinding({ cfg, store, enqueue, source, finding, delivery: batch.deliveries[index], log, signature: "host-pull" });
+			stage = "checkpoint";
 			if (!await redis.eval(CHECKPOINT, 2, leaseKey, cursorKey, token, JSON.stringify(batch.cursor), WATCH_PULL_CURSOR_TTL_MS)) throw new Error("watch pull lease lost");
-			due.set(source, now() + (declaration.pull.intervalSeconds ?? 30) * 1000);
+			failing.delete(identity);
 			log("watch_pull_cycle", { source, count: batch.findings.length, status: "checkpointed" });
-		} catch { failures++; log("watch_pull_source_failed", { source, reason: "source-unavailable-cursor-retained" }); } finally { try { await redis.eval(RELEASE, 1, leaseKey, token); } catch { failures++; } }
+		} catch {
+			if (failing.get(identity) !== stage) {
+				failing.set(identity, stage);
+				log("watch_pull_source_failed", { source, stage, reason: "source-unavailable-cursor-retained" });
+			}
+		} finally {
+			due.set(identity, now() + (declaration.pull.intervalSeconds ?? 30) * 1000);
+			try { await redis.eval(RELEASE, 1, leaseKey, token); } catch { unreleased++; }
+		}
 	}
-	if (failures) throw new Error("watch pull sources unavailable");
+	if (unreleased) throw new Error("watch pull lease release unavailable");
 }
 
 /**
@@ -80,7 +116,7 @@ export async function startWatchPuller(env = process.env, deps = {}) {
 	const redis = deps.redis ?? makeRedisClient(cfg.valkeyUrl);
 	const queue = ownedQueue ? (deps.makeQueueFn ?? makeQueue)(parseConnection(cfg.valkeyUrl)) : null;
 	const enqueue = deps.enqueue ?? (fields => enqueueWatchJob(queue, fields, { now }));
-	const store = deps.store ?? makeWatchStore(redis, { now }); const due = new Map();
+	const store = deps.store ?? makeWatchStore(redis, { now }); const due = new Map(); const failing = new Map();
 	const triggersFollower = makeTriggersFollower(env, cfg, { readFile: fsDeps.readFile, fileExists: fsDeps.fileExists, baseline: triggersAtBoot, log: out, now });
 	let stopped = false; let wake; let timer;
 	const log = (event, fields) => out({ event, ...fields });
@@ -94,11 +130,22 @@ export async function startWatchPuller(env = process.env, deps = {}) {
 	};
 	const signal = () => stop();
 	if (signals) { process.once("SIGTERM", signal); process.once("SIGINT", signal); }
+	// Whether the last pass threw (issue #1027): `watch_pull_failed` is said once per streak of passes cut short by a lease
+	// request or release that Valkey answered with an error, and a pass that finishes ends the streak. A source's own
+	// failure is said by `pollWatchSources`, never here, so the line no longer repeats it every second. A Valkey that does
+	// not answer at all says nothing here: the pass waits for it (see `pollWatchSources`).
+	let passFailing = false;
 	const done = (async () => {
 		try {
 			while (!stopped) {
 				triggersFollower.follow();
-				try { await pollWatchSources({ cfg, redis, store, enqueue, adapterFactory, env, now, log, due }); } catch { if (!stopped) log("watch_pull_failed", { reason: "source-unavailable-cursor-retained" }); }
+				try {
+					await pollWatchSources({ cfg, redis, store, enqueue, adapterFactory, env, now, log, due, failing });
+					passFailing = false;
+				} catch {
+					if (!stopped && !passFailing) log("watch_pull_failed", { reason: "valkey-unavailable-cursor-retained" });
+					passFailing = true;
+				}
 				if (!stopped) await wait(); clearTimeout(timer);
 			}
 		} finally {

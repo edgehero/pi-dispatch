@@ -110,11 +110,12 @@ and never blindly create a second issue.
 Run `pi-dispatch-receiver watch` on the collector host. It reads the same reviewed `PI_TRIGGERS_FILE` and `VALKEY_URL`
 as the push receiver, uses the same matching, digest, cooldown and caps, and calls no model. It reads the triggers file
 again at the start of every pass, about once a second, and takes it only when its text changed. An edit that fails
-validation leaves it collecting with the last copy that loaded and logs `triggers_reload_invalid` once for that text,
-with the reason and `"kept": true`; a good file back logs `triggers_reloaded`, the same lines the poller and `serve`
-write. Earlier releases logged `watch_pull_config_invalid` on every pass while the file was invalid; that line is gone,
-so a log alert on it should look for `triggers_reload_invalid` instead. SIGTERM and SIGINT stop the loop and release its
-owned connections. Start `serve` separately if push webhooks are also needed.
+validation leaves it collecting with the last copy that loaded and logs `triggers_reload_invalid` each time the text it
+refuses changes, with the reason and `"kept": true`: it compares each read with the one before, so an invalid file left
+alone is said once, and a return to a text it refused earlier is said again. A good file back logs `triggers_reloaded`,
+the same lines the poller and `serve` write. Earlier releases logged `watch_pull_config_invalid` on every pass while
+the file was invalid; that line is gone, so a log alert on it should look for `triggers_reload_invalid` instead. SIGTERM
+and SIGINT stop the loop and release its owned connections. Start `serve` separately if push webhooks are also needed.
 
 Add a `pull` block to a source. These are three alternative blocks:
 
@@ -154,6 +155,18 @@ unreadable source, missing credential, invalid response, or timestamp batch that
 named collector failure and its cursor retained. No unchecked tail is silently skipped. Split or throttle such a
 source upstream before retrying. Cursors are retained for 35 days; evidence and traces for seven days. Digest windows
 cannot exceed one day, and window plus cooldown cannot exceed seven days, so an active cooldown retains its finding.
+
+A source that fails waits its `intervalSeconds` like one that collected: whichever step fails (reading its cursor, the
+read itself, the batch's bounds, admitting or enqueueing a finding, the checkpoint), its cursor is kept and it is asked
+again one interval later, so a failing remote is not asked more often than a healthy one. The collector logs
+`watch_pull_source_failed` with the source and that `stage` (`cursor`, `poll`, `batch`, `ingest` or `checkpoint`) once,
+and again only when the source fails at another stage or after it collected; its next `watch_pull_cycle` is the line
+that says it collects again. `watch_pull_failed` is for Valkey alone, when it answers the request for a source's
+lease, or its release, with an error (out of memory, say), said once until a pass completes. A Valkey that stops
+answering at all holds the collector, with nothing said, until it answers again. Earlier releases asked a failing
+source again every second and logged both lines each time, so an alert on `watch_pull_failed` should look for
+`watch_pull_source_failed` too. A source another collector is reading is skipped without a line, and a source whose
+`pull` block you edit is read at the next pass, whatever the old block's interval.
 
 If a source declares `project`, it must use the project ID grammar from `projects.json` and match the resolved
 investigation folder's project. A mismatch refuses before spend. With no source project, the normal folder project
