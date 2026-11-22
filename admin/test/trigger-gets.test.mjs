@@ -65,7 +65,7 @@ test("no key has two editors: the card takes CARD_FIELDS, the Edit form EDIT_FIE
   const gets = panelOf(page, "p-trigger-gets");
   for (const key of CARD_FIELDS) assert.ok(!edit.includes(key), `the Edit form does not offer ${key}`);
   for (const key of EDIT_FIELDS) assert.ok(!namesIn(gets).includes(key), `the card does not offer ${key}`);
-  assert.deepEqual(namesIn(gets).filter((name) => name !== "index" && name !== "pageDigest").sort(), ["flow", "maxCostUsd", "model", "provider"], "a card's text fields, each once");
+  assert.deepEqual(namesIn(gets).filter((name) => name !== "index" && name !== "pageDigest").sort(), ["flow", "maxCostUsd", "maxSubscriptionUsd", "model", "provider"], "a card's text fields, each once");
   for (const key of ["models", "fallbackModels"]) assert.ok(gets.includes(`data-gets-add="${key}"`), key);
   assert.ok(gets.includes('data-gets-list="mcp"') && gets.includes('data-gets-list="excludeTools"') && gets.includes('data-gets-flag="packages"'));
   const run = panelOf(page, "p-trigger-run");

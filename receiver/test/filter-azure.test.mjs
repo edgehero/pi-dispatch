@@ -384,3 +384,16 @@ test("Azure webhook jobs preserve the explicit auxiliary grant", () => {
 		for (const key of Object.keys(grant)) assert.deepEqual(result.job[key], grant[key], key);
 	}
 });
+
+test("Azure webhook jobs carry the trigger's subscription allowance, and a trigger without one carries no key (#1008)", () => {
+	const allowance = { maxSubscriptionUsd: "12.50" };
+	for (const extra of [allowance, {}]) {
+		const group = { label: triggers.label.map(rule => ({ ...rule, ...extra })), comment: { ...triggers.comment, ...extra }, pullRequest: triggers.pullRequest.map(rule => ({ ...rule, ...extra })) };
+		for (const payload of [workItem(), pullRequest()]) {
+			const result = filterAzure(parseAzureSubset(payload), group, knownFlows, SELF, true, "allowance");
+			assert.equal(result.enqueue, true, result.reason);
+			assert.equal(result.job.maxSubscriptionUsd, extra.maxSubscriptionUsd);
+			assert.equal(Object.hasOwn(result.job, "maxSubscriptionUsd"), extra.maxSubscriptionUsd !== undefined);
+		}
+	}
+});

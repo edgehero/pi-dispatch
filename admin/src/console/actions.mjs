@@ -1039,6 +1039,8 @@ export function runFieldsLines(f, lead) {
     ...(f.modelSelection?.strategy === "random" ? [`random pool ${fieldText(f.modelSelection.candidates)}`] : []),
     ...(Array.isArray(f.fallbackModels) && f.fallbackModels.length > 0 ? [`fallbacks ${fieldText(f.fallbackModels)}`] : []),
     `per-job cap ${f.maxCostUsd !== null && f.maxCostUsd !== undefined ? `$${fieldText(f.maxCostUsd)}` : "the deployment's"}`,
+    // Issue #1008: only when set, so every other preview reads as it did.
+    ...(f.maxSubscriptionUsd !== null && f.maxSubscriptionUsd !== undefined ? [`subscription allowance $${fieldText(f.maxSubscriptionUsd)} at list price`] : []),
     ...(f.secretsProfile !== null && f.secretsProfile !== undefined ? [`secret profile ${fieldText(f.secretsProfile)}`] : []),
     ...(f.image !== null && f.image !== undefined ? [`image ${fieldText(f.image)}`] : []),
     ...(f.backend !== null && f.backend !== undefined ? [`backend ${fieldText(f.backend)}`] : []),

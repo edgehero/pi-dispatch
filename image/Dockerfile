@@ -467,7 +467,13 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # floor, so the worker requires this separate declaration before handing a job a short lease.
 # `mergePolicy` (issue #908) proves that the runner selects its system rule from the worker-owned job marker.
 # Without it, an opted-in forge prompt would still lose to the old unconditional system rule.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary,idleWatch,credentialRefresh,subscriptionLease,mergePolicy,secretFiles"
+# `subscriptionAllowance` (issue #1008) tells the worker this runner reads PI_SUBSCRIPTION_ALLOWANCE_MICROS (a trigger's
+# run.maxSubscriptionUsd) and refuses a subscription call once the settled list price of the job's subscription calls is
+# at or above it, stopping the job as subscription-allowance. An older runner handed the variable would ignore it and run
+# a subscription job with no dollar limit at all, so the worker refuses that pairing pre-spend (its `subscriptionAllowance`
+# capability row, reason job-image-subscription-allowance-unsupported). verify-image.sh runs the baked runner's own
+# allowance offline (image/runner/test/fixtures/subscription-allowance-smoke.mjs) and a real job given a malformed value.
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary,idleWatch,credentialRefresh,subscriptionLease,mergePolicy,secretFiles,subscriptionAllowance"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it

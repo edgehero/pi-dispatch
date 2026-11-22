@@ -1966,7 +1966,9 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 	const N = 99_999_999;
 	const MICROS = 9_999_999_999_999;
 	const row = (provider, model) => ({ provider, model, calls: N, input: N, output: N, cacheRead: N, cacheWrite: N, cacheWrite1h: N, reasoning: N, total: N, cost: 99_999.99, unpriced: N, providerBilled: 0 });
-	const tokenValue = (key) => (key === "metered" ? true : key === "cost" ? 99_999.99 : key.endsWith("Micros") ? MICROS : N);
+	// `costNotional` (issue #1008) at the 17 characters a float sum of dollars prints; `allowanceMicros` is a micro-dollar
+	// key and takes MICROS.
+	const tokenValue = (key) => (key === "metered" ? true : key === "cost" ? 99_999.99 : key === "costNotional" ? 99_382.71604992478 : key.endsWith("Micros") ? MICROS : N);
 	const rest = {
 		turns: 4096,
 		retryTurns: 4096,

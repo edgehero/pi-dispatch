@@ -392,6 +392,19 @@ test("the job's dollar cap reaches the container env as PI_MAX_COST_MICROS, 0 in
 	}
 });
 
+test("the job's subscription allowance reaches the container env as PI_SUBSCRIPTION_ALLOWANCE_MICROS, 0 included, and a job without one emits none (#1008)", { skip }, async () => {
+	// The hop from effectiveJobOf's `maxSubscriptionMicros` to buildContainerEnv. Dropped here, a job with an allowance would
+	// pass the subscriptionAllowance gate and then run its subscription calls with no dollar limit.
+	for (const maxSubscriptionMicros of [0, 12_500_000]) {
+		const argv = await argvFor({ ...JOB, maxSubscriptionMicros });
+		assert.ok(argv.includes(`PI_SUBSCRIPTION_ALLOWANCE_MICROS=${maxSubscriptionMicros}`), `allowance ${maxSubscriptionMicros} must reach the runner`);
+	}
+	for (const job of [{ ...JOB, maxSubscriptionMicros: null }, JOB]) {
+		const argv = await argvFor(job);
+		assert.ok(!argv.some((a) => String(a).startsWith("PI_SUBSCRIPTION_ALLOWANCE_MICROS")), "no allowance: no variable at all");
+	}
+});
+
 test("overlay extensions: the factory default emits nothing, and only an explicit false emits the opt-out", { skip }, async () => {
 	const on = await argvFor(JOB);
 	assert.ok(!on.some((a) => String(a).startsWith("PI_GLOBAL_ALLOW_EXTENSIONS")), "loading is the absence of the variable, on both sides");

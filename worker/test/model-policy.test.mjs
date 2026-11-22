@@ -269,7 +269,7 @@ const skewFile = (run) => ({ readFileSync: () => JSON.stringify({ ...(run.auxili
 const arrived = (extra = {}) => ({ trigger: { matched: { index: 0, type: "label" } }, kind: "github", flow: "fix", ...extra });
 
 test("the skew check refuses a job whose AUTHORED trigger lists models it arrived without, and reads one row per field", async () => {
-	assert.deepEqual(AUTHORED_NARROWING_FIELDS.map((row) => row.key), ["secretFiles", "mayMerge", "privateEndpoints", "models", "fallbackModels", "auxiliaryModels", "modelSelection", "maxCostUsd", "mcp", "awaitInput", "progress", "statusComment", "recover", "steer", "excludeExtensions", "excludeExtensionTools", "idleTimeoutMinutes", "stallTimeoutMinutes", "maxMinutes"], "a new narrowing field is one row here");
+	assert.deepEqual(AUTHORED_NARROWING_FIELDS.map((row) => row.key), ["secretFiles", "mayMerge", "privateEndpoints", "models", "fallbackModels", "auxiliaryModels", "modelSelection", "maxCostUsd", "maxSubscriptionUsd", "mcp", "awaitInput", "progress", "statusComment", "recover", "steer", "excludeExtensions", "excludeExtensionTools", "idleTimeoutMinutes", "stallTimeoutMinutes", "maxMinutes"], "a new narrowing field is one row here");
 	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ models: ["openai/gpt-x"] }) });
 	assert.deepEqual(await check(arrived()), { skewed: true, field: "models" }, "a stale receiver dropped the list");
 	assert.deepEqual(await check(arrived({ models: null })), { skewed: true, field: "models" }, "null is absent");
@@ -512,4 +512,60 @@ test("the skew check refuses a producer dropping an explicit auxiliary grant", a
 	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile(fields) });
 	for (const value of [undefined, null]) assert.deepEqual(await check(arrived({ ...fields, auxiliaryModels: value })), { skewed: true, field: "auxiliaryModels" });
 	assert.deepEqual(await check(arrived(fields)), { ok: true });
+});
+
+// --- issue #1008: the subscription allowance through the real processor ---
+
+test("the processor refuses a job whose AUTHORED trigger sets maxSubscriptionUsd it arrived without as trigger-skew, before any spend (#1008)", { skip }, async () => {
+	const seen = [];
+	const checkWaitSkew = makeCheckWaitSkew({ triggersPath: "/t.json", fs: { readFileSync: () => JSON.stringify({ version: 11, triggers: [{ on: { type: "label", any: ["pi:go"] }, run: { kind: "github", flow: "fix", maxSubscriptionUsd: "12.50" } }] }) } });
+	const h = harness({ extraDeps: { checkWaitSkew: (j) => (seen.push(j.maxSubscriptionUsd), checkWaitSkew(j)) } });
+	const r = await h.processor(qJob("j-allowance", { kind: "github", repo: "o/r", flow: "fix", target: { number: 1 }, trigger: { matched: { index: 0, type: "label" } } }), "tok", new AbortController().signal);
+	assert.equal(r.reason, "trigger-skew");
+	assert.equal(r.budgetReserved, false);
+	assert.deepEqual(seen, [undefined], "the check sees the job as it arrived");
+	assert.equal(h.seen.ctx.length, 0, "no container");
+	assert.ok(h.seen.comments.some((t) => t.includes("`run.maxSubscriptionUsd`") && !t.includes("12.50")), "names the field, never its value");
+});
+
+test("the container job carries the trigger's allowance in micro-dollars, a malformed one as 0 with its key logged, and a job without one carries none (#1008)", { skip }, async () => {
+	const runWith = async (data) => {
+		const h = harness();
+		await run(h, { ...LOCAL, ...data });
+		return h;
+	};
+	assert.equal((await runWith({ maxSubscriptionUsd: "12.50" })).seen.ctx[0].job.maxSubscriptionMicros, 12_500_000);
+	const malformed = await runWith({ maxSubscriptionUsd: "sk-ant-oops" });
+	assert.equal(malformed.seen.ctx[0].job.maxSubscriptionMicros, 0, "fails closed: no subscription call is allowed");
+	assert.deepEqual(malformed.seen.logs.find((l) => l.event === "job_subscription_allowance_malformed").fields, { jobId: "j-1", key: "maxSubscriptionUsd" }, "by key, never by value");
+	for (const data of [{}, { maxSubscriptionUsd: null }, { maxSubscriptionMicros: 999 }]) {
+		assert.equal(Object.hasOwn((await runWith(data)).seen.ctx[0].job, "maxSubscriptionMicros"), false, `${JSON.stringify(data)}: no allowance, and no stray key from the queued data`);
+	}
+	// The worker's deployment cap never stands in for an allowance, nor the reverse.
+	const h = harness({ getSettings: SETTINGS({ maxCostUsd: "5" }) });
+	await run(h, { ...LOCAL, maxSubscriptionUsd: "2" });
+	assert.deepEqual([h.seen.ctx[0].job.maxCostMicros, h.seen.ctx[0].job.maxSubscriptionMicros], [5_000_000, 2_000_000]);
+});
+
+test("a job with an allowance on an image that does not declare subscriptionAllowance is refused before any spend, through the real effective job (#1008)", { skip }, async () => {
+	const { makeImagePreflight, FIELD_SEP } = await import("../src/image-preflight.mjs");
+	const { EventEmitter } = await import("node:events");
+	const docker = (caps) => (_cmd, _args, opts) => {
+		const child = new EventEmitter();
+		if (opts?.stdio?.[1] === "pipe") {
+			const out = new EventEmitter();
+			out.setEncoding = () => {};
+			child.stdout = out;
+			queueMicrotask(() => out.emit("data", `sha256:abc${FIELD_SEP}1.5.2${FIELD_SEP}github${FIELD_SEP}${caps}\n`));
+		}
+		queueMicrotask(() => child.emit("close", 0));
+		return child;
+	};
+	const old = harness({ extraDeps: { imagePreflight: makeImagePreflight({ image: "pi-job:stale", spawnFn: docker("costCap") }) } });
+	const r = await run(old, { ...LOCAL, maxSubscriptionUsd: "12.50" });
+	assert.equal(r.reason, "job-image-subscription-allowance-unsupported");
+	assert.equal(r.budgetReserved, false);
+	assert.equal(old.seen.ctx.length, 0, "no container: a subscription job with no dollar limit is what this gate exists to stop");
+	const without = harness({ extraDeps: { imagePreflight: makeImagePreflight({ image: "pi-job:stale", spawnFn: docker("costCap") }) } });
+	assert.notEqual((await run(without, LOCAL)).reason, "job-image-subscription-allowance-unsupported", "a job without one is not this gate's business");
 });

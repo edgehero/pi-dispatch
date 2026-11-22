@@ -103,8 +103,8 @@ function undoBody(inverse) {
 
 // ---- the file ---------------------------------------------------------------------------------------------------------
 
-test("CARD_FIELDS are the twelve the card edits, named once; image, secrets and skillsDir are not among them", () => {
-  assert.deepEqual([...CARD_FIELDS], ["flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "modelSelection", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools"]);
+test("CARD_FIELDS are the thirteen the card edits, named once; image, secrets and skillsDir are not among them", () => {
+  assert.deepEqual([...CARD_FIELDS], ["flow", "provider", "model", "maxCostUsd", "maxSubscriptionUsd", "models", "fallbackModels", "modelSelection", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools"]);
   assert.ok(Object.isFrozen(CARD_FIELDS));
   for (const key of ["image", "secrets", "secretsProfile", "skillsDir", "backend", "maxTurns"]) assert.ok(!CARD_FIELDS.includes(key), key);
 });
@@ -2184,6 +2184,7 @@ const IN_LINE = [
   [{ provider: "openai", model: "gpt-4o" }, null],
   [{ model: "claude-sonnet-5-5" }, null],
   [{ maxCostUsd: "2" }, "maxCostUsd"],
+  [{ maxSubscriptionUsd: "5" }, "maxSubscriptionUsd"],
   [{ models: [HAIKU] }, "models"],
   [{ fallbackModels: [SONNET] }, "fallbackModels"],
   [{ modelSelection: { strategy: "random", candidates: [HAIKU, SONNET] } }, "modelSelection"],
@@ -2200,8 +2201,8 @@ for (const [change, field] of IN_LINE) {
   test(`a job in line under ${JSON.stringify(change)}: ${field === null ? "runs, and no sentence names it" : `refused, as run.${field}`}, as the worker's own check says of the written file`, async () => {
     // A job that carries the list, so the one thing it lacks is what this row adds.
     const carried = "fallbackModels" in change || "modelSelection" in change ? { models: [HAIKU, SONNET] } : {};
-    // A narrowing that needs version 2 asks each live host, and this one reads it.
-    const { f } = skewFixture([queued("gh-1", carried)], { run: { provider: "anthropic", model: "claude-haiku-4-5", ...carried, ...(change.fallbackModels ? { models: [HAIKU, SONNET] } : {}) }, deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "6", jobDataVersion: "7" }] }), readHostLoads: async () => ({ hosts: [{ name: "mini1", state: "current", packages: [{ name: "pi-lint", version: "1.4.2" }], extensions: [], unread: [], more: {} }] }) } });
+    // A narrowing that needs version 2 asks each live host, and this one reads it (the allowance, issue #1008, needs 11 and 12).
+    const { f } = skewFixture([queued("gh-1", carried)], { run: { provider: "anthropic", model: "claude-haiku-4-5", ...carried, ...(change.fallbackModels ? { models: [HAIKU, SONNET] } : {}) }, deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "11", jobDataVersion: "12" }] }), readHostLoads: async () => ({ hosts: [{ name: "mini1", state: "current", packages: [{ name: "pi-lint", version: "1.4.2" }], extensions: [], unread: [], more: {} }] }) } });
     const out = await f.service.preview(ask(f, change), operator);
     assert.ok(out.plan, JSON.stringify(out));
     assert.deepEqual(out.plan.skew.rows, field === null ? [] : [{ jobId: "gh-1", queue: "pi-jobs", field }], JSON.stringify(change));
@@ -2485,4 +2486,44 @@ test("a random pool cannot grant its own authority when both allowed-model ceili
   assert.match(out.refusal, /random pool needs an explicit allowed-model list/);
   const allowed = await f.service.preview(ask(f, { modelSelection: { strategy: "random", candidates: [HAIKU] }, models: [HAIKU] }), operator);
   assert.ok(allowed.plan, JSON.stringify(allowed));
+});
+
+// ---- issue #1008: the subscription allowance on the card ----------------------------------------------------------------
+
+/** A live host that reads the allowance: the triggers file at 11 and the job data at 12. */
+const READS_ALLOWANCE = Object.freeze({ readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "11", jobDataVersion: "12" }] }) });
+
+const ALLOWANCE_WORDS = [
+  ["an allowance added", { resume: true }, { maxSubscriptionUsd: "12.50" }, ["Subscription allowance: $12.50 at list price, where this trigger set none."]],
+  ["an allowance lowered", { maxSubscriptionUsd: "12.50" }, { maxSubscriptionUsd: "5" }, ["Subscription allowance: $12.50 to $5.00."]],
+  ["an allowance raised is a widening", { maxSubscriptionUsd: "5" }, { maxSubscriptionUsd: "12.50" }, ["Subscription allowance: $5.00 to $12.50.", "This widens what each job's subscription calls may use: up to $12.50 at list price."]],
+  ["an allowance removed is a widening: nothing stands behind it", { maxSubscriptionUsd: "5" }, { maxSubscriptionUsd: null }, ["Subscription allowance: $5.00 removed; its jobs' subscription calls have no dollar limit.", "This widens what each job's subscription calls may use: no allowance at all."]],
+];
+for (const [what, run, change, want] of ALLOWANCE_WORDS) {
+  test(`in words, never an arrow: ${what} (#1008)`, async () => {
+    const f = fixture({ doc: { version: 11, triggers: [cron, comment(run)] }, deps: READS_ALLOWANCE });
+    const out = await f.service.preview(ask(f, change), operator);
+    assert.ok(out.plan, JSON.stringify(out));
+    assert.deepEqual(out.plan.changes.flatMap((c) => [c.line, ...(c.widening ? [c.widening] : [])]), want);
+    assert.deepEqual(out.summary.slice(1, 1 + want.length), want, "the lines lead with the change, each widening beside it");
+  });
+}
+
+test("the allowance is written as typed, the file stamped 11, and two spellings of one amount are no change (#1008)", async () => {
+  const f = fixture({ doc: { version: 11, triggers: [cron, comment()] }, deps: READS_ALLOWANCE });
+  await write(f, { maxSubscriptionUsd: "12.50" });
+  assert.equal(f.entry().run.maxSubscriptionUsd, "12.50");
+  assert.equal(JSON.parse(f.read()).version, 11);
+  for (const sent of ["12.5", 12.5, "12.500000"]) assert.deepEqual(await f.service.preview(ask(f, { maxSubscriptionUsd: sent }), operator), { unchanged: "trigger row 2 already says this." }, JSON.stringify(sent));
+  // A value the loader refuses is refused in its words, and nothing is written.
+  const before = f.read();
+  assert.match((await refusal(f, { maxSubscriptionUsd: "lots" })).refusal, /run\.maxSubscriptionUsd must be a dollar amount above 0/);
+  assert.equal(f.read(), before);
+});
+
+test("a host that reads an older triggers file or job data refuses the allowance's edit before anything is written (#1008)", async () => {
+  const f = fixture({ doc: { version: 11, triggers: [cron, comment()] }, deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "10", jobDataVersion: "11" }] }) } });
+  const before = f.read();
+  assert.match((await refusal(f, { maxSubscriptionUsd: "12.50" })).refusal, /^This change needs the triggers file at version 11 and the job data at version 12\. mini1 reads less/);
+  assert.equal(f.read(), before);
 });

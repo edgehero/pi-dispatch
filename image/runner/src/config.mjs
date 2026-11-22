@@ -41,6 +41,10 @@ export function parseRunnerEnv(env, { steerFrames = false } = {}) {
 		maxTokens,
 		// Issue #501: the per-job dollar cap in integer micro-dollars, or null (no cap, today's behaviour).
 		maxCostMicros: parseCostMicros(env, "PI_MAX_COST_MICROS"),
+		// Issue #1008: the list-price allowance for subscription calls in integer micro-dollars, or null (no allowance).
+		// Parsed by the cap's own rule: the worker writes it only for a job whose trigger set run.maxSubscriptionUsd.
+		// env-internal PI_SUBSCRIPTION_ALLOWANCE_MICROS: the worker's own per-job input (INT-CONTAINER-RUNTIME-CONTRACT), from the trigger's run.maxSubscriptionUsd; the container env is BUILT, never inherited, and `run.secrets` cannot bind it.
+		subscriptionAllowanceMicros: parseCostMicros(env, "PI_SUBSCRIPTION_ALLOWANCE_MICROS"),
 		// Issue #502: the models this job may call, as `{ provider, model }` pairs, or null (unrestricted).
 		allowedModels: parseAllowedModels(env, "PI_ALLOWED_MODELS"),
 		// REQ-GLOBAL-PI-OVERLAY: does the global overlay's `extensions/` dir load? ON by default -- the

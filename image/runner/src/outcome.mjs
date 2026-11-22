@@ -21,10 +21,16 @@ export const EXIT_POLICY = 2; // not retried: turn budget, cap, config error, pr
  * The four new ones are hyphenated like every other worker reason. Two are STOPS (the run spent and a cap or
  * a list ended it), two are REFUSALS before any call (a cap or a list this runner cannot enforce before a
  * call, which it refuses rather than run with the policy unenforced).
+ *
+ * `subscription-allowance` (issue #1008) is a third STOP: the job's list-price allowance for subscription calls
+ * (`PI_SUBSCRIPTION_ALLOWANCE_MICROS`, the trigger's `run.maxSubscriptionUsd`) was used up, so the next subscription
+ * call was not made. An allowance this runner cannot enforce is refused as `cost-cap-unenforceable`, the money
+ * refusal it shares with the cap.
  */
 export const TOKEN_BUDGET = "token_budget";
 export const COST_CAP = "cost-cap";
 export const MODEL_NOT_ALLOWED = "model-not-allowed";
+export const SUBSCRIPTION_ALLOWANCE = "subscription-allowance";
 export const COST_CAP_UNENFORCEABLE = "cost-cap-unenforceable";
 export const MODEL_POLICY_UNENFORCEABLE = "model-policy-unenforceable";
 /**
@@ -193,8 +199,8 @@ export function captureTerminal(previous, event) {
 // `rejected` is classifyPromptRejection's verdict on a prompt() that rejected, or null. It ranks BELOW both
 // budget aborts (a cap that fired is the better-named cause of whatever pi did next) and above everything
 // the terminal message could say, because a rejected prompt's last message is not the job's outcome.
-// `meterStop` is the process-wide meter's first stop reason (`state.stopReason`: TOKEN_BUDGET, COST_CAP or
-// MODEL_NOT_ALLOWED), or null. It ranks below the turn budget only for the stable order the turn budget always
+// `meterStop` is the process-wide meter's first stop reason (`state.stopReason`: TOKEN_BUDGET, COST_CAP,
+// MODEL_NOT_ALLOWED or, since issue #1008, SUBSCRIPTION_ALLOWANCE), or null. It ranks below the turn budget only for the stable order the turn budget always
 // had, and above `tokenAborted`, which since the meter learned more than one stop is the FALLBACK bus meter's
 // flag alone: a runner whose meter installed passes its token stop here, as `meterStop`, never as both.
 // `parked` (issue #625) is true only when the job was armed with run.awaitInput AND the run ended on that tool's own

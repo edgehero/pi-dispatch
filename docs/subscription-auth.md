@@ -57,7 +57,8 @@ candidates. A pool that mixes the classes on this host needs a positive `run.max
 otherwise refused as `auth-route-unbounded` before its draw. That cap bounds the API-key draws and the draws on a
 connection with paid extra usage, which the runner prices from pi's model catalog and the overlay `models.json` as
 they were at the job's start (a model priced at zero there is not bounded). A draw on a connection without paid
-extra usage is not counted against it (see [the cost cap](#the-cost-cap-and-the-dollar-windows)). A connection whose
+extra usage is not counted against it (see [the cost cap](#the-cost-cap-and-the-dollar-windows)); the trigger's
+`run.maxSubscriptionUsd`, when set, limits those draws at list price instead, and doctor's line for the pool says which. A connection whose
 `extraUsageCreditMicros` is below the job's cap is passed over at every draw (`auth-credit-cap-required`), so a
 mixed pool then runs only on its API-key candidates, and doctor warns when a mixed pool's cap is above it. See
 [random pools](triggers.md#choosing-randomly-from-a-reviewed-pool).
@@ -424,9 +425,23 @@ A connection without paid extra usage (no `extraUsageCreditMicros`) bills nothin
 notional: the per-job cost cap (`maxCostUsd`) does not count them, and they leave every dollar window, a
 `model:<provider>/<model>` row of `scoped-limits.json` included. The run record still prices them at list price, in
 `tokens.cost`, with that part as `tokens.costNotional`, and `notionalProviders` names the providers. What bounds such
-a job is the account's quota, checked before the job starts, and the job's turn and time limits (`run.maxTurns`,
-`run.maxMinutes`). A job whose every model is on such a connection reserves nothing in the dollar windows and
-`pi-dispatch doctor` warns when a trigger's own `run.maxCostUsd` bounds nothing on that host.
+a job is the account's quota, checked before the job starts, the job's turn and time limits (`run.maxTurns`,
+`run.maxMinutes`) and, when its trigger sets one, a list-price allowance (below). A job whose every model is on such a
+connection reserves nothing in the dollar windows and `pi-dispatch doctor` warns when a trigger's own
+`run.maxCostUsd` bounds nothing on that host.
+
+**A list-price allowance.** A trigger's `run.maxSubscriptionUsd` limits the list price of a job's notional calls,
+on every subscription connection alike, whatever its adapter: the runner checks the `tokens.costNotional` the calls so far settled at
+before each subscription call and refuses the call once it is at or above the allowance, which stops the run as
+`subscription-allowance`. It holds nothing for a call still running, so the calls in flight when it is reached finish
+and count, and a job can end above it by what they cost. It never counts a call that can be billed, which the cap
+still bounds. Without it a subscription job has no dollar limit; there is no deployment-wide allowance. A job with one
+needs a job image that declares `subscriptionAllowance`, or it is refused before it spends
+(`job-image-subscription-allowance-unsupported`). A subscription call whose cost cannot be read stops the run at the
+next one; a model priced at zero is not bounded by it. It is a budget at list price for each attempt (a recovery or a
+retry starts again at 0, as the cap does), not a share of the account's
+quota: the five-hour and seven-day windows are the account's, shared by every job on it. See
+[triggers.md](triggers.md#a-subscription-allowance-per-job).
 
 A connection WITH paid extra usage keeps counting every call against the cap and the windows: any of its calls may
 be billed, and nothing tells which, so the case in issue #1008 (a long subscription job stopped at the cap over list

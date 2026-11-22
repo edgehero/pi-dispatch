@@ -508,7 +508,7 @@ function layoutEnv(layout) {
  * same for the role model's provider (`secondaryProvider`, a watch rule's `decide` model): the run secret the processor
  * admitted as that model's credential, on the same terms and by the same route.
  */
-export function buildContainerEnv({ mainCredential = null, secondaryCredential = null, size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, secretFilePaths = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, auxiliaryModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, privateEndpoints = [], exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, credentialRefresh = false }) {
+export function buildContainerEnv({ mainCredential = null, secondaryCredential = null, size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, subscriptionAllowanceMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, secretFilePaths = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, auxiliaryModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, privateEndpoints = [], exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, credentialRefresh = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -823,6 +823,16 @@ export function buildContainerEnv({ mainCredential = null, secondaryCredential =
 	// env-internal PI_MAX_COST_MICROS: written into the job's closed env map here, never read from the worker's environment.
 	if (maxCostMicros === null || maxCostMicros === undefined) delete env.PI_MAX_COST_MICROS;
 	else env.PI_MAX_COST_MICROS = String(maxCostMicros);
+
+	// Issue #1008: the list-price allowance for the job's subscription calls (the trigger's run.maxSubscriptionUsd,
+	// effectiveJobOf's `maxSubscriptionMicros`), the cap's rules exactly: the worker's answer and nothing else's, settled
+	// here once AFTER the PI_FORWARD_ENV and secrets loops (both refuse the name upstream, CONTAINER_ENV_NAMES), so a
+	// forwarded or secret value can neither replace it nor send one past the `subscriptionAllowance` gate, which only runs
+	// for a job that carries one. `!== null`: 0 is a real allowance (a malformed queued value's fail-closed reading, which
+	// refuses every subscription call). Absent leaves no variable, so a job without one carries the env it always did.
+	// env-internal PI_SUBSCRIPTION_ALLOWANCE_MICROS: written into the job's closed env map here, never read from the worker's environment.
+	if (subscriptionAllowanceMicros === null || subscriptionAllowanceMicros === undefined) delete env.PI_SUBSCRIPTION_ALLOWANCE_MICROS;
+	else env.PI_SUBSCRIPTION_ALLOWANCE_MICROS = String(subscriptionAllowanceMicros);
 
 	// Issue #545: the exit line's key waits on the container's stdin, and this variable tells the runner to read it.
 	// The value names the channel and is never the key: the environment is readable from /proc/1/environ by every

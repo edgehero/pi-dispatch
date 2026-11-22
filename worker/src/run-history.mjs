@@ -198,6 +198,9 @@ export function parseExitTurns(text) {
  * it could not enforce before a call. The two refusals are live from the first image that knows the variables.
  * `cost-cap` is live from the image that declares `costCap`, whose runner carries the cost guard, and
  * `model-not-allowed` from the image that declares `modelPolicy`, whose runner carries the model guard.
+ * `subscription-allowance` (issue #1008) is the third stop: the job's list-price allowance for subscription calls
+ * (`run.maxSubscriptionUsd`) was used up, live from the image that declares `subscriptionAllowance`; an allowance such
+ * an image cannot apply is refused as `cost-cap-unenforceable`.
  *
  * Then the runner's exit-2 refusals of a job's MCP servers (`MCP_RUNNER_REASONS`), each before the prompt. They read as
  * `runner-policy` until they were named here, which hid an operator's fix (a server that answers 401, a command the
@@ -237,7 +240,7 @@ export const STEER_RUNNER_REASONS = Object.freeze(["steer-inbox-missing", "steer
  * limit or the command the job waited on, not a budget.
  */
 export const ACTIVITY_RUNNER_REASONS = Object.freeze(["idle", "stalled"]);
-export const RUNNER_POLICY_REASONS = new Set(["secret-files-unusable", "provider-auth-refused", "cost-cap", "model-not-allowed", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...EXCLUDE_RUNNER_REASONS, ...ANSWER_DRAFT_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, ...ACTIVITY_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
+export const RUNNER_POLICY_REASONS = new Set(["secret-files-unusable", "provider-auth-refused", "cost-cap", "model-not-allowed", "subscription-allowance", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...EXCLUDE_RUNNER_REASONS, ...ANSWER_DRAFT_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, ...ACTIVITY_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
 
 /**
  * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so
@@ -910,7 +913,7 @@ function rebuildResources(r) {
  * dollar settlement takes it off the charge (`notionalMicros`), so on this list for the same reason: dropped, the
  * whole cost would be charged, the safe side but not the true one.
  *
- * The last seven are the policy counters of issues #501 and #502, in the order the runner emits them after
+ * Then the seven policy counters of issues #501 and #502, in the order the runner emits them after
  * it: `costCapMicros` (the job's cap), `costRefused` (calls the cost guard stopped),
  * `boundExceeded` (calls that cost more than their bound), `longContext` (calls priced past a long-context
  * threshold the catalog does not tier), `costUnjudged` (compat entries found displaced under the cap, so calls
@@ -926,8 +929,13 @@ function rebuildResources(r) {
  * calls charged their bound, the long-context tier), `costWaited` (calls that waited for room) and `costWarned` (1 when
  * the warning at 70% of the cap was queued for the agent, else 0). They say why `cost` can be far below the cap a job was stopped at; no
  * settlement reads them, and they are no floor counters (`FLOOR_COUNTERS`). A worker before them drops all four.
+ *
+ * And `allowanceMicros` (issue #1008), between `modelRefused` and those four: the job's list-price allowance for
+ * subscription calls in integer micro-dollars, which the runner's allowance guard writes (after the model guard's
+ * counter) only when the trigger set `run.maxSubscriptionUsd`. On the list so the record says what the `costNotional`
+ * beside it was held to; nothing settles from it.
  */
-export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "childTotal", "childProcesses", "unmeteredChildren", "costUnreported", "costNotional", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused", "costChargedMicros", "costLiftedMicros", "costWaited", "costWarned"]);
+export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "childTotal", "childProcesses", "unmeteredChildren", "costUnreported", "costNotional", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused", "allowanceMicros", "costChargedMicros", "costLiftedMicros", "costWaited", "costWarned"]);
 
 /**
  * Rebuild the billed totals from a closed key list rather than passing the container's object through.
@@ -941,7 +949,7 @@ export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "me
  * did not, and the asymmetry was an oversight rather than a decision.
  *
  * A key the runner omitted stays OMITTED rather than becoming null: the fallback shape legitimately
- * carries only five of the twenty-eight, and a null there would read as "measured zero" for a number nobody
+ * carries only five of the twenty-nine, and a null there would read as "measured zero" for a number nobody
  * measured. `typeof === "number"` rather than `Number.isFinite`, deliberately, so this narrows WHICH
  * KEYS survive and never which objects are admitted -- the admission gate above is unchanged.
  */

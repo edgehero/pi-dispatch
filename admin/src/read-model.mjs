@@ -3556,6 +3556,9 @@ export function normalizeTriggerForDisplay(entry) {
     ...(Array.isArray(run.fallbackModels) && run.fallbackModels.length > 0 && run.fallbackModels.every((m) => typeof m === "string") && { fallbackModels: [...run.fallbackModels] }),
     ...(Array.isArray(run.auxiliaryModels) && run.auxiliaryModels.length > 0 && run.auxiliaryModels.every((m) => typeof m === "string") && { auxiliaryModels: [...run.auxiliaryModels] }),
     ...((typeof run.maxCostUsd === "string" || typeof run.maxCostUsd === "number") && { maxCostUsd: String(run.maxCostUsd) }),
+    // Issue #1008: the list-price allowance for subscription calls, as written, by the cap's rule: no tool can set it, and
+    // only the file says what a trigger's subscription calls may use.
+    ...((typeof run.maxSubscriptionUsd === "string" || typeof run.maxSubscriptionUsd === "number") && { maxSubscriptionUsd: String(run.maxSubscriptionUsd) }),
     // The overlay MCP servers the jobs connect (REQ-MCP-OPERATOR-SERVERS), by name: the operator's own words, never a
     // server's definition or a credential. Shown for `secrets`' reason: what a job can reach is set only in this file.
     ...(Array.isArray(run.mcp) && run.mcp.length > 0 && run.mcp.every((name) => typeof name === "string") && { mcp: [...run.mcp] }),

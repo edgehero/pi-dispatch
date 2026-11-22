@@ -255,7 +255,8 @@ function unknownTriggerField(params, kind) {
 }
 
 /**
- * The trigger fields NO tool may set (issue #501, part 7): `run.maxCostUsd` (a trigger's per-job dollar cap),
+ * The trigger fields NO tool may set (issue #501, part 7): `run.maxCostUsd` (a trigger's per-job dollar cap), since
+ * issue #1008 `run.maxSubscriptionUsd` (the list-price allowance for its subscription calls),
  * `run.models` (the models its jobs may call), `run.fallbackModels` (their reviewed retry order),
  * `run.mcp` (the MCP servers they connect, below), and since issue #800 `run.excludeTools` (the tools they lose),
  * `run.packages` (whether they load the staged packages), `run.excludeExtensions` (the extensions they go without) and
@@ -273,9 +274,9 @@ function unknownTriggerField(params, kind) {
  * existing value is never touched: the add tool builds entries without these keys and the edit tool spreads the entry's own
  * `run` under the fields it sets.
  */
-const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.fallbackModels", "run.modelSelection", "run.mcp", "run.excludeTools", "run.packages", "run.excludeExtensions", "run.excludeExtensionTools"]);
+const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.maxSubscriptionUsd", "run.models", "run.fallbackModels", "run.modelSelection", "run.mcp", "run.excludeTools", "run.packages", "run.excludeExtensions", "run.excludeExtensionTools"]);
 /** Each tool-proof field as its refusal says it. */
-const TOOL_PROOF_WORDS = Object.freeze({ "run.maxCostUsd": "per-job dollar cap", "run.models": "allowed-model list", "run.fallbackModels": "fallback-model list", "run.modelSelection": "random model pool", "run.mcp": "list of MCP servers", "run.excludeTools": "list of removed tools", "run.packages": "staged-package switch", "run.excludeExtensions": "list of extensions it leaves out", "run.excludeExtensionTools": "list of an extension's tools it removes" });
+const TOOL_PROOF_WORDS = Object.freeze({ "run.maxCostUsd": "per-job dollar cap", "run.maxSubscriptionUsd": "subscription allowance", "run.models": "allowed-model list", "run.fallbackModels": "fallback-model list", "run.modelSelection": "random model pool", "run.mcp": "list of MCP servers", "run.excludeTools": "list of removed tools", "run.packages": "staged-package switch", "run.excludeExtensions": "list of extensions it leaves out", "run.excludeExtensionTools": "list of an extension's tools it removes" });
 /**
  * `run.mcp` (REQ-MCP-OPERATOR-SERVERS) is tool-proof for the same reason: which outside systems a trigger's jobs act
  * on, with which credentials, is the operator's to write. Its near misses are the loader's own (`isMcpNearMiss`: the

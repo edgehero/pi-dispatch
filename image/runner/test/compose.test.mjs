@@ -290,7 +290,8 @@ test("run-job refuses an unenforceable cost cap or model list after the meter in
 	const session = src.indexOf("await createAgentSession(");
 	assert.ok(install > 0 && check > install && session > check, "install, then the policy check, then the session");
 	// The verdict comes from policyEnforcement, whose ok:false and brake rules usage-meter.test.mjs drives.
-	assert.match(src, /assertPoliciesEnforceable\(\{\s*maxCostMicros: cfg\.maxCostMicros,\s*allowedModels: cfg\.allowedModels,\s*\.\.\.policyEnforcement\(usageMeter\),\s*\}\);/, "the fallback bus meter (ok:false) can only see a call after it was paid for");
+	// Issue #1008: the subscription allowance is checked with them, so an allowance the runner cannot apply is refused too.
+	assert.match(src, /assertPoliciesEnforceable\(\{\s*maxCostMicros: cfg\.maxCostMicros,\s*allowedModels: cfg\.allowedModels,\s*allowanceMicros: cfg\.subscriptionAllowanceMicros,\s*\.\.\.policyEnforcement\(usageMeter\),\s*\}\);/, "the fallback bus meter (ok:false) can only see a call after it was paid for");
 	// Issue #501, PR 3 (PR #533's review): the stop handler is the tested one, so a cost stop cannot log token_budget_exceeded.
 	assert.match(src, /const stopHandler = meterStopHandler\(\{ onTokenAbort, abort: \(\) => void session\?\.abort\(\) \}\);/, "the meter's stop goes through meterStopHandler");
 	// And then, issue #500 part E, to the children: STOP is written the moment the meter stops.
@@ -299,7 +300,7 @@ test("run-job refuses an unenforceable cost cap or model list after the meter in
 	// The policy guard (issues #501, #502): built from both policies (null when neither is set, its order and its
 	// snapshot driven in model-guard.test.mjs), handed to the install, and its fields spread only when it exists.
 	// Issue #985: the children's in-flight part and the wait claim come from the same hook as their spend.
-	assert.match(src, /const policyGuard = createPolicyGuard\(\{ maxCostMicros: cfg\.maxCostMicros, allowedModels: cfg\.allowedModels, log, external: \(\) => childWatch\.external\(\), externalInflight: \(\) => childWatch\.externalInflight\(\), claim: \(waited\) => childWatch\.claim\(waited\), outsideWaiting: \(\) => childWatch\.outsideWaiting\(\), subscriptionAdmission, subscriptions: subscriptionEntries, refreshCredentials: \(\) => credentialRefresher\?\.apply\(\), notional \}\);/, "the guard reads a pending drop before judging and injecting the runner's verified credentials");
+	assert.match(src, /const policyGuard = createPolicyGuard\(\{ maxCostMicros: cfg\.maxCostMicros, allowedModels: cfg\.allowedModels, log, external: \(\) => childWatch\.external\(\), externalInflight: \(\) => childWatch\.externalInflight\(\), claim: \(waited\) => childWatch\.claim\(waited\), outsideWaiting: \(\) => childWatch\.outsideWaiting\(\), subscriptionAdmission, subscriptions: subscriptionEntries, refreshCredentials: \(\) => credentialRefresher\?\.apply\(\), notional, allowanceMicros: cfg\.subscriptionAllowanceMicros, settledNotional: \(\) => meter\.notionalMicros\(\) \}\);/, "the guard reads a pending drop before judging and injecting the runner's verified credentials, and judges the allowance on the meter's own notional total");
 	assert.match(src, /const subscriptionAdmission = subscriptionRegistration \? \(provider\) => subscriptionRegistration\.admitted\(provider\) : null;/, "the admission is the sealed registration's");
 	// Issue #1008: ONE notional set, from the verified entries, the admission and the job's model list, handed to the meter
 	// (only with subscription entries) and to the guard, so the meter's costNotional and the guard's uncharged calls agree.

@@ -142,6 +142,21 @@ test("doctor says a capped mixed pool's draws each bill their own class, the cap
 	assert.equal(fits.some((c) => /auth-credit-cap-required/.test(c.label)), false, "a cap at the connection's ceiling is admitted");
 });
 
+test("doctor's mixed pool line names the trigger's subscription allowance read from the file, or says it sets none (issue #1008)", async () => {
+	const fact = async (run) => (await poolChecks(run)).find((c) => MIXED.test(c.label));
+	const set = await fact({ maxCostUsd: "2", maxSubscriptionUsd: "12.50" });
+	assert.equal(set.ok, true);
+	assert.match(set.label, /a draw on a subscription without paid extra usage is notional: its calls leave the cap and the dollar windows, and the trigger's \$12\.50 run\.maxSubscriptionUsd \(its calls' settled list price, checked between calls\), its quota and the job's turn and time limits bound it/);
+	assert.match((await fact({ maxCostUsd: "2" })).label, /only its quota and the job's turn and time limits bound it, as the trigger sets no run\.maxSubscriptionUsd/);
+	const warning = (await capChecks({ provider: "anthropic", model: "claude-sonnet-4-5", models: ["anthropic/claude-sonnet-4-5"], maxCostUsd: "2" })).find((c) => BOUNDS_NOTHING.test(c.label));
+	assert.match(warning.fix, /^set run\.maxSubscriptionUsd to give its subscription calls a list-price allowance/);
+	assert.match(warning.label, /so its jobs are bounded only by the subscription's quota and their turn and time limits$/);
+	// A trigger that sets one is bounded by it, and the line says so rather than "only the quota".
+	const allowed = (await capChecks({ provider: "anthropic", model: "claude-sonnet-4-5", models: ["anthropic/claude-sonnet-4-5"], maxCostUsd: "2", maxSubscriptionUsd: "12.50" })).find((c) => BOUNDS_NOTHING.test(c.label));
+	assert.match(allowed.label, /so its jobs are bounded by its \$12\.50 run\.maxSubscriptionUsd at list price, the subscription's quota and their turn and time limits$/);
+	assert.match(allowed.fix, /^limit its turns or minutes/);
+});
+
 test("doctor says nothing of a random pool in one billing class on this host, capped or not (issue #968)", async () => {
 	assert.equal((await poolChecks({}, { row: { ok: true, managed: false } })).some((c) => MIXED.test(c.label)), false, "nothing bound here: all API keys");
 	assert.equal((await poolChecks({}, { candidates: ["anthropic/claude-sonnet-4-5", "anthropic/claude-haiku-4-5"] })).some((c) => MIXED.test(c.label)), false, "all subscription");

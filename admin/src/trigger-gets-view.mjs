@@ -333,6 +333,8 @@ function modelRow({ trigger, defaults, modelChoices }) {
     cap: cap ?? "",
     deployment: { provider: defaults?.provider ?? null, model: defaults?.model ?? null },
     capHint: deploymentCap !== null ? `Blank uses the deployment’s $${deploymentCap}; a trigger can only lower it.` : "Blank means no cap of its own.",
+    // Issue #1008: the list-price allowance for subscription calls, the trigger's alone (no deployment value behind it).
+    allowance: trigger.maxSubscriptionUsd ?? "",
     allowed: trigger.models ?? [],
     fallbacks: trigger.fallbackModels ?? [],
     allowedNone: Array.isArray(allowed) ? `The deployment’s list applies: ${allowed.join(", ")}.` : "Any model is allowed.",
@@ -344,6 +346,8 @@ function modelRow({ trigger, defaults, modelChoices }) {
       trigger.models ? `allowed: ${trigger.models.join(", ")}` : Array.isArray(allowed) ? "the deployment’s allowed list" : "any model allowed",
       trigger.fallbackModels ? `fallbacks: ${trigger.fallbackModels.join(", ")}` : "no fallback",
       cap !== null ? `$${cap} cap` : deploymentCap !== null ? `the deployment’s $${deploymentCap} cap` : "no cap of its own",
+      // Only when set, so a trigger without one reads as it always did.
+      ...(trigger.maxSubscriptionUsd !== undefined && trigger.maxSubscriptionUsd !== null ? [`$${trigger.maxSubscriptionUsd} subscription allowance`] : []),
     ].join(" · "),
   };
 }

@@ -354,7 +354,7 @@ function isNonEmptyString(value) {
  * `version`, absent meaning 1, which `writeTriggers` owns and writes only when the content needs more than 1, so every
  * file of today's fields stays byte-identical.
  */
-export const TRIGGERS_FILE_VERSION = 10;
+export const TRIGGERS_FILE_VERSION = 11;
 
 /**
  * Each `run` key whose ABSENCE an older build would misread, with the version that introduced it. The raw `run` keys
@@ -370,8 +370,10 @@ export const TRIGGERS_FILE_VERSION = 10;
  * flow was written against, on a run that records as clean.
  * `idleTimeoutMinutes`, `stallTimeoutMinutes` and `maxMinutes` (issue #888): an older loader drops each and runs the job
  * under the deployment's limits, which for a ceiling the trigger set is a longer run than the file allows.
+ * `maxSubscriptionUsd` (issue #1008), at 11: an older loader drops the list-price allowance and runs a subscription job
+ * with no dollar limit at all, on a clean record.
  */
-export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3, mayMerge: 4, worker: 5, modelSelection: 6, privateEndpoints: 7, secretFiles: 8, auxiliaryModels: 9 });
+export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3, mayMerge: 4, worker: 5, modelSelection: 6, privateEndpoints: 7, secretFiles: 8, auxiliaryModels: 9, maxSubscriptionUsd: 11 });
 
 /** Each top-level block (beside `triggers`) whose absence an older build would misread, as above. Empty until one does. */
 export const TRIGGERS_BLOCK_VERSIONS = Object.freeze({});
@@ -854,7 +856,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, ...(worker !== undefined && { worker }), flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretFiles !== undefined && { secretFiles }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(privateEndpoints !== undefined && { privateEndpoints }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.modelSelection !== undefined && { modelSelection: ref.modelSelection }), ...(ref.auxiliaryModels !== undefined && { auxiliaryModels: ref.auxiliaryModels }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(ref.idleTimeoutMinutes !== undefined && { idleTimeoutMinutes: ref.idleTimeoutMinutes }), ...(ref.stallTimeoutMinutes !== undefined && { stallTimeoutMinutes: ref.stallTimeoutMinutes }), ...(ref.maxMinutes !== undefined && { maxMinutes: ref.maxMinutes }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
+		run: { kind: "local", folder: run.folder, ...(worker !== undefined && { worker }), flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretFiles !== undefined && { secretFiles }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(privateEndpoints !== undefined && { privateEndpoints }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.modelSelection !== undefined && { modelSelection: ref.modelSelection }), ...(ref.auxiliaryModels !== undefined && { auxiliaryModels: ref.auxiliaryModels }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(ref.maxSubscriptionUsd !== undefined && { maxSubscriptionUsd: ref.maxSubscriptionUsd }), ...(ref.idleTimeoutMinutes !== undefined && { idleTimeoutMinutes: ref.idleTimeoutMinutes }), ...(ref.stallTimeoutMinutes !== undefined && { stallTimeoutMinutes: ref.stallTimeoutMinutes }), ...(ref.maxMinutes !== undefined && { maxMinutes: ref.maxMinutes }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
 	};
 }
 
@@ -2039,7 +2041,7 @@ export function recoverVenueProblem(venue) {
 
 /**
  * The `run` field a key spells or nearly spells (`run.provider`, `run.model`, `run.models`, `run.maxTurns`,
- * `run.maxCostUsd`), or null. The exact field names match too: the CALLER decides whether an exact name is legal
+ * `run.maxCostUsd`, `run.maxSubscriptionUsd`), or null. The exact field names match too: the CALLER decides whether an exact name is legal
  * where it found it (the loader allows them under `run`, never under `on`; the console's trigger tools refuse
  * `run.models` and `run.maxCostUsd` in any spelling, issue #501 part 7). One sweep, so the two cannot disagree on
  * what a near miss is.
@@ -2078,6 +2080,9 @@ const RUN_MODEL_NEAR_MISS_TARGETS = Object.freeze({
 	modelselection: "run.modelSelection", modelselections: "run.modelSelection", modelselectiongeneration: "run.modelSelection",
 	maxturns: "run.maxTurns", maxturn: "run.maxTurns",
 	maxcostusd: "run.maxCostUsd", maxcost: "run.maxCostUsd",
+	// Issue #1008: the list-price allowance for subscription calls. Its own name, the dollar-less and plural steps, and the
+	// words its docs and its refusal use for it ("subscription allowance"), never `maxcost`'s: that one already means the cap.
+	maxsubscriptionusd: "run.maxSubscriptionUsd", maxsubscription: "run.maxSubscriptionUsd", maxsubscriptionsusd: "run.maxSubscriptionUsd", maxsubscriptions: "run.maxSubscriptionUsd", maxsubscriptioncost: "run.maxSubscriptionUsd", maxsubscriptioncostusd: "run.maxSubscriptionUsd", subscriptionallowance: "run.maxSubscriptionUsd", subscriptionallowanceusd: "run.maxSubscriptionUsd", maxsubscriptionallowance: "run.maxSubscriptionUsd",
 });
 
 /**
@@ -2099,9 +2104,12 @@ const RUN_MODEL_NEAR_MISS_TARGETS = Object.freeze({
  *
  * `run.models` (the allowed-model list) is validated with them since #502's second part, and its misspellings
  * were refused here before it was.
+ *
+ * `run.maxSubscriptionUsd` (issue #1008) beside the cap, by the cap's grammar: the list-price allowance for the job's
+ * subscription calls (validateMaxSubscriptionUsd).
  */
 function validateRunModel(on, run, at, path) {
-	const exact = new Set(["provider", "model", "maxTurns", "models", "fallbackModels", "auxiliaryModels", "modelSelection", "maxCostUsd"]);
+	const exact = new Set(["provider", "model", "maxTurns", "models", "fallbackModels", "auxiliaryModels", "modelSelection", "maxCostUsd", "maxSubscriptionUsd"]);
 	for (const [label, source, exactIsLegal] of [
 		["run", run, true],
 		["on", on, false],
@@ -2113,7 +2121,7 @@ function validateRunModel(on, run, at, path) {
 			throw configError(`${at}: ${label}.${key} is not a field -- did you mean ${meant}? A model choice the loader drops runs the job on the deployment default while the file reads as though it chose, so a near miss is refused rather than dropped: ${path}`);
 		}
 	}
-	return { ...validateModelRef(run, at, path), ...validateMaxCostUsd(run, at, path), ...validateRunLimits(on, run, at, path) };
+	return { ...validateModelRef(run, at, path), ...validateMaxCostUsd(run, at, path), ...validateMaxSubscriptionUsd(run, at, path), ...validateRunLimits(on, run, at, path) };
 }
 
 /**
@@ -2163,6 +2171,24 @@ function validateMaxCostUsd(run, at, path) {
 		throw configError(`${at}: ${error.message}: ${path}`);
 	}
 	return { maxCostUsd: run.maxCostUsd };
+}
+
+/**
+ * `run.maxSubscriptionUsd` (issue #1008, `REQ-TOKEN-ACCOUNTING-AND-CAPS` (d)): the LIST-PRICE allowance for the job's
+ * subscription calls, the ones that leave the cost cap because a subscription with no paid extra usage bills nothing per
+ * call. `{ maxSubscriptionUsd }` when present and valid, `{}` when absent or null, by `validateMaxCostUsd`'s rule and
+ * grammar (`parseUsdMicros`: above 0, at most 1,000,000, at most 6 decimals), carried AS WRITTEN. No deployment value
+ * stands behind it: absent means no allowance, so such a job's subscription calls have no dollar limit (its quota and its
+ * turn and time limits still apply). The refusal names the trigger and the key, never the value.
+ */
+function validateMaxSubscriptionUsd(run, at, path) {
+	if (run?.maxSubscriptionUsd === null || run?.maxSubscriptionUsd === undefined) return {};
+	try {
+		parseUsdMicros(run.maxSubscriptionUsd, "run.maxSubscriptionUsd");
+	} catch (error) {
+		throw configError(`${at}: ${error.message}: ${path}`);
+	}
+	return { maxSubscriptionUsd: run.maxSubscriptionUsd };
 }
 
 /**

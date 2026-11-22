@@ -561,6 +561,20 @@ test("a chained child inherits the PARENT'S provider, model, models and maxCostU
 	assert.equal(args.jobId, chainedJobId({ parentJobId: parent.id, flow: "ok", task: "do it" }), "the child's identity is unchanged by the inheritance");
 });
 
+test("a chained child inherits the PARENT'S subscription allowance, never the request file's, and a parent with none chains none (#1008)", async () => {
+	// The request file is agent-authored: an allowance it names must be inert, or an agent could lift its child's limit.
+	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it", maxSubscriptionUsd: 999 }) } } });
+	const cap = makeCapture();
+	const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
+	const parent = localJob();
+	parent.data = { ...parent.data, maxSubscriptionUsd: "12.50" };
+	await collect({ job: parent, prepared: PREPARED });
+	assert.equal(cap.enqueued[0].args.maxSubscriptionUsd, "12.50", "the parent's allowance follows the child");
+	const none = makeCapture();
+	await makeCollectChain({ queue: none.queue, enqueue: none.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs })({ job: localJob(), prepared: PREPARED });
+	assert.equal(none.enqueued[0].args.maxSubscriptionUsd, undefined, "byte-identical to a pre-issue chain, whatever the request file says");
+});
+
 test("a parent whose trigger named no model chains a child with none either, so it resolves the default at its own start (#502)", async () => {
 	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it", model: "MARKER-m", models: ["MARKER/x"] }) } } });
 	const cap = makeCapture();

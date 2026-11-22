@@ -24,3 +24,18 @@ test("receiver grouping preserves auxiliary grants for every forge route and loc
 		}
 	}
 });
+
+test("receiver grouping carries the subscription allowance on every forge route, and no key where the trigger sets none (#1008)", () => {
+	for (const kind of FORGE_KINDS) for (const maxSubscriptionUsd of [undefined, "12.50"]) {
+		const run = { kind, flow: "fix", ...(maxSubscriptionUsd !== undefined && { maxSubscriptionUsd }) };
+		const ons = [{ type: "label", any: ["pi"] }, { type: "comment", phrase: "@pi" }, { type: "pull_request", action: [[...PR_ACTIONS[kind]].find(word => word !== PR_CLOSE_ACTIONS[kind])] }];
+		if (PR_CLOSE_ACTIONS[kind]) ons.push({ type: "pull_request", action: [PR_CLOSE_ACTIONS[kind]] }, { type: "issue", action: [PR_CLOSE_ACTIONS[kind]] });
+		const group = groupTriggers(ons.map(on => ({ on, run })))[kind];
+		const rows = [...group.label, group.comment, ...group.pullRequest, ...group.issue, ...group.prClose];
+		assert.equal(rows.length, ons.length);
+		for (const row of rows) {
+			assert.equal(row.maxSubscriptionUsd, maxSubscriptionUsd, `${kind}: allowance`);
+			assert.equal(Object.hasOwn(row, "maxSubscriptionUsd"), maxSubscriptionUsd !== undefined, `${kind}: an absent allowance is no present undefined versioned field`);
+		}
+	}
+});

@@ -103,6 +103,9 @@ function shapeProblem(body) {
   return null;
 }
 
+/** The two dollar amounts the card writes (issue #1008 added the allowance), each one value however it is written. */
+const AMOUNT_FIELDS = Object.freeze(["maxCostUsd", "maxSubscriptionUsd"]);
+
 /** A dollar value as the page says it; a value the parser refuses is the funnel's to name, so this never throws. */
 function dollars(value) {
   try {
@@ -121,9 +124,9 @@ function dollars(value) {
  */
 function sameToAJob(key, before, after) {
   const read = (value) => {
-    if (key !== "maxCostUsd") return value;
+    if (!AMOUNT_FIELDS.includes(key)) return value;
     try {
-      return parseUsdMicros(value, "run.maxCostUsd");
+      return parseUsdMicros(value, `run.${key}`);
     } catch {
       return value;
     }
@@ -178,6 +181,25 @@ function changeWords(key, before, after, facts, effective = null) {
       return {
         line: removedKey ? `Job cap: ${dollars(before)} removed; ${under}.` : addedKey ? `Job cap: ${dollars(after)}, where this trigger set none.` : `Job cap: ${dollars(before)} to ${dollars(after)}.`,
         ...(widened ? { widening: `This widens what each job may spend: ${will === null ? "no cap at all" : `up to ${money(will)}`}.` } : {}),
+      };
+    }
+    case "maxSubscriptionUsd": {
+      // Issue #1008: the list-price allowance for subscription calls. The trigger's alone, so removing it leaves no limit
+      // at all, and raising it lets a job's subscription calls use more; both are said as widenings. No facts are read: no
+      // deployment value stands behind it and it changes no model a job may call.
+      const read = (value) => {
+        try {
+          return value === undefined || value === null ? null : parseUsdMicros(value, "run.maxSubscriptionUsd");
+        } catch {
+          return null;
+        }
+      };
+      const was = read(before);
+      const will = read(after);
+      const widened = (was !== null && will === null) || (was !== null && will !== null && will > was);
+      return {
+        line: removedKey ? `Subscription allowance: ${dollars(before)} removed; its jobs' subscription calls have no dollar limit.` : addedKey ? `Subscription allowance: ${dollars(after)} at list price, where this trigger set none.` : `Subscription allowance: ${dollars(before)} to ${dollars(after)}.`,
+        ...(widened ? { widening: `This widens what each job's subscription calls may use: ${will === null ? "no allowance at all" : `up to ${money(will)} at list price`}.` } : {}),
       };
     }
     case "models":

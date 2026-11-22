@@ -212,6 +212,8 @@ export const NON_SECRET_ENV_KEYS = new Set([
 	"PI_MAX_TURNS",
 	"PI_MAX_TOKENS",
 	"PI_MAX_COST_MICROS",
+	// Issue #1008: an integer of micro-dollars, never a secret, like the cap beside it.
+	"PI_SUBSCRIPTION_ALLOWANCE_MICROS",
 	"PI_JOB_ID",
 	"PLAYWRIGHT_BROWSERS_PATH",
 	"PLAYWRIGHT_MCP_BROWSER",

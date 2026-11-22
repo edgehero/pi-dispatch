@@ -12,7 +12,9 @@
  * holds each limit's fixed text), the limit in micro-dollars, and a reader of the SETTLED measure against it. The cost
  * cap is wired by run-job.mjs: its measure is the job's settled charge, the cost guard's spent plus the children's
  * settled spend, never what calls hold in flight (a hold settles far below its bound, so counting it would warn a job
- * of parallel calls at a fraction of its real spend). Another limit is one row in LIMIT_WARNINGS and one `watch` call.
+ * of parallel calls at a fraction of its real spend). Another limit is one row in LIMIT_WARNINGS and one `watch` call:
+ * the subscription allowance (issue #1008, `run.maxSubscriptionUsd`) is one, watched on the meter's settled notional
+ * total when a job has an allowance above 0.
  *
  * WHEN. On the root session's `turn_end` (its session id is the runner's root id: an in-process subagent session that
  * loads this factory gets its own handlers, and never fires), only when:
@@ -80,6 +82,9 @@ export function steersQueued(session) {
  */
 export const LIMIT_WARNINGS = Object.freeze({
 	"cost-cap": "pi-dispatch: about 70% of this job's cost limit is used. Write your report now and, if your flow pushes, commit and push your work; start no new parallel work. The job is stopped when the limit is reached.",
+	// Issue #1008: the trigger's list-price allowance for subscription calls (run.maxSubscriptionUsd), watched by run-job.mjs
+	// on the meter's settled notional total.
+	"subscription-allowance": "pi-dispatch: about 70% of this job's subscription allowance is used. Write your report now and, if your flow pushes, commit and push your work; start no new parallel work. The job is stopped when the allowance is reached.",
 });
 
 /** Whether `value` is a whole number of micro-dollars. */

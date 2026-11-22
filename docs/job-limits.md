@@ -132,6 +132,12 @@ sentence, the same for every job.
 - **A resumed or recovered run** reads an earlier attempt's warning in its transcript, though its own cap starts afresh,
   and can be warned again at its own 70%.
 
+**The subscription allowance** (`run.maxSubscriptionUsd`, issue #1008) has the same warning, with its own fixed
+sentence: a job with an allowance above 0 is told once, when the settled list price of its subscription calls reaches 70%
+of it, the same advice, under the same rules. What counts is the run record's `tokens.costNotional`, the calls that
+finished; a subscription call whose cost could not be read warns nothing, since the next subscription call is refused
+anyway. The record's `costWarned` stays the cap's ([a subscription allowance](triggers.md#a-subscription-allowance-per-job)).
+
 It is a warning and not a stop: the cap still stops the job when the next call could pass it. The turn limit
 (`maxTurns`) and the time limits above have no warning; they stop the job when reached.
 

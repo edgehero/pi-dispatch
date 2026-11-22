@@ -150,10 +150,33 @@ request changed in a way the list does not allow.
 What to do: check the trigger's `run.models` and the deployment's `PI_ALLOWED_MODELS`, and list every model the job
 may call, fallbacks included, or check the job log for a refused request. See [triggers.md](triggers.md).
 
+### subscription-allowance
+
+The run reached its allowance for subscription AI calls, or could no longer count against it, so the runner did not make
+its next subscription call. The allowance is the
+trigger's `run.maxSubscriptionUsd`: the list price of the run's calls on a subscription with no paid extra usage, which
+bill nothing per call and so leave the cost limit. It is checked between calls against what those calls settled at, with
+nothing held for calls in flight, so the calls already running when it was reached still finished and counted: the
+run's notional cost (`tokens.costNotional` in the record, `tokens.allowanceMicros` beside it) can be above the
+allowance. A subscription call whose cost could not be read (no cost at all, not a number, or negative) stops the run
+this way too, at the next subscription call, whatever the total, because the total is then known to be short. Calls that
+can be billed are never counted against it; the cost limit judges them as before.
+
+To tell the two apart, compare the record's `tokens.costNotional` with `tokens.allowanceMicros` (micro-dollars, so
+divide by 1,000,000): a notional cost at or above the allowance means it was reached; one below it means a call's cost
+could not be read.
+
+What to do: when the allowance was reached, raise the trigger's `run.maxSubscriptionUsd` if the work needs more
+subscription calls, then run the job again. When a cost could not be read, raising it does not help: check the job log
+for the model whose answer carried no usable cost (a provider or extension that reports no usage, or a model missing
+from pi's catalog and the overlay `models.json`), fix or replace that model, then run the job again. See
+[subscription authentication](subscription-auth.md) and [costs.md](costs.md).
+
 ### cost-cap-unenforceable
 
 The run has a cost limit, and the job image could not enforce it before each AI call. So nothing was sent to the
-provider.
+provider. A trigger's subscription allowance (`run.maxSubscriptionUsd`) the job image cannot apply before each call is
+refused with this reason too.
 
 What to do: update the job image to a release that enforces cost limits. See [job-image.md](job-image.md).
 
@@ -513,6 +536,13 @@ needed for a reviewed next-attempt fallback. Rebuild the image before enabling `
 
 The image does not declare cost cap support, so its runner would run the job with no dollar cap at all. See
 [costs.md](costs.md).
+
+### job-image-subscription-allowance-unsupported
+
+The trigger sets `run.maxSubscriptionUsd`, and the image does not declare `subscriptionAllowance`, so its runner would
+run the job's subscription calls with no dollar limit at all. No container started and nothing was spent.
+
+What to do: rebuild the job image from this release. See [subscription authentication](subscription-auth.md).
 
 ### job-image-any-uid-unsupported
 

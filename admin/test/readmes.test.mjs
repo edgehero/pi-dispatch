@@ -367,7 +367,7 @@ test("the admin README's list of what a person changes on a trigger's page is CA
   const admin = read("admin/README.md").replace(/\s+/g, " ");
   const sentence = /There a person changes (.*?), with one preview that says each change in words, one Confirm, and Undo\./.exec(admin)?.[1];
   assert.ok(sentence, "the sentence");
-  const plain = { flow: "the flow", provider: "the provider", model: "and model", maxCostUsd: "the job cap", models: "the allowed models", fallbackModels: "and fallbacks", modelSelection: "the random pool", mcp: "the MCP servers", packages: "switch for staged packages", excludeTools: "the tools", excludeExtensions: "each extension the trigger leaves out", excludeExtensionTools: "each extension's tool it removes" };
+  const plain = { flow: "the flow", provider: "the provider", model: "and model", maxCostUsd: "the job cap", maxSubscriptionUsd: "the subscription allowance", models: "the allowed models", fallbackModels: "and fallbacks", modelSelection: "the random pool", mcp: "the MCP servers", packages: "switch for staged packages", excludeTools: "the tools", excludeExtensions: "each extension the trigger leaves out", excludeExtensionTools: "each extension's tool it removes" };
   assert.deepEqual(Object.keys(plain), [...CARD_FIELDS], "one plain name per field");
   for (const [field, name] of Object.entries(plain)) assert.ok(sentence.includes(name), `${field} is said as ${name}`);
   assert.ok(admin.includes(TRIGGER_GETS_WORDS.title), "the card by its name");
@@ -386,11 +386,11 @@ test("both READMEs say what no tool can set as exactly the fields it cannot, and
   // What those commands can still do, as `docs/triggers.md` says: without it the list reads as ruling out a one-confirm change of the model.
   assert.match(section, /Those commands can still move a trigger's flow, provider and model, and only after you confirm/);
   assert.match(read("docs/triggers.md").replace(/\s+/g, " "), /`dispatch_trigger_edit` can still set the first three/);
-  const plain = { maxCostUsd: "job cap", models: "the list of models its jobs may use", fallbackModels: "fallback models", modelSelection: "random model pools", mcp: "outside systems", excludeTools: "which tools its jobs lose (pi's own", packages: "load your packages", excludeExtensions: "which of your packages and extensions they leave out", excludeExtensionTools: "or those your extensions add)" };
+  const plain = { maxCostUsd: "job cap", maxSubscriptionUsd: "its subscription allowance", models: "the list of models its jobs may use", fallbackModels: "fallback models", modelSelection: "random model pools", mcp: "outside systems", excludeTools: "which tools its jobs lose (pi's own", packages: "load your packages", excludeExtensions: "which of your packages and extensions they leave out", excludeExtensionTools: "or those your extensions add)" };
   assert.deepEqual(Object.keys(plain).sort(), fields, "one plain name per field");
   for (const [field, name] of Object.entries(plain)) assert.ok(said.includes(name), `${field} is said as ${name}`);
   const admin = read("admin/README.md").replace(/\s+/g, " ");
-  const adminPlain = { maxCostUsd: "job cap", models: "allowed models", fallbackModels: "fallbacks", modelSelection: "random model pools", mcp: "MCP servers", excludeTools: "tool exclusions", packages: "staged packages", excludeExtensions: "extension exclusions", excludeExtensionTools: "extension tool exclusions" };
+  const adminPlain = { maxCostUsd: "job cap", maxSubscriptionUsd: "subscription allowance", models: "allowed models", fallbackModels: "fallbacks", modelSelection: "random model pools", mcp: "MCP servers", excludeTools: "tool exclusions", packages: "staged packages", excludeExtensions: "extension exclusions", excludeExtensionTools: "extension tool exclusions" };
   assert.deepEqual(Object.keys(adminPlain).sort(), fields);
   const list = /no `dispatch_\*` tool can set a trigger's (job cap[^.]*?)\. A pi process's own `bash`, `write` and `edit` tools are outside this policy/.exec(admin)?.[1];
   assert.ok(list, "the admin README's sentence, and what it does not cover");

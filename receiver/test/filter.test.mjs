@@ -1336,3 +1336,17 @@ test("GitHub label, comment, pull request and close jobs preserve the explicit a
 		for (const key of Object.keys(grant)) assert.deepEqual(result.job[key], grant[key], `${event}: ${key}`);
 	}
 });
+
+test("GitHub label, comment, pull request and close jobs carry the trigger's subscription allowance, and a trigger without one carries no key (#1008)", () => {
+	const allowance = { maxSubscriptionUsd: "12.50" };
+	for (const extra of [allowance, {}]) {
+		const group = { label: cfgRaw.triggers.label.map(rule => ({ ...rule, ...extra })), comment: { ...cfgRaw.triggers.comment, ...extra }, pullRequest: prCfgRaw.triggers.pullRequest.map(rule => ({ ...rule, ...extra })), issue: [{ index: 9, actions: new Set(["closed"]), flow: "fix", ...extra }], prClose: [{ index: 10, actions: new Set(["closed"]), flow: "fix", ...extra }] };
+		const config = { triggers: { github: group, knownFlows: cfgRaw.triggers.knownFlows } };
+		for (const [event, subset] of [["issues", issuesSubset()], ["issue_comment", commentSubset({ comment: { author_association: "OWNER", body: "@pi triage" } })], ["pull_request", prSubset()], ["issues", issuesSubset({ action: "closed" })], ["pull_request", prSubset({ action: "closed" })]]) {
+			const result = filter(event, subset, config, SELF_ID, "allowance", true);
+			assert.equal(result.enqueue, true, `${event}: ${result.reason}`);
+			assert.equal(result.job.maxSubscriptionUsd, extra.maxSubscriptionUsd, `${event}: carried as written`);
+			assert.equal(Object.hasOwn(result.job, "maxSubscriptionUsd"), extra.maxSubscriptionUsd !== undefined, `${event}: no key without one`);
+		}
+	}
+});

@@ -159,6 +159,9 @@ export function filterForgejo(eventName, subset, triggers, knownFlows, selfId, a
 			// #501. Its own spread, the rule above: a dropped cap runs the job under the deployment's cap, or none,
 			// while the file reads as narrowed.
 			...(resolved.maxCostUsd !== undefined ? { maxCostUsd: resolved.maxCostUsd } : {}),
+			// Issue #1008: the list-price allowance for subscription calls, its own spread by the same rule: a dropped one runs the
+			// job's subscription calls with no dollar limit at all, while the file reads as limited.
+			...(resolved.maxSubscriptionUsd !== undefined ? { maxSubscriptionUsd: resolved.maxSubscriptionUsd } : {}),
 			// Issue #888: the trigger's limits, each its own spread by the rule above: a dropped ceiling runs the job longer than
 			// the file allows, and a dropped idle or stall limit under the deployment's, while the file reads as though it set one.
 			...(resolved.idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes: resolved.idleTimeoutMinutes } : {}),
@@ -228,7 +231,7 @@ function routeIssueLabel(subset, triggers) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp, privateEndpoints: rule.privateEndpoints,
-		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), ...(rule.auxiliaryModels !== undefined ? { auxiliaryModels: rule.auxiliaryModels } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), ...(rule.auxiliaryModels !== undefined ? { auxiliaryModels: rule.auxiliaryModels } : {}), maxCostUsd: rule.maxCostUsd, ...(rule.maxSubscriptionUsd !== undefined ? { maxSubscriptionUsd: rule.maxSubscriptionUsd } : {}), idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretFiles: rule.secretFiles,
@@ -301,7 +304,7 @@ function routeComment(subset, triggers, knownFlows, assumeParked = false) {
 		...(command !== undefined ? { command } : { flow }),
 		packages: triggers.comment.packages,
 		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools, excludeExtensions: triggers.comment.excludeExtensions, excludeExtensionTools: triggers.comment.excludeExtensionTools, mcp: triggers.comment.mcp, privateEndpoints: triggers.comment.privateEndpoints,
-		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models, fallbackModels: triggers.comment.fallbackModels, ...(triggers.comment.modelSelection !== undefined ? { modelSelection: triggers.comment.modelSelection } : {}), ...(triggers.comment.auxiliaryModels !== undefined ? { auxiliaryModels: triggers.comment.auxiliaryModels } : {}), maxCostUsd: triggers.comment.maxCostUsd, idleTimeoutMinutes: triggers.comment.idleTimeoutMinutes, stallTimeoutMinutes: triggers.comment.stallTimeoutMinutes, maxMinutes: triggers.comment.maxMinutes,
+		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models, fallbackModels: triggers.comment.fallbackModels, ...(triggers.comment.modelSelection !== undefined ? { modelSelection: triggers.comment.modelSelection } : {}), ...(triggers.comment.auxiliaryModels !== undefined ? { auxiliaryModels: triggers.comment.auxiliaryModels } : {}), maxCostUsd: triggers.comment.maxCostUsd, ...(triggers.comment.maxSubscriptionUsd !== undefined ? { maxSubscriptionUsd: triggers.comment.maxSubscriptionUsd } : {}), idleTimeoutMinutes: triggers.comment.idleTimeoutMinutes, stallTimeoutMinutes: triggers.comment.stallTimeoutMinutes, maxMinutes: triggers.comment.maxMinutes,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
 		secretFiles: triggers.comment.secretFiles,
@@ -346,7 +349,7 @@ function routePullRequest(subset, triggers, action) {
 			...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 			packages: rule.packages,
 			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp, privateEndpoints: rule.privateEndpoints,
-			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), ...(rule.auxiliaryModels !== undefined ? { auxiliaryModels: rule.auxiliaryModels } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
+			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), ...(rule.auxiliaryModels !== undefined ? { auxiliaryModels: rule.auxiliaryModels } : {}), maxCostUsd: rule.maxCostUsd, ...(rule.maxSubscriptionUsd !== undefined ? { maxSubscriptionUsd: rule.maxSubscriptionUsd } : {}), idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
 			secretFiles: rule.secretFiles,
@@ -409,7 +412,7 @@ function routeIssueClose(subset, triggers, authorized) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp, privateEndpoints: rule.privateEndpoints,
-		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), ...(rule.auxiliaryModels !== undefined ? { auxiliaryModels: rule.auxiliaryModels } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), ...(rule.auxiliaryModels !== undefined ? { auxiliaryModels: rule.auxiliaryModels } : {}), maxCostUsd: rule.maxCostUsd, ...(rule.maxSubscriptionUsd !== undefined ? { maxSubscriptionUsd: rule.maxSubscriptionUsd } : {}), idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretFiles: rule.secretFiles,
@@ -453,7 +456,7 @@ function routePullRequestClose(subset, triggers, authorized) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages,
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp, privateEndpoints: rule.privateEndpoints,
-		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), ...(rule.auxiliaryModels !== undefined ? { auxiliaryModels: rule.auxiliaryModels } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), ...(rule.auxiliaryModels !== undefined ? { auxiliaryModels: rule.auxiliaryModels } : {}), maxCostUsd: rule.maxCostUsd, ...(rule.maxSubscriptionUsd !== undefined ? { maxSubscriptionUsd: rule.maxSubscriptionUsd } : {}), idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretFiles: rule.secretFiles,

@@ -413,10 +413,10 @@ test("the panel's list row and sections say the console's words", async () => {
 
 test("the panel's list row keeps the turns and tokens on an 80-column row for the longest reason token, and clips the token first (#710 round 1)", async () => {
   const longest = Object.keys(REASONS).reduce((a, b) => (b.length > a.length ? b : a));
-  assert.equal(longest, "model-selection-continuation-unavailable", "the longest token the catalog has");
+  assert.equal(longest, "job-image-subscription-allowance-unsupported", "the longest token the catalog has (issue #1008's image refusal)");
   const run = { ...RUN, outcome: "failed", reason: longest, turns: 3, tokens: { total: 12345, cost: 0.1 } };
   const rowAt = async (width) => (await render([run], width)).map(stripAnsi).find((l) => l.includes("gh-w1 · ")) ?? "";
-  for (const width of [60, 80]) assert.match(await rowAt(width), /· fix · ✘ failed · 3t · 12\.3k · mo/, `width ${width}`);
+  for (const width of [60, 80]) assert.match(await rowAt(width), new RegExp(`· fix · ✘ failed · 3t · 12\\.3k · ${longest.slice(0, 2)}`), `width ${width}`);
   assert.match(await rowAt(80), new RegExp(`· ${longest.slice(0, 22)}…`), "the token, clipped, after the counts");
   assert.match(await rowAt(140), new RegExp(`· ✘ failed · 3t · 12\\.3k · ${longest}\\s*│$`), "and whole where it fits");
   assert.match(await rowAt(40), /· fix · ✘ fail…/, "at 40 the word is what is left, never the token");

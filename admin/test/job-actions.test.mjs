@@ -1713,3 +1713,42 @@ test("a failed-job confirm's read that answers after its bound: what it then ope
     process.off("unhandledRejection", note);
   }
 });
+
+test("a fresh local re-run keeps the subscription allowance the job carried, with or without a random pool, stamped 12 (#1008)", async () => {
+  const at = Date.UTC(2026, 10, 22, 12);
+  for (const extra of [{}, { modelSelection: { strategy: "random", candidates: ["anthropic/claude-opus-5-5"] }, models: ["anthropic/claude-opus-5-5"], maxCostUsd: "1" }]) {
+    let stored;
+    const queue = { add: async (_name, data, opts) => { stored = { id: opts.jobId, data }; return stored; }, getJob: async () => stored, close: async () => {} };
+    const job = { kind: "local", folder: "/project", flow: "work", maxSubscriptionUsd: "12.50", ...extra };
+    const result = await enqueueRerun({ kind: "local", jobId: "local-allowance", queue: "pi-jobs", job }, { url: "redis://unused", queueFn: () => queue, parseConnectionFn: () => ({}), localRepoProblemFn: () => null, gitDirtyFn: () => false, now: () => at });
+    assert.equal(result.ok, true);
+    assert.equal(stored.data.maxSubscriptionUsd, "12.50", "no deployment value stands behind it, so a re-run without it would have no limit");
+    assert.equal(stored.data.dataVersion, 12);
+  }
+});
+
+test("planRerun of a forge run whose trigger sets run.maxSubscriptionUsd: the receiver's job field for field, and the preview names the allowance (#1008)", live, async () => {
+  const v = await freshValkey();
+  const dir = tempDir("pd-1008-rerun-");
+  const logsDir = join(dir, "logs");
+  const triggersPath = join(dir, "triggers.json");
+  try {
+    const run = { kind: "github", flow: "fix", maxCostUsd: "1.5", maxSubscriptionUsd: "12.50" };
+    writeFileSync(triggersPath, JSON.stringify({ version: 11, triggers: [{ on: { type: "label", any: ["pi"] }, run }] }));
+    const shared = await v.q("pi-jobs");
+    const original = { repo: "org/repo", target: { type: "issue", number: 7, title: "T", body: "B" }, flow: "fix", maxCostUsd: "1.5", maxSubscriptionUsd: "12.50", trigger: { event: "issues", action: "labeled", deliveryId: "orig-1008", sender: { id: 9 }, matched: { index: 0, type: "label", label: "pi" } } };
+    const { jobId } = await enqueueForgeJob(shared, "github", original);
+    assert.equal((await shared.getJob(jobId)).data.dataVersion, 12, "the stored job asks for a worker that reads the allowance");
+    writeRecord(logsDir, { jobId, kind: "github", target: "org/repo#7", outcome: "failed", reason: "subscription-allowance" });
+    const planned = await planRerun({ url: URL12, logsDir, jobId, triggersPath, env: {}, random: (n) => Buffer.alloc(n, 0xcd) });
+    assert.equal(planned.plan.kind, "forge", JSON.stringify(planned));
+    const cfg = {};
+    assert.deepEqual(reloadTriggers({ PI_TRIGGERS_FILE: triggersPath }, cfg), { ok: true });
+    const fresh = filter("issues", { action: "labeled", sender: { id: 9 }, repository: { full_name: "org/repo" }, issue: { number: 7, title: "T", body: "B", labels: [{ name: "pi" }] } }, cfg, 1, "orig-1008").job;
+    assert.equal(fresh.maxSubscriptionUsd, "12.50", "the premise: the receiver carries it");
+    assert.deepEqual(planned.plan.job, { ...fresh, trigger: { ...fresh.trigger, deliveryId: "console-cdcdcdcdcdcdcdcd" } }, "field for field the receiver's job");
+    assert.equal(planned.plan.runFields.maxSubscriptionUsd, "12.50", "what the preview shows of the run it starts");
+  } finally {
+    await v.done();
+  }
+});
