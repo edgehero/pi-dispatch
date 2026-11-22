@@ -384,8 +384,9 @@ test("the worst-case exit line fits the worker's 8 KiB recovery tail with headro
 	// full worst case (this ledger plus `context`, the longest session reason and the 2000-character capped
 	// message a provider-refusal exit carries) is measured against the tail in
 	// worker/test/run-history.test.mjs, which holds it under 6 KiB; that, not this number, is the headroom.
-	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root-0" });
 	const wide = (prefix, i) => `${prefix}-${i}`.padEnd(64, "x");
+	// A job with subscription entries (issue #1008), so `costNotional` is on the line too, as wide as `cost`.
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root-0", notionalProviders: new Set([wide("provider", 0)]) });
 	for (let i = 0; i < 9; i += 1) {
 		meter.observe(
 			streamOf(usage({
@@ -421,6 +422,7 @@ test("the worst-case exit line fits the worker's 8 KiB recovery tail with headro
 		resources: Object.fromEntries(RESOURCE_KEYS.map((key) => [key, Number.MAX_SAFE_INTEGER])),
 	});
 	assert.ok(line.includes('"resources":{"memPeak":9007199254740991,'), "the worst case must carry the block");
+	assert.match(line, /"costNotional":99999\.99[,}]/, "and the notional part of the cost");
 	assert.ok(line.length < 5000, `the worst-case exit line must leave tail headroom; got ${line.length} chars`);
 });
 

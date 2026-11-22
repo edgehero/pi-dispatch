@@ -126,8 +126,11 @@ export async function selectRandomModelJob(job, { redis, id, retry = false, retr
 			const candidate = { ...candidateJob(job, ref), modelSelectionBilling: expected, modelSelectionBinding: bindings[ref] ?? null };
 			if (continuity) candidate.modelSelectionBinding = continuity.binding;
 			if (state && !reselect) candidate.modelSelectionBinding = state.binding;
+			// The candidate's own subscription check, handed to `reservationFor` (issue #1008): null without one.
+			let checked = null;
 			if (subscriptionCheck) {
 				const subscription = subscriptions.get(ref) ?? await subscriptionCheck(candidate);
+				checked = subscription;
 				if (subscription.unavailable) throw new Error("subscription state unavailable");
 				// A live class other than the pinned one is a race with a binding change since the inspection, never a skip.
 				if (pinned !== null && (managed(subscription) ? "subscription" : "api") !== pinned || candidate.modelSelectionBinding && subscription.ok && subscription.binding !== undefined && subscription.binding !== candidate.modelSelectionBinding) return { refused: "auth-binding-changed" };
@@ -154,7 +157,7 @@ export async function selectRandomModelJob(job, { redis, id, retry = false, retr
 			if (bad) { log("model_candidate_skipped", { model: ref, reason: bad }); continue; }
 			const cooldown = await readModelCooldown(redis, ref, { now });
 			if (cooldown) { blockers.push({ wait: "model-cooldown", resetAt: cooldown.until }); log("model_candidate_skipped", { model: ref, reason: "cooldown" }); continue; }
-			const reservationJob = { ...candidate, maxCostMicros: reservationFor(candidate) };
+			const reservationJob = { ...candidate, maxCostMicros: reservationFor(candidate, checked) };
 			if (modelDollarRows(limits, [ref]).length > 0 && !Number.isSafeInteger(reservationJob.maxCostMicros)) { log("model_candidate_skipped", { model: ref, reason: "model-cost-cap-missing" }); continue; }
 			if (!(await modelWindowHasRoom(redis, ref, reservationJob, limits, now()))) { blockers.push({ wait: "model-window", resetAt: null }); log("model_candidate_skipped", { model: ref, reason: "model-window" }); continue; }
 			let acquired = false;

@@ -133,6 +133,16 @@ test("queued fork reservation cannot become paid or grow after its preview", asy
 	}
 });
 
+test("a fork whose every route is a notional subscription reserves nothing, so a $0 preview still fits (issue #1008)", async () => {
+	// The reservation the job will take is the reserve step's own (reserveVerdict): nothing, for a job that reaches no
+	// billed route, so a preview that said $0 is not refused as changed. A paid-overage connection keeps the refusal.
+	for (const [snapshot, refused] of [[{ provider: "anthropic", notional: true }, false], [{ provider: "anthropic" }, true]]) {
+		const f = fixture({ prepareSubscriptionAuth: async () => ({ ok: true, snapshots: [snapshot] }), validateSubscriptionAuth: async () => true });
+		const result = await runJob({ ...f.job, models: ["anthropic/m"], forkReserveMicros: 0, maxCostMicros: 1_000_000 }, f.deps);
+		assert.equal(result.reason === "fork-reservation-changed", refused, JSON.stringify(snapshot));
+	}
+});
+
 test("transient source or restore faults throw so the queue retries, without reserving", async () => {
 	for (const where of ["readPoint", "restorePoint"]) {
 		const f = fixture();

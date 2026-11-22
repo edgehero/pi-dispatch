@@ -283,6 +283,26 @@ export function meteredMicros(costUsd) {
 export const FLOOR_COUNTERS = Object.freeze(["unresolved", "unpriced", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "costUnreported", "unmeteredChildren"]);
 
 /**
+ * The NOTIONAL part of a run's metered cost (issue #1008), `tokens.costNotional` as whole micro-dollars ROUNDED DOWN
+ * (`Math.floor(costNotional x 1e6)`, the money-safe direction for an amount taken OFF the charge, as `meteredMicros`
+ * rounds the cost up). `meteredCostMicros` is `meteredMicros(tokens.cost)`.
+ *   - 0 when the line has no `costNotional`: an image from before issue #1008, or a job with no subscription entry,
+ *     whose every call is billed. The safe overcharge: such an image also counted those calls against the cap;
+ *   - the micro-dollars when it is a finite number at or above 0 whose micro-dollars are a safe integer and not above
+ *     `meteredCostMicros` (the runner adds both in the same order, so a notional part never exceeds the cost);
+ *   - null otherwise (malformed, or larger than the cost it is part of, or a cost that does not convert): the caller
+ *     settles that at the floor.
+ */
+export function notionalMicros(tokens, meteredCostMicros) {
+	if (tokens === null || typeof tokens !== "object" || !Object.hasOwn(tokens, "costNotional")) return 0;
+	const value = tokens.costNotional;
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+	const micros = Math.floor(value * MICROS_PER_USD);
+	if (!Number.isSafeInteger(micros) || !Number.isSafeInteger(meteredCostMicros) || micros > meteredCostMicros) return null;
+	return micros;
+}
+
+/**
  * How a job's reservation settles, from what the container reported. PURE. Returns `{ settledMicros, basis }`.
  *
  * FIRST, whether the exit line may be believed at all (PR #542's review, round 3). The job's own tools can write to
@@ -304,13 +324,22 @@ export const FLOOR_COUNTERS = Object.freeze(["unresolved", "unpriced", "boundExc
  *     still known: discarding it would undercharge the window.
  * Floor cases: no exit line (`tokens: null`, a job killed before it wrote one), the fallback meter, a missing or
  * non-zero counter, a cap wider than the reservation, or calls with no ledger.
+ *
+ * BILLED ONLY (issue #1008). On a trusted metered line, the cost settled is the BILLED part, `meteredMicros(tokens.cost)
+ * - notionalMicros(...)`: a subscription call with no paid extra usage bills nothing, so its list price leaves every
+ * window. That billed cost is also the floor's known part. A line with no `costNotional` is all billed (an older image,
+ * the safe overcharge); a `costNotional` that is malformed or above the cost settles at the floor on the whole cost. An
+ * untrusted line's `costNotional` is never read, so a forged one cannot lower a charge: its floor is the whole cost.
  */
 export function dollarSettlement({ tokens, usage, reservedMicros, trusted = false }) {
 	assertMicros(reservedMicros, "reservedMicros", { positive: false });
-	const reported = tokens !== null && typeof tokens === "object" ? meteredMicros(tokens.cost) : null;
+	const full = tokens !== null && typeof tokens === "object" ? meteredMicros(tokens.cost) : null;
+	const notional = trusted === true && full !== null && tokens.metered === true ? notionalMicros(tokens, full) : 0;
+	const reported = full === null ? null : notional === null ? full : full - notional;
 	const floor = { settledMicros: reported === null ? reservedMicros : Math.max(reservedMicros, reported), basis: "floor" };
 	if (trusted !== true) return floor;
 	if (tokens === null || typeof tokens !== "object" || tokens.metered !== true) return floor;
+	if (notional === null) return floor;
 	if (typeof tokens.costCapMicros !== "number" || tokens.costCapMicros > reservedMicros) return floor;
 	for (const key of FLOOR_COUNTERS) if (tokens[key] !== 0) return floor;
 	if (reported === null) return floor;

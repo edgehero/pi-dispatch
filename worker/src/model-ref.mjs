@@ -189,6 +189,21 @@ export function splitModelEntry(entry) {
 }
 
 /**
+ * Every model route a job may call, as `{ provider, id }` refs, each once: its main model, its allowed-model list, its
+ * auxiliary models and its decision roles. An entry that does not split is left out. Moved here from
+ * subscription-runtime.mjs (issue #1008), which re-exports it, so the reserve rule (reserve-estimate.mjs, which the
+ * console imports) reads the same routes the subscription check does without importing pi's catalog.
+ */
+export function subscriptionRoutes(job) {
+	const refs = new Map();
+	const add = (provider, id) => { if (provider && id) refs.set(`${provider}/${id}`, { provider, id }); };
+	add(job.provider, job.model);
+	for (const entry of [...(job.models ?? []), ...(job.auxiliaryModels ?? [])]) { const ref = splitModelEntry(entry); if (ref) add(ref.provider, ref.model); }
+	for (const role of [job.watchDecisionModel, job.questionGroupModel, job.answerDecisionModel]) add(role?.provider, role?.id);
+	return [...refs.values()];
+}
+
+/**
  * An allowed-model list (issue #502), from a trigger's `run.models` or the deployment's `PI_ALLOWED_MODELS`:
  * the problem as a sentence, or null when the list is good. ONE rule for both sources, so a list an operator
  * moves from a trigger into the env (or back) means the same thing in both places.

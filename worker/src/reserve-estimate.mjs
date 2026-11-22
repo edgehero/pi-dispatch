@@ -9,13 +9,16 @@
  *   - a job that cannot spend reserves nothing: `zeroRatedFor` below is the processor's own test (its reserve step
  *     calls it), a cap of 0 or every callable model served by a declared endpoint and zero-rated (model-endpoints.mjs);
  *   - every job takes one job-count slot in each window that applies.
+ * The processor's own reserve step goes one rule further (issue #1008, `reserveVerdict`): a job whose every route is
+ * on a subscription with no paid extra usage reserves nothing and keeps its cap. The estimate below does not know this
+ * host's connections, so for such a job it names the cap, the larger figure, never a smaller one than the worker holds.
  *
  * The deployment's settings resolve as the worker's do, `overlay > env > default` per key (runtime-settings.mjs over
  * config.mjs), with an empty env value unset (`usdSetting`).
  */
 
 import { effectiveCostCapMicros } from "./money.mjs";
-import { splitModelEntry } from "./model-ref.mjs";
+import { splitModelEntry, subscriptionRoutes } from "./model-ref.mjs";
 import { zeroRatedVerdict } from "./model-endpoints.mjs";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, allowedModelsFrom } from "./config.mjs";
 
@@ -43,6 +46,81 @@ export function callableModelRefs(job) {
 export function zeroRatedFor(job, { modelEndpoints = null, builtinModel = () => null } = {}) {
 	if (job.maxCostMicros === 0) return { zeroRated: true };
 	return zeroRatedVerdict({ models: modelEndpoints?.models ?? null, endpoints: modelEndpoints?.endpoints ?? [], refs: callableModelRefs(job), builtinModel });
+}
+
+/**
+ * Issue #1008: whether a subscription connection's calls are NOTIONAL. One with no paid extra usage
+ * (`extraUsageCreditMicros` unset: the provider bills no call on it, and for Claude the quota gate admits it only while
+ * extra usage is known to be off) spends nothing per call, so its list price is not money. One WITH paid extra usage
+ * may bill any call and nothing says which, so its calls are money: they stay under the cost cap and in the dollar
+ * windows (`auth-credit-cap-required` still holds its cap to the credit). Anything but a positive safe integer of
+ * micro-dollars reads as "none", the auth policy's own rule. A ChatGPT connection has no modelled overage, so it is
+ * notional (an account with purchased credits is a residual), and Claude extra usage turned on at the provider during
+ * a running job, with no credit edit, is billed past the quota with no dollar bound (the other residual). The one rule behind the worker's `notional: true` marker on a job's snapshot (subscription-runtime.mjs
+ * `prepare`) and the pickup's skip of a notional candidate's model window (`notionalProvidersOf`).
+ */
+export function notionalConnection(row) {
+	return row !== null && typeof row === "object" && !(Number.isSafeInteger(row.extraUsageCreditMicros) && row.extraUsageCreditMicros > 0);
+}
+
+/**
+ * The providers whose connections a subscription check admitted (`check`'s `managed` rows) and that are notional, as a
+ * Set. Empty for anything else: a refusal, a wait, an API-key route, or no check at all, so a doubt keeps the window.
+ */
+export function notionalProvidersOf(checked) {
+	if (checked?.ok !== true || !Array.isArray(checked.managed)) return new Set();
+	return new Set(checked.managed.filter((row) => notionalConnection(row) && typeof row.provider === "string").map((row) => row.provider));
+}
+
+/**
+ * What a pickup candidate's model windows are judged against (index.mjs's `reservationFor`, model-selection.mjs and
+ * model-failover.mjs `modelWindowHasRoom`): 0, so no window is checked, for a zero-rated candidate and (issue #1008)
+ * for one whose own provider its subscription check admitted on a notional connection, since the reserve step drops
+ * that provider's model rows (`billedModelRows`); its cap otherwise. `checked` is the candidate's `check` result, or
+ * null when no subscription check ran, which keeps the window.
+ */
+export function candidateWindowReservation(candidate, checked = null, { modelEndpoints = null, builtinModel = () => null } = {}) {
+	if (notionalProvidersOf(checked).has(candidate?.provider)) return 0;
+	return zeroRatedFor(candidate, { modelEndpoints, builtinModel }).zeroRated ? 0 : candidate.maxCostMicros;
+}
+
+/** The providers a job's prepared subscription snapshots mark notional (subscription-runtime.mjs `prepare`), as a Set. */
+export function notionalSnapshotProviders(snapshots) {
+	return new Set((Array.isArray(snapshots) ? snapshots : []).filter((row) => row?.notional === true && typeof row.provider === "string").map((row) => row.provider));
+}
+
+/**
+ * The model dollar rows (`modelDollarRows`, `{ ref, keyPrefix, caps }`, `ref` lowercased `provider/model`) a job reserves
+ * and settles in (issue #1008): every row but those of a notional provider. A subscription call with no paid extra usage
+ * bills nothing, so it leaves every dollar window, a model's included.
+ */
+export function billedModelRows(rows, notional) {
+	const list = Array.isArray(rows) ? rows : [];
+	if (!(notional instanceof Set) || notional.size === 0) return list;
+	return list.filter((row) => !notional.has(String(row?.ref ?? "").split("/")[0]));
+}
+
+/**
+ * How the worker reserves for an EFFECTIVE job at pickup (issue #1008), the processor's reserve step and the fork check:
+ *   - `{ reserve: "none", zeroRated: true }`: the job cannot spend (`zeroRatedFor`). It runs under a per-job cap of 0
+ *     and reserves nothing (issue #503 part 7);
+ *   - `{ reserve: "none", zeroRated: false }`: the job reaches no BILLED route. Every route it may call (its callable
+ *     models, its auxiliary models and its decision roles, `subscriptionRoutes`) is on a provider in `notional` (the
+ *     providers its prepared snapshots mark notional, `notionalSnapshotProviders`) or is zero-rated. It reserves
+ *     nothing, but KEEPS its real cap: an image from before issue #1008 still counts subscription calls at list price
+ *     under it, and a cap of 0 would make such an image refuse every call;
+ *   - `{ reserve: "cap", zeroRated: false }`: it reserves its cap, as every job did before.
+ * A route whose entry does not split is billed (fail closed), and so is a job with no finite allowed-model list: it may
+ * switch to any model mid-run, so its routes are not the ones it names (a subscription job always has one, the
+ * subscription check refuses it otherwise). With no notional provider the answer is exactly the zero-rated rule's, so a
+ * job without a subscription reserves as it always did.
+ */
+export function reserveVerdict(job, { notional = null, modelEndpoints = null, builtinModel = () => null } = {}) {
+	if (zeroRatedFor(job, { modelEndpoints, builtinModel }).zeroRated) return { reserve: "none", zeroRated: true };
+	if (!(notional instanceof Set) || notional.size === 0 || !Array.isArray(job.models) || job.models.length === 0) return { reserve: "cap", zeroRated: false };
+	const zeroRated = (ref) => zeroRatedVerdict({ models: modelEndpoints?.models ?? null, endpoints: modelEndpoints?.endpoints ?? [], refs: [ref], builtinModel }).zeroRated;
+	const billed = [...callableModelRefs(job), ...subscriptionRoutes(job)].some((ref) => ref === null || (!notional.has(ref.provider) && !zeroRated(ref)));
+	return { reserve: billed ? "cap" : "none", zeroRated: false };
 }
 
 /** An env dollar value as config.mjs's `usdSetting` reads it: unset or empty is null. Validated by the cap below. */

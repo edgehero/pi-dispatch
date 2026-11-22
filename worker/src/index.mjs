@@ -3,7 +3,7 @@ import { SubscriptionWait } from "./subscription-wait.mjs";
 import { MODEL_SELECTION_FINISH } from "./model-selection-record.mjs";
 import { selectRandomModelJob } from "./model-selection.mjs";
 import { identityForModelSelection, readModelSelection, armModelSelection, allowModelSelectionQuotaReselection, markModelSelectionNeverStarted } from "./model-selection-state.mjs";
-import { zeroRatedFor } from "./reserve-estimate.mjs";
+import { candidateWindowReservation } from "./reserve-estimate.mjs";
 import { isTransientOverlayRead } from "./model-catalog.mjs";
 import { checkFailoverCandidate, markModelCooldown, readModelAttempt, selectFailoverJob, writeModelAttempt } from "./model-failover.mjs";
 import { modelAttemptIdOf } from "./model-attempts.mjs";
@@ -1304,7 +1304,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						// record is this job's previous attempt's or none, so an older job's `container-never-started` under a
 						// reused id cannot start this retry over from the primary after an attempt that may have spent.
 						recoveryModel, retryNeverStarted: recordReadable(priorAttemptRecord) && priorAttemptRecord.reason === "container-never-started" && priorAttemptRecord.budgetReserved === false && priorAttemptRecord.exitCode === null, models, limits, now, log: deps?.log,
-						reservationFor: (candidate) => zeroRatedFor(candidate, { modelEndpoints: failoverSnapshot, builtinModel: deps?.builtinModel }).zeroRated ? 0 : candidate.maxCostMicros,
+						// What a candidate's model windows are judged against: 0 for a zero-rated candidate and (issue #1008) for one
+						// on a notional subscription, whose model rows leave the ledgers at the reserve step; its cap otherwise.
+						reservationFor: (candidate, checked = null) => candidateWindowReservation(candidate, checked, { modelEndpoints: failoverSnapshot, builtinModel: deps?.builtinModel }),
 						subscriptionCheck: deps?.subscriptionRuntime ? (candidate) => deps.subscriptionRuntime.check(candidate) : null,
 						checkCandidate: (candidate) => deps?.checkFailoverCandidate ? deps.checkFailoverCandidate(candidate, { models, endpoints }) : checkFailoverCandidate(candidate, { models, endpoints, credential: deps?.checkProviderCredential, lookup: deps?.builtinModel }),
 						acquireEndpoints: async (candidate) => {

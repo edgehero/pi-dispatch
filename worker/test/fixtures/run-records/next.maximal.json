@@ -434,5 +434,8 @@
     "externalMicros": 40000,
     "boundMicros": 600000
   },
+  "notionalProviders": [
+    "anthropic"
+  ],
   "v": 1
 }

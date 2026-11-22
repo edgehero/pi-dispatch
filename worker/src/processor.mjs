@@ -36,8 +36,8 @@ import { ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON } from "./allocation.mj
 export const LOCAL_FOLDER_PROJECT_CHANGED = "local-folder-project-changed";
 // Issue #505: a portfolio cron job refused before it spends, because this host could not apply the plan it would write.
 export const PORTFOLIO_NO_ENVELOPE = "portfolio-no-envelope";
-import { DOLLAR_CAP_REASON, DOLLAR_KEY_PREFIX, deploymentWindowsOf, dollarLedgers, dollarSettlement, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
-import { callableModelRefs, zeroRatedFor } from "./reserve-estimate.mjs";
+import { DOLLAR_CAP_REASON, DOLLAR_KEY_PREFIX, deploymentWindowsOf, dollarLedgers, dollarSettlement, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, notionalMicros, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
+import { billedModelRows, callableModelRefs, notionalSnapshotProviders, reserveVerdict } from "./reserve-estimate.mjs";
 import { outputCapView } from "./output-cap.mjs";
 import { answerTrailComment, consoleAnswerBy, consoleDraftOf } from "./console-answer.mjs";
 import { forgeDeliveryJobId } from "./job-id.mjs";
@@ -430,9 +430,11 @@ async function runJobInner(job, deps) {
 	const archiveFacts = { value: null };
 	// Issue #918: the private endpoints this attempt's container was granted, for the record (`privateEndpoints`).
 	const privateFacts = { value: null };
+	// Issue #1008: the providers whose calls this attempt's container ran as notional, for the record (`notionalProviders`).
+	const notionalFacts = { value: null };
 	let result;
 	try {
-		result = await runAttempt(job, deps, durable, bundleFacts, archiveFacts, privateFacts);
+		result = await runAttempt(job, deps, durable, bundleFacts, archiveFacts, privateFacts, notionalFacts);
 		if (approval?.audit && !result?.approval) result = { ...result, approval: approval.audit };
 		if (approval?.request && result?.outcome === "policy") {
 			const closed = await deps.approvalRuntime.finish({ requestId: approval.request.requestId, jobId: deps.approvalJobId });
@@ -444,6 +446,7 @@ async function runJobInner(job, deps) {
 		tagDurable(e, durable);
 		tagBundle(e, bundleFacts);
 		tagPrivateEndpoints(e, privateFacts);
+		tagNotional(e, notionalFacts);
 		// A RECOVERY job has one attempt (recovery-queue.mjs), so a never-started retry would fail it for good over a
 		// blip (a pointer read, a ledger write, a restore that met a lock). Every such throw becomes a wait hold instead:
 		// `makeProcessor` delays it without spending the attempt, and the run's recovery deadline (`recoverBy`, the
@@ -453,6 +456,7 @@ async function runJobInner(job, deps) {
 			tagDurable(hold, durable);
 			tagBundle(hold, bundleFacts);
 			tagPrivateEndpoints(hold, privateFacts);
+			tagNotional(hold, notionalFacts);
 			deps?.log?.("recovery_retry_held", { delayMs: RECOVERY_RETRY_WAIT_MS });
 			throw hold;
 		}
@@ -462,7 +466,26 @@ async function runJobInner(job, deps) {
 	// and not `recovery-superseded`: that one is decided on a pointer read that came back empty, and an empty read must
 	// never be the reason another run's store is deleted; the run that settled cleaned up after itself.
 	if (durable.armed && result?.reason !== RECOVERY_ENQUEUED && result?.reason !== RECOVERY_SUPERSEDED) await endDurableRun(durable, deps);
-	return withPrivateEndpoints(withBundle(withDurable(archiveFacts.value ? { ...result, forkSource: archiveFacts.value } : result, durable), bundleFacts), privateFacts);
+	return withNotional(withPrivateEndpoints(withBundle(withDurable(archiveFacts.value ? { ...result, forkSource: archiveFacts.value } : result, durable), bundleFacts), privateFacts), notionalFacts);
+}
+
+/**
+ * The providers whose calls the attempt's container ran as notional (issue #1008): its subscription snapshots the worker
+ * marked `notional: true`, sorted. Added to a result, or tagged on a throw, only when there were any, so every other
+ * record is unchanged. Set when the container is about to start, so a job refused before then records none.
+ */
+function withNotional(result, n) {
+	if (result === null || typeof result !== "object" || n.value === null) return result;
+	return { ...result, notionalProviders: n.value };
+}
+
+function tagNotional(e, n) {
+	if (e === null || typeof e !== "object" || n.value === null) return;
+	try {
+		if (e.notionalProviders === undefined) e.notionalProviders = n.value;
+	} catch {
+		// a frozen error keeps its own fields
+	}
 }
 
 /**
@@ -506,7 +529,7 @@ function tagBundle(e, b) {
 	}
 }
 
-async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bundleSkipped: null }, archiveFacts = { value: null }, privateFacts = { value: null }) {
+async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bundleSkipped: null }, archiveFacts = { value: null }, privateFacts = { value: null }, notionalFacts = { value: null }) {
 	const {
 		redis,
 		caps, // { day, week, month }; week/month null when that window is disabled (REQ-SPEND-CAPS-MULTI-WINDOW)
@@ -1571,7 +1594,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			if (policy?.ok !== true) return await forkRefusal(policy?.refused ?? "fork-policy-unavailable");
 			const expected = job.forkReserveMicros;
 			if (expected !== null && (!Number.isSafeInteger(expected) || expected < 0)) return await forkRefusal("fork-request-invalid");
-			if (expected !== null && !zeroRatedFor(job, { modelEndpoints, builtinModel }).zeroRated && (expected === 0 || !Number.isSafeInteger(job.maxCostMicros) || job.maxCostMicros > expected)) return await forkRefusal("fork-reservation-changed");
+			// The reservation the job will take (reserveVerdict, the reserve step's own rule): one that reserves nothing
+			// (zero-rated, or every route notional, issue #1008) never exceeds what the person confirmed.
+			if (expected !== null && reserveVerdict(job, { notional: notionalSnapshotProviders(subscriptionAuth), modelEndpoints, builtinModel }).reserve === "cap" && (expected === 0 || !Number.isSafeInteger(job.maxCostMicros) || job.maxCostMicros > expected)) return await forkRefusal("fork-reservation-changed");
 			const sourceKey = sessionKeyFor({ ...job, fork: undefined });
 			if (sourceKey !== job.fork.rootKey) return await forkRefusal("fork-source-target-mismatch");
 			// A recovery continues THIS fork's checkpoint; selecting the parent's original point again loses its work.
@@ -2606,11 +2631,17 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// a refusal anywhere above never touches a dollar counter. The amount is the job's per-job cost cap, which the
 		// runner enforces before every call, so it bounds what the run can spend; the worker needs no prices.
 		let containerJob = job;
+		// Issue #1008: the providers this attempt's subscription snapshots mark notional (a connection with no paid extra
+		// usage, reserve-estimate.mjs `notionalConnection`). Their calls bill nothing: their model rows leave the ledgers
+		// (`billedModelRows`), so no model window reserves or settles for them, and a job that reaches no billed route
+		// reserves nothing at all (`reserveVerdict` below).
+		const notional = notionalSnapshotProviders(subscriptionAuth);
+		const billedModelDollars = billedModelRows(modelDollars, notional);
 		// Every dollar ledger this job reserves in: the deployment's windows, its repo or folder row's, and each model
 		// row it may reach (scoped-limits.json version 2). ONE reservation over all of them, so a refusal in any window
 		// gives back every key, the deployment's included.
-		const ledgers = dollarLedgers(dollarCaps, { scope: scopedDollars, project: projectDollars, other: otherDollars, models: modelDollars });
-		const modelPrefixes = new Map((modelDollars ?? []).map((m) => [m.keyPrefix, m.ref]));
+		const ledgers = dollarLedgers(dollarCaps, { scope: scopedDollars, project: projectDollars, other: otherDollars, models: billedModelDollars });
+		const modelPrefixes = new Map(billedModelDollars.map((m) => [m.keyPrefix, m.ref]));
 		// The ledgers that settle to the JOB's cost (the deployment's, the repo or folder row's, the project row's), named
 		// rather than derived as "not a model", so a ledger kind added later settles nowhere until it is put on a list.
 		// `_other`'s ledger (issue #504 part B) settles to the job's cost too: its counter is what the unassigned work spent.
@@ -2627,12 +2658,17 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// by trust in the cost table. The capability gate above already required `costCap` of this job's image (the
 			// job carried a non-null cap), so an image that would ignore the 0 never gets here. A cap that is ALREADY 0
 			// (a malformed queued value reads as 0, `effectiveCostCapMicros`) has nothing to reserve either.
+			// Issue #1008: a job that reaches no BILLED route reserves nothing too: every route it may call, auxiliary
+			// models and decision roles included, is on a notional subscription or zero-rated. Unlike the zero-rated job it
+			// keeps its REAL cap: the runner admits its notional calls without a charge, and an image from before issue
+			// #1008 counts them at list price under the cap, as it always did; a cap of 0 would make that image refuse every
+			// one. Its settlement writes nothing, and `dollar_unreserved_spent` below names a billed cost that should not be.
 			const refs = callableModelRefs(job);
-			const zero = zeroRatedFor(job, { modelEndpoints, builtinModel });
-			if (zero.zeroRated) {
-				containerJob = { ...job, maxCostMicros: 0 };
+			const verdict = reserveVerdict(job, { notional, modelEndpoints, builtinModel });
+			if (verdict.reserve === "none") {
+				if (verdict.zeroRated) containerJob = { ...job, maxCostMicros: 0 };
 				dollars = dollarsRecord({ reservedMicros: 0, settledMicros: 0, basis: "unreserved" });
-				log("dollar_unreserved", { models: refs.length });
+				log("dollar_unreserved", { models: refs.length, ...(verdict.zeroRated ? {} : { notional: true }) });
 			} else {
 				let reservation;
 				try {
@@ -2820,6 +2856,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// proxy enforces it when the egress policy is on (`proxy`); with PI_EGRESS=0 no proxy stands between any job and the
 		// device (`unenforced`), and the record says so rather than imply a binding nobody enforced.
 		if (privateGrant.length > 0) privateFacts.value = { ids: privateGrant.map((e) => e.id), basis: egress?.proxy ? "proxy" : "unenforced" };
+		if (notional.size > 0) notionalFacts.value = [...notional].sort();
 		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitCostRefusal = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, checkSecretFilesPlacement: () => checkSecretFilesPlacement(job, { prepared }), secrets, ...(mainDeclared !== null ? { mainCredential: mainDeclared } : {}), ...(roleDeclared !== null ? { secondaryCredential: roleDeclared } : {}), ...(Object.keys(secretFiles).length > 0 ? { secretFiles } : {}), ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(privateGrant.length > 0 ? { privateEndpoints: privateGrant } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}), ...(activityWatch !== null ? { activityWatch, onActivityArmed: deps.onActivityArmed ?? null, requestStop: deps.requestStop ?? null, noteActivity: deps.noteActivity ?? null, ...(credentialRefresh !== null ? { credentialRefresh } : {}) } : {}) });
 		const answeredPark = prepared.session?.parkedSource;
 		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
@@ -3016,10 +3053,15 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			publishDollarHold(null);
 			log("dollar_settled", { reservedMicros: dollars.reservedMicros, settledMicros: dollars.settledMicros, basis: dollars.basis, ...(modelBasis !== null ? { modelBasis } : {}) });
 		} else if (dollars?.basis === "unreserved") {
-			// Nothing was held, so nothing is written. A metered cost above 0 here would mean the runner's cap of 0 let a
-			// priced call through, which it cannot by construction; it is logged so it cannot pass unseen.
+			// Nothing was held, so nothing is written. A BILLED cost above 0 here would mean the runner's cap of 0 let a
+			// priced call through, which it cannot by construction, or (issue #1008) that a job whose every route the worker
+			// judged notional made a billed call; it is logged so it cannot pass unseen. Billed is the metered cost less its
+			// `costNotional` (all of it billed when the line has none, an image from before issue #1008). Such an image
+			// therefore logs this for every subscription-only job, so for a job whose snapshots were marked notional the
+			// line then names the key it lacks (`missing`), which tells that rollout case from a real billed call.
 			const spent = meteredMicros(tokens?.cost);
-			if (spent !== null && spent > 0) log("dollar_unreserved_spent", { meteredMicros: spent });
+			const billed = spent === null ? null : spent - (notionalMicros(tokens, spent) ?? 0);
+			if (billed !== null && billed > 0) log("dollar_unreserved_spent", { meteredMicros: billed, ...(notional.size > 0 && !Object.hasOwn(tokens, "costNotional") ? { missing: "costNotional" } : {}) });
 		}
 
 		// Issue #345: `docker run` exited with a never-started code, but THIS attempt's container was found by its cidfile,

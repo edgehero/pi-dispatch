@@ -22,7 +22,7 @@ Today's settled amount comes from run records: the runs that reserved in today's
 
 Dollar counters include settled charges and reservations. A dollar window can be full before the displayed counter reaches its cap because another job's per-job reservation would not fit. Only global job-count windows have a soft hold; scoped job-count windows have hard caps. At that hold the worker refuses new starts; it does not leave them waiting. Tokens are refused at their cap alone.
 
-A prepaid plan changes reporting, not enforcement: its runs count against every cap, including dollar windows at API-equivalent price. See [cost accounting](costs.md).
+A prepaid plan changes reporting, not enforcement: its runs count against every cap, including dollar windows at API-equivalent price. A [subscription connection](subscription-auth.md#the-cost-cap-and-the-dollar-windows) without paid extra usage is different: its calls bill nothing, so they count against no dollar cap or window, and their API-equivalent cost is recorded as notional (`tokens.costNotional`). See [cost accounting](costs.md#what-the-cap-counts).
 
 ## What-if estimates
 

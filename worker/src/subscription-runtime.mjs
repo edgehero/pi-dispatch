@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 /** Host-only orchestration. Private snapshots never become job data, run records or telemetry. */
 import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
 import { builtinModel } from "./model-catalog.mjs";
-import { splitModelEntry, auxiliaryModelsProblem } from "./model-ref.mjs";
+import { auxiliaryModelsProblem, subscriptionRoutes } from "./model-ref.mjs";
+import { notionalConnection } from "./reserve-estimate.mjs";
 import { normalizeClaudeQuota, normalizeOpenAIQuota, normalizeSubscriptionQuotaError, SUBSCRIPTION_QUOTA_LIMITS } from "./subscription-quota.mjs";
 import { LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH } from "./private-store-boundary.mjs";
 
@@ -48,14 +49,8 @@ export function subscriptionBindingDigest(row) {
 	if (parts.slice(0, 5).some((part) => typeof part !== "string" || !part)) return null;
 	return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 }
-export function subscriptionRoutes(job) {
-	const refs = new Map();
-	const add = (provider, id) => { if (provider && id) refs.set(`${provider}/${id}`, { provider, id }); };
-	add(job.provider, job.model);
-	for (const entry of [...(job.models ?? []), ...(job.auxiliaryModels ?? [])]) { const ref = splitModelEntry(entry); if (ref) add(ref.provider, ref.model); }
-	for (const role of [job.watchDecisionModel, job.questionGroupModel, job.answerDecisionModel]) add(role?.provider, role?.id);
-	return [...refs.values()];
-}
+// Every route a job may call (model-ref.mjs since issue #1008, re-exported for its callers here).
+export { subscriptionRoutes };
 
 // Auxiliary authority never changes a root candidate's billing class, even when an operator also lists
 // that candidate as an auxiliary model. The latter is useful for panels that include the chosen root.
@@ -185,7 +180,19 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 			// access-token refresh may change generation, which the stable binding digest deliberately excludes.
 			if (job.auxiliaryModels !== undefined && (!subscriptionBindingDigest(row) || subscriptionBindingDigest({ ...prepared.snapshot, ownerHost: row.ownerHost }) !== subscriptionBindingDigest(row))) return { ok: false, managed: true, reason: "auth-binding-changed" };
 			if (job.modelSelectionBinding && (row.provider === job.provider || job.auxiliaryModels === undefined) && subscriptionBindingDigest({ ...prepared.snapshot, ownerHost: row.ownerHost }) !== job.modelSelectionBinding) return { ok: false, managed: true, reason: "auth-binding-changed" };
-			snapshots.push({ ...prepared.snapshot, ownerHost: row.ownerHost, ...packageRootFor(row.adapter) });
+			const snapshot = { ...prepared.snapshot, ownerHost: row.ownerHost, ...packageRootFor(row.adapter) };
+			// Issue #1008: `notional: true` for a connection with no paid extra usage (reserve-estimate.mjs
+			// `notionalConnection`): the runner then admits its calls without charging the cost cap. Decided here only, so
+			// nothing spread above can set it. A connection with paid extra usage gets no marker, and its calls count.
+			// The credit is read off the check's row, so the marker is set only when the snapshot was prepared from that
+			// very row: its `bindingSignature` hashes the whole connection, credit included, and a credit set between the
+			// check and the snapshot changes it. On a mismatch the snapshot simply carries no marker, so every call counts,
+			// as it did before issue #1008. REJECTED: refusing as `auth-binding-changed`, the rule auxiliary and random-pool
+			// jobs follow above: an ordinary job never compared its binding here, and a policy edit is no reason to refuse
+			// it, only a reason not to trust a stale "no paid extra usage".
+			delete snapshot.notional;
+			if (notionalConnection(row) && typeof row.bindingSignature === "string" && prepared.snapshot.bindingSignature === row.bindingSignature) snapshot.notional = true;
+			snapshots.push(snapshot);
 		}
 		return { ok: true, snapshots };
 	}

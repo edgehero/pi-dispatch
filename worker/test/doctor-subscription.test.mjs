@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { writeFileSync, existsSync } from "node:fs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { collectChecks, runDoctor } from "./helpers/doctor.mjs";
-import { doctorSubscriptionCredentials, subscriptionCredentialCheck, listedProviderCredentialChecks, WORKER_SERVICE_KEYS } from "../src/doctor.mjs";
+import { doctorSubscriptionCredentials, subscriptionCredentialCheck, listedProviderCredentialChecks, notionalCapChecks, WORKER_SERVICE_KEYS } from "../src/doctor.mjs";
 import { TRIGGERS_FILE_VERSION } from "../src/triggers.mjs";
 
 const instant = 1_800_000_000_000;
@@ -125,11 +125,12 @@ test("doctor fails a random pool mixing billing classes on this host without a c
 	}
 });
 
-test("doctor says a capped mixed pool's draws each bill their own class under the cap, and warns when a connection's paid usage is below it (issue #968)", async () => {
+test("doctor says a capped mixed pool's draws each bill their own class, the cap bounding the billed ones, and warns when a connection's paid usage is below it (issues #968, #1008)", async () => {
 	const capped = await poolChecks({ maxCostUsd: "2" });
 	const fact = capped.find((c) => MIXED.test(c.label));
 	assert.equal(fact.ok, true);
-	assert.match(fact.label, /each draw bills its own candidate's class, and every draw runs under the job's \$2\.00 cap, a subscription draw too/);
+	assert.match(fact.label, /each draw bills its own candidate's class, and the job's \$2\.00 cap bounds the API-key draws and a draw on a connection with paid extra usage/);
+	assert.match(fact.label, /a draw on a subscription without paid extra usage is notional: its calls leave the cap and the dollar windows/);
 	assert.equal(capped.some((c) => /auth-credit-cap-required/.test(c.label)), false, "no paid usage on the connection, no warning");
 	const credit = await poolChecks({ maxCostUsd: "2" }, { row: { ...claude, extraUsageCreditMicros: 1_000_000 } });
 	const warning = credit.find((c) => /auth-credit-cap-required/.test(c.label));
@@ -144,4 +145,59 @@ test("doctor says a capped mixed pool's draws each bill their own class under th
 test("doctor says nothing of a random pool in one billing class on this host, capped or not (issue #968)", async () => {
 	assert.equal((await poolChecks({}, { row: { ok: true, managed: false } })).some((c) => MIXED.test(c.label)), false, "nothing bound here: all API keys");
 	assert.equal((await poolChecks({}, { candidates: ["anthropic/claude-sonnet-4-5", "anthropic/claude-haiku-4-5"] })).some((c) => MIXED.test(c.label)), false, "all subscription");
+});
+
+// Issue #1008: a trigger whose own run.maxCostUsd bounds nothing on this host, because every model it may call is on a
+// subscription connection without paid extra usage, whose calls are notional.
+const BOUNDS_NOTHING = /bounds nothing on this host/;
+async function capChecks(run, { row = claude } = {}) {
+	const root = tempDir("doctor-notional-cap-");
+	const path = join(root, "triggers.json");
+	writeFileSync(path, JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [{ on: { type: "label", any: ["pi:sub"] }, run: { kind: "github", flow: "deploy", ...run } }] }));
+	return collectChecks({ ...env, PI_TRIGGERS_FILE: path, PI_MAX_COST_USD: "5" }, { cwd: root, home: root, out() {}, spawn: missingBinary, fileExists: (p) => p === path, probeValkey: async () => false, nodeVersion: "22.19.0", platform: "linux", agentDir: join(root, "agent"), wallClock: now, modelCatalog: async () => null, subscriptionFactory: () => ({ auth: { async check(provider) { return provider === "anthropic" ? row : { ok: true, managed: false }; } } }) });
+}
+
+test("doctor warns when a trigger's own run.maxCostUsd bounds nothing on this host: every model it may call is a notional subscription (issue #1008)", async () => {
+	const single = { provider: "anthropic", model: "claude-sonnet-4-5", models: ["anthropic/claude-sonnet-4-5"], maxCostUsd: "2" };
+	const warning = (await capChecks(single)).find((c) => BOUNDS_NOTHING.test(c.label));
+	assert.equal(warning.ok, false);
+	assert.equal(warning.warn, true, "a warning: the cap may still be needed");
+	assert.match(warning.label, /^label trigger #0: its run\.maxCostUsd \(\$2\.00\) bounds nothing on this host: every model it may call is on a subscription connection without paid extra usage \(anthropic\)/);
+	assert.match(warning.fix, /run\.maxTurns, run\.maxMinutes/);
+	const pool = { models: ["anthropic/claude-sonnet-4-5", "anthropic/claude-haiku-4-5"], modelSelection: { strategy: "random", candidates: ["anthropic/claude-sonnet-4-5", "anthropic/claude-haiku-4-5"] }, maxCostUsd: "2" };
+	assert.equal((await capChecks(pool)).filter((c) => BOUNDS_NOTHING.test(c.label)).length, 1, "a random pool of notional candidates, one line for the trigger");
+	// Each of these leaves the cap something to bound, or no cap of the trigger's own: no line.
+	for (const [why, run, row] of [
+		["paid extra usage", single, { ...claude, extraUsageCreditMicros: 5_000_000 }],
+		["an API-key model in the list", { ...single, models: [...single.models, "openrouter/deepseek/deepseek-chat"] }, claude],
+		["an API-key candidate in the pool", { ...pool, models: mixedPool, modelSelection: { strategy: "random", candidates: mixedPool } }, claude],
+		["the deployment's cap alone", { ...single, maxCostUsd: undefined }, claude],
+		["nothing bound here", single, { ok: true, managed: false }],
+	]) assert.equal((await capChecks(run, { row })).some((c) => BOUNDS_NOTHING.test(c.label)), false, why);
+});
+
+test("a failed or unreadable subscription check never reads as notional: no false bounds-nothing line (issue #1008)", async () => {
+	// Doctor answers `managed: true` for a check that failed, for any provider: such a verdict states no credit, so it
+	// proves nothing about whether the connection's calls are billed.
+	const subject = { label: "label trigger #0", main: { provider: "anthropic", id: "claude-sonnet-4-5" }, list: [{ provider: "anthropic", id: "claude-sonnet-4-5" }], auxiliaryModels: [], decisionModel: null, triggerCap: 2_000_000 };
+	for (const [why, verdict] of [
+		["another owner host", { ok: false, managed: true, reason: "auth-owner-host", unavailable: false }],
+		["sign-in required", { ok: false, managed: true, reason: "auth-reauth-required", unavailable: false }],
+		["sign-in required with paid extra usage", { ok: false, managed: true, reason: "auth-reauth-required", extraUsageCreditMicros: 5_000_000 }],
+		["an unreadable policy", { ok: false, managed: true, reason: "auth-policy-invalid" }],
+		["a failed check that names no credit", { ok: false, managed: true, extraUsageCreditMicros: null }],
+		["a check that names no credit", { ok: true, managed: true }],
+	]) assert.deepEqual(notionalCapChecks([subject], { verdictOf: () => verdict }), [], why);
+	assert.equal(notionalCapChecks([subject], { verdictOf: () => ({ ok: true, managed: true, extraUsageCreditMicros: null }) }).length, 1, "the premise: a successful check with no credit warns");
+	const openrouter = { ...subject, main: { provider: "openrouter", id: "deepseek/deepseek-chat" }, list: [{ provider: "openrouter", id: "deepseek/deepseek-chat" }] };
+	assert.deepEqual(notionalCapChecks([openrouter], { verdictOf: () => ({ ok: true, managed: true, extraUsageCreditMicros: null }) }), [], "a provider no subscription adapter serves is never notional");
+	// Through collection: a connections file that does not load, and a check that throws, on an API-key-only trigger.
+	const run = { provider: "openrouter", model: "deepseek/deepseek-chat", models: ["openrouter/deepseek/deepseek-chat"], maxCostUsd: "2" };
+	for (const [why, factory] of [["a connections file that does not load", () => { throw new Error("malformed"); }], ["a check that throws", () => ({ auth: { async check() { throw new Error("eio"); } } })]]) {
+		const root = tempDir("doctor-notional-failed-");
+		const path = join(root, "triggers.json");
+		writeFileSync(path, JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [{ on: { type: "label", any: ["pi:api"] }, run: { kind: "github", flow: "deploy", ...run } }] }));
+		const checks = await collectChecks({ ...env, PI_TRIGGERS_FILE: path, PI_MAX_COST_USD: "5" }, { cwd: root, home: root, out() {}, spawn: missingBinary, fileExists: (p) => p === path, probeValkey: async () => false, nodeVersion: "22.19.0", platform: "linux", agentDir: join(root, "agent"), wallClock: now, modelCatalog: async () => null, subscriptionFactory: factory });
+		assert.equal(checks.some((c) => BOUNDS_NOTHING.test(c.label)), false, why);
+	}
 });

@@ -93,6 +93,7 @@ import {
 	createUsageMeter,
 	installProcessUsageMeter,
 	meterStopHandler,
+	notionalProviders,
 	openChildLedger,
 	policyEnforcement,
 	publishPriceTable,
@@ -388,11 +389,19 @@ async function main() {
 	const stopHandler = meterStopHandler({ onTokenAbort, abort: () => void session?.abort() });
 
 	const failureObserver = installProviderFailureObserver({ ModelRuntime, rootSessionId, ...(subscriptionCredentials && credentialRefresher ? { fetch: subscriptionRefreshFetch({ credentials: subscriptionCredentials, refresh: () => credentialRefresher.apply() }) } : {}) });
+	const subscriptionAdmission = subscriptionRegistration ? (provider) => subscriptionRegistration.admitted(provider) : null;
+	// Issue #1008: the providers whose calls are notional (a subscription with no paid extra usage, as the worker marked
+	// the verified entries), ONE set handed to the meter, which adds their list price to `costNotional`, and to the cost
+	// guard, which admits their calls without a charge. Empty unless the entry, the admission and the model list are all
+	// there (notionalProviders says why), so a doubt counts the call against the cap.
+	const notional = notionalProviders({ subscriptions: subscriptionEntries, subscriptionAdmission, allowedModels: cfg.allowedModels });
 	const meter = createUsageMeter({
 		maxTokens: cfg.maxTokens,
 		maxCostMicros: cfg.maxCostMicros,
 		allowedModels: cfg.allowedModels,
 		rootSessionId,
+		// Only with subscription entries, so every other exit line stays byte-identical.
+		notionalProviders: subscriptionEntries.length > 0 ? notional : null,
 		// The meter's ONE stop (issues #501, #502): the token cap, the cost cap and the model list. Fires once,
 		// for the first stop only, whichever policy it was; only a token stop logs token_budget_exceeded
 		// (meterStopHandler). Same synchronous-abort discipline as attachTokenBudget's
@@ -414,7 +423,7 @@ async function main() {
 	// (issue #985). From here on the exit line carries childTotal, childProcesses and unmeteredChildren, zeros with no
 	// children.
 	childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });
-	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), externalInflight: () => childWatch.externalInflight(), claim: (waited) => childWatch.claim(waited), outsideWaiting: () => childWatch.outsideWaiting(), subscriptionAdmission: subscriptionRegistration ? (provider) => subscriptionRegistration.admitted(provider) : null, subscriptions: subscriptionEntries, refreshCredentials: () => credentialRefresher?.apply() });
+	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), externalInflight: () => childWatch.externalInflight(), claim: (waited) => childWatch.claim(waited), outsideWaiting: () => childWatch.outsideWaiting(), subscriptionAdmission, subscriptions: subscriptionEntries, refreshCredentials: () => credentialRefresher?.apply(), notional });
 	// The job's first refusal (issue #985): a child's, when its refusal is what stopped the job (childWatch.refusal), else
 	// this guard's own, each a rule with its own numbers.
 	const jobRefusal = () => childWatch.refusal() ?? (policyGuard?.refusedWhy() ? { why: policyGuard.refusedWhy(), numbers: policyGuard.refusal() } : null);

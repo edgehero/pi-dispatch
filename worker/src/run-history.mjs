@@ -905,6 +905,11 @@ function rebuildResources(r) {
  * keys: calls on a priced model whose answer carried broken usage (pi records a missing usage block as zeros), so
  * `cost` is short. A floor counter, on this list for the same reason as `unmeteredChildren`.
  *
+ * Then `costNotional` (issue #1008), which the metered runner writes after `costUnreported` only for a job with
+ * subscription entries: the part of `cost`, in US dollars, priced on subscription calls with no paid extra usage. The
+ * dollar settlement takes it off the charge (`notionalMicros`), so on this list for the same reason: dropped, the
+ * whole cost would be charged, the safe side but not the true one.
+ *
  * The last seven are the policy counters of issues #501 and #502, in the order the runner emits them after
  * it: `costCapMicros` (the job's cap), `costRefused` (calls the cost guard stopped),
  * `boundExceeded` (calls that cost more than their bound), `longContext` (calls priced past a long-context
@@ -922,7 +927,7 @@ function rebuildResources(r) {
  * the warning at 70% of the cap was queued for the agent, else 0). They say why `cost` can be far below the cap a job was stopped at; no
  * settlement reads them, and they are no floor counters (`FLOOR_COUNTERS`). A worker before them drops all four.
  */
-export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "childTotal", "childProcesses", "unmeteredChildren", "costUnreported", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused", "costChargedMicros", "costLiftedMicros", "costWaited", "costWarned"]);
+export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "childTotal", "childProcesses", "unmeteredChildren", "costUnreported", "costNotional", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused", "costChargedMicros", "costLiftedMicros", "costWaited", "costWarned"]);
 
 /**
  * Rebuild the billed totals from a closed key list rather than passing the container's object through.
@@ -936,7 +941,7 @@ export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "me
  * did not, and the asymmetry was an oversight rather than a decision.
  *
  * A key the runner omitted stays OMITTED rather than becoming null: the fallback shape legitimately
- * carries only five of the twenty-seven, and a null there would read as "measured zero" for a number nobody
+ * carries only five of the twenty-eight, and a null there would read as "measured zero" for a number nobody
  * measured. `typeof === "number"` rather than `Number.isFinite`, deliberately, so this narrows WHICH
  * KEYS survive and never which objects are admitted -- the admission gate above is unchanged.
  */
@@ -1115,6 +1120,19 @@ export function recordReadable(record, { supported = RUN_RECORD_VERSION } = {}) 
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
+/**
+ * The providers a record's `notionalProviders` may name (issue #1008): the subscription providers a connection can bind
+ * (auth-policy.mjs), in this order. Held to the adapters' providers by a test.
+ */
+export const NOTIONAL_PROVIDERS = Object.freeze(["anthropic", "openai"]);
+
+/** `notionalProviders` rebuilt: the known members, each once, in NOTIONAL_PROVIDERS order, or null for none. */
+function recordedNotionalProviders(value) {
+	if (!Array.isArray(value)) return null;
+	const kept = NOTIONAL_PROVIDERS.filter((provider) => value.includes(provider));
+	return kept.length > 0 ? kept : null;
+}
+
 export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null, earlier = null, maxTurns = null, limits = null, touchTracking = false }) {
 	const data = job.data ?? {};
 	const fork = recordedFork(data.fork, sourceModel(result, error));
@@ -1439,6 +1457,12 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// `artifacts`: present only on such a record whose line carried the numbers, so every other record is
 		// byte-identical. Additive, so `v` stays.
 		...(costRefusalOf(source.costRefusal) !== null ? { costRefusal: costRefusalOf(source.costRefusal) } : {}),
+		// The subscription providers whose calls this run made as notional (issue #1008, INT-RUN-HISTORY-FILE-CONTRACT):
+		// those the worker marked for its container (a connection with no paid extra usage), so a reader can tell the
+		// notional rows of `usage` from the billed ones. A closed list, REBUILT (`recordedNotionalProviders`), so PII-free
+		// by construction. CONDITIONAL, after `costRefusal` (the tail when it was added): present only for a run whose
+		// container held such a connection, so every other record is byte-identical. Additive, so `v` stays.
+		...(recordedNotionalProviders(source.notionalProviders) !== null ? { notionalProviders: recordedNotionalProviders(source.notionalProviders) } : {}),
 		// The record's version (issue #761, `RUN_RECORD_VERSION`), the LAST key on every record and after every conditional
 		// key, so it stays last whatever a record carries and every earlier position is untouched. Unconditional: a reader
 		// asks one key, and a missing one reads as 1.

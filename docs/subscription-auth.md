@@ -54,9 +54,10 @@ API-key one. The first draw passes over a subscription candidate that cannot tak
 out, or allowing less paid extra usage than the job's cap) and may land on an API-key candidate the trigger listed;
 once drawn, the class never changes, and a replacement after a subscription limit stays among the subscription
 candidates. A pool that mixes the classes on this host needs a positive `run.maxCostUsd` on its trigger and is
-otherwise refused as `auth-route-unbounded` before its draw. That cap bounds a subscription draw too, since the
-runner prices every call from pi's model catalog and the overlay `models.json` as they were at the job's start,
-whatever credential carries it (a model priced at zero there is not bounded). A connection whose
+otherwise refused as `auth-route-unbounded` before its draw. That cap bounds the API-key draws and the draws on a
+connection with paid extra usage, which the runner prices from pi's model catalog and the overlay `models.json` as
+they were at the job's start (a model priced at zero there is not bounded). A draw on a connection without paid
+extra usage is not counted against it (see [the cost cap](#the-cost-cap-and-the-dollar-windows)). A connection whose
 `extraUsageCreditMicros` is below the job's cap is passed over at every draw (`auth-credit-cap-required`), so a
 mixed pool then runs only on its API-key candidates, and doctor warns when a mixed pool's cap is above it. See
 [random pools](triggers.md#choosing-randomly-from-a-reviewed-pool).
@@ -416,6 +417,29 @@ Claude `extra_usage` that is enabled or unknown refuses by default. To authorize
 positive safe-integer `extraUsageCreditMicros` on that connection and set a per-job dollar cap no larger than
 it. For example, `250000` is a conservative model-cost ceiling of 0.25 USD per job, not 250000 provider credits.
 Deployment and scoped dollar windows still apply. Authorization never silently changes the bound account.
+
+## The cost cap and the dollar windows
+
+A connection without paid extra usage (no `extraUsageCreditMicros`) bills nothing per call, so its calls are
+notional: the per-job cost cap (`maxCostUsd`) does not count them, and they leave every dollar window, a
+`model:<provider>/<model>` row of `scoped-limits.json` included. The run record still prices them at list price, in
+`tokens.cost`, with that part as `tokens.costNotional`, and `notionalProviders` names the providers. What bounds such
+a job is the account's quota, checked before the job starts, and the job's turn and time limits (`run.maxTurns`,
+`run.maxMinutes`). A job whose every model is on such a connection reserves nothing in the dollar windows and
+`pi-dispatch doctor` warns when a trigger's own `run.maxCostUsd` bounds nothing on that host.
+
+A connection WITH paid extra usage keeps counting every call against the cap and the windows: any of its calls may
+be billed, and nothing tells which, so the case in issue #1008 (a long subscription job stopped at the cap over list
+prices) can still happen there. Two residuals are known, and in both a call can be billed with no dollar bound,
+where before this release it was capped at list price: a ChatGPT connection has no modelled paid overage, so it is
+treated as notional, an account with purchased credits included; and a Claude connection is admitted only while extra
+usage is known to be off, so if extra usage is turned on at the provider while a job runs, with no
+`extraUsageCreditMicros` edit, that job's calls past the quota are billed as extra usage and nothing caps them.
+
+The job image decides whether a call is counted, and it trusts the worker's mark only with the subscription's
+adapter admitted and a model list in force, never in a child process. An image from before this release counts every
+subscription call against the cap, as before, and a worker from before it never marks a connection, so its jobs count
+every call too. See [the upgrade guide](upgrading.md) and [what the cap counts](costs.md#what-the-cap-counts).
 
 Provider `used_credits` and `monthly_limit` retain their own currency and decimal scale; missing units are
 unknown. Quota percentages, vendor credit counters, API-equivalent model costs and flat subscription prices

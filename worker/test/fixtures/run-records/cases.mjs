@@ -207,6 +207,8 @@ export function caseInput(name) {
 					artifacts: { kept: 2, bytes: 184_213, dropped: { size: 1, name: 2 } },
 					// Issue #985: the first cost refusal's numbers (beside a cost-cap `why`; here only so the record holds the key).
 					costRefusal: { spentMicros: 1_820_000, inflightMicros: 900_000, externalMicros: 40_000, boundMicros: 600_000 },
+					// Issue #1008: the subscription providers whose calls the run made as notional.
+					notionalProviders: ["anthropic"],
 					openshell: { mode: "copy", ruleHosts: ["github.com", "api.anthropic.com"], ruleHostCount: 2, providers: 1, placeholders: 1 },
 					touches: [{ runId: "gh-9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d-r2", at: ms("2026-09-14T14:10:00.000Z"), cause: "steer" }],
 					touchLineageSkipped: "source-unavailable",

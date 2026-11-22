@@ -71,6 +71,8 @@ import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs"
 import { FIRST_CALL_MIN_CONTEXT_BYTES, FIRST_CALL_OVERHEAD_TOKENS, boundModelOf, firstCallFloorMicros, isTransientOverlayRead, overlayProviderProblem, serviceTierMultiplier } from "./model-catalog.mjs";
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
 import { failoverListUsable, providerIdProblem, splitModelEntry } from "./model-ref.mjs";
+import { notionalConnection } from "./reserve-estimate.mjs";
+import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
 import { resolveConfiguredModelRuns as resolveDoctorModelRuns, cooldownModelRefs, RADIUS_COST_CAP_LABEL, RADIUS_COST_CAP_FIX } from "./model-observation.mjs";
 import { ignoredOutputCapModels, outputCapView, outputUnboundable } from "./output-cap.mjs";
 import { GRANT_HELPER_TARGET, PRIVATE_DIR_TARGET, PRIVATE_ENDPOINTS_FILE_NAME, PRIVATE_INCLUDE_TARGET, endpointsOverlap, loadPrivateEndpoints, privateFolderInsideJobPathSentence, privateFoldersInsideJobPaths, renderPrivateInclude } from "./private-endpoints.mjs";
@@ -4250,6 +4252,7 @@ export async function collectChecks(shellVars, seams) {
 			if (subjectProvider !== provider && result.managed) checks.push(subscriptionCredentialCheck(subjectProvider, result));
 		}
 		checks.push(...mixedBillingPoolChecks(subjects, { verdictOf: (subjectProvider) => subscriptionChecks.get(subjectProvider) }));
+		checks.push(...notionalCapChecks(subjects, { verdictOf: (subjectProvider) => subscriptionChecks.get(subjectProvider) }));
 		const catalog = await (seams.modelCatalog ?? defaultModelCatalog)();
 		if (catalog) {
 			const overlayDir = typeof env.PI_GLOBAL_PI_DIR === "string" && env.PI_GLOBAL_PI_DIR !== "" ? resolve(cwd, env.PI_GLOBAL_PI_DIR) : null;
@@ -6782,6 +6785,7 @@ export { resolveConfiguredModelRuns as resolveDoctorModelRuns } from "./model-ob
  * A random candidate's subject (`random: true`) also carries its `trigger` (the trigger's label, shared by every
  * candidate of one pool) and `triggerCap`, the trigger's OWN cap in micro-dollars or null (issue #968): a pool mixing
  * billing classes needs that one positive, and the deployment's cap, which `cap` folds in, does not stand in for it.
+ * Every other trigger's subject carries `triggerCap` too (issue #1008), for `notionalCapChecks`.
  */
 export function modelSubjects({ runs = [], deployment, envList = null, modelRoles = {}, projects = [], fallbacks = false }) {
 	const listOf = (list) => (Array.isArray(list) ? list.map(splitModelEntry).filter((ref) => ref !== null).map((ref) => ({ provider: ref.provider, id: ref.model })) : []);
@@ -6803,7 +6807,7 @@ export function modelSubjects({ runs = [], deployment, envList = null, modelRole
 			continue;
 		}
 		const main = { provider: run.provider ?? deployment.provider, id: run.model ?? deployment.model };
-		const shared = { cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], auxiliaryModels: run.auxiliaryModels ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null };
+		const shared = { cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], auxiliaryModels: run.auxiliaryModels ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, triggerCap: triggerCapOf(run.maxCostUsd) };
 		subjects.push({
 			label: run.label,
 			main,
@@ -7283,9 +7287,10 @@ export function subscriptionCredentialCheck(provider, row) {
  *   - fails without a positive `run.maxCostUsd` of the trigger's own: the worker refuses every job of it as
  *     auth-route-unbounded before its draw (model-selection.mjs `triggerCapped`), and the deployment's cap alone does
  *     not count;
- *   - with one, gets a fact line: each draw bills its own candidate's class, and the cap bounds a subscription draw too,
- *     since the runner's cost guard prices every call from the table it pinned before any extension loaded (pi's catalog
- *     and the overlay models.json) whatever credential carries it; a model priced at zero there is bounded by nothing;
+ *   - with one, gets a fact line: each draw bills its own candidate's class, and the cap bounds the API-key draws and a
+ *     draw on a connection with paid extra usage (the runner's cost guard prices every such call from the table it
+ *     pinned before any extension loaded, and a model priced at zero there is bounded by nothing); a draw on a
+ *     connection without paid extra usage is notional since issue #1008 and leaves the cap and the dollar windows;
  *   - and warns for a bound connection whose `extraUsageCreditMicros` is below the job's cap: the worker refuses each
  *     draw on it as auth-credit-cap-required (subscription-runtime.mjs `check`), so the pool only ever runs API keys.
  * Classes depend on the host's own connections file, so another host may judge the same pool otherwise; every line
@@ -7318,7 +7323,7 @@ export function mixedBillingPoolChecks(subjects, { verdictOf = () => undefined }
 			continue;
 		}
 		const cap = Number.isSafeInteger(pool.cap) ? `$${formatMicros(pool.cap)}` : "per-job";
-		checks.push({ ok: true, label: `${trigger}: its random pool mixes billing classes on this host (${classes}); each draw bills its own candidate's class, and every draw runs under the job's ${cap} cap, a subscription draw too: the runner prices its calls from pi's model catalog and the overlay models.json, so a long subscription run can stop at the cap (a model priced at zero there is not bounded by it)` });
+		checks.push({ ok: true, label: `${trigger}: its random pool mixes billing classes on this host (${classes}); each draw bills its own candidate's class, and the job's ${cap} cap bounds the API-key draws and a draw on a connection with paid extra usage (the runner prices those calls from pi's model catalog and the overlay models.json, and a model priced at zero there is not bounded by it); a draw on a subscription without paid extra usage is notional: its calls leave the cap and the dollar windows, and only its quota and the job's turn and time limits bound it (a job image from before issue #1008 still counts them under the cap)` });
 		for (const [connectionProvider, verdict] of pool.connections) {
 			const credit = verdict.extraUsageCreditMicros;
 			if (!Number.isSafeInteger(credit) || credit <= 0 || (Number.isSafeInteger(pool.cap) && pool.cap <= credit)) continue;
@@ -7329,6 +7334,56 @@ export function mixedBillingPoolChecks(subjects, { verdictOf = () => undefined }
 				fix: `lower the trigger's run.maxCostUsd to at most ${formatMicros(credit)}, or raise the connection's extraUsageCreditMicros in the auth connections file`,
 			});
 		}
+	}
+	return checks;
+}
+
+/**
+ * Issue #1008: a trigger whose OWN positive `run.maxCostUsd` bounds nothing on THIS host. Every model it may call (its
+ * main model or each random candidate, its allowed-model list, its auxiliary models and a watch rule's decision model)
+ * is on a provider bound here to a subscription connection with no paid extra usage (reserve-estimate.mjs
+ * `notionalConnection`), whose calls are notional: they leave the cost cap and the dollar windows, so a job of it is
+ * bounded by its quota and its turn and time limits alone. A WARNING, never a failure: the trigger may still need the
+ * cap (`auth-route-unbounded` wants one beside `run.auxiliaryModels`), an API-key model added later is bounded by it,
+ * and a job image from before issue #1008 still counts those calls under it. A route counts as notional only on a
+ * verdict that says so: a provider a subscription adapter serves, a check that SUCCEEDED (`ok: true`) and named the
+ * connection's credit as none (the worker's own marker reads that very row). A failed or unreadable check (a connections
+ * file that does not load, a throwing store, another owner host, a sign-in required) states no credit, and is answered
+ * `managed: true` for any provider, an API-key one included, so it says nothing here; nor does an API-key route or a
+ * connection with paid extra usage. `subjects` and `verdictOf` are the mixed-pool lines'.
+ */
+/** The providers a subscription connection can bind: the adapters' (community-auth-metadata.mjs). */
+const SUBSCRIPTION_PROVIDERS = new Set(Object.values(COMMUNITY_AUTH_ADAPTERS).map((adapter) => adapter.provider));
+
+export function notionalCapChecks(subjects, { verdictOf = () => undefined } = {}) {
+	const refOf = (entry) => {
+		const split = typeof entry === "string" ? splitModelEntry(entry) : null;
+		return split === null ? null : { provider: split.provider, id: split.model };
+	};
+	const triggers = new Map();
+	for (const subject of subjects) {
+		if (subject.deployment === true || subject.fallback === true) continue;
+		const trigger = subject.random === true ? subject.trigger : subject.label;
+		if (typeof trigger !== "string") continue;
+		const entry = triggers.get(trigger) ?? { cap: subject.triggerCap, routes: [] };
+		entry.routes.push(subject.main, ...(subject.list ?? []), ...(subject.auxiliaryModels ?? []).map(refOf), ...(subject.decisionModel ? [refOf(subject.decisionModel)] : []));
+		triggers.set(trigger, entry);
+	}
+	const notional = (ref) => {
+		if (!ref || !SUBSCRIPTION_PROVIDERS.has(ref.provider)) return false;
+		const verdict = verdictOf(ref.provider);
+		return verdict?.ok === true && verdict.managed === true && Object.hasOwn(verdict, "extraUsageCreditMicros") && notionalConnection(verdict);
+	};
+	const checks = [];
+	for (const [trigger, { cap, routes }] of triggers) {
+		if (!(Number.isSafeInteger(cap) && cap > 0) || routes.length === 0 || !routes.every(notional)) continue;
+		const providers = [...new Set(routes.map((ref) => printable(ref.provider)))].join(", ");
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `${trigger}: its run.maxCostUsd ($${formatMicros(cap)}) bounds nothing on this host: every model it may call is on a subscription connection without paid extra usage (${providers}), whose calls leave the cost cap and the dollar windows, so its jobs are bounded only by the subscription's quota and their turn and time limits`,
+			fix: "limit the trigger's turns or minutes (run.maxTurns, run.maxMinutes) to bound such a job; keep run.maxCostUsd where the trigger lists run.auxiliaryModels, which need a positive cap, or where a job image from before issue #1008 still runs its jobs",
+		});
 	}
 	return checks;
 }

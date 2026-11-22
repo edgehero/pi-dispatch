@@ -1942,7 +1942,7 @@ What to do: Run `pi-dispatch auth status` on the connection owner host, check it
 
 ### auth-route-unbounded
 
-Stopped before starting: a route this job may take has no bound. A subscription route needs a finite model allowlist; explicit `run.auxiliaryModels` also need exact entries in it and a positive `run.maxCostUsd`; and a random pool whose candidates mix subscription and API-key billing on the worker's host needs a positive `run.maxCostUsd` on its own trigger, since its draw may spend an API key. No container was started and nothing was spent.
+Stopped before starting: a route this job may take has no bound. A subscription route needs a finite model allowlist; explicit `run.auxiliaryModels` also need exact entries in it and a positive `run.maxCostUsd`; and a random pool whose candidates mix subscription and API-key billing on the worker's host needs a positive `run.maxCostUsd` on its own trigger, since its draw may spend an API key. That cap bounds the calls that can be billed: an API-key draw, and a draw on a connection with paid extra usage; a draw on a subscription without paid extra usage is not counted against it ([what the cap counts](costs.md#what-the-cap-counts)). No container was started and nothing was spent.
 
 What to do: For a random pool, set a positive `run.maxCostUsd` on the trigger (the deployment's `maxCostUsd` alone does not count), or keep the pool in one billing class; `pi-dispatch doctor` on the worker names the trigger. See [random pools](triggers.md#choosing-randomly-from-a-reviewed-pool). Otherwise run `pi-dispatch auth status` on the connection owner host and check its adapter, quota and finite model policy.
 
@@ -1961,6 +1961,8 @@ What to do: This job goes without the connection's adapter, so reconnecting cann
 ### auth-credit-cap-required
 
 Stopped before starting: the configured subscription connection cannot authorize this job (auth-credit-cap-required). No container was started and nothing was spent.
+
+The connection allows paid extra usage (`extraUsageCreditMicros`), so any of its calls may be billed: the job needs a per-job dollar cap no larger than that credit, and its calls count against the cap and the dollar windows. A connection without paid extra usage needs no cap for its calls, which are not counted ([what the cap counts](costs.md#what-the-cap-counts)).
 
 What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
 
