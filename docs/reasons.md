@@ -1035,7 +1035,10 @@ place of the host's. It is still refused here when it is bound in `run.secretFil
 on this host (also one bound after the job was picked up). The provider's other variables, such as
 `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_OAUTH_TOKEN`, are always refused, and so is every variable of a watch rule's
 `decide` model's provider. On a host with no credential of its own for that provider, the worker refuses
-such a job earlier, as [`provider-unconfigured`](#provider-unconfigured); both refuse before anything is spent.
+such a job earlier, as [`provider-unconfigured`](#provider-unconfigured); both refuse before anything is spent. Every
+variable of the provider of a model in `run.auxiliaryModels` is refused too, except its API-key variable bound in
+`run.secrets` on the same terms as the job's own provider's, which is that model's key; a project's bundle may carry
+none of them, so move a key a tool reads under its usual name from the bundle into the trigger's `run.secrets`.
 
 What to do: rename the variable in the triggers file, or in the secrets manager. The worker log names it. See
 [secrets.md](secrets.md#the-provider-key-as-a-run-secret).

@@ -135,6 +135,23 @@ test("a reserved name refuses naming the variable: the static set, the job's pro
 	assert.equal((await resolver.resolve(job, binding())).ok, true, "another provider's key is the project's own business, as for run.secrets");
 });
 
+test("issue #999: a bundle may carry no variable of an auxiliary model's provider, its API key included", async () => {
+	const r = fileBackedResolver();
+	const resolver = makeBundleResolver({ envBundles: { "shop-env": { path: r.script, format: "dotenv" } } });
+	const panel = { ...job, provider: "openrouter", auxiliaryModels: ["anthropic/claude-sonnet-4-5"] };
+	for (const name of ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"]) {
+		r.write("shop", `OK=1\n${name}=x\n`);
+		assert.deepEqual(await resolver.resolve(panel, binding()), { reserved: name }, name);
+	}
+	// The bearer variable is in the static set as well (it steers the provider's host); the OAuth one is not.
+	r.write("shop", "OK=1\nANTHROPIC_OAUTH_TOKEN=x\n");
+	assert.equal((await resolver.resolve({ ...panel, auxiliaryModels: undefined }, binding())).ok, true, "free without the auxiliary model");
+	// The API key too: a bundle never declares a key, so it would replace the host's for that model, judged by no gate.
+	r.write("shop", "OK=1\nANTHROPIC_API_KEY=x\n");
+	assert.deepEqual(await resolver.resolve(panel, binding()), { reserved: "ANTHROPIC_API_KEY" });
+	assert.equal((await resolver.resolve({ ...panel, auxiliaryModels: undefined }, binding())).ok, true, "another provider's key is free without the auxiliary model");
+});
+
 test("the profile lookup: unknown, ambiguous, and an overlay path outside the roots", async () => {
 	const r = fileBackedResolver();
 	const env = { "shop-env": { path: r.script, format: "dotenv" } };

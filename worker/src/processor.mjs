@@ -18,7 +18,7 @@ import { PROJECT_CAP_REASON } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { secretFileNameAllowed, secretFileNamesDistinct } from "./secret-file-names.mjs";
 import { mergeBundleSecrets } from "./secret-bundles.mjs";
-import { providerKeyCandidates } from "./env-allowlist.mjs";
+import { declaredProviderKey, providerKeyCandidates, withheldPoolKeys } from "./env-allowlist.mjs";
 import { isReservedEnvName } from "./triggers.mjs";
 import { imageFactsOf, loadedWithBase, loadedWithImage } from "./loaded-record.mjs";
 import { mcpRefusalComment } from "./mcp-preflight.mjs";
@@ -2055,10 +2055,30 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			const model = splitModelEntry(job.auxiliaryModels.find((ref) => splitModelEntry(ref).provider === provider)).model;
 			const credential = await checkProviderCredential({ ...job, provider, model }, { modelEndpoints, secrets });
 			if (credential.unavailable) throw new InfraRetry("auxiliary provider credentials could not be read", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false });
+			// Issue #999: an auxiliary provider is held to the main provider's rule, so its declared API key is refused when
+			// the provider is bound to a subscription here (the service answers managed, or the access snapshot taken since
+			// the pickup covers it), as the main re-check above refuses it: the snapshot would replace the key, silently.
+			const declared = declaredProviderKey({ ...job, provider, model });
+			if (declared !== null && (credential.managed === true || subscriptionAuth.some((snapshot) => snapshot.provider === provider))) {
+				await comment(job, reservedBindingComment(declared));
+				log("refused_secret_name_reserved", { kind: job.kind ?? null, name: declared });
+				return { outcome: "policy", reason: "secret-name-reserved", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
 			if (!credential.ok) {
 				await comment(job, `Refused: the auxiliary provider ${provider} has no usable credentials. Configure its host authentication or a declared run secret. Not run.`);
 				return { outcome: "policy", reason: "provider-unconfigured", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
 			}
+		}
+		// Issue #1002: a random pool's run secret that is another candidate's API key stays out of this draw's container
+		// (`withheldPoolKeys`). A subscription draw would otherwise hold the API candidate's key as a plain variable that
+		// any tool can spend outside the cost meter. Taken out here, after every credential gate has judged the values and
+		// before the venue or the container builder sees them, and the bundle merge below withholds the same kind of name
+		// from the bundle's values, so nothing downstream can hand one on. Still resolved, so a broken reference refuses
+		// every draw alike, as before. Names only in the log, never a value.
+		const withheld = withheldPoolKeys(job, secrets);
+		if (withheld.length > 0) {
+			secrets = Object.fromEntries(Object.entries(secrets).filter(([name]) => !withheld.includes(name)));
+			log("run_secret_withheld", { provider: job.provider ?? null, names: withheld });
 		}
 		let secretFiles = resolved.secretFiles ?? {};
 		if (Object.keys(secretFiles).length > 0) bundleFacts.secretFiles = Object.keys(secretFiles).sort();
@@ -2153,13 +2173,20 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// shadowed names are recorded. The values join `secrets`, so every path that already treats a run.secrets
 			// value as a secret treats these alike: buildContainerEnv injects them, the redaction covers every
 			// non-NON_SECRET_ENV_KEYS name (run-container.mjs), and a checkpoint refuses to store any of them.
-			const merged = mergeBundleSecrets(bundleRead.vars, secrets, { bundleFiles: bundleBinding.files ?? [], triggerFiles: secretFiles });
+			// Issue #1002: the draw's withholding, applied to the bundle's values too. A trigger value withheld above no longer
+			// shadows a bundle variable of the same name, and a bundle may carry a pool candidate's API key on its own (its
+			// reserved set holds only this draw's provider and the auxiliary ones), so either would reach a subscription draw.
+			// A bundle file stays, as a `run.secretFiles` one does. The log names the bundle, never a value.
+			const bundleWithheld = withheldPoolKeys(job, bundleRead.vars).filter((name) => !(bundleBinding.files ?? []).includes(name));
+			const bundleVars = Object.fromEntries(Object.entries(bundleRead.vars).filter(([name]) => !bundleWithheld.includes(name)));
+			if (bundleWithheld.length > 0) log("run_secret_withheld", { provider: job.provider ?? null, names: bundleWithheld, bundle: bundleBinding.id });
+			const merged = mergeBundleSecrets(bundleVars, secrets, { bundleFiles: bundleBinding.files ?? [], triggerFiles: secretFiles });
 			// Issue #704 part 3: which received variables the bundle binds to a host (`endpoints`) and which go in plain; a
 			// variable a run.secrets value shadowed is in neither unless `endpoints` names it (below). Said to every
 			// venue (`bundleKeys` on the call bag); only a venue whose layer holds credentials reads it, and it judges the
 			// split first, now with the values (`bundleGate`): a value its gateway would refuse is a refusal here, before
 			// spend, never a create that fails as infrastructure and is retried into the same answer.
-			const received = Object.fromEntries(Object.entries(bundleRead.vars).filter(([name]) => !merged.shadowed.includes(name) && !Object.hasOwn(merged.secretFiles ?? {}, name)));
+			const received = Object.fromEntries(Object.entries(bundleVars).filter(([name]) => !merged.shadowed.includes(name) && !Object.hasOwn(merged.secretFiles ?? {}, name)));
 			const post = await askBundleGate({ endpoints, vars: received, shadowed: merged.shadowed });
 			if (post.refused) return post.refused;
 			// Review round 1, M2: a declared endpoint name a run.secrets value shadowed stays on that host's provider, now with

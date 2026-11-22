@@ -8309,6 +8309,33 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   `worker/test/processor.test.mjs`, `worker/test/env-allowlist.test.mjs`, `worker/test/run-container.test.mjs`,
   `worker/test/declared-credential-index.test.mjs`, `worker/test/doctor.test.mjs`,
   `worker/test/backend-openshell.test.mjs`.
+  AMENDED 2026-11-21 (#999, #1002), the auxiliary models and a random pool's draw: the provider of a model in
+  `run.auxiliaryModels` is held to the main provider's rule. Every variable pi reads for it is reserved except the
+  API-key variable `declaredProviderKey` would admit for a job on that provider (`reservedAuxiliaryNames`: bound in
+  `run.secrets`, not `run.secretFiles`, not on `PI_FORWARD_ENV`, on a provider needing no host authentication), so a
+  `run.secrets` or `run.secretFiles` key of another such name (`ANTHROPIC_OAUTH_TOKEN` for an `anthropic` auxiliary
+  model, the token of a `github-copilot` or `google-vertex` one; `ANTHROPIC_AUTH_TOKEN` is refused at load already)
+  refuses as `secret-name-reserved` before spend, and `doctor` fails the binding, naming the trigger, the variable and
+  the auxiliary model's provider. A project bundle may carry no variable of such a provider, its API key included
+  (`auxiliaryCredentialNames`; a bundle never declares a credential), refused the same way. An auxiliary provider
+  takes its credential from the host with the run secrets laid over it, so before this such a binding became that
+  model's credential, a subscription token from a run secret or a key no gate judged. The admitted API-key variable
+  is the auxiliary model's declared key and, as the main one, its only credential: the host's environment and
+  `auth.json` are not read for that provider, and every other variable pi reads for it is removed from the container
+  env (a host or forwarded `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_OAUTH_TOKEN` would otherwise outrank it). A
+  subscription token in it stays refused as `provider-unconfigured` at the credential gate, and a provider bound to a
+  subscription here (the service answers managed after the resolver, or the access snapshot covers it) refuses the
+  binding as `secret-name-reserved`, both before the mint; the container builder refuses every one of these shapes
+  again as a backstop. In a
+  random pool (`run.modelSelection`), a `run.secrets` key that is the API-key variable of a candidate's provider
+  reaches the container only when the drawn model's provider or an auxiliary model's provider reads it
+  (`withheldPoolKeys`): the worker still resolves it, removes it after every credential gate and before the venue
+  and the container builder, keeps a project bundle's variable of such a name out of that draw too, and logs
+  `run_secret_withheld` with the names, never a value. Every other run
+  secret is unaffected, a file secret included, and so is a fallback list (`run.fallbackModels`), whose keys reach
+  every attempt. Tests: `worker/test/env-allowlist.test.mjs`,
+  `worker/test/secrets.test.mjs`, `worker/test/secret-bundles.test.mjs`, `worker/test/processor.test.mjs`,
+  `worker/test/doctor.test.mjs`.
 
 ## REQ-BROWSER-FIRST-RUN-SETUP
 
@@ -9508,6 +9535,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-21 (#999, #1002) | **`REQ-TRIGGER-SECRETS` AMENDED**, its acceptance, by a dated paragraph after #967's: an auxiliary model's provider is held to the main provider's rule, every variable reserved but the API key `declaredProviderKey` would admit (`secret-name-reserved` before spend, and a doctor failure), that key exclusive and refused for a provider bound to a subscription here, a project bundle carrying none of its variables, closing the routes by which `ANTHROPIC_OAUTH_TOKEN`, a host-authenticated provider's token or a bundle's key became an auxiliary model's credential; a subscription token in a declared auxiliary API key stays `provider-unconfigured`; and a random pool's `run.secrets` binding or project bundle variable of a candidate provider's API-key variable reaches only the draws whose model or auxiliary model reads it, logged `run_secret_withheld` by name. UNCHANGED, checked: `REQ-MODEL-POLICY` (no draw, class or cap rule moves), `REQ-SUBSCRIPTION-AUTHENTICATION` (a bound provider's snapshot still clears its variables), the reason enum (no token added). **Code evidence**: worker/src/env-allowlist.mjs -> reservedAuxiliaryNames, auxiliaryCredentialNames, withheldPoolKeys, buildContainerEnv; worker/src/secrets.mjs -> makeSecretsResolver; worker/src/secret-bundles.mjs -> makeBundleResolver; worker/src/processor.mjs -> withheld; worker/src/doctor.mjs -> triggerSecretProviderChecks, modelSubjects. |
 | 2026-11-21 (#978) | **`REQ-RESURRECTABLE-SANDBOX` AMENDED**, its "Bounded, and swept like every other artifact" bullet: the sweep is paced in bounded passes (20 s of wall time or 50 removals a pass, a rest after each run asked about or deleted for as long as it took, at least 100 ms and at most 10 s), and a pass that stopped is followed a minute after it ends by one that goes on where it stopped, until a pass reaches the end of the retained runs and networks (one lap, a held run looked at again by the next sweep), so a boot takes jobs after its first pass and a backlog of N runs takes at least N / 50 passes; its "`0` = boot-only" now says the boot sweep still finishes in those passes at 0. What is retained, the window, the pin, every hold and the network rules are UNCHANGED, checked. **`REQ-RESUMABLE-SESSION` UNCHANGED, checked**: the session reaper touches only the filesystem, never a container runtime, and is not paced. **`REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked**: the log reaper is untouched for the same reason. **Code evidence**: worker/src/sandbox-store.mjs -> makeSandboxReaper; worker/src/retention-sweep.mjs -> makeSweepFollowUps; worker/src/start.mjs -> startWorker. |
 | 2026-11-21 (#1001) | **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, doctor's boot refusals: the two `GITHUB_AUTH_SOURCE` cases (a source none of `pat`, `gh` and `app`, and the PAT source with its PAT missing) also stop the poller and the watch collector, which load the same auth block through `loadReceiverConfig`, and doctor names them. **Code evidence**: worker/src/doctor.mjs -> collectChecks (githubAuthRefusers); worker/src/config.mjs and receiver/src/config.mjs -> loadGitHubAuth; worker/test/doctor-watch.test.mjs |
 | 2026-11-21 (#970) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (g6) Connections, when the missing-poller line shows: "no poller reported" and "poller not known" follow the rule `pi-dispatch status` asks (`pollerExpected`: `GITHUB_INGEST` `poll` or `both`, else a `POLL_REPOS` that names repositories), where they followed the polling cell's own "on", which an App deployment taking webhooks reads too, so the page raised an alarm the CLI did not and stayed apart from it on a hand-made poller's deployment without `GITHUB_INGEST`; a heartbeat that exists is still drawn in every case, and the polling cell's own on, off and unknown words are unchanged. **Code evidence**: worker/src/poller-status.mjs -> pollerExpected; admin/src/connections-view.mjs -> readConnections; admin/src/console/panels/connections.mjs -> pollerLine; admin/test/connections-poller.test.mjs. |

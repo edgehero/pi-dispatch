@@ -237,6 +237,73 @@ export function declaredProviderKey(job, { forwardEnv = [] } = {}) {
 	return name;
 }
 
+/** The provider of each of a job's `run.auxiliaryModels` entries, the part before the first `/`. */
+function auxiliaryProvidersOf(job) {
+	return (job?.auxiliaryModels ?? []).map((ref) => ref.slice(0, ref.indexOf("/")));
+}
+
+/**
+ * The variables of a job's auxiliary providers that its run secrets may not name (issue #999): each auxiliary model's
+ * provider judged by the main provider's own rule. Every variable pi reads for it is reserved except the one
+ * `declaredProviderKey` admits for a job on that provider: its API-key variable, bound in `run.secrets` and not in
+ * `run.secretFiles`, not on PI_FORWARD_ENV, on no decision job, and on a provider that needs no host authentication.
+ * So at the pin an `anthropic` auxiliary model keeps ANTHROPIC_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN reserved, and a
+ * `github-copilot` or `google-vertex` one its only variable, as a job on that provider would.
+ *
+ * An auxiliary provider takes its credential from the worker's environment with the run secrets laid over it
+ * (`buildContainerEnv`), so before this a trigger on `openrouter` listing an `anthropic` auxiliary model could bind
+ * ANTHROPIC_OAUTH_TOKEN and give that model a subscription token from a run secret: the credential this project refuses
+ * from a pi login file, at setup and as a declared key's value, since subscription access is host owned. A rule of its
+ * own would drift from the main one: exempting every provider's API-key variable, say, leaves a host-authenticated
+ * provider's token bindable for an auxiliary model while the same binding refuses a job on that provider.
+ * The admitted key's value is judged at the credential gate (`isOAuthTokenValue`), and for a provider bound to a
+ * subscription here the processor refuses the binding after the gate, as it does the main one's (this function does not
+ * read subscriptions, as `declaredProviderKey` does not). An auxiliary model on the job's own provider adds nothing the
+ * main reservation does not already hold. The secret resolver, the container env and doctor ask this function; a
+ * project bundle never declares a key, so it is held to `auxiliaryCredentialNames`.
+ * Pure, and the names come from pi through `providerKeyCandidates`.
+ */
+export function reservedAuxiliaryNames(job, { forwardEnv = [] } = {}) {
+	const names = new Set();
+	for (const provider of auxiliaryProvidersOf(job)) {
+		const admitted = declaredProviderKey({ ...job, provider }, { forwardEnv });
+		for (const name of providerKeyCandidates(provider)) if (name !== admitted) names.add(name);
+	}
+	return [...names];
+}
+
+/**
+ * Every variable pi reads for the provider of a model in `run.auxiliaryModels` (issue #999), the set a project bundle
+ * may not carry. A bundle never declares a credential, for an auxiliary model as for the main one (its names exist only
+ * once read, after the auxiliary credential gate, and one bundle serves every trigger of a project), so a bundle value
+ * there would silently replace the host's key for that model, or be a key no gate judged before spend.
+ */
+export function auxiliaryCredentialNames(job) {
+	return [...new Set(auxiliaryProvidersOf(job).flatMap((provider) => providerKeyCandidates(provider)))];
+}
+
+/**
+ * The run secrets a random pool's draw withholds from its container (issue #1002), as variable names: each one in
+ * `secrets` that is the API-key variable of a pool candidate's provider (`modelSelection.candidates`) and that neither
+ * the drawn model's provider (`job.provider`) nor an auxiliary model's provider reads.
+ *
+ * Since issue #968 a pool may mix a subscription candidate and an API-key candidate, and since issue #967 the API
+ * candidate's key may be a run secret. A draw that lands on the subscription candidate would otherwise carry that key
+ * as a plain variable beside the subscription: pi does not spend it there (the allowed models exclude it), but any tool
+ * the job runs can, outside the cost meter. Narrow on purpose: a name no pool candidate's provider uses as its API key
+ * is never withheld, since a job may call an API from a tool on purpose, and nothing outside a random pool changes.
+ * "Reads" goes by variable, never by provider: pi shares a variable between providers (OPENCODE_API_KEY serves
+ * `opencode` and `opencode-go`), so a draw on one reads the other's key as its own credential. The drawn and auxiliary
+ * providers' whole candidate lists count, so no variable a provider this draw uses reads is ever withheld. Pure.
+ */
+export function withheldPoolKeys(job, secrets) {
+	const candidates = job?.modelSelection?.candidates;
+	if (!Array.isArray(candidates)) return [];
+	const poolKeys = new Set(candidates.map((ref) => apiKeyVariable(providerKeyCandidates(ref.slice(0, ref.indexOf("/"))))));
+	const used = new Set([job.provider, ...auxiliaryProvidersOf(job)].flatMap((provider) => providerKeyCandidates(provider)));
+	return Object.keys(secrets ?? {}).filter((name) => poolKeys.has(name) && !used.has(name));
+}
+
 /** The value of `PI_DISPATCH_KEYLESS`: fixed and non-secret, since the model server takes no key. */
 export const KEYLESS_VALUE = "keyless";
 
@@ -447,10 +514,36 @@ export function buildContainerEnv({ mainCredential = null, size = DEFAULT_JOB_SI
 	const secondaryAuth = subscriptionAuth.find((entry) => entry.provider === secondaryProvider);
 	const secondaryCredEnv = secondaryAuth ? secondaryAuth.env : secondaryProvider && secondaryProvider !== provider ? resolveProviderCredential({ provider: secondaryProvider, hostEnv, authFromPi, agentDir, readFile, forwardEnv: [], modelEndpoints }) : {};
 
+	// Issue #999: an auxiliary provider is held to the main provider's rule. A run secret may set only the API-key variable
+	// that rule admits (`declaredProviderKey` asked for that provider), and then that value IS the auxiliary model's
+	// credential, exclusively, as the declared main one is above: the host's environment and auth.json are not read for
+	// that provider, an empty value or a subscription token refuses, and a provider bound to a subscription here takes its
+	// snapshot and refuses the binding. Without a declared key the host's credential is resolved as before. The resolver
+	// refuses every other auxiliary variable (`reservedAuxiliaryNames`), a project bundle's reserved set every one of them,
+	// and the processor the other three cases, all before spend; these refusals are the backstop if one is bypassed. Each
+	// names the variable, never the value.
+	const auxiliaryNames = reservedAuxiliaryNames({ auxiliaryModels, secrets, secretFiles: secretFilePaths }, { forwardEnv });
+	const auxiliaryReserved = [...Object.keys(secrets ?? {}), ...Object.keys(secretFilePaths)].find((name) => auxiliaryNames.includes(name));
+	if (auxiliaryReserved !== undefined) throw configError(`buildContainerEnv: the run secret ${auxiliaryReserved} is an auxiliary provider's credential variable that a run secret may not set`);
 	const auxiliaryCredEnv = {};
+	// The declared auxiliary credentials, `[provider, variable]`, for the clearing step after the loops below.
+	const auxiliaryDeclared = [];
 	for (const other of new Set((auxiliaryModels ?? []).map(ref => ref.slice(0, ref.indexOf("/"))))) {
-		if (other === provider || other === secondaryProvider || subscriptionAuth.some(row => row.provider === other)) continue;
-		Object.assign(auxiliaryCredEnv, resolveProviderCredential({ provider: other, hostEnv: { ...hostEnv, ...secrets }, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints }));
+		if (other === provider || other === secondaryProvider) continue;
+		const declared = declaredProviderKey({ provider: other, secrets, secretFiles: secretFilePaths }, { forwardEnv });
+		if (subscriptionAuth.some(row => row.provider === other)) {
+			if (declared !== null) throw configError(`buildContainerEnv: auxiliary provider ${other} is bound to a subscription, so its run secret ${declared} cannot be its credential`);
+			continue;
+		}
+		if (declared === null) {
+			Object.assign(auxiliaryCredEnv, resolveProviderCredential({ provider: other, hostEnv, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints }));
+			continue;
+		}
+		const value = secrets[declared];
+		if (typeof value !== "string" || value === "") throw configError(`buildContainerEnv: the run secret ${declared} has no value, and the host's credential does not stand in for it, for auxiliary provider ${other}`);
+		if (isOAuthTokenValue(other, value)) throw configError(`buildContainerEnv: the run secret ${declared} holds a subscription token, not an API key, for auxiliary provider ${other}`);
+		auxiliaryCredEnv[declared] = value;
+		auxiliaryDeclared.push([other, declared]);
 	}
 	const env = {
 		...auxiliaryCredEnv,
@@ -627,6 +720,12 @@ export function buildContainerEnv({ mainCredential = null, size = DEFAULT_JOB_SI
 	if (mainCredential !== null) {
 		for (const name of providerKeyCandidates(provider)) if (name !== mainCredential) delete env[name];
 		Object.assign(env, credEnv);
+	}
+	// Issue #999: the same for each declared auxiliary credential, so a host bearer or OAuth token forwarded by
+	// PI_FORWARD_ENV cannot outrank the key the trigger declared for that model.
+	for (const [other, declared] of auxiliaryDeclared) {
+		for (const name of providerKeyCandidates(other)) if (name !== declared) delete env[name];
+		env[declared] = auxiliaryCredEnv[declared];
 	}
 
 	// An explicit subscription binding is authoritative, including against host API keys and trigger secrets.

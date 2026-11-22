@@ -431,6 +431,31 @@ test("issue #967: the exemption refuses another provider's name, a PI_FORWARD_EN
 	}
 });
 
+test("issue #999: an auxiliary model's OAuth and bearer variables are reserved like the main provider's, and its API key is not", async () => {
+	// An auxiliary provider takes its credential from the host with the run secrets laid over it, so either variable
+	// bound here became that model's credential: a subscription token from a run secret. Refused before any spawn.
+	const restore = withoutEnv(PROVIDER_VARS);
+	try {
+		const spawnFn = () => assert.fail("a reserved name must refuse before any resolver runs");
+		const { fn } = resolver({}, { hostEnv: {}, spawnFn });
+		const panel = (secrets, over = {}) => job(secrets, { provider: "openrouter", auxiliaryModels: ["anthropic/claude-sonnet-4-5"], ...over });
+		assert.equal((await fn(panel({ ANTHROPIC_OAUTH_TOKEN: "op://ci/a/oauth" }))).reserved, "ANTHROPIC_OAUTH_TOKEN");
+		assert.equal((await fn(panel({ ANTHROPIC_AUTH_TOKEN: "op://ci/a/bearer" }))).reserved, "ANTHROPIC_AUTH_TOKEN");
+		assert.equal((await fn(panel({}, { secretFiles: { ANTHROPIC_OAUTH_TOKEN: "op://ci/a/oauth" } }))).reserved, "ANTHROPIC_OAUTH_TOKEN", "a file secret of that name too");
+		// Judged by the main rule: the API key as a file secret is no declared key, and a provider that needs host
+		// authentication declares none, so its token stays reserved as it is for a job on that provider.
+		assert.equal((await fn(panel({}, { secretFiles: { ANTHROPIC_API_KEY: "op://ci/a/file" } }))).reserved, "ANTHROPIC_API_KEY");
+		assert.equal((await fn(panel({ COPILOT_GITHUB_TOKEN: "op://ci/gh" }, { auxiliaryModels: ["github-copilot/gpt-4o"] }))).reserved, "COPILOT_GITHUB_TOKEN");
+		assert.equal((await fn(panel({ GOOGLE_CLOUD_API_KEY: "op://ci/gcp" }, { auxiliaryModels: ["google-vertex/gemini-2.5-pro"] }))).reserved, "GOOGLE_CLOUD_API_KEY");
+		// The API-key variable is the auxiliary model's declared key, and without the auxiliary model the names are free.
+		const allowed = resolver({}, { hostEnv: {} }).fn;
+		assert.equal((await allowed(panel({ ANTHROPIC_API_KEY: "op://ci/a/key" }))).secrets.ANTHROPIC_API_KEY, "value-for-op://ci/a/key");
+		assert.equal((await allowed(panel({ ANTHROPIC_OAUTH_TOKEN: "op://ci/a/oauth" }, { auxiliaryModels: undefined }))).reserved, undefined);
+	} finally {
+		restore();
+	}
+});
+
 // --- what a host advertises (issue #704) ---
 
 test("servableSecretProfiles: env as declared, overlay only inside the roots, ambiguity advertises nothing", () => {
