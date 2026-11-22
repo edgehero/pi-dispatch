@@ -218,7 +218,8 @@ export function makeRunContainer({
 	// `mainCredential` (issue #967) is the processor's: the name of the run secret it admitted as the main provider's
 	// credential, so buildContainerEnv writes that value as the credential and reads no host key for the provider. Off the
 	// call bag, never off `job`, for `secrets`' reason. Null (every job that declares none) builds the env as before.
-	return async function runContainer({ job, token, prepared, checkSecretFilesPlacement = null, secrets = {}, mainCredential = null, secretFiles = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, privateEndpoints = [], size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null }) {
+	// `secondaryCredential` (issue #997) is the same for the role model's provider (a watch rule's `decide` model).
+	return async function runContainer({ job, token, prepared, checkSecretFilesPlacement = null, secrets = {}, mainCredential = null, secondaryCredential = null, secretFiles = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, privateEndpoints = [], size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// A host source may have moved after preparation. Check even an ungranted job, which must not see another attempt's files.
 		// Bare callers also keep the exact sibling private. Only the wired worker knows the configured jobs root,
@@ -539,6 +540,7 @@ export function makeRunContainer({
 			// record may carry nor a deployment setting, it is a live credential, and `token` is its precedent.
 			secrets,
 			mainCredential, // issue #967: the declared main credential's name, off the call bag like `secrets`
+			secondaryCredential, // issue #997: the declared role credential's name, the same way
 			secretFilePaths,
 			home: user !== null ? home : null, // issue #341: HOME only beside --user, assigned after the forward loops
 			modelEndpoints, // issue #503: the keyless branch of the credential, from the gate's own snapshot

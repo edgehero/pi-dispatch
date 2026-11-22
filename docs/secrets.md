@@ -607,14 +607,19 @@ In detail:
 - **Only the API-key variable counts**, and only when all of these hold:
   - it is in `run.secrets`, not `run.secretFiles` (a file secret's variable is a path, never the key);
   - it is not on `PI_FORWARD_ENV`;
-  - the trigger is not a watch rule (watch jobs, answer drafts and question groupings keep this host's
-    credential, and a watch rule's `decide` model keeps every variable of its provider reserved);
+  - the job is not an answer draft or a question grouping (an answer rule and the `zeroTouch` settings have no
+    `run.secrets`, so their models always take this host's credential);
   - the provider is not one that needs host authentication (`amazon-bedrock`, `github-copilot`, `google-vertex`,
     `openai-codex`);
   - the provider is not bound to a subscription on this host ([subscription-auth.md](subscription-auth.md)).
 
   Anything else stays `secret-name-reserved`. So does a provider bound to a subscription between the job's pickup
   and its secret resolve, before anything spends.
+- **A watch rule's `decide` model follows the same rule.** On a watch trigger the rule's `run.secrets` may declare the
+  API-key variable of the provider its `decide` model runs on, and that value is the classifier's only credential, on
+  the same terms as above: the host's key for that provider is not read, an empty value refuses, and its other
+  variables (`ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`) stay `secret-name-reserved`. A watch rule's investigation
+  declares its own provider's key the same way. A classifier on the investigation's provider shares that one key.
 - **A project bundle never sets it.** A bundle carrying a provider variable of the job, or of the provider of a
   model in its `run.auxiliaryModels`, is refused as `secret-name-reserved`: its names exist only once it is read, after
   the credential gates, and one bundle serves every trigger of a project.

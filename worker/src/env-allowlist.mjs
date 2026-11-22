@@ -211,8 +211,11 @@ export function resolveProviderCredential({ provider, hostEnv, authFromPi = fals
  *     the API key and sends them as other credentials, so a trigger binding one is still the issue #309 hazard;
  *   - it is an own key of `run.secrets` and NOT a key of `run.secretFiles` (a file is a path, never the key itself);
  *   - it is not in PI_FORWARD_ENV, where the operator's own host value claims the same name;
- *   - the job is not an internal decision job (a watch, an answer draft, a question grouping), whose reviewed fixed
- *     routes take their credentials from the host alone;
+ *   - the job is not an answer draft or a question grouping, internal decision jobs whose reviewed fixed routes take
+ *     their credentials from the host alone (neither carries `run.secrets`: answer rules and the `zeroTouch` settings
+ *     have none, and admitting one would be a new field of the triggers file). A watch job counts since issue #997: it
+ *     carries its rule's `run.secrets` like any trigger's job, so its main model may declare a key, and its `decide`
+ *     model's provider is judged by this same function, asked as `{ ...job, provider }`;
  *   - the provider is not one that needs host authentication (`HOST_AUTH_PROVIDERS`).
  * The last condition, that the provider is not bound to a subscription on this host, is the CALLER's: every caller
  * asks the subscription service first and never reaches this for a managed provider, and the processor asks again
@@ -222,7 +225,7 @@ export function resolveProviderCredential({ provider, hostEnv, authFromPi = fals
  * Pure, and the names come from pi through `providerKeyCandidates`, so no table of providers is kept here.
  */
 export function declaredProviderKey(job, { forwardEnv = [] } = {}) {
-	if (job?.answerDraft || job?.watch || job?.questionGrouping) return null;
+	if (job?.answerDraft || job?.questionGrouping) return null;
 	const provider = job?.provider;
 	if (typeof provider !== "string" || provider === "" || needsHostAuthentication(provider)) return null;
 	const name = apiKeyVariable(providerKeyCandidates(provider));
@@ -246,8 +249,8 @@ function auxiliaryProvidersOf(job) {
  * The variables of a job's auxiliary providers that its run secrets may not name (issue #999): each auxiliary model's
  * provider judged by the main provider's own rule. Every variable pi reads for it is reserved except the one
  * `declaredProviderKey` admits for a job on that provider: its API-key variable, bound in `run.secrets` and not in
- * `run.secretFiles`, not on PI_FORWARD_ENV, on no decision job, and on a provider that needs no host authentication.
- * So at the pin an `anthropic` auxiliary model keeps ANTHROPIC_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN reserved, and a
+ * `run.secretFiles`, not on PI_FORWARD_ENV, on no answer draft or question grouping, and on a provider that needs no
+ * host authentication. So at the pin an `anthropic` auxiliary model keeps ANTHROPIC_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN reserved, and a
  * `github-copilot` or `google-vertex` one its only variable, as a job on that provider would.
  *
  * An auxiliary provider takes its credential from the worker's environment with the run secrets laid over it
@@ -486,9 +489,11 @@ function layoutEnv(layout) {
  *
  * `mainCredential` (issue #967) is the variable name of the run secret the processor admitted as this job's main
  * credential (`declaredProviderKey`), handed down by run-container as an argument of its own and never read off the job,
- * so nothing queued can set it. Null keeps the host's credential, as before.
+ * so nothing queued can set it. Null keeps the host's credential, as before. `secondaryCredential` (issue #997) is the
+ * same for the role model's provider (`secondaryProvider`, a watch rule's `decide` model): the run secret the processor
+ * admitted as that model's credential, on the same terms and by the same route.
  */
-export function buildContainerEnv({ mainCredential = null, size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, secretFilePaths = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, auxiliaryModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, privateEndpoints = [], exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, credentialRefresh = false }) {
+export function buildContainerEnv({ mainCredential = null, secondaryCredential = null, size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, secretFilePaths = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, auxiliaryModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, privateEndpoints = [], exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, credentialRefresh = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -501,18 +506,22 @@ export function buildContainerEnv({ mainCredential = null, size = DEFAULT_JOB_SI
 	// the snapshot so the backstop below is live: the processor never admits a declared key for a provider bound to a
 	// subscription, and a snapshot here would mean two credentials for one provider, which is refused rather than
 	// resolved by whichever this function happened to read first. Every refusal names the variable, never the value.
-	const declaredCredential = () => {
-		if (typeof mainCredential !== "string" || mainCredential !== apiKeyVariable(providerKeyCandidates(provider))) throw configError(`buildContainerEnv: ${JSON.stringify(mainCredential)} is not the variable the worker writes for provider ${provider}`);
-		if (selectedAuth) throw configError(`buildContainerEnv: provider ${provider} is bound to a subscription, so its declared run secret ${mainCredential} cannot be its credential`);
-		const value = secrets !== null && typeof secrets === "object" && Object.hasOwn(secrets, mainCredential) ? secrets[mainCredential] : undefined;
-		if (typeof value !== "string" || value === "") throw configError(`buildContainerEnv: the declared run secret ${mainCredential} has no value, and the host's credential does not stand in for it`);
-		if (isOAuthTokenValue(provider, value)) throw configError(`buildContainerEnv: the declared run secret ${mainCredential} holds a subscription token, not an API key`);
-		return { [mainCredential]: value };
+	const declaredCredential = (forProvider, name, bound) => {
+		if (typeof name !== "string" || name !== apiKeyVariable(providerKeyCandidates(forProvider))) throw configError(`buildContainerEnv: ${JSON.stringify(name)} is not the variable the worker writes for provider ${forProvider}`);
+		if (bound) throw configError(`buildContainerEnv: provider ${forProvider} is bound to a subscription, so its declared run secret ${name} cannot be its credential`);
+		const value = secrets !== null && typeof secrets === "object" && Object.hasOwn(secrets, name) ? secrets[name] : undefined;
+		if (typeof value !== "string" || value === "") throw configError(`buildContainerEnv: the declared run secret ${name} has no value, and the host's credential does not stand in for it`);
+		if (isOAuthTokenValue(forProvider, value)) throw configError(`buildContainerEnv: the declared run secret ${name} holds a subscription token, not an API key`);
+		return { [name]: value };
 	};
-	const credEnv = mainCredential !== null ? declaredCredential() : selectedAuth ? selectedAuth.env : resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints });
+	const credEnv = mainCredential !== null ? declaredCredential(provider, mainCredential, selectedAuth) : selectedAuth ? selectedAuth.env : resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints });
 	// A reviewed watch classifier may use another provider. Resolve only that provider, never a blanket key copy.
+	// Issue #997: or take the run secret the processor admitted as its credential, exclusively, as the main one above. A
+	// role model on the main provider shares the main credential, so a declared role key there is refused rather than
+	// written as a second credential for one provider.
 	const secondaryAuth = subscriptionAuth.find((entry) => entry.provider === secondaryProvider);
-	const secondaryCredEnv = secondaryAuth ? secondaryAuth.env : secondaryProvider && secondaryProvider !== provider ? resolveProviderCredential({ provider: secondaryProvider, hostEnv, authFromPi, agentDir, readFile, forwardEnv: [], modelEndpoints }) : {};
+	if (secondaryCredential !== null && secondaryProvider === provider) throw configError(`buildContainerEnv: the role model is on the main provider ${provider}, so its declared run secret ${secondaryCredential} is the main credential's to decide`);
+	const secondaryCredEnv = secondaryCredential !== null ? declaredCredential(secondaryProvider, secondaryCredential, secondaryAuth) : secondaryAuth ? secondaryAuth.env : secondaryProvider && secondaryProvider !== provider ? resolveProviderCredential({ provider: secondaryProvider, hostEnv, authFromPi, agentDir, readFile, forwardEnv: [], modelEndpoints }) : {};
 
 	// Issue #999: an auxiliary provider is held to the main provider's rule. A run secret may set only the API-key variable
 	// that rule admits (`declaredProviderKey` asked for that provider), and then that value IS the auxiliary model's
@@ -708,7 +717,8 @@ export function buildContainerEnv({ mainCredential = null, size = DEFAULT_JOB_SI
 	// PI_SESSION_FILE and PI_FLOW already keep. The resolver guarantees non-empty; this is the defense in
 	// depth at the DI seam that the empty-token guard keeps for the mint.
 	for (const [name, value] of Object.entries(secrets ?? {})) {
-		if (secondaryProvider && providerKeyCandidates(secondaryProvider).includes(name)) throw configError(`watch classifier credential variable ${name} is reserved`);
+		// Issue #997: but for the declared role key, and the declared main key when the role model shares the main provider.
+		if (secondaryProvider && providerKeyCandidates(secondaryProvider).includes(name) && name !== secondaryCredential && name !== mainCredential) throw configError(`watch classifier credential variable ${name} is reserved`);
 		if (typeof value === "string" && value !== "") env[name] = value;
 	}
 
@@ -720,6 +730,11 @@ export function buildContainerEnv({ mainCredential = null, size = DEFAULT_JOB_SI
 	if (mainCredential !== null) {
 		for (const name of providerKeyCandidates(provider)) if (name !== mainCredential) delete env[name];
 		Object.assign(env, credEnv);
+	}
+	// Issue #997: the same for the declared role credential.
+	if (secondaryCredential !== null) {
+		for (const name of providerKeyCandidates(secondaryProvider)) if (name !== secondaryCredential) delete env[name];
+		Object.assign(env, secondaryCredEnv);
 	}
 	// Issue #999: the same for each declared auxiliary credential, so a host bearer or OAuth token forwarded by
 	// PI_FORWARD_ENV cannot outrank the key the trigger declared for that model.

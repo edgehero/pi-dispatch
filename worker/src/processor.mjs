@@ -688,7 +688,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// `resources` and `exitOomKilled` (issue #596) are the exit line's cgroup block and the supervisor's OOM report.
 		// `user`/`home` are the job-user gate's answer (issue #341), null for the image's own USER.
 		// `mainCredential` (issue #967) is the name of the run secret admitted as the main provider's credential, passed only
-		// when there is one: an argument of its own, never a job field, so queue data cannot choose it.
+		// when there is one: an argument of its own, never a job field, so queue data cannot choose it. `secondaryCredential`
+		// (issue #997) is the same for the role model's provider, a watch rule's `decide` model on another provider.
 		// `secrets` is the resolved map from the gate above: values, already fetched, host-side. It MUST honour
 		// `signal`: stop the container on abort, and reject/exit promptly if `signal.aborted` is already
 		// true at entry (the timeout can fire during a slow prepare). The wiring injects name + signal, and
@@ -1402,17 +1403,22 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		if (job.watch && job.watchDecisionModel && job.watchDecisionModel.provider !== job.provider) credentialJobs.push({ ...job, provider: job.watchDecisionModel.provider, model: job.watchDecisionModel.id });
 		if (job.questionGrouping && job.questionGroupModel && job.questionGroupModel.provider !== job.provider) credentialJobs.push({ ...job, provider: job.questionGroupModel.provider, model: job.questionGroupModel.id });
 		if (job.answerDraft && job.answerDecisionModel && job.answerDecisionModel.provider !== job.provider) credentialJobs.push({ ...job, provider: job.answerDecisionModel.provider, model: job.answerDecisionModel.id });
-		// Issue #967: the run secret the MAIN job's verdict declares as its credential (`declaredProviderKey`), or null. Taken
-		// from the main job alone: a role provider (the watch, question or answer model) keeps the host's credential and its
-		// variables stay reserved (`secondaryCredentialNames` below). Handed to the resolver, re-checked against the
-		// resolved values, and passed to the container as an argument of its own, never as a job field.
+		// Issue #967: the run secret the MAIN job's verdict declares as its credential (`declaredProviderKey`), or null. Handed
+		// to the resolver, re-checked against the resolved values, and passed to the container as an argument of its own,
+		// never as a job field. Issue #997: the role model's verdict the same way (`roleDeclared`, with the job the gate was
+		// asked as), on the same rule. Only a watch job can have one: an answer draft and a question grouping carry no
+		// `run.secrets`, so their role provider keeps the host's credential and its variables stay reserved
+		// (`secondaryCredentialNames` below).
 		let mainDeclared = null;
+		let roleDeclared = null;
+		let roleJob = null;
 		for (const credentialJob of credentialJobs) {
 			const credential = await checkProviderCredential(credentialJob, { modelEndpoints });
-			if (credentialJob === job && credential.ok === true && typeof credential.declared === "string") {
-				mainDeclared = credential.declared;
+			if (credential.ok === true && typeof credential.declared === "string") {
+				if (credentialJob === job) mainDeclared = credential.declared;
+				else [roleDeclared, roleJob] = [credential.declared, credentialJob];
 				// Names only: the provider and the variable, both from the reviewed triggers file, never a value or a reference.
-				log("provider_credential_declared", { provider: job.provider ?? null, name: mainDeclared });
+				log("provider_credential_declared", { provider: credentialJob.provider ?? null, name: credential.declared });
 			}
 			if (credential.unavailable) {
 				// Issue #503: the overlay models.json could not be read at this pickup for a transient reason, so the gate has no
@@ -1933,7 +1939,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// carry `secrets` the current set would refuse, and buildContainerEnv would write every one of them.
 		// The same set the loader uses, imported, so the two cannot drift, and checked before the resolver so
 		// no wiring of it can skip the check.
-		const secondaryCredentialNames = new Set(job.answerDraft && job.answerDecisionModel ? providerKeyCandidates(job.answerDecisionModel.provider) : job.questionGrouping && job.questionGroupModel ? providerKeyCandidates(job.questionGroupModel.provider) : job.watch && job.watchDecisionModel ? providerKeyCandidates(job.watchDecisionModel.provider) : []);
+		// Issue #997: but for a declared key the gate admitted above, the role model's own or, when the role model shares the
+		// main provider, the main one, which the resolver then judges with the rest of the main provider's names.
+		const secondaryCredentialNames = new Set((job.answerDraft && job.answerDecisionModel ? providerKeyCandidates(job.answerDecisionModel.provider) : job.questionGrouping && job.questionGroupModel ? providerKeyCandidates(job.questionGroupModel.provider) : job.watch && job.watchDecisionModel ? providerKeyCandidates(job.watchDecisionModel.provider) : []).filter((name) => name !== mainDeclared && name !== roleDeclared));
 		const loadReserved = secretsArmed(job) ? [...Object.keys(job.secrets ?? {}), ...Object.keys(job.secretFiles ?? {})].find((name) => isReservedEnvName(name) || secondaryCredentialNames.has(name)) : undefined;
 		// Issue #967: the declared main credential is the one name the resolver lifts out of its reserved set, and only when
 		// it is asked to by name; the resolver checks the name against the same rule again. Without it the call is the one
@@ -2031,20 +2039,22 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// in between covers it) now owns its credentials, so the binding is the reserved name it was before this feature
 		// (`secret-name-reserved`). The resolver refuses an empty value as `secret-unresolved` on its own, so the first
 		// refusal is the backstop for a resolver seam that did not.
-		if (mainDeclared !== null) {
-			const recheck = await checkProviderCredential(job, { modelEndpoints, secrets });
+		// Issue #997: the declared role credential is asked again the same way, as the job the gate was asked as.
+		for (const [declaredJob, declared] of [[job, mainDeclared], [roleJob, roleDeclared]]) {
+			if (declared === null) continue;
+			const recheck = await checkProviderCredential(declaredJob, { modelEndpoints, secrets });
 			if (recheck.unavailable) {
-				log("provider_credential_unavailable", { provider: job.provider ?? null, reason: typeof recheck.unavailable === "string" ? recheck.unavailable : recheck.reason ?? null });
+				log("provider_credential_unavailable", { provider: declaredJob.provider ?? null, reason: typeof recheck.unavailable === "string" ? recheck.unavailable : recheck.reason ?? null });
 				throw new InfraRetry("the provider credential could not be decided", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 			}
-			if (recheck.managed || subscriptionAuth.some((snapshot) => snapshot.provider === job.provider)) {
-				await comment(job, reservedBindingComment(mainDeclared));
-				log("refused_secret_name_reserved", { kind: job.kind ?? null, name: mainDeclared });
+			if (recheck.managed || subscriptionAuth.some((snapshot) => snapshot.provider === declaredJob.provider)) {
+				await comment(job, reservedBindingComment(declared));
+				log("refused_secret_name_reserved", { kind: job.kind ?? null, name: declared });
 				return { outcome: "policy", reason: "secret-name-reserved", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 			}
-			if (recheck.ok !== true || recheck.declared !== mainDeclared) {
-				await comment(job, `Refused: this deployment has no usable credential for the "${job.provider}" provider, so no container was started and nothing was spent. Ask the operator to run \`pi-dispatch doctor\`. Not run.`);
-				log("refused_provider_unconfigured", { provider: job.provider ?? null, name: mainDeclared });
+			if (recheck.ok !== true || recheck.declared !== declared) {
+				await comment(job, `Refused: this deployment has no usable credential for the "${declaredJob.provider}" provider, so no container was started and nothing was spent. Ask the operator to run \`pi-dispatch doctor\`. Not run.`);
+				log("refused_provider_unconfigured", { provider: declaredJob.provider ?? null, name: declared });
 				return { outcome: "policy", reason: "provider-unconfigured", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 			}
 		}
@@ -2802,7 +2812,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// proxy enforces it when the egress policy is on (`proxy`); with PI_EGRESS=0 no proxy stands between any job and the
 		// device (`unenforced`), and the record says so rather than imply a binding nobody enforced.
 		if (privateGrant.length > 0) privateFacts.value = { ids: privateGrant.map((e) => e.id), basis: egress?.proxy ? "proxy" : "unenforced" };
-		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, checkSecretFilesPlacement: () => checkSecretFilesPlacement(job, { prepared }), secrets, ...(mainDeclared !== null ? { mainCredential: mainDeclared } : {}), ...(Object.keys(secretFiles).length > 0 ? { secretFiles } : {}), ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(privateGrant.length > 0 ? { privateEndpoints: privateGrant } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}), ...(activityWatch !== null ? { activityWatch, onActivityArmed: deps.onActivityArmed ?? null, requestStop: deps.requestStop ?? null, noteActivity: deps.noteActivity ?? null, ...(credentialRefresh !== null ? { credentialRefresh } : {}) } : {}) });
+		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, checkSecretFilesPlacement: () => checkSecretFilesPlacement(job, { prepared }), secrets, ...(mainDeclared !== null ? { mainCredential: mainDeclared } : {}), ...(roleDeclared !== null ? { secondaryCredential: roleDeclared } : {}), ...(Object.keys(secretFiles).length > 0 ? { secretFiles } : {}), ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(privateGrant.length > 0 ? { privateEndpoints: privateGrant } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}), ...(activityWatch !== null ? { activityWatch, onActivityArmed: deps.onActivityArmed ?? null, requestStop: deps.requestStop ?? null, noteActivity: deps.noteActivity ?? null, ...(credentialRefresh !== null ? { credentialRefresh } : {}) } : {}) });
 		const answeredPark = prepared.session?.parkedSource;
 		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
 		// answers its question. A held receipt also identifies an answer whose legacy source cannot be proved.
