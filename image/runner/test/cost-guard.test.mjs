@@ -21,6 +21,11 @@ import {
 	wrapProviderStreams,
 	DISPATCH_MARK,
 	dispatchToken,
+	COST_WAIT,
+	COST_WAIT_IDLE_MS,
+	COST_WAIT_TICK_MS,
+	makeDeferredStream,
+	WAIT_ABORTED_MESSAGE,
 } from "../src/usage-meter.mjs";
 import { COST_CAP, COST_REFUSALS, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "../src/outcome.mjs";
 import { dollarSettlement } from "../../../worker/src/dollar-budget.mjs";
@@ -1157,4 +1162,602 @@ test("Radius routes, zero-rate rows and custom gateways never dispatch under a l
 			layer.restore();
 		}
 	}
+});
+
+// ── Issue #985: a call refused only by other calls' holds waits for them ────────────────────────────────────
+//
+// Every test below asserts the cap's invariant at EACH step, not only at the end (`within`): what the guard settled,
+// plus what it holds in flight, plus the outside spend where there is one, never passes the cap.
+
+/** A fake interval: the drain the guard arms while anyone waits, run by hand (`tick()`). */
+function fakeTimer() {
+	const timer = { armed: null, unrefs: 0 };
+	timer.set = (run, ms) => {
+		timer.armed = { run, ms, unref: () => (timer.unrefs += 1) };
+		return timer.armed;
+	};
+	timer.clear = (handle) => {
+		if (timer.armed === handle) timer.armed = null;
+	};
+	timer.tick = () => timer.armed?.run();
+	return timer;
+}
+
+/** A guard for the waiting tests: an injected clock and timer, the bound read off the call's model (`model.bound`). */
+function waitingGuard({ capMicros, external = null }) {
+	const clock = { now: 0 };
+	const timer = fakeTimer();
+	const logged = [];
+	const guard = createCostGuard({ capMicros, bound: (method, model) => model.bound, external, log: (event, fields) => logged.push({ event, fields }), now: () => clock.now, setTimer: timer.set, clearTimer: timer.clear });
+	const within = (label) => {
+		const outside = external === null ? 0 : external();
+		assert.ok(guard.state.spent + guard.state.inflight + outside <= capMicros, `${label}: spent ${guard.state.spent} + in flight ${guard.state.inflight} + outside ${outside} passed the cap ${capMicros}`);
+	};
+	return { guard, clock, timer, logged, within };
+}
+
+/** A call whose bound is `bound`, offered as the wrappers offer a waitable one (a retry carries its waiter). */
+const sized = (bound, waiter = null) => ({ method: "streamSimple", model: { ...FLAT, bound }, args: [{}, {}], waitable: true, waiter });
+
+/** Admit and bind a call of `bound` that fits now; returns its stream, to settle it. Not waitable: a call under a hold. */
+function hold(guard, bound, { waitable = true } = {}) {
+	const stream = new FakeStream();
+	assert.equal(guard.admit(waitable ? sized(bound) : { ...sized(bound), waitable: false }), null, `a call of ${bound} fits`);
+	guard.bind(stream);
+	return stream;
+}
+
+/**
+ * A call of `bound` queued the way the wrappers queue one (waitTurn): offered, told COST_WAIT, queued, then retried by
+ * the drain with its waiter; bound to its stream once admitted, off the queue once it ends any other way.
+ */
+function queued(guard, bound) {
+	const entry = { verdicts: [], stream: new FakeStream(), waiter: null };
+	assert.equal(guard.admit(sized(bound)), COST_WAIT, `a call of ${bound} waits`);
+	entry.waiter = guard.wait(() => {
+		const verdict = guard.admit(sized(bound, entry.waiter));
+		entry.verdicts.push(verdict);
+		if (verdict === COST_WAIT) return;
+		if (verdict === null) guard.bind(entry.stream);
+		guard.leave(entry.waiter);
+	});
+	return entry;
+}
+
+test("issue #985: a call refused only by another call's hold waits, holding nothing, and is admitted when that hold settles", { timeout: 10_000 }, async () => {
+	const { guard, clock, timer, logged, within } = waitingGuard({ capMicros: 1000 });
+	const first = hold(guard, 600);
+	within("first admitted");
+	const second = queued(guard, 600); // 0 + 600 + 600 > 1000, and 0 + 600 <= 1000 once the first settles
+	within("second waiting");
+	assert.deepEqual([guard.state.inflight, guard.state.waited, guard.state.refused], [600, 1, 0], "the waiter holds nothing, and is no refusal");
+	assert.deepEqual(logged, [{ event: "cost_wait", fields: { bound: 600, spent: 0, inflight: 600, cap: 1000, waiting: 0 } }], "numbers only");
+	assert.equal(timer.armed?.ms, COST_WAIT_TICK_MS, "a drain timer runs while anyone waits");
+	assert.equal(timer.unrefs, 1, "unref'd: a waiting call never keeps the runner alive");
+	timer.tick();
+	within("a tick");
+	assert.deepEqual(second.verdicts, [COST_WAIT], "a tick with nothing settled: it waits on, in place");
+	clock.now = 250;
+	first.end(message(0.0001)); // 100 micro-dollars
+	await flush();
+	within("first settled");
+	assert.deepEqual(second.verdicts, [COST_WAIT, null], "the settle drained the queue: 100 + 0 + 600 <= 1000");
+	assert.deepEqual([guard.state.spent, guard.state.inflight], [100, 600]);
+	assert.deepEqual(logged.at(-1), { event: "cost_waited", fields: { waitedMs: 250 } });
+	assert.equal(timer.armed, null, "the timer stops with the last waiter");
+	second.stream.end(message(0.0002));
+	await flush();
+	within("both settled");
+	assert.deepEqual([guard.state.spent, guard.state.inflight, guard.state.refused, guard.refusedWhy()], [300, 0, 0, null]);
+});
+
+test("issue #985: a call is still refused when waiting cannot help: nothing in flight, or spent + outside + bound over the cap", { timeout: 10_000 }, async () => {
+	const alone = waitingGuard({ capMicros: 500 });
+	assert.equal(alone.guard.admit(sized(600)), COST_CAP, "nothing in flight: no settle can make room");
+	alone.within("refused alone");
+	assert.deepEqual(alone.logged, [{ event: "cost_refused", fields: { bound: 600, spent: 0, inflight: 0, cap: 500 } }]);
+	const spentOut = waitingGuard({ capMicros: 1000 });
+	const settled = hold(spentOut.guard, 500);
+	settled.end(message(0.0005));
+	await flush();
+	hold(spentOut.guard, 300);
+	spentOut.within("500 spent, 300 in flight");
+	assert.equal(spentOut.guard.admit(sized(600)), COST_CAP, "500 + 600 > 1000 whatever settles");
+	spentOut.within("refused");
+	const outside = waitingGuard({ capMicros: 1000, external: () => 500 });
+	hold(outside.guard, 100);
+	outside.within("100 in flight, 500 outside");
+	assert.equal(outside.guard.admit(sized(600)), COST_CAP, "0 + 500 + 600 > 1000: the outside spend counts as settled, so waiting cannot free it");
+	outside.within("refused");
+	const holding = waitingGuard({ capMicros: 1000 });
+	hold(holding.guard, 600);
+	assert.equal(holding.guard.admit({ ...sized(600), waitable: false }), COST_CAP, "a call that cannot wait (under an admitted dispatch) is refused as before");
+	holding.within("refused");
+	for (const { guard } of [alone, spentOut, outside, holding]) assert.equal(guard.state.waited, 0);
+});
+
+test("issue #985: a waiter is refused once the hold it waited for settles at its bound, its wait on the line", { timeout: 10_000 }, async () => {
+	const { guard, clock, timer, logged, within } = waitingGuard({ capMicros: 1000 });
+	const first = hold(guard, 600);
+	const second = queued(guard, 600);
+	within("waiting");
+	clock.now = 40;
+	// The first call STARTED and then failed: charged its whole bound (PR #534's rule), so no room appears.
+	first.end({ role: "assistant", stopReason: "error", content: [{ type: "text", text: "partial" }], usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { total: 0.00001 } } });
+	await flush();
+	within("refused after the settle");
+	assert.deepEqual(second.verdicts, [COST_CAP], "600 + 600 > 1000: waiting can no longer help");
+	assert.deepEqual([guard.state.spent, guard.state.inflight, guard.state.refused], [600, 0, 1]);
+	assert.deepEqual(logged.at(-1), { event: "cost_refused", fields: { bound: 600, waited: 40, spent: 600, inflight: 0, cap: 1000 } });
+	assert.equal(guard.refusedWhy(), "over-cap");
+	assert.equal(timer.armed, null, "nobody waits");
+});
+
+test("issue #985: the queue is FIFO: a small call that would fit waits behind a large waiter, which goes first", { timeout: 10_000 }, async () => {
+	const { guard, within } = waitingGuard({ capMicros: 1000 });
+	const first = hold(guard, 600);
+	const large = queued(guard, 900); // 0 + 600 + 900 > 1000; 900 fits once the first settles
+	within("large waiting");
+	const small = queued(guard, 300); // 0 + 600 + 300 fits, but the large one waits ahead of it
+	within("small waiting behind");
+	assert.equal(guard.state.inflight, 600, "the small call did not take the room the large one waits for");
+	// A call that cannot wait is not held behind the queue: it fits, so it is admitted.
+	const forward = hold(guard, 300, { waitable: false });
+	within("a call under a hold, past the queue");
+	forward.end(message(0));
+	first.end(message(0.0001));
+	await flush();
+	within("first settled");
+	assert.deepEqual([large.verdicts, small.verdicts], [[null], [COST_WAIT]], "100 + 900 <= 1000 for the large one; 100 + 900 + 300 > 1000 for the small one");
+	large.stream.end(message(0.0001));
+	await flush();
+	within("large settled");
+	assert.deepEqual(small.verdicts, [COST_WAIT, null]);
+	assert.deepEqual([guard.state.spent, guard.state.inflight, guard.state.waited], [200, 300, 2]);
+});
+
+test("issue #985: a settle inside admit (a stale slot flushed) drains on a microtask, never inside that admit", { timeout: 10_000 }, async () => {
+	const { guard, within } = waitingGuard({ capMicros: 1000 });
+	hold(guard, 600);
+	const waiting = queued(guard, 600);
+	assert.equal(guard.admit({ ...sized(300), waitable: false }), null, "admitted, and its dispatch threw: no bind");
+	within("a stale slot");
+	assert.equal(guard.admit({ ...sized(100), waitable: false }), null, "the stale slot is flushed, settled at its bound, inside this admit");
+	assert.deepEqual(waiting.verdicts, [], "the settle did not retry the waiter inside admit: the one pending slot is this call's");
+	guard.bind(new FakeStream());
+	within("after the flush");
+	await Promise.resolve();
+	assert.deepEqual(waiting.verdicts, [COST_WAIT], "drained on the next microtask: 300 + 700 + 600 > 1000, and it waits on");
+	within("drained");
+});
+
+test("issue #985: a waiter with no progress for COST_WAIT_IDLE_MS is refused over-cap; a settle meanwhile starts the count again", { timeout: 10_000 }, async () => {
+	assert.equal(COST_WAIT_IDLE_MS, 15 * 60 * 1000, "the default idle limit's 15 minutes");
+	const { guard, clock, timer, logged, within } = waitingGuard({ capMicros: 1000 });
+	const settling = hold(guard, 300);
+	hold(guard, 300); // never settles: a hung call
+	const waiting = queued(guard, 700); // 0 + 600 + 700 > 1000; 700 fits once both settle
+	clock.now = 10 * 60 * 1000;
+	settling.end(message(0.0001)); // progress at minute 10: 100 + 300 + 700 > 1000, so it waits on
+	await flush();
+	within("minute 10");
+	assert.deepEqual(waiting.verdicts, [COST_WAIT]);
+	clock.now = 10 * 60 * 1000 + COST_WAIT_IDLE_MS - 1;
+	timer.tick();
+	within("just under the limit");
+	assert.deepEqual(waiting.verdicts, [COST_WAIT, COST_WAIT], "past 15 minutes from the start, not from the last progress");
+	clock.now = 10 * 60 * 1000 + COST_WAIT_IDLE_MS;
+	timer.tick();
+	within("refused");
+	assert.deepEqual(waiting.verdicts, [COST_WAIT, COST_WAIT, COST_CAP]);
+	assert.deepEqual(logged.at(-1), { event: "cost_refused", fields: { bound: 700, waited: 25 * 60 * 1000, spent: 100, inflight: 300, cap: 1000 } });
+	assert.equal(guard.refusedWhy(), "over-cap");
+	assert.equal(timer.armed, null);
+});
+
+test("issue #985: the drain timer picks up room that no settle of ours signals: a drop in the outside spend", () => {
+	let outside = 301;
+	const { guard, timer, within } = waitingGuard({ capMicros: 1000, external: () => outside });
+	hold(guard, 100);
+	const waiting = queued(guard, 600); // 0 + 100 + 301 + 600 > 1000; 301 + 600 <= 1000 with our hold in flight
+	within("waiting");
+	outside = 0; // a child's hold settled far below its bound
+	within("the outside spend dropped");
+	timer.tick();
+	within("admitted on the tick");
+	assert.deepEqual(waiting.verdicts, [null], "0 + 100 + 0 + 600 <= 1000");
+	assert.equal(timer.armed, null);
+});
+
+test("issue #985: the policy guard offers the queue only with a cap, so a model list alone never defers a call", () => {
+	const capped = createPolicyGuard({ maxCostMicros: 1000, allowedModels: [{ provider: FLAT.provider, model: FLAT.id }], env: {} });
+	assert.deepEqual([typeof capped.wait, typeof capped.leave], ["function", "function"]);
+	assert.equal(createPolicyGuard({ allowedModels: [{ provider: FLAT.provider, model: FLAT.id }] }).wait, undefined);
+});
+
+// ── Issue #985: the deferred call in the two halves ──────────────────────────────────────────────────────
+
+/**
+ * A stream as pi's EventStream behaves (pinned in pinned-api.test.mjs): push() queues an event and a terminal one
+ * resolves result(); end() resolves result() with what it is given and ends the iteration.
+ */
+class EventFake {
+	constructor() {
+		this.events = [];
+		this.waiting = [];
+		this.done = false;
+		this.final = new Promise((resolve) => (this.resolve = resolve));
+	}
+	push(event) {
+		if (this.done) return;
+		if (event.type === "done" || event.type === "error") {
+			this.done = true;
+			this.resolve(event.type === "done" ? event.message : event.error);
+		}
+		const waiter = this.waiting.shift();
+		if (waiter) waiter({ value: event, done: false });
+		else this.events.push(event);
+	}
+	end(result) {
+		this.done = true;
+		if (result !== undefined) this.resolve(result);
+		for (const waiter of this.waiting.splice(0)) waiter({ value: undefined, done: true });
+	}
+	async *[Symbol.asyncIterator]() {
+		while (true) {
+			if (this.events.length > 0) yield this.events.shift();
+			else if (this.done) return;
+			else {
+				const next = await new Promise((resolve) => this.waiting.push(resolve));
+				if (next.done) return;
+				yield next.value;
+			}
+		}
+	}
+	result() {
+		return this.final;
+	}
+}
+
+const answered = (cost) => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }], usage: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 11, cost: { total: cost } } });
+/** Answer a provider stream the way pi's providers do: start, a delta, done. Returns the final message. */
+function answer(stream, cost) {
+	const final = answered(cost);
+	stream.push({ type: "start", partial: final });
+	stream.push({ type: "text_delta", delta: "ok", partial: final });
+	stream.push({ type: "done", reason: "stop", message: final });
+	return final;
+}
+async function eventsOf(stream) {
+	const events = [];
+	for await (const event of stream) events.push(event);
+	return events;
+}
+
+/** A runtime class whose provider streams the test answers by hand; `onCall` sees each dispatch. */
+function handRuntime({ onCall = () => {} } = {}) {
+	const calls = [];
+	class HandRuntime {
+		streamSimple(model, context, options) {
+			const stream = new EventFake();
+			calls.push({ model: model.id, stream });
+			onCall(model, this, stream);
+			return stream;
+		}
+	}
+	return { HandRuntime, calls };
+}
+
+/** A capped install of the runtime half with a placeholder to defer with: cap 1000, every call's bound 600. */
+function deferringLayer(Runtime, { bound = () => 600 } = {}) {
+	const timer = fakeTimer();
+	const meter = createUsageMeter({ maxCostMicros: 1000 });
+	const guard = createCostGuard({ capMicros: 1000, bound, setTimer: timer.set, clearTimer: timer.clear });
+	const layer = wrapModelRuntime({ ModelRuntime: Runtime, meter, hardStop: makeHardStopStream({ createStream: () => new EventFake() }), guard, deferred: makeDeferredStream({ createStream: () => new EventFake() }) });
+	const within = (label) => assert.ok(guard.state.spent + guard.state.inflight <= 1000, `${label}: ${guard.state.spent} + ${guard.state.inflight}`);
+	return { meter, guard, layer, timer, within };
+}
+
+test("issue #985: a deferred runtime call answers with a placeholder at once; its retry is dispatched once room appears, and every event follows in order", { timeout: 10_000 }, async () => {
+	const { HandRuntime, calls } = handRuntime();
+	const { meter, guard, layer, within } = deferringLayer(HandRuntime);
+	try {
+		const runtime = new HandRuntime();
+		runtime.streamSimple(PHYSICAL, {}, {});
+		const placeholder = runtime.streamSimple(PHYSICAL, {}, {});
+		within("one admitted, one waiting");
+		assert.equal(calls.length, 1, "the second call waits: the provider has seen one");
+		assert.notEqual(placeholder, calls[0].stream);
+		assert.deepEqual([meter.state.calls, meter.state.stopReason, guard.state.waited], [1, null, 1], "the placeholder is no call, and nothing stopped");
+		meter.observe(placeholder, {});
+		assert.equal(meter.state.calls, 1, "adopted: an observe that meets the placeholder does not count it");
+		const seen = eventsOf(placeholder);
+		answer(calls[0].stream, 0.0001);
+		await flush();
+		within("first settled, second dispatched");
+		assert.equal(calls.length, 2, "the retry reached the provider, once");
+		assert.deepEqual([guard.state.spent, guard.state.inflight], [100, 600], "bound once, on the retried call");
+		const final = answer(calls[1].stream, 0.0002);
+		assert.deepEqual((await seen).map((event) => event.type), ["start", "text_delta", "done"], "every event, in order");
+		assert.equal(await placeholder.result(), final, "it ends with the retried call's own message");
+		await flush();
+		within("both settled");
+		assert.deepEqual([meter.state.calls, meter.state.unresolved, guard.state.spent, guard.state.inflight], [2, 0, 300, 0], "counted once, on the stream the retry dispatched");
+		assert.ok(Math.abs(meter.state.cost - 0.0003) < 1e-12);
+	} finally {
+		layer.restore();
+	}
+});
+
+test("issue #985: an abort while waiting ends the placeholder aborted with zero usage, and a stop while waiting with that stop's hard stop; neither reaches the provider", { timeout: 10_000 }, async () => {
+	const { HandRuntime, calls } = handRuntime();
+	const { meter, guard, layer, timer, within } = deferringLayer(HandRuntime);
+	try {
+		const runtime = new HandRuntime();
+		runtime.streamSimple(PHYSICAL, {}, {});
+		const controller = new AbortController();
+		const aborted = runtime.streamSimple(PHYSICAL, {}, { signal: controller.signal });
+		const stopped = runtime.streamSimple(PHYSICAL, {}, {});
+		assert.equal(guard.state.waited, 2);
+		controller.abort();
+		const gone = await aborted.result();
+		assert.deepEqual([gone.stopReason, gone.errorMessage, gone.usage.cost.total], ["aborted", WAIT_ABORTED_MESSAGE, 0], "aborted, so pi does not retry it");
+		const already = new AbortController();
+		already.abort();
+		const early = await runtime.streamSimple(PHYSICAL, {}, { signal: already.signal }).result();
+		assert.equal(early.errorMessage, WAIT_ABORTED_MESSAGE, "an abort before it waits ends it at once");
+		assert.equal(guard.state.waited, 2, "and it never queued");
+		within("before the stop");
+		meter.stop(TOKEN_BUDGET); // a stop that is not the guard's, picked up by the next drain
+		timer.tick();
+		const stop = await stopped.result();
+		assert.deepEqual([stop.stopReason, stop.errorMessage], ["aborted", "pi-dispatch: token cap exceeded"]);
+		assert.equal(calls.length, 1, "neither waiter reached the provider");
+		assert.equal(timer.armed, null, "nobody waits");
+		within("after the stop");
+	} finally {
+		layer.restore();
+	}
+});
+
+test("issue #985: a deferred call's retry runs in the caller's own async context, not that of the settle that drained it", { timeout: 10_000 }, async () => {
+	const context = new AsyncLocalStorage();
+	const seen = [];
+	const { HandRuntime, calls } = handRuntime({ onCall: () => seen.push(context.getStore()) });
+	const { layer } = deferringLayer(HandRuntime);
+	try {
+		const runtime = new HandRuntime();
+		runtime.streamSimple(PHYSICAL, {}, {});
+		context.run("the waiting caller", () => runtime.streamSimple(PHYSICAL, {}, {}));
+		answer(calls[0].stream, 0.0001);
+		await flush();
+		assert.deepEqual(seen, [undefined, "the waiting caller"]);
+	} finally {
+		layer.restore();
+	}
+});
+
+test("issue #985: a call under an admitted call's dispatch (a router's forward) never waits for its parent's hold; a virtual model's physical call may", { timeout: 10_000 }, async () => {
+	// The router forwards after an await, where only the AsyncLocalStorage still says whose dispatch this is.
+	const forwards = [];
+	const { HandRuntime, calls } = handRuntime({ onCall: (model, runtime) => {
+		if (model.id === "router") Promise.resolve().then(() => forwards.push(runtime.streamSimple(PHYSICAL, {}, {})));
+	} });
+	const { meter, guard, layer } = deferringLayer(HandRuntime);
+	try {
+		new HandRuntime().streamSimple({ ...PHYSICAL, id: "router" }, {}, {});
+		await flush();
+		assert.equal(forwards.length, 1);
+		assert.deepEqual([guard.state.waited, meter.state.stopReason], [0, COST_CAP], "refused: waiting for its own parent's hold could never end");
+		const forwarded = await forwards[0].result();
+		assert.equal(forwarded.errorMessage, "pi-dispatch: cost cap reached");
+		assert.equal(calls.length, 1);
+	} finally {
+		layer.restore();
+	}
+	// A virtual model's physical re-entry runs under the outer call's dispatch token, which holds no bound: it waits.
+	const { FakeRuntime, calls: virtualCalls } = fakeRuntimeClass(() => {});
+	const timer = fakeTimer();
+	const virtualMeter = createUsageMeter({ maxCostMicros: 1000 });
+	const virtualGuard = createCostGuard({ capMicros: 1000, bound: () => 600, setTimer: timer.set, clearTimer: timer.clear });
+	const virtualLayer = wrapModelRuntime({ ModelRuntime: FakeRuntime, meter: virtualMeter, hardStop: makeHardStopStream({ createStream: () => new EventFake() }), guard: virtualGuard, deferred: makeDeferredStream({ createStream: () => new EventFake() }) });
+	try {
+		const runtime = new FakeRuntime();
+		runtime.streamSimple(PHYSICAL, {}, {});
+		runtime.streamSimple(VIRTUAL, {}, {});
+		assert.deepEqual([virtualGuard.state.waited, virtualMeter.state.stopReason], [1, null]);
+		assert.deepEqual(virtualCalls, ["physical", "auto"], "the physical re-entry has not reached the provider");
+	} finally {
+		virtualLayer.restore();
+	}
+});
+
+test("issue #985: the compat half defers a legacy call the same way, and dispatches it once room appears", { timeout: 10_000 }, async () => {
+	const meter = createUsageMeter({ maxCostMicros: 1000 });
+	const guard = createCostGuard({ capMicros: 1000, bound: () => 600 });
+	const sent = [];
+	const inner = { streamSimple: () => (sent.push(new EventFake()), sent.at(-1)), stream: () => new EventFake() };
+	const streams = wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop: makeHardStopStream({ createStream: () => new EventFake() }), guard, deferred: makeDeferredStream({ createStream: () => new EventFake() }) });
+	streams.streamSimple(PHYSICAL, {}, {});
+	const placeholder = streams.streamSimple(PHYSICAL, {}, {});
+	assert.deepEqual([sent.length, guard.state.waited, meter.state.calls], [1, 1, 1]);
+	answer(sent[0], 0.0001);
+	await flush();
+	assert.equal(sent.length, 2);
+	const final = answer(sent[1], 0.0002);
+	assert.equal(await placeholder.result(), final);
+	await flush();
+	assert.deepEqual([meter.state.calls, guard.state.spent, guard.state.inflight], [2, 300, 0]);
+});
+
+test("issue #985: a deferred classify answers with a promise of its retry's result", { timeout: 10_000 }, async () => {
+	const calls = [];
+	let release;
+	class ClassifyRuntime {
+		classify(model) {
+			calls.push(model.id);
+			return calls.length === 1 ? new Promise((resolve) => (release = resolve)) : Promise.resolve({ usage: { input: 10, cost: { total: 0.0002 } }, answers: { ok: true } });
+		}
+	}
+	const { meter, guard, layer, within } = deferringLayer(ClassifyRuntime);
+	try {
+		const runtime = new ClassifyRuntime();
+		const first = runtime.classify(PHYSICAL, {}, {});
+		const second = runtime.classify(PHYSICAL, {}, {});
+		within("one admitted, one waiting");
+		assert.deepEqual([calls.length, guard.state.waited], [1, 1]);
+		release({ usage: { input: 10, cost: { total: 0.0001 } }, answers: {} });
+		await first;
+		await flush();
+		assert.equal(calls.length, 2);
+		assert.deepEqual((await second).answers, { ok: true });
+		await flush();
+		within("both settled");
+		assert.deepEqual([meter.state.calls, guard.state.spent, guard.state.inflight], [2, 300, 0]);
+	} finally {
+		layer.restore();
+	}
+});
+
+test("issue #985: a guard without wait (a pi child's) is never offered a wait, so every call is judged as before", () => {
+	const offered = [];
+	const { HandRuntime } = handRuntime();
+	const childLike = { enforces: [COST_CAP], admit: (call) => (offered.push(Object.keys(call)), null) };
+	const layer = wrapModelRuntime({ ModelRuntime: HandRuntime, meter: createUsageMeter({ maxCostMicros: 1000 }), hardStop: makeHardStopStream({ createStream: () => new EventFake() }), guard: childLike, deferred: makeDeferredStream({ createStream: () => new EventFake() }) });
+	try {
+		new HandRuntime().streamSimple(PHYSICAL, {}, {});
+		assert.deepEqual(offered, [["method", "model", "args"]]);
+	} finally {
+		layer.restore();
+	}
+});
+
+/** Whether `promise` settles within a few event-loop turns: "settled", or "hung" for one nobody will ever end. */
+async function settlesSoon(promise) {
+	const hung = new Promise((resolve) => setTimeout(() => resolve("hung"), 100));
+	return Promise.race([Promise.resolve(promise).then(() => "settled", () => "settled"), hung]);
+}
+
+test("issue #985: a retry whose dispatch throws ends its placeholder aborted with the error, and the queue goes on", { timeout: 10_000 }, async () => {
+	const calls = [];
+	class ThrowingRuntime {
+		streamSimple(model) {
+			calls.push(model.id);
+			if (calls.length === 2) throw new Error("provider exploded");
+			return new EventFake();
+		}
+	}
+	const { guard, layer, within } = deferringLayer(ThrowingRuntime);
+	try {
+		const runtime = new ThrowingRuntime();
+		const first = runtime.streamSimple(PHYSICAL, {}, {});
+		const placeholder = runtime.streamSimple(PHYSICAL, {}, {});
+		answer(first, 0.0001); // the first call's own stream, as the meter hands it back
+		await flush();
+		within("after the retry threw");
+		assert.equal(await settlesSoon(placeholder.result()), "settled", "the placeholder ends: a throw in the drain must not leave its caller waiting for ever");
+		const ended = await placeholder.result();
+		assert.deepEqual([ended.stopReason, ended.errorMessage, ended.usage.cost.total], ["aborted", "provider exploded", 0], "aborted, never error, so pi does not retry it");
+		assert.deepEqual([calls.length, guard.snapshot().costUnanswered, guard.state.inflight], [2, 1, 0], "the throwing dispatch is charged its bound and counted, as any call whose dispatch threw");
+	} finally {
+		layer.restore();
+	}
+});
+
+test("issue #985: a deferred classify whose caller aborts while it waits resolves aborted, and is never dispatched", { timeout: 10_000 }, async () => {
+	const calls = [];
+	let release;
+	class ClassifyRuntime {
+		classify(model) {
+			calls.push(model.id);
+			return new Promise((resolve) => (release = resolve));
+		}
+	}
+	const { guard, layer, within } = deferringLayer(ClassifyRuntime);
+	try {
+		const runtime = new ClassifyRuntime();
+		runtime.classify(PHYSICAL, {}, {});
+		const controller = new AbortController();
+		const waiting = runtime.classify(PHYSICAL, {}, { signal: controller.signal });
+		controller.abort();
+		assert.equal(await settlesSoon(waiting), "settled");
+		const ended = await waiting;
+		assert.deepEqual([ended.stopReason, ended.errorMessage, ended.usage.cost.total], ["aborted", WAIT_ABORTED_MESSAGE, 0]);
+		release({ usage: { input: 10, cost: { total: 0.0001 } }, answers: {} });
+		await flush();
+		within("after the first settled");
+		assert.deepEqual([calls.length, guard.state.inflight], [1, 0], "the aborted call never reached the provider");
+	} finally {
+		layer.restore();
+	}
+});
+
+test("issue #985: a deferred legacy call whose caller aborts while it waits ends aborted, and is never dispatched", { timeout: 10_000 }, async () => {
+	const meter = createUsageMeter({ maxCostMicros: 1000 });
+	const guard = createCostGuard({ capMicros: 1000, bound: () => 600 });
+	const sent = [];
+	const inner = { streamSimple: () => (sent.push(new EventFake()), sent.at(-1)), stream: () => new EventFake() };
+	const streams = wrapProviderStreams({ inner, fallbackModels: null, meter, hardStop: makeHardStopStream({ createStream: () => new EventFake() }), guard, deferred: makeDeferredStream({ createStream: () => new EventFake() }) });
+	streams.streamSimple(PHYSICAL, {}, {});
+	const controller = new AbortController();
+	const placeholder = streams.streamSimple(PHYSICAL, {}, { signal: controller.signal });
+	controller.abort();
+	assert.equal(await settlesSoon(placeholder.result()), "settled");
+	assert.equal((await placeholder.result()).errorMessage, WAIT_ABORTED_MESSAGE);
+	answer(sent[0], 0.0001);
+	await flush();
+	assert.deepEqual([sent.length, guard.state.inflight, meter.state.calls], [1, 0, 1], "the aborted call never reached the provider and was never counted");
+	assert.ok(guard.state.spent + guard.state.inflight <= 1000);
+});
+
+test("issue #985: a refusal that stops the job ends the waiting calls at once, not at the next tick", { timeout: 10_000 }, async () => {
+	const { HandRuntime, calls } = handRuntime();
+	const { meter, layer, timer, within } = deferringLayer(HandRuntime, { bound: (method, model) => model.bound ?? 600 });
+	try {
+		const runtime = new HandRuntime();
+		runtime.streamSimple(PHYSICAL, {}, {});
+		const waiting = runtime.streamSimple(PHYSICAL, {}, {});
+		const refused = await runtime.streamSimple({ ...PHYSICAL, bound: 2000 }, {}, {}).result(); // larger than the cap alone
+		assert.equal(refused.errorMessage, "pi-dispatch: cost cap reached");
+		assert.equal(meter.state.stopReason, COST_CAP);
+		assert.equal(await settlesSoon(waiting.result()), "settled", "the waiter got its hard stop without a tick of the drain timer");
+		assert.equal((await waiting.result()).errorMessage, "pi-dispatch: cost cap reached");
+		assert.deepEqual([calls.length, timer.armed], [1, null]);
+		within("after the stop");
+	} finally {
+		layer.restore();
+	}
+});
+
+test("issue #985: a waiter that leaves (an abort) lets the next one in at once", async () => {
+	const { guard, within } = waitingGuard({ capMicros: 1000 });
+	hold(guard, 600);
+	const large = queued(guard, 500); // 0 + 600 + 500 > 1000
+	const small = queued(guard, 300); // fits, but waits behind the large one
+	within("both waiting");
+	guard.leave(large.waiter);
+	await Promise.resolve();
+	within("the large one left");
+	assert.deepEqual(small.verdicts, [null], "retried on the next microtask: 0 + 600 + 300 <= 1000");
+	assert.deepEqual(large.verdicts, [], "the one that left is never retried");
+});
+
+test("issue #985: a drop in the outside spend is progress for the idle limit", () => {
+	let outside = 400;
+	const { guard, clock, timer, logged, within } = waitingGuard({ capMicros: 1000, external: () => outside });
+	hold(guard, 100); // never settles
+	const waiting = queued(guard, 600); // 0 + 100 + 400 + 600 > 1000; 400 + 600 <= 1000
+	clock.now = 10 * 60 * 1000;
+	outside = 350; // a child settled below its bound: progress, though still no room (100 + 350 + 600 > 1000)
+	timer.tick();
+	within("minute 10");
+	clock.now = 10 * 60 * 1000 + COST_WAIT_IDLE_MS - 1;
+	timer.tick();
+	within("past 15 minutes from the start");
+	assert.deepEqual(waiting.verdicts, [COST_WAIT, COST_WAIT], "not idle: the drop at minute 10 was progress");
+	clock.now = 10 * 60 * 1000 + COST_WAIT_IDLE_MS;
+	timer.tick();
+	within("refused");
+	assert.deepEqual(waiting.verdicts, [COST_WAIT, COST_WAIT, COST_CAP]);
+	assert.equal(logged.at(-1).fields.waited, 25 * 60 * 1000);
 });

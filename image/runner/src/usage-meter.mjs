@@ -485,6 +485,17 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		return stream;
 	}
 
+	/**
+	 * Mark a stream as accounted for WITHOUT counting it (issue #985): the placeholder a deferred call answers with
+	 * (makeDeferredStream). The call itself is counted once, on the stream its retry dispatches; the placeholder only
+	 * carries that stream's events, so an observe() that meets it later (a second layer in the chain, or a promise of a
+	 * stream resolving to it, observePending) must not count it as a second call.
+	 */
+	function adopt(stream) {
+		if (stream !== null && typeof stream === "object") observed.add(stream);
+		return stream;
+	}
+
 	/** observe() for a promise of a stream (see there): the call counts now and settles from the stream it resolves to. */
 	function observePending(promise, ctx) {
 		if (observed.has(promise)) return promise;
@@ -685,7 +696,7 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		if (typeof version === "string" && version.length > 0) piAiVersion = version;
 	}
 
-	return { state, cap, costCap, allowed, stop, record, observe, observeResult, snapshot, usageSnapshot, setPiAiVersion, rows, setChildren };
+	return { state, cap, costCap, allowed, stop, record, observe, adopt, observeResult, snapshot, usageSnapshot, setPiAiVersion, rows, setChildren };
 }
 
 
@@ -867,6 +878,102 @@ function priceEntry(prices, model) {
 
 /** The verdict for a call the guard judged and let through: dispatch it, and bind it to its settle. */
 const ADMITTED = Symbol("admitted");
+/**
+ * The verdict for a call the guard told to WAIT (issue #985, COST_WAIT): nothing is stopped and nothing is dispatched;
+ * the wrapper answers with a placeholder (makeDeferredStream) and queues the call to be judged again (waitTurn).
+ */
+const DEFERRED = Symbol("deferred");
+
+/**
+ * Marks the dispatch of a call the guard ADMITTED, in both halves of every install (issue #985): an AsyncLocalStorage
+ * that is true for everything that dispatch runs, across its awaits, the provider's code, its onPayload hooks and the
+ * timers and promises scheduled there. A call made under it never waits: its parent holds a bound in flight, and that
+ * parent may be waiting for this very call to answer (a router's forward, a call from an onPayload), so waiting there
+ * could wait for its own parent's hold. Not the dispatch token's context (trap #5): a virtual model's physical re-entry
+ * runs under the outer call's token, which holds no bound, and may wait. ONE per process, not one per install: a call
+ * under one install's admitted dispatch made through another install is still a call its parent may wait on.
+ */
+const HOLDING = new AsyncLocalStorage();
+
+/** Run an admitted call's dispatch under HOLDING (and any other verdict's as it is). */
+function holdWhile(holding, verdict, run) {
+	return verdict === ADMITTED ? holding.run(true, run) : run();
+}
+
+/** The errorMessage of a call its caller aborted while it waited for room under the cost cap (issue #985). */
+export const WAIT_ABORTED_MESSAGE = "pi-dispatch: aborted while waiting for other calls under the cost cap";
+
+/**
+ * Queue a call the guard deferred (issue #985) and run `attempt(waiter)` again each time the guard's drain reaches it,
+ * until it answers anything but DEFERRED: `done(answer)` gets that answer, `failed(error)` a throw. The retry runs in
+ * the caller's own async context (AsyncLocalStorage.snapshot() at the call): it runs from whichever settle or tick
+ * drained the queue, and without the snapshot the dispatch token (markForwarded), HOLDING and pi's own async-local
+ * state would be that settle's. An abort of the call's `signal` while it waits leaves the queue and calls `aborted()`:
+ * the provider is never called and nothing is counted, as for a hard stop. Never throws: the retry runs inside the
+ * guard's drain (a microtask or a timer), where a throw would end the runner, so a throw becomes the call's own answer.
+ */
+/** Whether a call's signal is already aborted. One whose `aborted` cannot be read is not: its provider reads it. */
+function signalAborted(signal) {
+	try {
+		return signal?.aborted === true;
+	} catch {
+		return false;
+	}
+}
+
+function waitTurn({ guard, signal, attempt, done, failed, aborted }) {
+	if (signalAborted(signal)) {
+		aborted();
+		return;
+	}
+	const resume = AsyncLocalStorage.snapshot();
+	let waiter = null;
+	let finished = false;
+	const finish = () => {
+		finished = true;
+		try {
+			signal?.removeEventListener?.("abort", onAbort);
+		} catch {
+			// Nothing to undo: the listener was never added.
+		}
+		guard.leave(waiter);
+	};
+	const onAbort = () => {
+		if (finished) return;
+		finish();
+		aborted();
+	};
+	waiter = guard.wait(() => {
+		if (finished) return;
+		let answer;
+		try {
+			answer = resume(() => attempt(waiter));
+		} catch (error) {
+			finish();
+			failed(error);
+			return;
+		}
+		if (answer === DEFERRED) return;
+		finish();
+		done(answer);
+	});
+	try {
+		signal?.addEventListener?.("abort", onAbort, { once: true });
+	} catch {
+		// Without a listener an abort is seen at the retry, by the provider, as for any call.
+	}
+}
+
+/**
+ * The answer of a stream call the guard deferred (issue #985): the placeholder, returned at once, whose events follow
+ * the retry's answer (makeDeferredStream).
+ */
+function deferStream({ meter, guard, deferred, model, signal, attempt }) {
+	const placeholder = deferred(model);
+	meter.adopt?.(placeholder.stream);
+	waitTurn({ guard, signal, attempt, done: (answer) => placeholder.follow(answer), failed: (error) => placeholder.fail(error), aborted: () => placeholder.end(WAIT_ABORTED_MESSAGE) });
+	return placeholder.stream;
+}
 
 /**
  * What an `isStopped()` answer means (issue #500): null, undefined or false is "go"; a STOP_MESSAGES key is a stop
@@ -897,8 +1004,14 @@ function externalStop(isStopped) {
  * with no hard stop to answer with would have to dispatch the call it refused; `skip` is a call the guard must
  * not judge (a virtual model, whose physical re-entry is judged instead, or a compat call already judged by
  * the runtime half).
+ *
+ * WAITING (issue #985). A call the wrapper can defer (`waitable`: the guard has `wait`, the wrapper has a placeholder to
+ * answer with, and the call is not under an admitted dispatch, HOLDING) is offered with `waitable: true` and its
+ * `waiter` (null on the call itself, the queued waiter on a retry), and the guard may answer COST_WAIT: judge then
+ * answers DEFERRED and stops nothing. COST_WAIT for a call that was not offered as waitable reaches meter.stop() and
+ * throws, as any answer outside the contract does.
  */
-function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = null, priced, legacy = false }) {
+function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = null, priced, legacy = false, waitable = false, waiter = null }) {
 	if (!hardStop) return null;
 	if (meter.state.stopReason !== null) return meter.state.stopReason;
 	// A stop from OUTSIDE this process (issue #500: a child reads the parent's STOP file), asked before every
@@ -911,8 +1024,9 @@ function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = 
 		}
 	}
 	if (guard === null || skip) return null;
-	const refused = guard.admit({ method, model, args, ...(priced === undefined ? {} : { priced }), ...(legacy ? { legacy: true } : {}) });
+	const refused = guard.admit({ method, model, args, ...(priced === undefined ? {} : { priced }), ...(legacy ? { legacy: true } : {}), ...(waitable ? { waitable: true, waiter } : {}) });
 	if (refused === null || refused === undefined) return ADMITTED;
+	if (waitable && refused === COST_WAIT) return DEFERRED;
 	meter.stop(refused);
 	return meter.state.stopReason;
 }
@@ -954,8 +1068,15 @@ function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = 
  * `restore()` puts back each original only while the prototype still holds OUR wrapper, so a wrapper a
  * later install layered on top is never torn out from under it; in that case this layer is switched to
  * pass-through instead, so it stops counting without breaking the chain.
+ *
+ * A call the guard DEFERS (issue #985: refused only by other calls' holds, judge's WAITING) is answered at once with a
+ * placeholder from `deferred` (makeDeferredStream), and a result method with a promise; the call is queued (waitTurn)
+ * and, when the guard's drain reaches it, judged, prepared, dispatched, bound and observed again, in one synchronous
+ * block, exactly as above: the single-slot `pending` of both guards and a child's pre-dispatch write still see admit,
+ * prepare, dispatch and bind adjacent. The placeholder is adopted by the meter, never observed: the call is counted on
+ * the stream its retry dispatched. Without `deferred` (or a guard with `wait`) no call is ever deferred.
  */
-export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardStopResult = defaultHardStopResult, guard = null, dispatch = new AsyncLocalStorage(), isStopped = null, prices = null }) {
+export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardStopResult = defaultHardStopResult, guard = null, dispatch = new AsyncLocalStorage(), isStopped = null, prices = null, deferred = null, holding = HOLDING }) {
 	const proto = ModelRuntime?.prototype;
 	const originals = new Map();
 	const wrappers = new Map();
@@ -968,9 +1089,12 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 	// itself: under a cost cap that is an unboundable call, refused, and under a list it is refused unless the list
 	// names the virtual entry itself (pi then fails such an unrouted call without reaching a provider).
 	// The pinned table prices the call (pinPriceTable), whatever instance it was made on, only while a guard judges.
-	const verdictFor = (method, model, args) => judge({ meter, hardStop, guard, method, model, args, isStopped, skip: method === "streamSimple" && model?.api === VIRTUAL_MODEL_API, priced: guard !== null && hardStop ? priceEntry(prices, model) : undefined });
+	const verdictFor = (method, model, args, waiter) => judge({ meter, hardStop, guard, method, model, args, isStopped, skip: method === "streamSimple" && model?.api === VIRTUAL_MODEL_API, priced: guard !== null && hardStop ? priceEntry(prices, model) : undefined, waitable: waitable(), waiter });
+	// Whether a call made now may wait for room (judge's WAITING): never under an admitted dispatch (HOLDING).
+	const waitable = () => deferred !== null && hardStop !== null && typeof guard?.wait === "function" && holding.getStore() !== true;
 	// The call's arguments as the guard prepared them for an admitted call (the model guard wraps options.onPayload).
-	const prepareFor = (verdict, method, model, args) => (verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method, model, args, stop: (reason) => meter.stop(reason) }) : args);
+	// `stopped()` (issue #985) lets a final-payload wait end when the job stopped meanwhile.
+	const prepareFor = (verdict, method, model, args) => (verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method, model, args, stop: (reason) => meter.stop(reason), stopped: () => meter.state.stopReason }) : args);
 	// Judged and dispatched on ONE copy (issue #502, PR #538's review): a model whose fields are getters could
 	// answer the guard with one id and the provider with another. Only while a guard can judge, so a job with no
 	// policy dispatches the caller's own object exactly as before.
@@ -986,20 +1110,26 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 			if (!active) return original.call(this, requested, ...passed);
 			const model = judgedModel(requested);
 			const given = judgedArgs(passed);
-			const verdict = verdictFor(name, model, given);
-			if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
-			// Trap #5: everything this call dispatches, across its awaits, runs under this call's own token, and its
-			// options carry the token, so the compat half can tell this call's re-entry from any other call there.
-			const token = dispatchToken(model);
-			const rest = markOptions(prepareFor(verdict, name, model, given), token);
-			// A call dispatched under another runtime call's dispatch is that call's forward (issue #571).
-			markForwarded(dispatch);
-			const stream = dispatchOrUnanswered(verdict, () => dispatch.run(token, () => original.call(this, model, ...rest)));
-			if (verdict === ADMITTED) guard.bind?.(stream);
-			if (model?.api === VIRTUAL_MODEL_API) return stream;
-			// streamSimple/stream take (model, context, options); streamDeferred takes (model, handle, options).
-			// Options are the LAST argument in all three.
-			return meter.observe(stream, ctxOf(model, rest.at(-1), token));
+			// One judgement and its dispatch; `waiter` is null on the call itself and its queued waiter on a retry.
+			const attempt = (waiter) => {
+				const verdict = verdictFor(name, model, given, waiter);
+				if (verdict === DEFERRED) return DEFERRED;
+				if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
+				// Trap #5: everything this call dispatches, across its awaits, runs under this call's own token, and its
+				// options carry the token, so the compat half can tell this call's re-entry from any other call there.
+				const token = dispatchToken(model);
+				const rest = markOptions(prepareFor(verdict, name, model, given), token);
+				// A call dispatched under another runtime call's dispatch is that call's forward (issue #571).
+				markForwarded(dispatch);
+				const stream = dispatchOrUnanswered(verdict, () => holdWhile(holding, verdict, () => dispatch.run(token, () => original.call(this, model, ...rest))));
+				if (verdict === ADMITTED) guard.bind?.(stream);
+				if (model?.api === VIRTUAL_MODEL_API) return stream;
+				// streamSimple/stream take (model, context, options); streamDeferred takes (model, handle, options).
+				// Options are the LAST argument in all three.
+				return meter.observe(stream, ctxOf(model, rest.at(-1), token));
+			};
+			const answer = attempt(null);
+			return answer === DEFERRED ? deferStream({ meter, guard, deferred, model, signal: given.at(-1)?.signal, attempt }) : answer;
 		};
 		originals.set(name, original);
 		wrappers.set(name, wrapper);
@@ -1011,16 +1141,24 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 			if (!active) return original.call(this, requested, context, passed);
 			const model = judgedModel(requested);
 			const [, given] = judgedArgs([context, passed]);
-			const verdict = verdictFor(name, model, [context, given]);
-			if (verdict !== null && verdict !== ADMITTED) return Promise.resolve(hardStopResult(name, model, STOP_MESSAGES[verdict]));
-			const [, options] = prepareFor(verdict, name, model, [context, given]);
-			// A token too, though no result method re-enters the compat half: a legacy call made inside it is never its own.
-			const token = dispatchToken(model);
-			markForwarded(dispatch);
-			const promise = dispatchOrUnanswered(verdict, () => dispatch.run(token, () => original.call(this, model, context, options)));
-			if (verdict === ADMITTED) guard.bind?.(promise);
-			if (model?.api === VIRTUAL_MODEL_API) return promise;
-			return meter.observeResult(promise, ctxOf(model, options, token));
+			const attempt = (waiter) => {
+				const verdict = verdictFor(name, model, [context, given], waiter);
+				if (verdict === DEFERRED) return DEFERRED;
+				if (verdict !== null && verdict !== ADMITTED) return Promise.resolve(hardStopResult(name, model, STOP_MESSAGES[verdict]));
+				const [, options] = prepareFor(verdict, name, model, [context, given]);
+				// A token too, though no result method re-enters the compat half: a legacy call made inside it is never its own.
+				const token = dispatchToken(model);
+				markForwarded(dispatch);
+				const promise = dispatchOrUnanswered(verdict, () => holdWhile(holding, verdict, () => dispatch.run(token, () => original.call(this, model, context, options))));
+				if (verdict === ADMITTED) guard.bind?.(promise);
+				if (model?.api === VIRTUAL_MODEL_API) return promise;
+				return meter.observeResult(promise, ctxOf(model, options, token));
+			};
+			const answer = attempt(null);
+			if (answer !== DEFERRED) return answer;
+			// A deferred result call (issue #985) answers with a promise of its retry's answer. A throw in the retry rejects
+			// it, as a throw in pi's own async method would.
+			return new Promise((resolve, reject) => waitTurn({ guard, signal: given?.signal, attempt, done: resolve, failed: reject, aborted: () => resolve(hardStopResult(name, model, WAIT_ABORTED_MESSAGE)) }));
 		};
 		originals.set(name, original);
 		wrappers.set(name, wrapper);
@@ -1076,8 +1214,9 @@ export function defaultHardStopResult(method, model, message = STOP_MESSAGES[TOK
  * observed here exactly as wrapModelRuntime's step 3 guards a runtime call (issue #543).
  *
  * There is deliberately NO swallowing try/catch, for the reason wrapModelRuntime gives (dispatchBinding rethrows).
+ * A deferred call (issue #985) is answered with a placeholder and retried exactly as in wrapModelRuntime.
  */
-export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, guard = null, dispatch = null, isStopped = null, prices = null }) {
+export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, guard = null, dispatch = null, isStopped = null, prices = null, deferred = null, holding = HOLDING }) {
 	const dispatchOrUnanswered = (verdict, run) => dispatchBinding(guard, verdict, run);
 	function route(kind, requested, context, passed) {
 		// One copy, judged and dispatched (wrapModelRuntime's judgedModel has the why), its options likewise.
@@ -1085,26 +1224,36 @@ export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, gu
 		const given = guard !== null && hardStop ? snapshotOptions(passed) : passed;
 		// Checked before dispatch, so a stop ends the NEXT call rather than merely recording it.
 		// The runtime call's own re-entry is skipped; any other call, a forward to another pair included, is judged.
+		// Claimed once, at the call: a deferred call is never a re-entry (a re-entry is not judged, so never deferred).
 		const reentry = claimReentry(dispatch?.getStore(), model, given);
-		// A legacy call is priced from the same pinned table as the runtime half (pinPriceTable).
-		const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: reentry, isStopped, legacy: true, priced: guard !== null && hardStop ? priceEntry(prices, model) : undefined });
-		if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
-		const options = verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method: kind, model, args: [context, given], stop: (reason) => meter.stop(reason) })[1] : given;
-		const provider = fallbackModels?.getProvider?.(model.provider);
-		const builtin = provider?.getModels?.().some((candidate) => candidate.api === model.api) ? provider : null;
-		// Any call other than the runtime call's own re-entry, made under a runtime call's dispatch, is that call's forward
-		// (issue #571), marked BEFORE it is dispatched as the runtime half does, so a forward that throws marks it too.
-		if (!reentry) markForwarded(dispatch);
-		const stream = dispatchOrUnanswered(verdict, () =>
-			builtin
-				? model.provider.startsWith("cloudflare-")
-					? fallbackModels[kind](model, context, options)
-					: builtin[kind](model, context, options)
-				: inner[kind](model, context, options),
-		);
-		if (verdict === ADMITTED) guard.bind?.(stream);
-		if (reentry) return stream;
-		return meter.observe(stream, { sessionId: options?.sessionId, provider: model.provider, modelId: model.id, model });
+		// Whether this call may wait for room (judge's WAITING): never under an admitted dispatch (HOLDING).
+		const waitable = deferred !== null && hardStop !== null && typeof guard?.wait === "function" && holding.getStore() !== true;
+		const attempt = (waiter) => {
+			// A legacy call is priced from the same pinned table as the runtime half (pinPriceTable).
+			const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: reentry, isStopped, legacy: true, priced: guard !== null && hardStop ? priceEntry(prices, model) : undefined, waitable, waiter });
+			if (verdict === DEFERRED) return DEFERRED;
+			if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
+			const options = verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method: kind, model, args: [context, given], stop: (reason) => meter.stop(reason), stopped: () => meter.state.stopReason })[1] : given;
+			const provider = fallbackModels?.getProvider?.(model.provider);
+			const builtin = provider?.getModels?.().some((candidate) => candidate.api === model.api) ? provider : null;
+			// Any call other than the runtime call's own re-entry, made under a runtime call's dispatch, is that call's forward
+			// (issue #571), marked BEFORE it is dispatched as the runtime half does, so a forward that throws marks it too.
+			if (!reentry) markForwarded(dispatch);
+			const stream = dispatchOrUnanswered(verdict, () =>
+				holdWhile(holding, verdict, () =>
+					builtin
+						? model.provider.startsWith("cloudflare-")
+							? fallbackModels[kind](model, context, options)
+							: builtin[kind](model, context, options)
+						: inner[kind](model, context, options),
+				),
+			);
+			if (verdict === ADMITTED) guard.bind?.(stream);
+			if (reentry) return stream;
+			return meter.observe(stream, { sessionId: options?.sessionId, provider: model.provider, modelId: model.id, model });
+		};
+		const answer = attempt(null);
+		return answer === DEFERRED ? deferStream({ meter, guard, deferred, model, signal: given?.signal, attempt }) : answer;
 	}
 	return {
 		stream: (model, context, options) => route("stream", model, context, options),
@@ -1131,24 +1280,101 @@ export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, gu
  */
 export function makeHardStopStream({ createStream, message: defaultMessage = STOP_MESSAGES[TOKEN_BUDGET] }) {
 	if (typeof createStream !== "function") throw new Error("makeHardStopStream requires createStream");
-	return (model, message = defaultMessage) => {
+	return (model, message = defaultMessage) => endStream(createStream(), terminalMessage(model, message, "aborted"));
+}
+
+/** The terminal message of a call that ended before it reached a provider: zero usage, `stopReason` as given. */
+function terminalMessage(model, message, stopReason) {
+	return {
+		role: "assistant",
+		content: [],
+		api: model?.api,
+		provider: model?.provider,
+		model: model?.id,
+		usage: zeroUsage(),
+		stopReason,
+		errorMessage: message,
+		timestamp: Date.now(),
+	};
+}
+
+/** End `stream` with a terminal error event carrying `message`, the shape both the hard stop and a placeholder end with. */
+function endStream(stream, message) {
+	// push() resolves result() via the terminal-event predicate; end() covers a stream implementation
+	// that does not. Both are idempotent on pi's EventStream (`done` short-circuits push).
+	stream.push({ type: "error", reason: message.stopReason, error: message });
+	stream.end(message);
+	return stream;
+}
+
+/**
+ * THE PLACEHOLDER of a deferred call (issue #985): a call the cost guard told to wait for other calls' holds is
+ * answered at once with a stream from the same `createStream` as the hard stop (pi's own
+ * createAssistantMessageEventStream, so pi's consumers see the stream type they already handle), and the call is
+ * queued. `(model)` builds one: `{ stream, follow(answer), fail(error), end(message) }`.
+ *   - follow: the retry's answer (its admitted stream, a hard stop if the job stopped meanwhile, or a promise of a
+ *     stream from a compat entry, observe() has where that comes from). Every event is copied into the placeholder in
+ *     order, as pi's own lazyStream forwards a provider's stream, and the placeholder then ends with the answer's own
+ *     result(), the message pi reads (push() of the terminal event already resolved it; end() covers an answer whose
+ *     events carried none). The answer is read eagerly, so the call settles whether or not anyone reads the placeholder.
+ *   - fail: a retry that threw, or an answer that is no stream at all (or whose result() rejected): the placeholder
+ *     ends with the error's message, zero usage, and `aborted`, never `error`. pi's lazyStream ends a failed setup
+ *     `error`, but `error` is the one stopReason pi auto-retries (pinned), and this meter never builds it: a retry of
+ *     a call that failed this way would be a paid one. The guard has already charged what the call may have cost.
+ *   - end: the caller aborted while it waited: `aborted`, zero usage, so pi does not retry it, and the provider was
+ *     never called.
+ * Never throws and never rejects: the retry runs inside the guard's drain.
+ */
+export function makeDeferredStream({ createStream }) {
+	if (typeof createStream !== "function") throw new Error("makeDeferredStream requires createStream");
+	return (model) => {
 		const stream = createStream();
-		const aborted = {
-			role: "assistant",
-			content: [],
-			api: model?.api,
-			provider: model?.provider,
-			model: model?.id,
-			usage: zeroUsage(),
-			stopReason: "aborted",
-			errorMessage: message,
-			timestamp: Date.now(),
+		const fail = (error) => endStream(stream, terminalMessage(model, error instanceof Error ? error.message : String(error), "aborted"));
+		const follow = async (answer) => {
+			let result;
+			try {
+				const source = await answer;
+				if (typeof source?.[Symbol.asyncIterator] === "function") {
+					for await (const event of source) {
+						stream.push(event);
+						if (event?.type === "done") result = event.message;
+						else if (event?.type === "error") result = event.error;
+					}
+				}
+				if (typeof source?.result === "function") result = await source.result();
+				if (result === undefined) throw new Error("pi-dispatch: the deferred call answered with no stream");
+			} catch (error) {
+				try {
+					fail(error);
+				} catch {
+					// pi's EventStream does not throw; nothing is left to tell the caller.
+				}
+				return;
+			}
+			try {
+				stream.end(result);
+			} catch {
+				// As above.
+			}
 		};
-		// push() resolves result() via the terminal-event predicate; end() covers a stream implementation
-		// that does not. Both are idempotent on pi's EventStream (`done` short-circuits push).
-		stream.push({ type: "error", reason: "aborted", error: aborted });
-		stream.end(aborted);
-		return stream;
+		return {
+			stream,
+			follow: (answer) => void follow(answer),
+			fail: (error) => {
+				try {
+					fail(error);
+				} catch {
+					// As above.
+				}
+			},
+			end: (message) => {
+				try {
+					endStream(stream, terminalMessage(model, message, "aborted"));
+				} catch {
+					// As above.
+				}
+			},
+		};
 	};
 }
 
@@ -1423,6 +1649,9 @@ export async function installProcessUsageMeter({
 	// needs a hard stop to answer the parent's STOP with.
 	const armed = brake === true || meter.cap !== null || meter.costCap !== null || meter.allowed !== null;
 	const hardStop = armed && createStream ? makeHardStopStream({ createStream }) : null;
+	// The placeholder a call the cost guard defers answers with (issue #985), from the same factory: only a guard with
+	// `wait` ever defers a call, so with no cap this is never used.
+	const deferred = hardStop !== null ? makeDeferredStream({ createStream }) : null;
 	// A meter that was ASKED for a brake (`brake: true`, or an outside stop to answer, `isStopped`) and cannot build
 	// one is not a meter (issue #500): judge() never asks isStopped without a hard stop, so a parent's STOP would be
 	// silently ignored. ok:false, so the child records itself `metered: false` and the parent counts it unmetered.
@@ -1440,7 +1669,7 @@ export async function installProcessUsageMeter({
 	}
 	// One per install, shared by both halves (trap #5).
 	const dispatch = new AsyncLocalStorage();
-	const runtimeLayer = wrapModelRuntime({ ModelRuntime, meter, hardStop, guard, dispatch, isStopped, prices: pinnedPrices });
+	const runtimeLayer = wrapModelRuntime({ ModelRuntime, meter, hardStop, guard, dispatch, isStopped, prices: pinnedPrices, deferred });
 	if (runtime !== null && !runtimeLayer.covers(runtime)) {
 		runtimeLayer.restore();
 		log("usage_meter_unavailable", { reason: "runtime-not-covered" });
@@ -1534,7 +1763,7 @@ export async function installProcessUsageMeter({
 			const api = entry?.api;
 			if (typeof api !== "string") continue;
 			if (wrapped.has(entry)) continue;
-			const streams = wrapProviderStreams({ inner: entry, fallbackModels, meter, hardStop, guard, dispatch, isStopped, prices: pinnedPrices });
+			const streams = wrapProviderStreams({ inner: entry, fallbackModels, meter, hardStop, guard, dispatch, isStopped, prices: pinnedPrices, deferred });
 			// One sourceId per api id, and registerApiProvider keys the registry by api id, so re-arming
 			// replaces our entry instead of piling up registrations.
 			module.registerApiProvider({ api, ...streams }, `${METER_PROVIDER_PREFIX}:${api}`);
@@ -1841,7 +2070,12 @@ function sendsMaxTokens(model, options) {
  *      least one UTF-8 byte; `boundExceeded` on the exit line is the evidence if a tokenizer breaks it. NOT capped
  *      by model.contextWindow: pi does not enforce the window (gpt-5.4 lists 272k and prices a tier above it).
  *      A context that does not serialise: Infinity. Each image block counts at least a per-image pixel ceiling
- *      (imageAllowance), because providers bill pixels, not base64 bytes.
+ *      (imageAllowance), because providers bill pixels, not base64 bytes. With `body` (the final shaped request the
+ *      cost guard's onPayload checks, issue #985) the input is the LARGER of the context's and the body's measures
+ *      (bytes plus image allowance each), never their sum: the body is what is sent, built from the context, so the
+ *      larger of the two covers both, and a continued request whose prefix the server holds (anthropic-messages'
+ *      threads, openai-codex-responses' previous_response_id, both pinned) is covered by the context and the checked
+ *      body it was cut from. A body that does not serialise: Infinity.
  *   5. The output bound: options.maxTokens (when positive and the api sends it) else model.maxTokens; raised to
  *      model.maxTokens when options.reasoning is set (adjustMaxTokensForThinking may lift the caller's budget up
  *      to it); at least 16 on openai-responses and azure. 0 for `classify`, which is Infinity if any output rate
@@ -1860,7 +2094,7 @@ function sendsMaxTokens(model, options) {
  *   8. ceil(max over tables of (inputBound x inputRate + output x outputRate) x multiplier). Per table, because
  *      pi prices one call with exactly one table.
  */
-export function callCostBound(method, model, context, options, env = process.env) {
+export function callCostBound(method, model, context, options, env = process.env, body = undefined) {
 	// 1.
 	if (!PRICED_APIS.includes(model?.api)) return Infinity;
 	// 2. The tables before tiers; each must be usable.
@@ -1879,12 +2113,16 @@ export function callCostBound(method, model, context, options, env = process.env
 	if (everyRate.every((value) => value === 0)) return 0;
 	// 4.
 	let serialised;
+	let serialisedBody;
 	try {
 		serialised = JSON.stringify(context);
+		if (body !== undefined) serialisedBody = JSON.stringify(body);
 	} catch {
 		return Infinity;
 	}
-	const inputBound = (typeof serialised === "string" ? Buffer.byteLength(serialised, "utf8") : 0) + BOUND_OVERHEAD_TOKENS + imageAllowance(model, context);
+	const bytes = (text) => (typeof text === "string" ? Buffer.byteLength(text, "utf8") : 0);
+	const measured = bytes(serialised) + imageAllowance(model, context);
+	const inputBound = (body === undefined ? measured : Math.max(measured, bytes(serialisedBody) + imageAllowance(model, body))) + BOUND_OVERHEAD_TOKENS;
 	// 5.
 	let output;
 	if (method === "classify") {
@@ -2206,6 +2444,35 @@ export function unreportedUsage(message, api) {
  * saw it. A slot merely flushed by the next admit (a synchronous forward) is charged its bound and not counted. A call
  * whose answer carries broken usage (unreportedUsage, the meter's own predicate) is charged at least its bound; the
  * guard keeps no counter for it: the meter counts it as `costUnreported` on every run, capped or not.
+ *
+ * WAITING (issue #985). Every parallel call holds its whole bound in flight, so six or seven parallel subagent calls
+ * used to hold most of the cap and the next call stopped the job far below it, while each held call then settled at a
+ * fraction of its bound. The cap stays a hard bound (CONST-BUDGET-BEFORE-TOKENS): nothing is under-reserved. Instead a
+ * call offered as `waitable` (judge's WAITING) that does not fit, and is refused ONLY by holds that will settle, gets
+ * COST_WAIT: `spent + (external() - its part in flight) + bound <= cap`, and something to wait for (a hold of ours in
+ * flight, or a waiter ahead of it). The wrapper queues it (`wait(retry)`) and answers its caller with a placeholder.
+ * The queue is FIFO: a new waitable call queues behind every waiter even when it would fit, so a large call is never
+ * starved by small ones. Every settle (and a refusal, which stops the job) schedules a DRAIN with queueMicrotask, never
+ * synchronously: flushPending settles inside admit, and a drain there would re-enter admit and break the single pending
+ * slot. The drain retries the front waiter and goes on while waiters are admitted or end; a 1 s unref'd timer drains
+ * too while anyone waits, which picks up what no settle signals (a meter stop that is not a refusal, a drop in
+ * external spend). A waiter that sees no progress (no settle of ours, no drop in external spend) for COST_WAIT_IDLE_MS is
+ * refused `over-cap`, its `cost_refused` line carrying `waited` (ms); so is one whose wait can no longer help (spend
+ * rose meanwhile). Log lines, numbers only: `cost_wait` when a call starts waiting, `cost_waited { waitedMs }` when it
+ * is admitted. Deadlock: a waiter holds nothing, every hold belongs to a call already sent, whose settle depends only
+ * on its own provider stream (result() is memoised and independent of the consumer), and a call that could be what a
+ * held call waits for (a forward, a call from a provider or an onPayload) runs under HOLDING and never waits; what is
+ * left is caught by the waiter's own 15 minute limit, the job's idle and stall limits, and abort. `outsideInflight`
+ * (the part of external() still in flight, which waiting could free) is 0 here: every outside micro-dollar counts as
+ * settled spend.
+ *
+ * The final payload may WAIT too: a waitable call whose final shaped request (prepare) does not fit only because of
+ * others' holds releases its own hold, waits at the FRONT of the queue holding nothing, and takes the larger hold back
+ * when room appears. Each priced api module's single send passes the hook's result, after the hook returns (pinned per
+ * module in pinned-api.test.mjs, a write deeper inside the body or by a helper excepted), so releasing breaks no bound.
+ * A non-waitable
+ * call keeps the refusal. An onPayload that throws (refused, aborted, or the caller's hook threw) WITHHELD its request:
+ * the provider awaits it before sending, so the call's settle does not count it `costUnanswered`.
  */
 /** Whether the call's model carries the pinned entry's api, cost (tiers included) and compat (fallbacks, maxTokensField). */
 function pricedAsPinned(model, pinned) {
@@ -2213,16 +2480,36 @@ function pricedAsPinned(model, pinned) {
 	return model?.api === pinned.api && samePayloadValue(model?.cost, pinned.cost) && samePayloadValue(model?.compat, pinned.compat);
 }
 
-export function createCostGuard({ capMicros, env = process.env, log = () => {}, bound = callCostBound, external = null }) {
+/** The cost guard's answer for a call refused ONLY by other calls' holds (issue #985): wait for them. Never a stop. */
+export const COST_WAIT = Symbol("cost-wait");
+/** How long a waiter waits with no progress before it is refused `over-cap` (issue #985): pi-dispatch's default idle limit. */
+export const COST_WAIT_IDLE_MS = 15 * 60 * 1000;
+/** The drain timer's period while anyone waits (issue #985): the child-fold and re-arm tick's. */
+export const COST_WAIT_TICK_MS = 1000;
+
+export function createCostGuard({ capMicros, env = process.env, log = () => {}, bound = callCostBound, external = null, now = Date.now, setTimer = setInterval, clearTimer = clearInterval }) {
 	if (!Number.isSafeInteger(capMicros) || capMicros < 0) throw new Error(`invalid PI_MAX_COST_MICROS: ${capMicros}`);
 	if (external !== null && typeof external !== "function") throw new Error("createCostGuard: external must be a function");
-	const state = { spent: 0, inflight: 0, refused: 0, boundExceeded: 0, longContext: 0, unjudged: 0, unanswered: 0, why: null };
+	// `waited` (issue #985) counts the calls that waited, each once (at admission, at its final payload, or both), for a
+	// later exit-line key; not in snapshot().
+	const state = { spent: 0, inflight: 0, refused: 0, boundExceeded: 0, longContext: 0, unjudged: 0, unanswered: 0, waited: 0, why: null };
 	let pending = null;
+	// The waiters (issue #985), FIFO: `{ retry, since }`, the front retried first. See WAITING in the header.
+	const queue = [];
+	let timer = null;
+	let draining = false;
+	let drainScheduled = false;
+	// The last progress a waiter could gain room from: a settle of ours, or a drop in external spend.
+	let progressAt = now();
+	let lastOutside = 0;
+	// The part of external() still in flight, which a settle elsewhere could free: 0, so all of it counts as settled spend.
+	const outsideInflight = 0;
 
 	/**
 	 * Spend this guard does not see itself (issue #500), in micro-dollars, read at every admit: for a parent, what its
 	 * children spent and hold in flight; for a child, what the parent's SPENT file says. Fail closed: anything but a
 	 * finite number at or above zero, or a throw, is Infinity, so the call is refused rather than judged against 0.
+	 * A value below the last one read is progress for a waiter (issue #985).
 	 */
 	function externalMicros() {
 		if (external === null) return 0;
@@ -2232,7 +2519,10 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		} catch {
 			return Infinity;
 		}
-		return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : Infinity;
+		if (!(typeof value === "number" && Number.isFinite(value) && value >= 0)) return Infinity;
+		if (value < lastOutside) progressAt = now();
+		lastOutside = value;
+		return value;
 	}
 
 	function refuse(fields) {
@@ -2242,12 +2532,94 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		// refusal logs its `bound`, not a `why`); the exit line names the rule through refusedWhy().
 		state.why ??= fields.why ?? "over-cap";
 		log("cost_refused", { ...fields, spent: state.spent, inflight: state.inflight, cap: capMicros });
+		// The refusal stops the job: let the waiters see it now (each gets its hard stop) rather than at the next tick.
+		scheduleDrain();
 		return COST_CAP;
+	}
+
+	// ── The waiters (issue #985) ──
+
+	/** Whether waiting can help a call of bound `b`: it fits once the holds settle, and there is something to wait for. */
+	function waitHelps(b, outside, others, behind) {
+		return state.spent + (outside - outsideInflight) + b <= capMicros && (others > 0 || outsideInflight > 0 || behind);
+	}
+
+	/** Whether a waiter has waited COST_WAIT_IDLE_MS with no progress since it started waiting. */
+	function idle(waiter) {
+		return now() - Math.max(waiter.since, progressAt) >= COST_WAIT_IDLE_MS;
+	}
+
+	function arm() {
+		if (timer !== null) return;
+		timer = setTimer(drain, COST_WAIT_TICK_MS);
+		// Unref'd: a waiting call must never be the reason the runner stays alive.
+		timer?.unref?.();
+	}
+
+	/** Take a waiter off the queue; true when it was on it. The timer stops with the last one. */
+	function remove(waiter) {
+		const index = queue.indexOf(waiter);
+		if (index < 0) return false;
+		queue.splice(index, 1);
+		if (queue.length === 0 && timer !== null) {
+			clearTimer(timer);
+			timer = null;
+		}
+		return true;
+	}
+
+	/** Drain on a microtask, never synchronously (see WAITING in the header). */
+	function scheduleDrain() {
+		if (queue.length === 0 || drainScheduled) return;
+		drainScheduled = true;
+		queueMicrotask(() => {
+			drainScheduled = false;
+			drain();
+		});
+	}
+
+	/**
+	 * Retry the front waiter; go on while the front changes (admitted, refused, stopped, aborted), stop at the first
+	 * that waits again. A retry never throws (waitTurn catches); one that did is dropped so the queue cannot jam.
+	 */
+	function drain() {
+		if (draining) return;
+		draining = true;
+		try {
+			while (queue.length > 0) {
+				const front = queue[0];
+				try {
+					front.retry();
+				} catch {
+					remove(front);
+				}
+				if (queue[0] === front) break;
+			}
+		} finally {
+			draining = false;
+		}
+	}
+
+	/** Queue a deferred call: `retry()` is run by the drain. Returns the waiter the wrapper hands back on each retry. */
+	function wait(retry) {
+		const waiter = { retry, since: now() };
+		queue.push(waiter);
+		state.waited += 1;
+		arm();
+		return waiter;
+	}
+
+	/** A waiter that ended outside admit (a stop, a model refusal, an abort, an admission): off the queue, the next one drained. */
+	function leave(waiter) {
+		if (remove(waiter)) scheduleDrain();
 	}
 
 	function settle(ticket, message) {
 		if (ticket.settled) return;
 		ticket.settled = true;
+		// A settle frees room: the waiters are retried (issue #985).
+		progressAt = now();
+		scheduleDrain();
 		const usage = message?.usage;
 		state.inflight -= ticket.bound;
 		const price = usage?.cost?.total;
@@ -2266,7 +2638,8 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		// started (a 429 or a 5xx before the stream, an in-band error before any content, a connection lost before the
 		// answer) is charged its metered cost and counted as `costUnanswered`: charging it the bound would stop a
 		// rate-limited job as cost-cap at $0 spent, and the counter tells a settlement the cost may be a floor, because
-		// a provider that accepted the request and lost the answer may still bill it. One rule, every api.
+		// a provider that accepted the request and lost the answer may still bill it. One rule, every api. A call whose
+		// onPayload threw (`withheld`, issue #985) never sent its request: it is not counted.
 		//
 		// Any other call whose usage is BROKEN is charged its bound too: the same predicate the meter counts
 		// `costUnreported` by (unreportedUsage, issue #571: no input, a failure after it started, or answer content with
@@ -2275,8 +2648,9 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		// not count it: the cap judges each call on its own worst case, and a router that answers itself after a failed
 		// forward must not run under the cap at $0.
 		const failed = message?.stopReason === "error" || message?.stopReason === "aborted";
-		if (failed && !started(message)) state.unanswered += 1;
-		else if (failed || unreportedUsage(message, ticket.model?.api)) charged = Math.max(charged, ticket.bound);
+		if (failed && !started(message)) {
+			if (!ticket.withheld) state.unanswered += 1;
+		} else if (failed || unreportedUsage(message, ticket.model?.api)) charged = Math.max(charged, ticket.bound);
 		const catalogTiers = ticket.model?.cost?.tiers ?? [];
 		const inputSide = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
 		if (ANTHROPIC_PRICED_APIS.has(ticket.model?.api) && catalogTiers.length === 0 && inputSide > LONG_CONTEXT_TOKENS) {
@@ -2302,23 +2676,42 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		settle(ticket, null);
 	}
 
-	function admit({ method, model, args, priced }) {
+	/** A refusal of a call that may be a queued waiter: off the queue first, and its wait on the log line. */
+	function refuseCall(waiter, fields) {
+		if (waiter !== null && remove(waiter)) return refuse({ ...fields, waited: now() - waiter.since });
+		return refuse(fields);
+	}
+
+	function admit({ method, model, args, priced, waitable = false, waiter = null }) {
 		flushPending();
 		// Issue #587's review: priced from the table pinned at install (pinPriceTable), never the caller's say-so. A call
 		// whose api, cost or compat differs from its entry, or one with no entry, cannot be bounded honestly. `priced` is
 		// undefined only when the meter was wired with no table at all, and then the call is judged on its own object.
-		if (priced !== undefined && !pricedAsPinned(model, priced)) return refuse({ why: "unboundable" });
+		if (priced !== undefined && !pricedAsPinned(model, priced)) return refuseCall(waiter, { why: "unboundable" });
 		const [context, options] = args ?? [];
 		// A copy that held something other than plain data (snapshotModel): what pi would read is not what was judged.
-		if (isUnreadable(model) || isUnreadable(options)) return refuse({ why: "unboundable" });
+		if (isUnreadable(model) || isUnreadable(options)) return refuseCall(waiter, { why: "unboundable" });
 		const b = method === "generateImages" || method === "streamDeferred" ? Infinity : bound(method, model, context, options, env);
-		if (!Number.isFinite(b)) return refuse({ why: "unboundable" });
+		if (!Number.isFinite(b)) return refuseCall(waiter, { why: "unboundable" });
 		const outside = externalMicros();
-		if (!Number.isFinite(outside)) return refuse({ why: "external" });
-		if (state.spent + state.inflight + outside + b > capMicros) return refuse(external === null ? { bound: b } : { bound: b, external: outside });
-		state.inflight += b;
-		pending = { bound: b, model, stream: !RUNTIME_RESULT_METHODS.includes(method) };
-		return null;
+		if (!Number.isFinite(outside)) return refuseCall(waiter, { why: "external" });
+		const queued = waiter !== null && queue.includes(waiter);
+		// FIFO (issue #985): a waitable call that is not the front waiter waits behind the queue, even when it fits.
+		const behind = waitable && queue.length > 0 && queue[0] !== waiter;
+		if (!behind && state.spent + state.inflight + outside + b <= capMicros) {
+			if (queued) {
+				remove(waiter);
+				log("cost_waited", { waitedMs: now() - waiter.since });
+			}
+			state.inflight += b;
+			pending = { bound: b, model, stream: !RUNTIME_RESULT_METHODS.includes(method), waitable, waited: queued };
+			return null;
+		}
+		if (waitable && waitHelps(b, outside, state.inflight, behind) && !(queued && idle(waiter))) {
+			if (!queued) log("cost_wait", { bound: b, spent: state.spent, inflight: state.inflight, ...(external === null ? {} : { external: outside }), cap: capMicros, waiting: queue.length });
+			return COST_WAIT;
+		}
+		return refuseCall(waiter, external === null ? { bound: b } : { bound: b, external: outside });
 	}
 
 	function bind(result) {
@@ -2344,41 +2737,122 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		}
 	}
 
-	function prepare({ method, model, args, stop }) {
+	/**
+	 * The final-payload WAIT (issue #985): `ticket` has released its hold; wait at the FRONT of the queue until
+	 * `enlarged` fits, then take it. Resolves once held; rejects (refusing as `final-payload` when the rule refuses) when
+	 * waiting can no longer help, after COST_WAIT_IDLE_MS without progress, when the ticket settled, when the job
+	 * stopped meanwhile (`stopped()`), or when the call's signal aborts. A rejection is the onPayload's throw.
+	 */
+	function waitForFinal({ ticket, enlarged, stop, stopped, signal }) {
+		return new Promise((resolve, reject) => {
+			let onAbort = null;
+			const end = (error) => {
+				remove(waiter);
+				try {
+					if (onAbort !== null) signal?.removeEventListener?.("abort", onAbort);
+				} catch {
+					// Nothing to undo.
+				}
+				if (error === null) resolve();
+				else reject(error);
+				scheduleDrain();
+			};
+			const refuseFinal = (fields) => {
+				refuse({ why: "final-payload", ...fields });
+				stop(COST_CAP);
+				end(new Error(STOP_MESSAGES[COST_CAP]));
+			};
+			const waiter = {
+				since: now(),
+				retry: () => {
+					const reason = stopped?.() ?? null;
+					if (reason !== null && Object.hasOwn(STOP_MESSAGES, reason)) return end(new Error(STOP_MESSAGES[reason]));
+					if (ticket.settled) return refuseFinal({ bound: enlarged, waited: now() - waiter.since });
+					const outside = externalMicros();
+					if (!Number.isFinite(outside)) return refuseFinal({ bound: enlarged, waited: now() - waiter.since });
+					if (state.spent + state.inflight + outside + enlarged <= capMicros) {
+						state.inflight += enlarged;
+						ticket.bound = enlarged;
+						log("cost_waited", { waitedMs: now() - waiter.since });
+						return end(null);
+					}
+					if (waitHelps(enlarged, outside, state.inflight, false) && !idle(waiter)) return undefined;
+					return refuseFinal({ bound: enlarged, waited: now() - waiter.since });
+				},
+			};
+			queue.unshift(waiter);
+			// A call counts once: one that already waited at admission is not counted again here.
+			if (!ticket.waited) state.waited += 1;
+			ticket.waited = true;
+			arm();
+			onAbort = () => end(new Error(WAIT_ABORTED_MESSAGE));
+			try {
+				signal?.addEventListener?.("abort", onAbort, { once: true });
+			} catch {
+				onAbort = null;
+			}
+		});
+	}
+
+	function prepare({ method, model, args, stop, stopped = null }) {
 		const ticket = pending;
 		if (!ticket) return args;
 		const [context, given = {}] = args ?? [];
 		const theirs = given.onPayload;
 		const onPayload = async function (payload, payloadModel) {
-			const next = typeof theirs === "function" ? await theirs.call(this, payload, payloadModel) : undefined;
-			let sent;
-			let finalBound = Infinity;
 			try {
-				// Clone once and send exactly this plain JSON. Original image allowances stay in the bound;
-				// the complete shaped body adds every byte introduced by a provider or caller hook.
-				sent = JSON.parse(JSON.stringify(next === undefined ? payload : next));
-				if (!isPlain(sent)) throw new Error("unboundable payload");
-				const caps = [sent.max_tokens, sent.max_completion_tokens, sent.max_output_tokens, sent.config?.maxOutputTokens, sent.inferenceConfig?.maxTokens].filter((value) => value !== undefined && value !== null);
-				if (caps.some((value) => typeof value !== "number" || !Number.isFinite(value))) throw new Error("unboundable output cap");
-				// A hook can remove or disable the cap it was given. The caller's options are no longer evidence of
-				// the wire limit. An operator's completions server has no known default, so its missing/zero/negative
-				// max_tokens refuses; a hosted adapter falls back to its catalog maximum through callCostBound.
-				if (completionsOwnServer(model) && !(typeof sent.max_tokens === "number" && sent.max_tokens > 0)) throw new Error("unboundable output cap");
-				const maxTokens = caps.length ? Math.max(...caps) : undefined;
-				const longCache = (value) => value && typeof value === "object" && (value.cache_control?.ttl === "1h" || value.cachePoint?.ttl === "1h" || Object.values(value).some(longCache));
-				const options = { ...given, maxTokens, ...(longCache(sent) ? { cacheRetention: "long" } : {}), ...(sent.n !== undefined ? { samplingParams: { ...given.samplingParams, n: sent.n } } : {}) };
-				finalBound = bound(method, model, { ...context, finalPayload: sent }, options, env);
-			} catch { /* A body we cannot bound must never reach the transport. */ }
-			const enlarged = Math.max(ticket.bound, finalBound);
-			const outside = externalMicros();
-			if (ticket.settled || !Number.isFinite(enlarged) || !Number.isFinite(outside) || state.spent + state.inflight - ticket.bound + outside + enlarged > capMicros) {
+				const next = typeof theirs === "function" ? await theirs.call(this, payload, payloadModel) : undefined;
+				let sent;
+				let finalBound = Infinity;
+				try {
+					// Clone once and send exactly this plain JSON. The bound is the larger of the context's and this body's
+					// (callCostBound's `body`, issue #985): the body adds every byte a provider or caller hook introduced,
+					// and the context covers what a continued request leaves on the server.
+					sent = JSON.parse(JSON.stringify(next === undefined ? payload : next));
+					if (!isPlain(sent)) throw new Error("unboundable payload");
+					const caps = [sent.max_tokens, sent.max_completion_tokens, sent.max_output_tokens, sent.config?.maxOutputTokens, sent.inferenceConfig?.maxTokens].filter((value) => value !== undefined && value !== null);
+					if (caps.some((value) => typeof value !== "number" || !Number.isFinite(value))) throw new Error("unboundable output cap");
+					// A hook can remove or disable the cap it was given. The caller's options are no longer evidence of
+					// the wire limit. An operator's completions server has no known default, so its missing/zero/negative
+					// max_tokens refuses; a hosted adapter falls back to its catalog maximum through callCostBound.
+					if (completionsOwnServer(model) && !(typeof sent.max_tokens === "number" && sent.max_tokens > 0)) throw new Error("unboundable output cap");
+					const maxTokens = caps.length ? Math.max(...caps) : undefined;
+					const longCache = (value) => value && typeof value === "object" && (value.cache_control?.ttl === "1h" || value.cachePoint?.ttl === "1h" || Object.values(value).some(longCache));
+					const options = { ...given, maxTokens, ...(longCache(sent) ? { cacheRetention: "long" } : {}), ...(sent.n !== undefined ? { samplingParams: { ...given.samplingParams, n: sent.n } } : {}) };
+					finalBound = bound(method, model, context, options, env, sent);
+				} catch { /* A body we cannot bound must never reach the transport. */ }
+				const enlarged = Math.max(ticket.bound, finalBound);
+				const outside = externalMicros();
+				if (!ticket.settled && Number.isFinite(enlarged) && Number.isFinite(outside)) {
+					const others = state.inflight - ticket.bound;
+					if (state.spent + others + outside + enlarged <= capMicros) {
+						state.inflight += enlarged - ticket.bound;
+						ticket.bound = enlarged;
+						ticket.sent = true;
+						return sent;
+					}
+					// Issue #985: refused only by others' holds, on a call that may wait. Release, wait at the front, retake.
+					if (ticket.waitable && waitHelps(enlarged, outside, others, false)) {
+						// A call whose signal is already aborted never waits, logs no wait and keeps its hold: an abort
+						// listener would never fire for it, and its caller, being gone, would hold the front of the queue
+						// until room appeared and then be sent.
+						if (signalAborted(given.signal)) throw new Error(WAIT_ABORTED_MESSAGE);
+						log("cost_wait", { why: "final-payload", bound: enlarged, spent: state.spent, inflight: others, ...(external === null ? {} : { external: outside }), cap: capMicros, waiting: queue.length });
+						state.inflight -= ticket.bound;
+						ticket.bound = 0;
+						await waitForFinal({ ticket, enlarged, stop, stopped, signal: given.signal });
+						ticket.sent = true;
+						return sent;
+					}
+				}
 				refuse({ why: "final-payload", bound: Number.isFinite(enlarged) ? enlarged : null });
 				stop(COST_CAP);
 				throw new Error(STOP_MESSAGES[COST_CAP]);
+			} catch (error) {
+				// Each priced api module sends only after this hook returns (pinned), so a throw here withheld the request.
+				if (!ticket.sent) ticket.withheld = true;
+				throw error;
 			}
-			state.inflight += enlarged - ticket.bound;
-			ticket.bound = enlarged;
-			return sent;
 		};
 		return [context, { ...given, onPayload }, ...(args ?? []).slice(2)];
 	}
@@ -2392,7 +2866,8 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 	/**
 	 * What this guard holds (issue #500): `spentMicros` settled and `inflightMicros` admitted but not settled. The two
 	 * numbers a child ledger carries and a parent's SPENT is made of. An accessor, NOT part of snapshot(), so the exit
-	 * line stays exactly as it was. It settles no pending slot: a pending admission is already in `inflight`.
+	 * line stays exactly as it was. It settles no pending slot: a pending admission is already in `inflight`. A waiter
+	 * holds nothing, so it is in neither.
 	 */
 	function spend() {
 		return { spentMicros: state.spent, inflightMicros: state.inflight };
@@ -2408,7 +2883,7 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		return state.why;
 	}
 
-	return { enforces: Object.freeze([COST_CAP]), admit, prepare, bind, snapshot, spend, unjudged, refusedWhy, state };
+	return { enforces: Object.freeze([COST_CAP]), admit, prepare, bind, wait, leave, snapshot, spend, unjudged, refusedWhy, state };
 }
 
 // ── Issue #502, part 4: the allowed-model list, checked before every provider call ────────────────────────
@@ -2827,6 +3302,8 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 		bind(result) {
 			for (const guard of guards) guard.bind?.(result);
 		},
+		// The cost guard's queue (issue #985), only with a cap: a guard without `wait` is never asked to wait.
+		...(cost ? { wait: (retry) => cost.wait(retry), leave: (waiter) => cost.leave(waiter) } : {}),
 		unjudged(count) {
 			cost?.unjudged(count);
 		},

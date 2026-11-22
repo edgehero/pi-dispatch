@@ -540,8 +540,8 @@ async function installCapped({ fx, capMicros, rootSessionId }) {
 	const logged = [];
 	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: capMicros, rootSessionId, onStop: (reason) => stops.push(reason) });
 	const bounds = [];
-	const guard = createCostGuard({ capMicros, log: (event, fields) => logged.push({ event, fields }), bound: (method, model, context, options) => {
-		const bound = callCostBound(method, model, context, options);
+	const guard = createCostGuard({ capMicros, log: (event, fields) => logged.push({ event, fields }), bound: (method, model, context, options, env, body) => {
+		const bound = callCostBound(method, model, context, options, env, body);
 		bounds.push({ bound, maxTokens: options?.maxTokens, reasoning: options?.reasoning, modelMax: model.maxTokens });
 		return bound;
 	} });
@@ -597,32 +597,88 @@ test("cost cap, sequential: the call whose bound would pass the cap is refused b
 	}
 });
 
-test("cost cap, two sessions in parallel: the second call is judged against the first one's bound while it is in flight", { skip }, async () => {
+/**
+ * `calls` that holds the cap's invariant at every provider call: what the guard settled plus what it holds in flight
+ * never passes the cap, and the call that just reached the provider is already in flight.
+ */
+function guardedCalls(capped, capMicros) {
+	const calls = [];
+	calls.push = (entry) => {
+		assert.ok(capped.guard.state.spent + capped.guard.state.inflight <= capMicros, `spent ${capped.guard.state.spent} + in flight ${capped.guard.state.inflight} passed ${capMicros}`);
+		return Array.prototype.push.call(calls, entry);
+	};
+	return calls;
+}
+
+test("cost cap, two sessions in parallel: the second call waits for the first one's hold to settle, then runs (issue #985)", { skip }, async () => {
 	const fx = await fixture(PRICED_API, PRICED_MODEL);
 	const sessions = [];
 	let installed;
 	try {
 		const rootManager = pi.SessionManager.inMemory(fx.root);
 		const otherManager = pi.SessionManager.inMemory(fx.root);
-		// One bound (about 1.01) fits under 1.75; two at once (about 2.02) do not, though either alone would.
+		// One bound (about 1.01) fits under 1.75; two at once (about 2.02) do not, though either alone would. Before issue
+		// #985 the second call was refused and stopped the job at $0.40 of $1.75; now it waits for the first to settle.
 		const capped = await installCapped({ fx, capMicros: 1_750_000, rootSessionId: rootManager.getSessionId() });
 		installed = capped.installed;
 		const otherRuntime = await fx.runtime();
-		const calls = [];
+		const calls = guardedCalls(capped, 1_750_000);
 		// Each call stays in flight for 300 ms, far longer than a session takes to reach its first call.
 		await registerFakeProvider({ modelRuntime: fx.modelRuntime, compat: installed.module, api: PRICED_API, calls, usage: FORTY_CENTS, delayMs: 300 });
 		await registerFakeProvider({ modelRuntime: otherRuntime, compat: installed.module, api: PRICED_API, calls, usage: FORTY_CENTS, delayMs: 300 });
 		const rootSession = await openSession({ fx, modelRuntime: fx.modelRuntime, sessionManager: rootManager });
 		const otherSession = await openSession({ fx, modelRuntime: otherRuntime, sessionManager: otherManager });
 		sessions.push(rootSession, otherSession);
+		const ends = [];
+		for (const session of sessions) session.subscribe((event) => event.type === "turn_end" && ends.push(event.message));
 
 		await Promise.all([rootSession.prompt("root"), otherSession.prompt("other")]);
 		await flush();
-		assert.equal(calls.length, 1, "exactly one of the two overlapping calls was dispatched");
-		assert.deepEqual([capped.guard.state.refused, capped.meter.state.stopReason], [1, "cost-cap"]);
-		assert.deepEqual([capped.guard.state.spent, capped.guard.state.inflight], [400_000, 0], "the admitted one settled at its real cost");
+		assert.equal(calls.length, 2, "both sessions' calls reached the provider");
+		assert.deepEqual(ends.map((message) => message?.stopReason), ["stop", "stop"], "both turns answered");
+		assert.deepEqual([capped.guard.state.refused, capped.meter.state.stopReason], [0, null], "nothing refused, nothing stopped");
+		assert.deepEqual([capped.guard.state.spent, capped.guard.state.inflight, capped.guard.state.waited], [800_000, 0, 1], "both settled at their real cost; one waited");
+		assert.deepEqual(capped.logged.filter((entry) => entry.event.startsWith("cost_")).map((entry) => entry.event), ["cost_wait", "cost_waited"]);
+		const wait = capped.logged.find((entry) => entry.event === "cost_wait");
+		assert.ok(wait.fields.inflight > 1_000_000, `it waited for the other call in flight: ${JSON.stringify(wait.fields)}`);
+		assert.ok(capped.logged.find((entry) => entry.event === "cost_waited").fields.waitedMs >= 250, "for about the 300 ms that call was out");
+		assert.deepEqual([capped.meter.state.calls, capped.meter.state.unresolved], [2, 0], "the placeholder was not counted as a call");
+	} finally {
+		for (const session of sessions) session.dispose();
+		installed?.uninstall();
+		fx.cleanup();
+	}
+});
+
+test("cost cap, three sessions in parallel: the third waits, and is refused once the settled spend leaves no room (issue #985)", { skip }, async () => {
+	const fx = await fixture(PRICED_API, PRICED_MODEL);
+	const sessions = [];
+	let installed;
+	try {
+		const managers = [0, 1, 2].map(() => pi.SessionManager.inMemory(fx.root));
+		// One bound (about 1.01) at a time fits under 1.75. The first call runs; the second waits and runs on $0.40 spent
+		// (0.40 + 1.01); the third waits behind it, then meets $0.80 spent (0.80 + 1.01 > 1.75) with nothing left in
+		// flight: waiting can no longer help, so it is refused and the job stops cost-cap, as a sequential job would.
+		const capped = await installCapped({ fx, capMicros: 1_750_000, rootSessionId: managers[0].getSessionId() });
+		installed = capped.installed;
+		const calls = guardedCalls(capped, 1_750_000);
+		const runtimes = [fx.modelRuntime, await fx.runtime(), await fx.runtime()];
+		for (const modelRuntime of runtimes) await registerFakeProvider({ modelRuntime, compat: installed.module, api: PRICED_API, calls, usage: FORTY_CENTS, delayMs: 200 });
+		for (const [index, modelRuntime] of runtimes.entries()) sessions.push(await openSession({ fx, modelRuntime, sessionManager: managers[index] }));
+		const ends = [];
+		for (const session of sessions) session.subscribe((event) => event.type === "turn_end" && ends.push(event.message));
+
+		await Promise.all(sessions.map((session, index) => session.prompt(`session ${index}`)));
+		await flush();
+		assert.equal(calls.length, 2, "the third call never reached the provider");
+		assert.deepEqual(ends.map((message) => message?.stopReason).sort(), ["aborted", "stop", "stop"]);
+		assert.equal(ends.find((message) => message?.stopReason === "aborted")?.errorMessage, "pi-dispatch: cost cap reached");
+		assert.deepEqual([capped.guard.state.refused, capped.meter.state.stopReason, capped.guard.refusedWhy()], [1, "cost-cap", "over-cap"]);
+		assert.deepEqual([capped.guard.state.spent, capped.guard.state.inflight, capped.guard.state.waited], [800_000, 0, 2]);
 		const refusal = capped.logged.find((entry) => entry.event === "cost_refused");
-		assert.ok(refusal.fields.inflight > 1_000_000, `the refusal counted the other call in flight: ${JSON.stringify(refusal.fields)}`);
+		assert.equal(refusal.fields.spent, 800_000);
+		assert.equal(refusal.fields.inflight, 0, "nothing in flight: waiting could no longer help");
+		assert.ok(refusal.fields.waited >= 350, `it waited for both calls before it: ${JSON.stringify(refusal.fields)}`);
 	} finally {
 		for (const session of sessions) session.dispose();
 		installed?.uninstall();
@@ -784,7 +840,7 @@ test("cost cap: a 200 cut after content is charged its bound, so a retry loop of
 		assert.equal(message.stopReason, "error", `the cut stream ended in error: ${message.errorMessage}`);
 		assert.equal(message.usage.cost.total, 0, "the premise: openai-completions reports usage only at the end");
 		assert.ok(message.content.length > 0, "the premise: content came back before the cut");
-		assert.equal(capped.guard.state.spent, callCostBound("streamSimple", lb.model, { ...context, finalPayload: lb.payloads[0] }, { ...options, maxTokens: lb.payloads[0].max_tokens }), "it started, so it is charged the final serialized payload bound");
+		assert.equal(capped.guard.state.spent, callCostBound("streamSimple", lb.model, context, { ...options, maxTokens: lb.payloads[0].max_tokens }, process.env, lb.payloads[0]), "it started, so it is charged the final serialized payload bound");
 		assert.equal(capped.guard.snapshot().costUnanswered, 0);
 		assert.equal(capped.meter.snapshot().costUnreported, 1, "its usage never came: the metered cost is short (issue #571)");
 	} finally {
@@ -818,7 +874,7 @@ test("cost cap: an answer with no usage chunk is charged its bound and counted c
 		assert.deepEqual(lb.seen, ["ok", "nousage"]);
 		assert.equal(message.stopReason, "stop", `it succeeded: ${message.errorMessage}`);
 		assert.deepEqual([message.usage.input, message.usage.output, message.usage.cost.total], [0, 0, 0], "the premise: pi fills a missing usage block with zeros");
-		assert.equal(capped.guard.state.spent - spentBefore, callCostBound("streamSimple", lb.model, { ...context, finalPayload: lb.payloads[1] }, { ...options, maxTokens: lb.payloads[1].max_tokens }), "charged the final serialized payload bound");
+		assert.equal(capped.guard.state.spent - spentBefore, callCostBound("streamSimple", lb.model, context, { ...options, maxTokens: lb.payloads[1].max_tokens }, process.env, lb.payloads[1]), "charged the final serialized payload bound");
 		assert.deepEqual([capped.meter.snapshot().costUnreported, capped.guard.snapshot().costUnanswered], [1, 0]);
 		// The exit line as run-job writes it, through the worker's own parse and settlement.
 		const after = line();

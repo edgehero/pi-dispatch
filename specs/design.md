@@ -5363,6 +5363,23 @@ passes are bounded (the bullet above); the session and fork-source turns are as 
   re-entry and is skipped, once; a token-carrying call on another pair is a provider's forward, a full call
   counted under its own model beside the runtime call (`DES-DOLLAR-RESERVE-AND-SETTLE`). Any other legacy call in a runtime call's context (a `before_provider_request` hook, an
   `onPayload`, a timer scheduled there) is judged and counted like an outside call.
+- **Amended for issue #985 (a deferred call's placeholder)**: a call the cost guard tells to WAIT for other calls' holds
+  (`DES-DOLLAR-RESERVE-AND-SETTLE`, **Waiting for room**) is not dispatched, and its caller is answered at once with a
+  PLACEHOLDER: a stream from the same factory as the hard stop (`createAssistantMessageEventStream` of the accepted
+  compat copy, so pi's consumers see the class they already handle), or, for a result method, a promise. This is the
+  one stream a wrapper returns that is not the provider's own, and that is deliberate: the call does not exist yet.
+  When the guard's queue reaches the call, both halves run the whole check again, judge, prepare, dispatch, bind and
+  observe, in one synchronous block, so the SINGLE-SLOT invariant still holds (admit, prepare, dispatch and bind
+  adjacent, nothing between an admission and its bind, and a child's pre-dispatch write still the last step before
+  dispatch). The placeholder then copies every event of what the retry answered (the admitted stream, or the hard
+  stop of a job that stopped meanwhile) in order, as pi's lazyStream forwards a provider's stream, reading it eagerly,
+  and ends with that answer's own `result()`. The meter ADOPTS the placeholder (its observed set) without counting
+  it, so an observe that meets it later (a second layer in the chain, a promise resolving to it) cannot count it twice:
+  the call is counted once, on the stream its retry dispatched. The retry runs in the caller's async context
+  (`AsyncLocalStorage.snapshot()`), so the dispatch token is the caller's. A placeholder that cannot follow (a retry
+  that threw, an answer with no stream) ends `aborted` with the error's message and zero usage, never `error`: the
+  meter builds no message pi would auto-retry (pinned). A caller's abort while it waits ends it `aborted` with zero
+  usage, and no provider is called.
 - **Why**: The bus is **per instance** and no event carries a session id, so a subagent session an extension
   spawns is invisible to it — a 16-wide fanout registers as roughly **one** turn, and both the cap and the
   run record then understate spend on exactly the most expensive jobs. The registry is the one choke point
@@ -5917,7 +5934,8 @@ free local model, or using a few successful live probes as proof of every routin
   3. the model check (issue #502, `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`) refuses a call to a model the list
      does not name, before the cost guard is asked, so such a call is never bounded or held in flight;
   4. the guard computes the call's BOUND (`callCostBound`) and refuses when
-     `spent + in-flight bounds + bound > cap`, or when the bound is `Infinity`. A refusal counts `costRefused`,
+     `spent + in-flight bounds + bound > cap`, or when the bound is `Infinity`, except that a call refused ONLY by
+     the in-flight holds of other calls in this process WAITS for them instead (issue #985, **Waiting for room** below). A refusal counts `costRefused`,
      logs `cost_refused` with numbers only, stops the job with `cost-cap` (the meter's one first-wins stop, which
      aborts the root session) and answers this call with the hard stop. The first refusal's rule (`unboundable`,
      `external`, `over-cap` or `final-payload`) rides the exit line as `why` and reaches the run record (issue #507), because a stop at
@@ -5925,14 +5943,67 @@ free local model, or using a few successful live probes as proof of every routin
      record is PII-free and the line is container-written. An admitted call's bound is held in
      flight until it settles.
      **Final shaped payload (#781):** the prepared `onPayload` hook runs after provider shaping and the
-     caller/model hook. It clones the complete JSON to send and recomputes a conservative bound from that
-     body plus the original context/image allowances. Wire output caps, output multiplicity and one-hour
+     caller/model hook. It clones the complete JSON to send and recomputes a conservative bound whose input is
+     the LARGER of the context's measure and that body's, each its UTF-8 bytes plus its image allowances, never
+     their sum (issue #985: the sum roughly doubled every call's bytes, held twice the room in flight and could
+     push a 150 KB context past the 200k long-context line by itself). The body is what is sent and is built
+     from the context, so the larger covers both; a request whose prefix the server keeps is cut from a checked
+     body and built from the context (anthropic-messages' threads, openai-codex-responses' `previous_response_id`
+     over its cached WebSocket, the only two, pinned), so the context and the checked body cover it too. Wire
+     output caps, output multiplicity and one-hour
      cache writes are judged from the final body; removing or disabling a local server's output cap is
      unboundable. The same ticket grows to the larger bound, with spent, other in-flight tickets and external
-     child spend included before dispatch. It is never reserved or settled twice. A denial throws before the
-     guarded transport sends and records `final-payload`. Reviewed subscription adapters must demonstrate
+     child spend included before dispatch. It is never reserved or settled twice. When the grown ticket does
+     not fit ONLY because of other calls' holds, on a call that may wait (below), the ticket RELEASES its hold,
+     waits at the FRONT of the queue holding nothing, and takes the grown hold back when room appears: nothing
+     is sent before `onPayload` returns (each priced api module's single send passes the hook's result, after the hook
+     returns; pinned per module in `pinned-api.test.mjs`, a write deeper inside the body or by a helper excepted), so releasing
+     breaks no bound, and holding nothing keeps two such calls from waiting on each other. A call that may not
+     wait keeps the refusal. A denial throws before the
+     guarded transport sends and records `final-payload`. An `onPayload` that throws, for any reason (this
+     refusal, a refused wait, the caller's or the model guard's hook), WITHHELD its request: the call's settle
+     no longer counts it `costUnanswered` (it did, which floored a settlement over a request never sent). Reviewed subscription adapters must demonstrate
      that their actual SDK sends this checked body and performs no unadmitted internal retry. Trusted code
      that does not participate in the payload protocol remains subject to the named extension trust boundary.
+  **Waiting for room (issue #985).** Every parallel call holds its whole bound in flight, and a bound is far above
+  what a call settles at, so six or seven parallel subagent calls held most of a cap and the next call stopped the
+  job at a fifth of it, between two calls, with no report and no push. The cap stays a hard bound
+  (`CONST-BUDGET-BEFORE-TOKENS`); nothing is reserved below the bound. Instead:
+  - a call that does not fit gets `COST_WAIT` when it may wait and waiting can help: `spent + external + bound <= cap`
+    (every micro-dollar of `external` counts as settled here: what is in flight elsewhere is not yet known), and
+    something to wait for, a hold of this guard's in flight or a waiter ahead of it. Otherwise it is refused as before;
+  - a call MAY wait unless it runs under an admitted call's dispatch: a forward, or a call from a provider, an
+    `onPayload` hook or a timer scheduled there. An AsyncLocalStorage (`HOLDING`, one per process) marks each admitted
+    dispatch in both halves, across its awaits. Such a call may be what its parent's hold is waiting for, so it never
+    waits, and is refused as before when it does not fit. Not the dispatch token's context: a virtual model's physical
+    re-entry runs under the outer call's token, which holds no bound, and may wait. A guard without a queue (a pi
+    child's) is never offered a wait;
+  - the waiting call is answered at once with a PLACEHOLDER stream (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`), or a
+    promise for a result method, and queued. The queue is FIFO: a new call that may wait queues behind every waiter,
+    even one that would fit, so a large call is never starved by small ones (a call that may not wait is not held
+    behind it). Every settle, and every refusal (which stops the job), DRAINS the queue on a microtask, never inside
+    the settle: `flushPending` settles inside `admit`, and a drain there would re-enter `admit` and break the single
+    pending slot. The drain retries the front waiter and goes on while waiters are admitted or end. A one second
+    unref'd timer drains too while anyone waits, which picks up what no settle signals (a meter stop that is not a
+    refusal, a drop in external spend);
+  - each retry runs judge, prepare, dispatch, bind and observe again, in one synchronous block, in the caller's own
+    async context (`AsyncLocalStorage.snapshot()` at the call), so the single-slot invariant and a child's
+    pre-dispatch write hold as for any call, and the dispatch token and pi's own async-local state are the caller's,
+    not those of the settle that drained it;
+  - an abort of the call's signal while it waits leaves the queue and ends the placeholder `aborted` with zero usage;
+    a stop of the meter while it waits ends it with that stop's hard stop. Neither reaches a provider, and
+    neither is counted;
+  - a waiter that sees no progress for 15 minutes (`COST_WAIT_IDLE_MS`: no settle of this guard's, no drop in external
+    spend) is refused `over-cap`, and so is one whose wait can no longer help (spend rose meanwhile). Its
+    `cost_refused` line carries `waited` (ms). 15 minutes is the default idle limit, so a hung provider usually ends
+    the job `idle` first, the accurate reason;
+  - log lines, numbers only: `cost_wait` (`bound`, `spent`, `inflight`, `external` with an external reader, `cap`,
+    `waiting`, and `why: "final-payload"` for a final payload's wait) when a call starts waiting, `cost_waited`
+    (`waitedMs`) when it is admitted.
+  No deadlock: a waiter holds nothing; every hold belongs to a call already sent, whose settle depends only on its own
+  provider stream (`result()` is memoised and independent of the consumer); a call that could be what a held call
+  waits for runs under `HOLDING` and never waits; in-process subagents run as tool calls, after the parent's own call
+  settled. What is left is caught by the waiter's own 15 minute limit, the job's idle and stall limits, and abort.
   When the call settles, its bound leaves the in-flight sum and `ceil(cost x 1e6)`, never below zero (pi's
   short-write term can go negative), joins `spent`. A charge above the bound counts `boundExceeded`. A call
   whose cost is unknown (no finite `cost.total`, or a rejected result) stays charged at its bound, and the meter
@@ -6338,8 +6409,22 @@ free local model, or using a few successful live probes as proof of every routin
 - **Why**: one call's dollars are not bounded by the cap's scale. On the default model one call can cost
   several dollars, so a cap checked after a call is a soft limit one call can pass by more than the cap. The
   in-flight sum is what makes parallel sessions safe: each is judged against the other's worst case, not
-  against a total neither has added to yet.
+  against a total neither has added to yet. Waiting (issue #985) is what keeps that sum from stopping them early:
+  a held bound is released at the call's real cost, usually a small part of it, so a call refused only by holds
+  runs once they settle, and the cap is never passed on the way.
 - **Rejected**:
+  - **Count only the largest in-flight hold** (issue #985's proposal): unsound, since every one of seven parallel
+    calls can spend its bound.
+  - **A "realistic" bound** (the input's tokens at the input price, the asked output) for parallel calls: it reserves
+    below what a call can cost, so the cap stops being a bound.
+  - **Wait inside `onPayload` instead of at admission** (a provisional admission, the final payload deciding): not
+    provable. The pin shows each api module CALLS `onPayload`, not that every path through it does, nor that an
+    extension's provider on a priced api id calls it at all; a provider that never calls it keeps its admission bound
+    today, and would keep nothing. Admission waits; only the final payload's growth waits at `onPayload`.
+  - **A fixed wait timeout**: a slow call that is making progress would refuse the calls behind it. The limit counts
+    time without progress, so a job waits as long as calls keep settling.
+  - **Bound the final payload by the context plus the body** (#781's first form): the body is built from the context,
+    so the sum counted most bytes twice.
   - **Check the cap after each call** (the token cap's shape): the overshoot is one call, and one call can cost
     more than the cap.
   - **Reserve "the cap plus one worst call"** in the worker: several dollars per job on the default model, it
@@ -6395,6 +6480,13 @@ free local model, or using a few successful live probes as proof of every routin
     by a separate path, and the two could disagree on what a refusal returns. One call over every ledger keeps one
     give-back rule.
 - **Residuals, named**:
+  - **waiting** (issue #985): a job can sit up to 15 minutes behind a hung call before the waiter is refused (the job's
+    idle limit, 15 minutes by default, usually ends it first). Waiting is per process: a pi child process (a role's
+    task) never waits, and a call judged against what other processes hold counts all of it as settled, so parallel
+    role children are still refused when their holds fill the cap. A call under an admitted dispatch cannot wait, and
+    takes room ahead of the queue when it fits. The final payload's wait releases the call's hold on the strength of
+    "nothing is sent before `onPayload` returns", which is pinned for pi-ai's api modules only: an extension's provider
+    on a priced api id that sent before awaiting the hook would run unheld while it waits;
   - extension code in the job can still reach a provider the meter never sees: pi-ai's per-api stream
     functions imported directly, an api id it registers in pi-ai's legacy registry and calls before the next
     re-arm (its own stream function, while it loads or during the run), legacy `generateImages`, or a raw fetch.
@@ -19276,6 +19368,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-22 (#985) | **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, six places. Step 4: a call refused ONLY by the in-flight holds of other calls in this process waits instead of stopping the job. NEW paragraph **Waiting for room**: `COST_WAIT` when the call may wait (not under an admitted dispatch, `HOLDING`, one AsyncLocalStorage per process; a virtual model's physical re-entry may wait; a guard without a queue, a pi child's, never waits) and waiting can help (`spent + external + bound <= cap`, all of `external` counted as settled, and a hold of ours in flight or a waiter ahead); a placeholder answers the caller; a FIFO queue a new waitable call joins behind every waiter; every settle and refusal drains on a microtask, never inside the settle (`flushPending` settles inside `admit`); a one second unref'd timer drains while anyone waits; each retry runs judge, prepare, dispatch, bind and observe again in one synchronous block in the caller's async context; an abort while waiting ends the call `aborted` at zero usage, a stop with its hard stop, neither sent; a waiter with no progress for 15 minutes (`COST_WAIT_IDLE_MS`) or whose wait can no longer help is refused `over-cap` with `waited` on `cost_refused`; log lines `cost_wait` and `cost_waited`, numbers only; the no-deadlock argument. The **Final shaped payload** paragraph: the bound's input is the larger of the context's and the body's measure (bytes plus image allowances each), never their sum; a waitable call whose grown ticket fits only once others' holds settle releases its hold, waits at the front holding nothing and takes the grown hold back, on the strength of each priced api module's single send passing the hook's result after the hook returns (pinned per module, deeper writes excepted); an already aborted call never waits; any `onPayload` that throws withheld its request and no longer counts `costUnanswered`. **Why**: waiting keeps the in-flight sum from stopping parallel calls early. **Rejected**, five: counting only the largest hold, a realistic bound, waiting inside `onPayload` instead of at admission, a fixed wait timeout, context plus body. **Residuals**: up to 15 minutes behind a hung call; waiting is per process, so parallel role children are still refused; a call under a dispatch takes room ahead of the queue; the final payload's release rests on a pin of pi-ai's api modules only. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: NEW bullet, a deferred call's placeholder (the hard stop's factory, a promise for a result method), the whole check re-run in one synchronous block so the single-slot invariant holds, events copied in order and ended with the retry's own `result()`, the placeholder adopted by the meter and never counted, a placeholder that cannot follow ends `aborted`, never `error`. **Code evidence**: image/runner/src/usage-meter.mjs -> createCostGuard (COST_WAIT, COST_WAIT_IDLE_MS, COST_WAIT_TICK_MS, wait, leave, waitForFinal, prepare), callCostBound (`body`), judge (DEFERRED), HOLDING, waitTurn, deferStream, makeDeferredStream, wrapModelRuntime, wrapProviderStreams, installProcessUsageMeter, createUsageMeter (adopt), createPolicyGuard; image/runner/test/pinned-api.test.mjs. |
 | 2026-11-21 (#997) | **`DES-PER-TRIGGER-SECRET-PROFILE` AMENDED**, a dated decision bullet after #999's: a watch job is no longer excluded from `declaredProviderKey`, so its investigation's and its `decide` model's provider keys are declared on the main rule (gate, reserved names, re-check and container builder, `secondaryCredential`); the answer and question grouping models keep the host's credential because their rules carry no `run.secrets`; three rejected alternatives. UNCHANGED, checked: `DES-PROJECT-SECRET-BUNDLES` (a bundle still declares nothing), `DES-HOST-OWNED-SUBSCRIPTION-AUTH` (a bound provider's snapshot rule is untouched), `DES-OPENSHELL-VENUE` (its host-value check already follows `declaredProviderKey`). **Code evidence**: worker/src/env-allowlist.mjs -> declaredProviderKey, buildContainerEnv; worker/src/processor.mjs -> roleDeclared, secondaryCredentialNames; worker/src/doctor.mjs -> triggerSecretProviderChecks. |
 | 2026-11-21 (#995) | **`DES-WATCH-DETERMINISTIC-PRODUCER` AMENDED**, a paragraph: the pull collector follows `triggers.json` by its text with the poller's follower (`makeTriggersFollower`), read at the top of every pass and regrouped only when what was read changed, so an invalid edit is logged once each time the invalid text changes, as `triggers_reload_invalid` with `kept: true` and the last good copy goes on collecting, a good text after it once as `triggers_reloaded`, and a quiet start, whose baseline is the boot load's own read, says nothing. It reloaded the file on every pass and logged `watch_pull_config_invalid` each time it was invalid, about a line a second; that line is gone. The follower judges for the collector's own command, `watch`, as the poller's judges for `poll`, so a watch source without its push secret is taken. Rejected: rate-limiting the old line. Out of scope, named: a collector heartbeat. **`DES-GH-POLLING-TRANSPORT` AMENDED, one phrase: "each distinct refusal" becomes "each change of refusal", since the follower compares with its last read only**: the follower it describes is reused as it is, with no change to its gate, its lines or its state. **Code evidence**: receiver/src/watch-puller.mjs -> startWatchPuller; receiver/src/config.mjs -> makeTriggersFollower; receiver/test/watch-puller.test.mjs. |
 | 2026-11-21 (#1006) | **`DES-GH-POLLING-TRANSPORT` AMENDED**, a paragraph after the poll mode's `WEBHOOK_SECRET` sentence: only the command that reads a setting judges it. `loadReceiverConfig` takes the command it loads for (`command`, `serve` by default, so a forgetful caller refuses as `serve` does); `poll` and `watch` judge none of what only `serve` reads (`WEBHOOK_SECRET`, `RECEIVER_PORT`, the GitLab, Forgejo and Azure DevOps webhook blocks, a watch source's push secret), and `watch` skips the GitHub auth block and the identity retry window too; measured before, a `GITLAB_TOKEN` with no GitLab webhook settings beside it, a malformed port or a secret of spaces stopped the poller and the collector at their start, exit 2, and a PAT source without its token or a malformed retry window stopped the collector. The forge blocks' rule moved into the worker package (`forgeWebhookFaults`, `loadForgeWebhook`), so doctor says a refusal exactly where `serve` makes one, whenever one of a forge's variables is set, rules or none, naming `serve` alone; a forge's rules with none of its variables set are said to fire nothing, never to refuse. The poller's placeholder for an absent secret (`pollerLoaderEnv`) is gone, and the follow bullet says so. The console's trigger editor offers polling under `GITHUB_INGEST=both` beside a secret of spaces, which no longer stops the poller (`githubTriggerTransports`). Doctor's GitHub auth lines no longer name the collector. A residual is named: the collector still judges `GITHUB_INGEST`, which it does not read, since the console's words for a garbled one say it stops every receiver command. Rejected: a second loader per command. **`DES-TRIGGER-OUTSIDE-PI` AMENDED**, the triggers check bullet: the first GitHub rule on a deployment without `WEBHOOK_SECRET` is the file's refusal of `serve` alone. **Code evidence**: receiver/src/config.mjs -> loadReceiverConfig; receiver/src/poller-config.mjs -> loadPollerConfig; receiver/src/poller.mjs -> startPoller; receiver/src/watch-puller.mjs -> startWatchPuller; worker/src/config.mjs -> forgeWebhookFaults, loadForgeWebhook, githubTriggerTransports; worker/src/doctor.mjs -> the forge webhook lines, the `WEBHOOK_SECRET` and `RECEIVER_PORT` lines; worker/test/doctor-forge-webhooks.test.mjs; receiver/test/poller.test.mjs; receiver/test/watch-puller.test.mjs. |

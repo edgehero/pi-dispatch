@@ -105,9 +105,12 @@ What to do: check the provider key on the worker and what it is allowed to use, 
 
 ### cost-cap
 
-The next AI call could have taken the run past its cost limit, so the runner did not make it. The record's `why` says
-which rule refused: the call's cost could not be bounded (`unboundable`), its bound would have passed the cap
-(`over-cap`), or the spend of the job's subprocesses could not be read (`external`).
+The next AI call could have taken the run past its cost limit, so the runner did not make it. A call that is held back
+only by other calls still running in the same process waits for them first, so the run stops only when waiting cannot
+make room, or after 15 minutes with no call finishing. Calls of a pi child process, such as a role's task, do not wait:
+spend in other processes counts as already spent. The record's `why` says which rule refused: the call's cost could not be bounded
+(`unboundable`), its bound would have passed the cap (`over-cap`), the request as finally built for the provider would
+have passed it (`final-payload`), or the spend of the job's subprocesses could not be read (`external`).
 
 What to do: raise the trigger's `run.maxCostUsd`, or the deployment's `PI_MAX_COST_USD`, if the work needs more. See
 [costs.md](costs.md).

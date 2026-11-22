@@ -9,7 +9,7 @@ import { test } from "node:test";
 // Pure -- no static pi import in its module graph -- so it needs none of the gating below. Importing
 // the runner's OWN candidate resolver is deliberate: the layout fact it encodes is the thing that
 // breaks silently, so pin the function the runner actually calls rather than a copy of its reasoning.
-import { BOUND_OVERHEAD_TOKENS, callCostBound, COMPLETIONS_CATALOG_HOSTS, COMPLETIONS_EXTRA_HOSTS, completionsOwnServer, IMAGE_RESIZE_MAX, PI_AI_REGISTRY_FUNCTIONS, piOwnPackageDir, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
+import { BOUND_OVERHEAD_TOKENS, callCostBound, COMPLETIONS_CATALOG_HOSTS, COMPLETIONS_EXTRA_HOSTS, completionsOwnServer, IMAGE_RESIZE_MAX, makeDeferredStream, PI_AI_REGISTRY_FUNCTIONS, piOwnPackageDir, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API, WAIT_ABORTED_MESSAGE } from "../src/usage-meter.mjs";
 import * as catalogModels from "./helpers/catalog-models.mjs";
 import { captureTerminal, classifyPromptRejection, classifyStopReason, decideExit, loadRetryPredicate, STOP_REASONS } from "../src/outcome.mjs";
 import { jobSettings, THINKING_LEVELS } from "../src/config.mjs";
@@ -1812,6 +1812,124 @@ test("what else picks the model that answers, as the model guard reads it (issue
 	const warm = readFileSync(join(piAiDist(), "cache-warming.js"), "utf8").match(/\nexport function getCacheWarmingRequestOptions\(options, signal\) \{([\s\S]*?)\n\}/)?.[1];
 	assert.ok(warm, "getCacheWarmingRequestOptions moved: re-check what options a warm request carries");
 	assert.doesNotMatch(warm, /\bfetch\b/, "the cache warmer now passes a fetch");
+});
+
+test("issue #985: every byte a provider bills as input is in the call's context or in the body the final-payload check measured", { skip }, () => {
+	// The cost guard bounds a final payload by the LARGER of the context's and the checked body's measure, not their
+	// sum (callCostBound's `body`). That holds while a request whose prefix the server keeps is cut from a body the
+	// guard checked. Two apis send such a request. anthropic-messages' threads are pinned in the test above. The other
+	// is openai-codex-responses over its cached WebSocket: a continued request sends `previous_response_id` and only
+	// the new input items, and only when every other field equals the last request's (the CHECKED body it recorded)
+	// and its input starts with that request's input plus the reply's items. So the server-held prefix is part of the
+	// checked body this request was cut from, and the context it was built from.
+	const apiDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
+	const modules = readdirSync(apiDir).filter((name) => name.endsWith(".js") && !name.endsWith(".lazy.js"));
+	assert.deepEqual(modules.filter((name) => /previous_response_id/.test(readFileSync(join(apiDir, name), "utf8"))).sort(), ["openai-codex-responses.js"], "another api now continues a stored response: check its prefix is the checked body's");
+	assert.deepEqual(modules.filter((name) => /\bconversation:|["']conversation["']/.test(readFileSync(join(apiDir, name), "utf8"))), [], "an api now sends a stored conversation, whose content the guard never measured");
+	const codex = nestedPiAi("api", "openai-codex-responses.js");
+	assert.match(codex, /const nextBody = await options\?\.onPayload\?\.\(body, model\);\s*if \(nextBody !== undefined\) \{\s*body = nextBody;\s*\}/, "the codex body is no longer the hook's result");
+	assert.match(codex, /await processWebSocketStream\(resolveCodexWebSocketUrl\(model\.baseUrl\), body, /, "the WebSocket request is no longer built from the checked body");
+	assert.match(codex, /const fullBody = body;\s*const requestBody = useCachedContext && entry \? buildCachedWebSocketRequestBody\(entry, fullBody\) : fullBody;/, "a continued request is no longer cut from the checked body");
+	assert.match(codex, /entry\.continuation = \{\s*lastRequestBody: fullBody,/, "the continuation no longer records the checked body as its baseline");
+	for (const [name, hash] of [
+		["requestBodyWithoutInput", "cf886e8b425f601411096258ba6f993a0133efc60375ed9665edbcaa032ce6e0"],
+		["requestBodiesMatchExceptInput", "3adf721685647ad0a0d0f918bf8d1cf62f14519d3f724ede12a594daddb4b945"],
+		["getCachedWebSocketInputDelta", "1d33ce7d9bdbcdc4799f787e5114b2e0da193af19f73dbe192c9dd54588be053"],
+		["buildCachedWebSocketRequestBody", "26f8e0919cd7bb7ac58961df8d5d350cbcae5905ee447d067ee5caa140b9d93e"],
+	]) assert.equal(sha256(piFunction(codex, name)), hash, `pi's ${name} changed: re-read what a continued codex request leaves on the server against the checked body`);
+});
+
+test("issue #985: each priced api module awaits the hook once, and its single send passes the hook's result", { skip }, () => {
+	// The cost guard's final-payload check runs in onPayload and may release the call's hold while it waits there
+	// (createCostGuard, prepare): that is sound only while nothing is sent before the hook returns, and what is sent is
+	// what the hook returned. Read per module at the pin: the hook is awaited once and its result replaces the variable;
+	// the module's send appears exactly once (and its transport call once), after the hook, passing that variable; and
+	// between them nothing assigns the variable or one of its own fields. NOT covered: a write deeper inside the body,
+	// or a helper that mutates it, which only reading the module at a bump can see. anthropic-messages adds
+	// `stream: true` to the hook's result (pinned whole in the test above), about 14 bytes that BOUND_OVERHEAD_TOKENS
+	// covers; mistral-conversations sends `toMistralWirePayload(payload)`, which only renames keys (a byte or two each,
+	// inside the same overhead and the one-byte-per-token reading), pinned by hash below. The system-one classifiers and
+	// openai-decisions send through classifier-shared (pinned in the test above).
+	const apiDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
+	const hook = (variable, next) => new RegExp(`const ${next} = await options\\?\\.onPayload\\?\\.\\(${variable}, model\\);\\s*if \\(${next} !== undefined\\) \\{\\s*${variable} = ${next};\\s*\\}`);
+	const SENDS = {
+		// `send`: the module's one send of the hook's result; `transport`: the network call under it, also once in the file.
+		"anthropic-messages.js": { variable: "params", hook: /const nextParams = await options\?\.onPayload\?\.\(params, model\);\s*if \(nextParams !== undefined\) \{\s*params = \{ \.\.\.nextParams, stream: true \};\s*\}/, send: /: \{ response: await send\(params\), thread: undefined \}/, transport: /client\.beta\.messages\.create\(/, calls: [/\bsend\(/g, 4] },
+		"azure-openai-responses.js": { variable: "params", hook: hook("params", "nextParams"), send: /client\.responses\.create\(params, requestOptions\)/, transport: /\.create\(/ },
+		"bedrock-converse-stream.js": { variable: "commandInput", hook: hook("commandInput", "nextCommandInput"), send: /client\.send\(new ConverseStreamCommand\(commandInput\), \{ abortSignal: options\.signal \}\)/, transport: /\.send\(new / },
+		"classifier-shared.js": { variable: "payload", hook: /const transformed = await options\.onPayload\?\.\(payload, model\);\s*if \(transformed !== undefined\)\s*payload = transformed;/, send: /body: JSON\.stringify\(payload\),/, transport: /requestFetch\(/ },
+		"google-generative-ai.js": { variable: "params", hook: hook("params", "nextParams"), send: /client\.models\.generateContentStream\(params\)/, transport: /\.generateContent(?:Stream)?\(/ },
+		"google-vertex.js": { variable: "params", hook: hook("params", "nextParams"), send: /client\.models\.generateContentStream\(params\)/, transport: /\.generateContent(?:Stream)?\(/ },
+		"mistral-conversations.js": { variable: "payload", hook: hook("payload", "nextPayload"), send: /await requestMistralStream\(model, payload, apiKey, options\)/, transport: /globalThis\.fetch\)\(/ },
+		"openai-codex-responses.js": { variable: "body", hook: hook("body", "nextBody"), send: /const bodyJson = JSON\.stringify\(body\);/, transport: /globalThis\.fetch\)\(/ },
+		"openai-completions.js": { variable: "params", hook: hook("params", "nextParams"), send: /client\.chat\.completions\.create\(params, requestOptions\)/, transport: /\.create\(/ },
+		"openai-responses.js": { variable: "params", hook: hook("params", "nextParams"), send: /client\.responses\.create\(params, requestOptions\)/, transport: /\.create\(/ },
+	};
+	// Exactly the hooked modules a capped call can reach: the other three are no priced api (refused under a cap).
+	const hooked = readdirSync(apiDir).filter((name) => name.endsWith(".js") && !name.endsWith(".lazy.js") && /await options\??\.onPayload\?\.\(/.test(readFileSync(join(apiDir, name), "utf8"))).sort();
+	const unpriced = ["llama-cpp-classify.js", "openrouter-images.js", "pi-messages.js"];
+	for (const name of unpriced) assert.ok(!PRICED_APIS.includes(name.slice(0, -3)), `${name} is now a priced api: pin its send`);
+	assert.deepEqual(hooked.filter((name) => !unpriced.includes(name)), Object.keys(SENDS).sort(), "a priced module's hook and send are not pinned");
+	for (const [name, { variable, hook: hookRe, send, transport, calls }] of Object.entries(SENDS)) {
+		const source = readFileSync(join(apiDir, name), "utf8");
+		assert.equal(source.match(new RegExp(hookRe.source, "g"))?.length, 1, `${name}: the hook is not awaited exactly once, with its result kept`);
+		// Once each, so a second send, before the hook or after it, fails here.
+		assert.equal(source.match(new RegExp(send.source, "g"))?.length ?? 0, 1, `${name}: the send is not made exactly once`);
+		assert.equal(source.match(new RegExp(transport.source, "g"))?.length ?? 0, 1, `${name}: the transport call is not made exactly once`);
+		// anthropic-messages' `send` closure: this call, and the three in the thread functions hashed in the test above.
+		if (calls) assert.equal(source.match(calls[0])?.length ?? 0, calls[1], `${name}: the send closure is called somewhere new`);
+		assert.equal(source.split("onPayload?.(").length + source.split("onPayload(").length - 2, 1, `${name}: the hook is called somewhere else too`);
+		const hookAt = source.search(hookRe);
+		const sendAt = source.slice(hookAt).search(send);
+		assert.ok(sendAt > 0, `${name}: the send no longer comes after the hook`);
+		// One level: `variable = ...` or `variable.field = ...`. Deeper writes are not covered (see above).
+		const between = source.slice(hookAt, hookAt + sendAt).replace(hookRe, "");
+		for (const write of [`\\b${variable}\\s*=(?!=)`, `\\b${variable}\\s*\\.\\s*\\w+\\s*=(?!=)`, `\\b${variable}\\[[^\\]]*\\]\\s*=(?!=)`, `delete\\s+${variable}\\b`, `Object\\.assign\\(\\s*${variable}\\b`]) {
+			assert.doesNotMatch(between, new RegExp(write), `${name}: ${variable} is changed between the hook and the send`);
+		}
+	}
+	const mistral = nestedPiAi("api", "mistral-conversations.js");
+	assert.match(piFunction(mistral, "requestMistralStream"), /body: JSON\.stringify\(toMistralWirePayload\(payload\)\),/, "mistral no longer sends the hook's result through toMistralWirePayload");
+	for (const [name, hash] of [
+		["toMistralWirePayload", "075ab8e291878fd16a2f3191f23a470ea705a0125391fad2e1aa07b534cc2ed7"],
+		["toMistralWireMessage", "42da9c554eda573b669b56b3c6becf5552ceaee2a9685d8c6336fa82951b5e14"],
+		["toMistralWireContentChunk", "c9ddfe6f72abf3d0c17ace82c429813ab37d4dd94bb26c1e56dedf8767987f2e"],
+		["remapMistralProperty", "9e9d9ae9ee43c7b97c719efa4d638744de3a9300f0e64812d91fc2e3604ec267"],
+	]) assert.equal(sha256(piFunction(mistral, name)), hash, `pi's ${name} changed: re-read whether mistral still sends the hook's result with keys renamed only`);
+	const codex = nestedPiAi("api", "openai-codex-responses.js");
+	assert.match(codex, /const compressedBody = compressRequestBodyZstd\(bodyJson\);[\s\S]*?const sseBody = compressedBody \?\? bodyJson;/, "codex's SSE body is no longer the hook's result, compressed or not");
+});
+
+test("issue #985: a deferred call's placeholder on pi's own AssistantMessageEventStream: push and end resolve result() as makeDeferredStream relies on", { skip }, async () => {
+	// The placeholder is a stream from the factory the hard stop uses (createAssistantMessageEventStream). It copies the
+	// retried call's events with push() and ends with end(result): push() of a terminal event resolves result() with
+	// that event's message, end() resolves it with what it is given when no terminal event came, and the iteration
+	// yields every event in order and stops at end(). pi's agent loop iterates the stream and awaits result().
+	const events = nestedPiAi("utils", "event-stream.js");
+	assert.match(events, /push\(event\) \{\s*if \(this\.done\)\s*return;\s*if \(this\.isComplete\(event\)\) \{\s*this\.done = true;\s*this\.resolveFinalResult\(this\.extractResult\(event\)\);/, "push() no longer resolves result() on the terminal event");
+	assert.match(events, /end\(result\) \{\s*this\.done = true;\s*if \(result !== undefined\) \{\s*this\.resolveFinalResult\(result\);/, "end() no longer resolves result() with what it is given");
+	assert.match(events, /super\(\(event\) => event\.type === "done" \|\| event\.type === "error", \(event\) => \{\s*if \(event\.type === "done"\) \{\s*return event\.message;\s*\}\s*else if \(event\.type === "error"\) \{\s*return event\.error;/, "the terminal events or what they resolve result() with moved");
+	assert.match(readFileSync(join(piOwnPackageDir("pi-agent-core"), "dist", "agent-loop.js"), "utf8"), /const response = await streamFunction\(config\.model, llmContext, \{[\s\S]*?for await \(const event of response\) \{/, "the agent loop no longer iterates the stream it is handed");
+	// Behaviour, on the real class.
+	const compat = await import(resolvePiAiCompat()[0].url);
+	const deferred = makeDeferredStream({ createStream: compat.createAssistantMessageEventStream });
+	const model = { api: "openai-completions", provider: "p", id: "m" };
+	const placeholder = deferred(model);
+	const inner = compat.createAssistantMessageEventStream();
+	placeholder.follow(inner);
+	const final = { role: "assistant", content: [{ type: "text", text: "ok" }], api: model.api, provider: model.provider, model: model.id, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() };
+	inner.push({ type: "start", partial: final });
+	inner.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: final });
+	inner.push({ type: "done", reason: "stop", message: final });
+	inner.end();
+	const seen = [];
+	for await (const event of placeholder.stream) seen.push(event.type);
+	assert.deepEqual(seen, ["start", "text_delta", "done"]);
+	assert.equal(await placeholder.stream.result(), final);
+	const aborted = deferred(model);
+	aborted.end(WAIT_ABORTED_MESSAGE);
+	const gone = await aborted.stream.result();
+	assert.deepEqual([gone.stopReason, gone.errorMessage, gone.usage.cost.total], ["aborted", WAIT_ABORTED_MESSAGE, 0]);
 });
 
 test("the service-tier multipliers the bound assumes, and azure applying none (issue #501)", { skip }, () => {
