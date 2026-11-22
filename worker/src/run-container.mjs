@@ -1007,10 +1007,14 @@ export function makeRunContainer({
 		// before the runner does. The runner's first line comes before its first model call on every job whose idle watch
 		// is armed (`activity_watch`: an image that honours `idleWatch`, and the idle limit is never off), earlier with
 		// staged packages (`packages_loaded`). Without such a line the bound is whatever writes first, a job's own tool or
-		// at the latest the exit line, so it can be the whole run: an upper bound, never the start itself. Two events, each
-		// said when it happens, rather than one field: during a slow start a create line with no first output after it is
-		// the evidence, and a container that never writes still has its create. Nothing is said for one that writes no
-		// stdout.
+		// at the latest the exit line, so it can be the whole run: an upper bound, never the start itself. A small create
+		// and a large first output is a slow start or anything after it before the container's first line reached the CLI,
+		// its boot or the output's way back (issue #1040: with containerd stopped right after a container had started,
+		// docker's `StartedAt` 21 ms, the first output came at 8086 ms). Two events, each said when it happens, rather than
+		// one field: while a container is slow to its first line, a create line with no first output after it is the
+		// evidence, and a container that never writes still has its create. Nothing is said for one that writes no stdout.
+		// Each line carries its wall time (`time`, from the worker's log closure, issue #1040), so the spawn is `ms` before
+		// the first output line's `time`.
 		let stopCreated = () => {};
 		const run = new Promise((resolve, reject) => {
 			const timed = args.includes(`--cidfile=${cidFile}`);

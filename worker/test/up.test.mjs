@@ -3186,6 +3186,95 @@ test("up on openshell: no start is offered where there is nothing to start, a re
 	assert.ok(killed >= 1, "the silent read was killed, not waited on");
 });
 
+// Issue #1040: the image reads after "Docker daemon reachable" had no bound, so a daemon that stopped answering there held
+// `up` with nothing said. Each is killed at the step bound and said as its engine not answering, with the command.
+// `hangImageRead` makes the one read named by `hangs` a child that never closes; every other spawn answers as planned. The
+// bound's seconds are pinned by shape (`within N s`): the test's bound is 5 ms.
+const hangImageRead = async ({ env, plan, hangs, extra = {}, files = {} }) => {
+	const h = harness({ env: { PI_PROVIDER: "anthropic", ...env }, plan, listening: false, argv: ["--yes"], extra, files });
+	const real = h.deps.spawn;
+	const killed = [];
+	const spawn = (cmd, args, opts) => {
+		if ([cmd, ...args].join(" ") !== hangs) return real(cmd, args, opts);
+		h.calls.push({ cmd, args, opts });
+		return { stdout: { on() {} }, stderr: { on() {} }, on() { return this; }, kill: (sig) => killed.push(sig) };
+	};
+	const code = await runUp(["--yes"], { ...h.deps, spawn, dockerStepTimeoutMs: 5 });
+	const started = h.calls.filter((c) => ["run", "pull", "tag", "start", "create"].includes(c.args[0]) || c.args[1] === "create" || (c.cmd === "systemctl" && c.args.includes("start")));
+	return { h, code, killed, started, text: h.text().replace(/within \d+ s/g, "within N s"), init: h.initCalls.length, doctor: h.doctorCalls.length };
+};
+const CAPS_LABEL = '{{index .Config.Labels "dev.pi-dispatch.capabilities"}}';
+
+// Where no venue left in the pass can go on without the engine that did not answer, `up` ends there: nothing pulled, run,
+// created or started, and neither init nor doctor reached.
+test("up's image reads are bounded: each one hanging in turn, where nothing can go on without its engine, ends `up` with the engine and command named, and nothing started (#1040)", async () => {
+	const closing = (engine) => `\nup: cannot continue without ${engine}: fix the above, then re-run \`pi-dispatch up\`.\n`;
+	const dockerSaid = (cmd) => `✗ Docker daemon not answering\n    → \`${cmd}\` did not finish within N s: check that the daemon answers, then re-run\n`;
+	const podmanSaid = (cmd) => `✗ podman not answering\n    → \`${cmd}\` did not finish within N s: check that podman answers as this account, then re-run\n`;
+	const caps = (bin) => `${bin} image inspect --format ${CAPS_LABEL} pi-job:latest`;
+	const capsShown = (bin) => `${bin} image inspect --format '${CAPS_LABEL}' pi-job:latest`;
+	for (const [label, env, plan, hangs, said, engine, extra] of [
+		["the default job image's presence", {}, { "docker version": 0 }, "docker image inspect pi-job:latest", dockerSaid("docker image inspect pi-job:latest"), "Docker"],
+		["a PI_JOB_IMAGE's presence", { PI_JOB_IMAGE: PINNED }, { "docker version": 0 }, `docker image inspect ${PINNED}`, dockerSaid(`docker image inspect ${PINNED}`), "Docker"],
+		["the podman venue's presence, with no docker venue", { PI_BACKENDS: "podman" }, podmanPlan(), "podman image exists pi-job:latest", podmanSaid("podman image exists pi-job:latest"), "podman", podmanExtra()],
+		["a PI_JOB_IMAGE's presence on podman", { PI_BACKENDS: "podman", PI_JOB_IMAGE: PINNED }, podmanPlan(), `podman image exists ${PINNED}`, podmanSaid(`podman image exists ${PINNED}`), "podman", podmanExtra()],
+		["the openshell venue's presence read on docker", { PI_BACKENDS: "openshell" }, openshellPlan({ "docker version": 0, "docker image inspect --format": CAPS }), "docker image inspect pi-job:latest", dockerSaid("docker image inspect pi-job:latest"), "Docker"],
+		["the openshell capability read on docker", { PI_BACKENDS: "openshell" }, openshellPlan({ "docker version": 0, "docker image inspect pi-job:latest": 0 }), caps("docker"), dockerSaid(capsShown("docker")), "Docker"],
+		["the openshell venue's presence read on podman", { PI_BACKENDS: "openshell", PI_OPENSHELL_ENGINE: "podman" }, openshellPlan({ "podman version": 0, "podman image inspect": CAPS }), "podman image exists pi-job:latest", podmanSaid("podman image exists pi-job:latest"), "podman"],
+		["the openshell capability read on podman", { PI_BACKENDS: "openshell", PI_OPENSHELL_ENGINE: "podman" }, openshellPlan({ "podman version": 0, "podman image exists": 0 }), caps("podman"), podmanSaid(capsShown("podman")), "podman"],
+		// Beside a venue on the very engine that did not answer: that venue's every later step would ask it again.
+		["the openshell capability read on docker, beside local", { PI_BACKENDS: "local,openshell" }, openshellPlan({ "docker version": 0, "docker image inspect pi-job:latest": 0 }), caps("docker"), dockerSaid(capsShown("docker")), "Docker"],
+		["the openshell capability read on podman, beside podman", { PI_BACKENDS: "podman,openshell", PI_OPENSHELL_ENGINE: "podman" }, openshellPlan({ "podman version": 0, "podman image exists": 0 }), caps("podman"), podmanSaid(capsShown("podman")), "podman", podmanExtra()],
+	]) {
+		const r = await hangImageRead({ env, plan, hangs, extra });
+		assert.equal(r.code, 1, label);
+		assert.deepEqual(r.killed, ["SIGKILL"], `${label}: the silent read was killed, not waited on`);
+		assert.ok(r.text.includes(said), `${label}: ${r.text}`);
+		assert.ok(r.text.endsWith(closing(engine)), `${label}: and up ends there`);
+		assert.deepEqual(r.started, [], `${label}: nothing pulled, run, created or started`);
+		assert.equal(r.init, 0, `${label}: init not reached`);
+		assert.equal(r.doctor, 0, `${label}: doctor not reached`);
+	}
+});
+
+// Beside a venue on the OTHER engine, a read that overran is met as that venue's refused gate is: only its own steps are
+// skipped, the other venue's all run, and an openshell venue skipped so fails `up` at the end (issue #1040).
+test("up's image reads beside a venue on the other engine: only the venue that read it is skipped, the others' steps all run, and a skipped openshell venue fails up at the end (#1040)", async () => {
+	const PODMAN_DEPLOY = { "/deploy/egress-allowlist.conf": "x\n", "/deploy/deploy/egress-proxy.conf": "conf\n" };
+	const dockerValkey = (r) => r.h.calls.some((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("pi-dispatch-valkey"));
+	const quadletStarted = (r) => r.h.calls.some((c) => c.cmd === "systemctl" && c.args.includes("start"));
+	for (const [label, env, plan, hangs, extra] of [
+		["local beside openshell on podman, its capability read", { PI_BACKENDS: "local,openshell", PI_OPENSHELL_ENGINE: "podman" }, openshellPlan({ "docker version": 0, "docker image inspect": 0, "docker volume create": 0, "docker run": 0, "podman version": 0, "podman image exists": 0 }), `podman image inspect --format ${CAPS_LABEL} pi-job:latest`],
+		["local beside openshell on podman, its presence read", { PI_BACKENDS: "local,openshell", PI_OPENSHELL_ENGINE: "podman" }, openshellPlan({ "docker version": 0, "docker image inspect": 0, "docker volume create": 0, "docker run": 0, "podman version": 0, "podman image inspect": CAPS }), "podman image exists pi-job:latest"],
+	]) {
+		const r = await hangImageRead({ env, plan, hangs, extra });
+		assert.deepEqual(r.killed, ["SIGKILL"], label);
+		assert.match(r.text, /✗ podman not answering\n/, label);
+		assert.match(r.text, /\n {2}the other venues' steps below are unaffected; the openshell steps are skipped\n/, label);
+		assert.ok(dockerValkey(r), `${label}: the docker venue's Valkey still started`);
+		assert.equal(r.init, 1, `${label}: init ran`);
+		assert.equal(r.doctor, 1, `${label}: doctor ran`);
+		assert.match(r.text, /openshell\s+NOT ready: podman did not answer `podman image (inspect|exists)[^`]*` within N s/, `${label}: named in the summary`);
+		assert.equal(r.code, 1, `${label}: and up fails at the end`);
+		assert.ok(r.text.endsWith("\nup: the openshell venue is not usable yet (above); fix it, then re-run `pi-dispatch up`.\n"), label);
+	}
+	// podman beside openshell on docker: the openshell presence read on docker hangs, and the podman venue's Quadlet
+	// Valkey is still installed and started.
+	const pod = await hangImageRead({ env: { PI_BACKENDS: "podman,openshell", PI_EGRESS: "1" }, plan: openshellPlan({ "docker version": 0, "docker image inspect --format": CAPS, "podman image exists": 0, "podman inspect": 1, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" } }), hangs: "docker image inspect pi-job:latest", extra: podmanExtra(), files: PODMAN_DEPLOY });
+	assert.match(pod.text, /✗ Docker daemon not answering\n/);
+	assert.ok(quadletStarted(pod), "the podman venue's units still started");
+	assert.equal(pod.code, 1);
+	assert.match(pod.text, /openshell\s+NOT ready: docker did not answer `docker image inspect pi-job:latest` within N s/);
+	// The podman venue's own read beside local: the podman steps are skipped, the docker venue's all run, as after a
+	// refused podman gate.
+	const mixed = await hangImageRead({ env: { PI_BACKENDS: "local,podman" }, plan: { ...green, [PROXY_INSPECT]: proxyState("running"), "podman inspect": 1, systemctl: 0, "loginctl show-user": { code: 0, output: "Linger=yes\n" } }, hangs: "podman image exists pi-job:latest", extra: podmanExtra(), files: PODMAN_DEPLOY });
+	assert.match(mixed.text, /✗ podman not answering\n {4}→ `podman image exists pi-job:latest` did not finish within N s/);
+	assert.match(mixed.text, /\n {2}the docker steps above are unaffected; the podman steps below are skipped\n/);
+	assert.ok(!quadletStarted(mixed), "no podman unit started");
+	assert.equal(mixed.init, 1);
+	assert.equal(mixed.doctor, 1);
+	assert.match(mixed.text, /podman\s+NOT ready: podman did not answer `podman image exists pi-job:latest` within N s/);
+});
 test("up on podman,openshell (docker engine): the podman venue's Quadlet Valkey is the queue, so no docker Valkey runs (#715 review)", async () => {
 	const h = harness({
 		env: { PI_PROVIDER: "anthropic", PI_BACKENDS: "podman,openshell", PI_EGRESS: "1" },

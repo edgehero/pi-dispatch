@@ -1134,7 +1134,15 @@ export async function startWorker(
 	// other module takes `log` injected, and two tests pin the KEY SET of the fields object handed to an
 	// injected log (`run_record_failed`, `wait_check`); a `host` added at any call site would break them,
 	// while one added inside this closure cannot reach them.
-	const log = (event, fields = {}) => write(`${JSON.stringify({ event, ...fields, host: config.workerName })}\n`);
+	// `time` (issue #1040) is the line's wall time, ISO 8601 in UTC with milliseconds, from the injected clock, stamped here
+	// after the spread for the same reasons as `host`. A log with no time of its own (the macOS launchd service writes
+	// stdout to a plain file, as nssm does on Windows) could put the start numbers, `sandbox_reaper_pass` and
+	// `cpu_reserve_fail_open` in order but never line them up against another clock, such as a VM's view of a slow
+	// window (issue #1022). journald stamps each line itself, to the second in local time by default, and keeps both.
+	// The key is `time` and not `at` because two events already log an `at` of their own, a word for where
+	// (`budget_release_failed`, `openshell_bind_mounts_disabled`), which a stamp after the spread would replace on lines
+	// operators may already read. No worker event logs a `time` field (verified, spread and multi-line fields included).
+	const log = (event, fields = {}) => write(`${JSON.stringify({ event, ...fields, host: config.workerName, time: new Date(now()).toISOString() })}\n`);
 
 	// Issue #464 (gate round 2): the owner rule where the connection is made. `service install`, `up` and doctor judge
 	// the Valkey too, but a VALKEY_URL edited after they refused it, a 0.0.0.0 URL, or another account publishing on ::1

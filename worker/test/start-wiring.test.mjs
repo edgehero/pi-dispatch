@@ -2049,7 +2049,7 @@ test("envelope: a valid file boot-loads with its containment check, seeds the ne
 		assert.equal(loaded.delegation, true);
 		assert.ok(logs.some((l) => l.event === "envelope_watching" && l.path === b.envelope), "the live-edit watcher armed");
 		assert.equal(logs.find((l) => l.event === "worker_started").envelopeDigest, loaded.digest);
-		assert.deepEqual(logs.find((l) => l.event === "allocation_reconciled"), { event: "allocation_reconciled", why: "boot", mismatch: false, digest: loaded.digest, applied: loaded.digest, host: logs[0].host });
+		assert.deepEqual(logs.find((l) => l.event === "allocation_reconciled"), { event: "allocation_reconciled", why: "boot", mismatch: false, digest: loaded.digest, applied: loaded.digest, host: logs[0].host, time: logs.find((l) => l.event === "allocation_reconciled").time });
 		assert.equal(JSON.parse(await redis.get("alloc:plan")).writer, "default", "the neutral split is persisted");
 		assert.equal(typeof captured.allocation.reconcile, "function");
 		assert.equal(captured.allocation.current().digest, loaded.digest);
@@ -2770,6 +2770,32 @@ test("a call site that passes its own host is OVERRIDDEN, never trusted", { skip
 	assert.equal(forged.jobId, "j1", "and every other field the caller passed survives");
 });
 
+// Issue #1040: a log with no time of its own (the macOS launchd service's file) could order the lines but never line
+// them up against another clock. The closure stamps the line's time beside `host`, from the injected clock, under `time`,
+// a key no worker event logs a field of its own under.
+test("every log line carries `time`, the injected clock's time in ISO 8601 UTC with milliseconds, beside `host`, and a call site cannot override it (#1040)", { skip }, async () => {
+	let clock = Date.parse("2026-11-22T21:07:03.042Z");
+	const { logs, deps } = await runStart({
+		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		now: () => clock,
+	});
+	const emitted = logs.filter((l) => l.event);
+	assert.ok(emitted.length > 0);
+	for (const line of emitted) {
+		assert.equal(line.time, "2026-11-22T21:07:03.042Z", `every line, including ${line.event}`);
+		assert.equal(line.host, "mac-mini-1", `beside the host, ${line.event}`);
+		assert.equal(Object.keys(line).at(-1), "time", `the last key, so a line ends on its time, ${line.event}`);
+	}
+	// Read at the write, not at boot: a later line carries the clock's later time, and a caller's own `time` is replaced.
+	clock += 1_500;
+	const { logs: later } = whileCapturingLogs(() => deps.log("forged", { time: "2001-01-01T00:00:00.000Z", at: "probe", jobId: "j1" }));
+	const forged = later.find((l) => l.event === "forged");
+	assert.equal(forged.time, "2026-11-22T21:07:04.542Z");
+	assert.equal(forged.jobId, "j1", "and every other field the caller passed survives");
+	assert.equal(forged.at, "probe", "an `at` of the caller's own (two events log one, a word for where) is left as it is");
+});
+
 test("the worker is NAMED, the registry is closed on shutdown, and the boot line announces both host and digest", { skip }, async () => {
 	const { captured, logs } = await runStart({
 		env: { PI_WORKER_NAME: "mac-mini-1", VALKEY_URL },
@@ -3443,7 +3469,7 @@ test("a TERMINAL failed attempt comments ONCE through the real adapter; a retrie
 	await settleListeners();
 	assert.deepEqual(posted, ["Failed: an error stopped this job and it will not be retried further. Ask the operator to check the worker log."], "one fixed sentence, never err.message");
 	const terminal = parseLines(bootLines.slice(from));
-	assert.deepEqual(Object.keys(terminal.find((l) => l.event === "job_failed")), ["event", "jobId", "attempt", "reason", "host"], "the existing line's key set is untouched");
+	assert.deepEqual(Object.keys(terminal.find((l) => l.event === "job_failed")), ["event", "jobId", "attempt", "reason", "host", "time"], "the existing line's key set is untouched");
 
 	// A RETRIED attempt (no finishedOn): the log line exactly as before, and no comment of any kind --
 	// a flaky daemon must not post three comments for one recovery.
@@ -3453,7 +3479,7 @@ test("a TERMINAL failed attempt comments ONCE through the real adapter; a retrie
 	await settleListeners();
 	assert.deepEqual(posted, [], "a retried attempt must not comment");
 	const retried = parseLines(bootLines.slice(from2));
-	assert.deepEqual(Object.keys(retried.find((l) => l.event === "job_failed")), ["event", "jobId", "attempt", "reason", "host"]);
+	assert.deepEqual(Object.keys(retried.find((l) => l.event === "job_failed")), ["event", "jobId", "attempt", "reason", "host", "time"]);
 	assert.ok(!retried.some((l) => l.event === "comment" || l.event === "comment_failed"), "no adapter activity at all on a retried attempt");
 });
 
@@ -3499,7 +3525,7 @@ test("PI_ON_FAILURE fires for the paid terminals only: terminal-failed and polic
 
 	const terminal = await fired(() => handlers.failed({ id: "j1", data: { kind: "github", repo: "o/r" }, attemptsMade: 2, finishedOn: 9 }, new Error("x")));
 	assert.equal(terminal.length, 1, "the final infra failure pages");
-	assert.deepEqual(Object.keys(terminal[0]), ["event", "jobId", "code", "detail", "host"], "the pinned key set, host stamped by the closure");
+	assert.deepEqual(Object.keys(terminal[0]), ["event", "jobId", "code", "detail", "host", "time"], "the pinned key set, host stamped by the closure");
 	assert.equal(terminal[0].detail, "unresolvable");
 
 	assert.equal((await fired(() => handlers.completed({ id: "j2" }, { outcome: "policy", reason: "worker-abort" }))).length, 1, "the 30-minute kill pages");
@@ -3548,8 +3574,8 @@ test("with PI_ON_FAILURE unset, a terminal failure produces no on_failure line a
 	await settleListeners();
 	const lines = parseLines(bootLines.slice(from));
 	assert.ok(!lines.some((l) => l.event === "on_failure"), "unset means not constructed: no spawn, no line, byte-identical");
-	assert.deepEqual(Object.keys(lines.find((l) => l.event === "job_failed")), ["event", "jobId", "attempt", "reason", "host"]);
-	assert.deepEqual(Object.keys(lines.find((l) => l.event === "job_completed")), ["event", "jobId", "outcome", "reason", "host"]);
+	assert.deepEqual(Object.keys(lines.find((l) => l.event === "job_failed")), ["event", "jobId", "attempt", "reason", "host", "time"]);
+	assert.deepEqual(Object.keys(lines.find((l) => l.event === "job_completed")), ["event", "jobId", "outcome", "reason", "host", "time"]);
 });
 
 test("hook publication follows the worker's existing terminal rules; deleting history and leaving the hook unset changes no result (#775)", { skip }, async () => {
@@ -3647,7 +3673,7 @@ test("a finished job's model attempt key gets its expiry in the listeners: compl
 	// An expiry that fails is one fixed line, the job id and nothing of the error.
 	refuse = true;
 	const failedLines = await drive(() => handlers.completed({ id: "j3", queueName }, { outcome: "completed" }));
-	assert.deepEqual(failedLines.filter((l) => l.event === "model_attempt_finish_failed").map((l) => Object.keys(l)), [["event", "jobId", "host"]]);
+	assert.deepEqual(failedLines.filter((l) => l.event === "model_attempt_finish_failed").map((l) => Object.keys(l)), [["event", "jobId", "host", "time"]]);
 	assert.equal(failedLines.find((l) => l.event === "model_attempt_finish_failed").jobId, "j3");
 	assert.ok(failedLines.some((l) => l.event === "job_completed"), "the terminal line is unchanged");
 	// A job with no queue name to read (this harness's worker has none either) names no key, so nothing is sent.
@@ -3666,7 +3692,7 @@ test("a terminal stall failure of a job whose record says this attempt completed
 	assert.ok(!lines.some((l) => l.event === "job_failed"), "job_failed is not the terminal line of a job that completed");
 	const terminal = lines.filter((l) => l.event === "job_lost_lock_after_completion");
 	assert.equal(terminal.length, 1, "exactly one terminal line (REQ-LOCAL-JOB-VISIBILITY)");
-	assert.deepEqual(Object.keys(terminal[0]), ["event", "jobId", "outcome", "host"]);
+	assert.deepEqual(Object.keys(terminal[0]), ["event", "jobId", "outcome", "host", "time"]);
 	assert.equal(terminal[0].jobId, "gh-41");
 	assert.equal(terminal[0].outcome, "completed");
 });
@@ -3724,7 +3750,7 @@ test("a lost-lock job whose record is a paid policy stop pages as that stop, onc
 	assert.deepEqual(posted, [], "the processor already posted the stop's own sentence before it returned");
 	const pages = paid.filter((l) => l.event === "on_failure");
 	assert.equal(pages.length, 1, "the page the completed listener never got to send");
-	assert.deepEqual(paid.find((l) => l.event === "job_lost_lock_after_completion"), { event: "job_lost_lock_after_completion", jobId: "gh-p", outcome: "policy", reason: "runner-policy", host: paid.find((l) => l.event === "job_lost_lock_after_completion").host });
+	assert.deepEqual(paid.find((l) => l.event === "job_lost_lock_after_completion"), { event: "job_lost_lock_after_completion", jobId: "gh-p", outcome: "policy", reason: "runner-policy", host: paid.find((l) => l.event === "job_lost_lock_after_completion").host, time: paid.find((l) => l.event === "job_lost_lock_after_completion").time });
 	const free = await drive(lostLockJob("gh-q"), await stalledError());
 	assert.ok(!free.some((l) => l.event === "on_failure"), "a free refusal pages nobody, exactly as the completed listener decides");
 	assert.deepEqual(posted, []);
@@ -3740,7 +3766,7 @@ test("a lost-lock job whose record a newer pi-dispatch wrote is settled by its o
 	assert.ok(!lines.some((l) => l.event === "on_failure"), "and no page from a reason this build cannot read");
 	const terminal = lines.filter((l) => l.event === "job_lost_lock_after_completion");
 	assert.equal(terminal.length, 1);
-	assert.deepEqual(Object.keys(terminal[0]), ["event", "jobId", "outcome", "host"], "the outcome, without the reason");
+	assert.deepEqual(Object.keys(terminal[0]), ["event", "jobId", "outcome", "host", "time"], "the outcome, without the reason");
 	assert.equal(terminal[0].outcome, "policy");
 });
 
@@ -4907,7 +4933,7 @@ test("a podman default whose image lacks anyUid is said at boot, with the venue 
 		jobUserIdentity: PODMAN_ID,
 		bootImage: { ok: true, image: "pi-job:latest", capabilities: [] },
 	});
-	assert.deepEqual(logs.find((l) => l.event === "job_image_any_uid_unsupported"), { event: "job_image_any_uid_unsupported", image: "pi-job:latest", backend: "podman", host: logs[0].host });
+	assert.deepEqual(logs.find((l) => l.event === "job_image_any_uid_unsupported"), { event: "job_image_any_uid_unsupported", image: "pi-job:latest", backend: "podman", host: logs[0].host, time: logs.find((l) => l.event === "job_image_any_uid_unsupported").time });
 	// uid 1001 is the image's own: no anyUid needed, so nothing is said, and HOME beside --user is.
 	const own = await runStart({ env: { PI_BACKENDS: "podman", PI_FORWARD_ENV: "HOME" }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(), jobUserIdentity: { ...PODMAN_ID, euid: 1001, egid: 1001 }, bootImage: { ok: true, capabilities: [] } });
 	assert.ok(!own.logs.some((l) => l.event === "job_image_any_uid_unsupported"));
@@ -5254,7 +5280,7 @@ test("the sandbox reaper holds a directory its OWN runtime reports open, whateve
 				return a;
 			},
 		});
-		return { left: left(root), asked, skipped: logs.filter((l) => l.event === "sandbox_reaper_skipped").map(({ event, host, ...f }) => f) };
+		return { left: left(root), asked, skipped: logs.filter((l) => l.event === "sandbox_reaper_skipped").map(({ event, host, time, ...f }) => f) };
 	};
 
 	for (const backends of ["podman", "local", "local,podman"]) {
@@ -5499,7 +5525,7 @@ test("boot logs whether it sends a Valkey password, never the value, and one it 
 	const judged = async () => ({ url: pinnedUrl, servername: null, pinned: { address: "127.0.0.1", port: 6399, heldBy: "this account" }, notes: [] });
 	const none = await runStart({ env: {}, judgeValkey: judged });
 	const line = none.logs.find((l) => l.event === "valkey_password");
-	assert.deepEqual(Object.keys(line).sort(), ["event", "host", "set"], "whether one is set, and nothing else");
+	assert.deepEqual(Object.keys(line).sort(), ["event", "host", "set", "time"], "whether one is set, and nothing else");
 	assert.equal(line.set, false);
 	const pw = "c0ffee00".repeat(8);
 	const withPw = await runStart({ env: { VALKEY_PASSWORD: pw }, judgeValkey: judged });
@@ -6587,7 +6613,7 @@ test("issue #645: with a store, the boot builds every durable dep and hands it t
 	assert.deepEqual(t.opened, [{ runId: "gh-1", attempt: 1 }], "which opens the run checkpointer per attempt");
 	assert.equal(started.checkpointsDir, store, "doctor-visible: where checkpoints go");
 	assert.equal(started.durableRuns, true);
-	assert.deepEqual(logs.find((l) => l.event === "durable_runs"), { event: "durable_runs", checkpointsDir: store, checkpointer: true, pointerReads: true, host: started.host });
+	assert.deepEqual(logs.find((l) => l.event === "durable_runs"), { event: "durable_runs", checkpointsDir: store, checkpointer: true, pointerReads: true, host: started.host, time: logs.find((l) => l.event === "durable_runs").time });
 
 	// Without a store: nothing pretends to checkpoint; the pointer read and the enqueue still exist (a stall is noticed on
 	// any host), and the opener is exactly what it was.
@@ -6728,7 +6754,7 @@ test("issue #645: no pointer, an unarmed job, or a recovery that was not enqueue
 	const lines = await a.drive(stalledArmed("gh-n1"), await stalledError());
 	assert.deepEqual(a.posted, [FAILED_SENTENCE]);
 	assert.equal(lines.filter((l) => l.event === "on_failure").length, 1);
-	assert.deepEqual(lines.find((l) => l.event === "job_recovery_skipped"), { event: "job_recovery_skipped", jobId: "gh-n1", reason: "no-checkpoint", host: lines.find((l) => l.event === "job_recovery_skipped").host });
+	assert.deepEqual(lines.find((l) => l.event === "job_recovery_skipped"), { event: "job_recovery_skipped", jobId: "gh-n1", reason: "no-checkpoint", host: lines.find((l) => l.event === "job_recovery_skipped").host, time: new Date(DURABLE_NOW).toISOString() });
 	assert.equal(none.enqueued.length, 0);
 	assert.equal(a.records.length, 0, "no recovery record: the job_failed line and the comment are today's");
 
@@ -6836,7 +6862,7 @@ test("issue #645: the boot sweeps orphaned job dirs older than the job timeout, 
 		assert.equal(existsSync(join(jobsDir, "job-point1")), true, "the dir a pointer of this host names is kept for its salvage");
 		assert.equal(existsSync(join(jobsDir, "job-link01")), true, "a link is never removed through");
 		assert.equal(existsSync(join(outside, "keep.txt")), true, "nor followed");
-		assert.deepEqual(logs.find((l) => l.event === "job_dirs_swept"), { event: "job_dirs_swept", removed: 1, kept: 3, failed: 0, host: name });
+		assert.deepEqual(logs.find((l) => l.event === "job_dirs_swept"), { event: "job_dirs_swept", removed: 1, kept: 3, failed: 0, host: name, time: new Date(DURABLE_NOW).toISOString() });
 		// The recovery, landing here, salvages it: one checkpoint of kind salvage past the pointer's seq, then the dir goes.
 		const pointer = JSON.parse(await redis.get(checkpointPointerKey(runId)));
 		assert.deepEqual(await deps.salvageCheckpoint({ runId, pointer, attempt: 2 }), { salvaged: true, seq: 4 });
@@ -7019,7 +7045,7 @@ function assertSettledElsewhere({ lines, after }, { id, text, t, posted, label }
 	assert.ok(!lines.some((l) => l.event === "job_failed" || l.event === "job_recovery_skipped"), `${label}: not the failure line`);
 	const terminal = lines.filter((l) => l.event === "job_lost_lock_after_completion");
 	assert.equal(terminal.length, 1, `${label}: exactly one terminal line (REQ-LOCAL-JOB-VISIBILITY)`);
-	assert.deepEqual(Object.keys(terminal[0]), ["event", "jobId", "outcome", "host"], `${label}: the outcome, without the reason`);
+	assert.deepEqual(Object.keys(terminal[0]), ["event", "jobId", "outcome", "host", "time"], `${label}: the outcome, without the reason`);
 	assert.deepEqual([terminal[0].jobId, terminal[0].outcome], [id, "failed"], label);
 	return terminal[0].host;
 }
