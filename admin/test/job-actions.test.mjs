@@ -1231,8 +1231,9 @@ test("a client's or a registry's error reaches no refusal unbounded: the planner
   const logsDir = tempDir("pd-737-bounded-words-");
   assert.deepEqual(await planRerun({ ...fakes, logsDir, jobId: "gh-1", redisFn: boom, queueFn: boom }), { refusal: `could not read the run or its job (${bounded}); nothing was queued`, unread: true });
   assert.deepEqual(await planParkedAnswer({ ...fakes, logsDir, jobId: "gh-1", text: "yes", by: "alice", triggersPath: join(logsDir, "triggers.json"), redisFn: boom, queueFn: boom }), { refusal: `could not read the parked run or its job (${bounded}); nothing was queued` });
-  assert.deepEqual(await planSteer({ ...fakes, jobId: "gh-1", text: "x", by: "alice", redisFn: boom, queueFn: boom }), { refusal: `Nothing was sent: could not read the job or its inbox (${bounded})` });
-  assert.deepEqual(await planSteerWithdraw({ ...fakes, jobId: "gh-1", id: "a".repeat(32), redisFn: boom, queueFn: boom }), { refusal: `could not read the job or its inbox (${bounded}); nothing was changed` });
+  // A read that threw is Valkey's refusal, 503 (issue #965), as a failed job's preview answers it.
+  assert.deepEqual(await planSteer({ ...fakes, jobId: "gh-1", text: "x", by: "alice", redisFn: boom, queueFn: boom }), { refusal: `Nothing was sent: could not read the job or its inbox (${bounded})`, status: 503 });
+  assert.deepEqual(await planSteerWithdraw({ ...fakes, jobId: "gh-1", id: "a".repeat(32), redisFn: boom, queueFn: boom }), { refusal: `could not read the job or its inbox (${bounded}); nothing was changed`, status: 503 });
   // The registry's read failed with a client's words: the sentence says so, without them.
   const blind = () => ({ on() {}, smembers: async () => { throw new Error(words); }, scan: async () => ["0", []], disconnect() {} });
   const empty = (_c, { name }) => ({ name, getJob: async () => undefined, close: async () => {} });
@@ -1500,9 +1501,9 @@ test("a failed-job preview and both steer previews answer within their bound whe
   const failed = await timed(planFailedBulk(common));
   assert.deepEqual(failed.res, { unreachable: "timed out reading the failed jobs" });
   const steer = await timed(planSteer({ ...common, jobId: "gh-1", text: "look at the tests", by: "rob" }));
-  assert.deepEqual(steer.res, { refusal: "Nothing was sent: the job or its inbox did not answer within 0.06 seconds" });
+  assert.deepEqual(steer.res, { refusal: "Nothing was sent: the job or its inbox did not answer within 0.06 seconds", status: 503 });
   const withdraw = await timed(planSteerWithdraw({ ...common, jobId: "gh-1", id: MESSAGE }));
-  assert.deepEqual(withdraw.res, { refusal: "the job or its inbox did not answer within 0.06 seconds; nothing was changed" });
+  assert.deepEqual(withdraw.res, { refusal: "the job or its inbox did not answer within 0.06 seconds; nothing was changed", status: 503 });
   for (const { ms } of [failed, steer, withdraw]) assert.ok(ms < 1500, `${ms} ms`);
   assert.deepEqual(closes, ["pi-jobs", "pi-jobs", "pi-jobs"], "each queue's close was started, and none was waited for");
   assert.deepEqual(conns, Array(3).fill({ failFast: true, commandTimeoutMs: 5000 }), "every queue is the console's bounded kind");
@@ -1524,9 +1525,9 @@ test("a steer preview whose inbox read never answers ends at its bound too, on a
   };
   const common = { url: "redis://x", redisFn, queueFn, parseConnectionFn: () => ({}), planTimeoutMs: 60 };
   const steer = await timed(planSteer({ ...common, jobId: "gh-1", text: "look at the tests", by: "rob" }));
-  assert.deepEqual(steer.res, { refusal: "Nothing was sent: the job or its inbox did not answer within 0.06 seconds" });
+  assert.deepEqual(steer.res, { refusal: "Nothing was sent: the job or its inbox did not answer within 0.06 seconds", status: 503 });
   const withdraw = await timed(planSteerWithdraw({ ...common, jobId: "gh-1", id: MESSAGE }));
-  assert.deepEqual(withdraw.res, { refusal: "the job or its inbox did not answer within 0.06 seconds; nothing was changed" });
+  assert.deepEqual(withdraw.res, { refusal: "the job or its inbox did not answer within 0.06 seconds; nothing was changed", status: 503 });
   // The fleet discovery's client first, then the inbox's: bounded, with its offline queue, dropped at once.
   assert.deepEqual(made.filter((o) => o !== null), Array(2).fill({ commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }));
   assert.ok(dropped >= 2, "and the inbox client is dropped, never left to a read that does not answer");

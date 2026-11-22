@@ -125,7 +125,8 @@ export async function readSandboxSessions(redis, { hosts = [], now = Date.now, t
  * What it answers when Valkey fails goes by where it failed (issue #843), so that "nothing was changed" is said only of
  * a request that was not written:
  * - the read of the session, before anything was written: it throws without `valkeyMayStillRun`, whatever the client put
- *   on a read that reached a socket. Nothing was changed.
+ *   on a read that reached a socket, and with `valkeyNotSent` (issue #965) where the read got no answer; Valkey's own
+ *   error reply is thrown as it is. Nothing was changed.
  * - the request's SET, rejected without the mark (it was never sent, or Valkey refused it): it throws as it is.
  * - the SET, rejected with the mark (it reached a Valkey that then stopped answering): the request may stand when Valkey
  *   wakes, so its removal is sent behind it, not waited for, and the error keeps its mark.
@@ -147,10 +148,14 @@ export async function requestSandboxEnd({ redis, host, id, nonce, containerId, n
 	try {
 		held = await sandboxBounded(redis.get(sandboxSessionKey(host, id)), timeoutMs);
 	} catch (err) {
-		if (err?.valkeyMayStillRun !== true) throw err;
-		// A new error, not the client's with its mark taken off: ioredis hands one error to every command it flushes, and
-		// another caller's write may be reading the mark on that one.
-		throw Object.assign(new Error(err.message, { cause: err }), typeof err.code === "string" ? { code: err.code } : {});
+		// Valkey's own error reply (a `ReplyError`), or a refusal this project raised (`valkeyRefused`), is an answer
+		// (connection.mjs's rule): thrown as it is, with no mark, and nothing was written.
+		if (err?.name === "ReplyError" || err?.valkeyRefused === true) throw err;
+		// Any other failure got no answer: a timeout, a connection closed, refused or not up. A new error, never the
+		// client's with its mark taken off or one added: ioredis hands one error to every command it flushes, and another
+		// caller's write may be reading the marks on that one. It carries `valkeyNotSent` (issue #965): this read got no
+		// answer before anything was written, so the console says Valkey could not be reached and nothing was changed.
+		throw Object.assign(new Error(err?.message ?? String(err), { cause: err }), typeof err?.code === "string" ? { code: err.code } : {}, { valkeyNotSent: true });
 	}
 	const current = parseSandboxSession(held);
 	if (!current || current.nonce !== nonce || current.containerId !== containerId) return { refused: "session-changed", message: "The sandbox session ended or changed; reload before asking to end it." };

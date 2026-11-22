@@ -69,7 +69,7 @@ import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { hostQueueName } from "@edgehero/pi-dispatch/queue";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { PAUSE_WINDOW_FIELDS, heldPauseWindows, parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
-import { auditedWrite } from "../audited-write.mjs";
+import { AGENT_REFUSED, AGENT_UNCONFIRMED, auditedWrite } from "../audited-write.mjs";
 import { pauseWindowsNewerRefusal } from "../newer-release.mjs";
 import { fieldNamed, NO_EXPLANATION, switchShortNote, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
@@ -449,9 +449,13 @@ async function applyFile(entry, ctx) {
   return { ok: true, ...(res?.pending ? { pending: String(res.pending) } : {}), ...(res?.warning ? { warning: String(res.warning) } : {}) };
 }
 
-/** A planner's `{ refusal }` / `{ plan }` as a preview's refusal or the plan. */
+/**
+ * A planner's `{ refusal }` / `{ plan }` as a preview's refusal or the plan. A refusal keeps the planner's HTTP `status`
+ * (issue #965: a steer's and a withdrawal's preview that could not read Valkey answer 503, the bar's Valkey state with
+ * Try again, as a failed job's does); a refusal without one is a 400, the change refused, as before.
+ */
 function planned(result) {
-  if (result?.refusal) return { refusal: String(result.refusal) };
+  if (result?.refusal) return { refusal: String(result.refusal), ...(Number.isInteger(result.status) ? { status: result.status } : {}) };
   if (result?.unchanged) return { unchanged: String(result.unchanged) };
   if (!result?.plan) return { refusal: "the change could not be planned" };
   return { plan: result.plan };
@@ -2735,12 +2739,10 @@ function actionCtx(ctx) {
 
 /**
  * The closed words an agent's failed write is recorded and answered with, where a person's row carries the sentence:
- * `action-refused` for a write that was refused before it was sent, and `action-unconfirmed` (issue #961) for one that
- * was sent and not confirmed (a `partial` answer, or a write the console's stop cut): "refused" was not true of a run
- * that may be queued.
+ * `action-refused` and `action-unconfirmed` (issue #961). They live beside `auditedWrite` (audited-write.mjs), whose
+ * row for a write that threw takes them too (issue #965), and are named here for this table's readers.
  */
-export const AGENT_REFUSED = "action-refused";
-export const AGENT_UNCONFIRMED = "action-unconfirmed";
+export { AGENT_REFUSED, AGENT_UNCONFIRMED };
 /**
  * The closed word of the second `ok` row an agent's fleet pause or resume gets when it landed over a set of queues that
  * may be short (issue #964, `auditedWrite`'s `note`), where a person's row carries the sentence.
@@ -3098,6 +3100,11 @@ async function confirmOne(ctx, action, entry, { actor, tag, actx, flight }) {
     // It reached a Valkey that then stopped answering. Whether it ran is not known here, and may not be decided yet, so
     // neither "nothing was changed" nor "it will be made" is true.
     if (e?.valkeyMayStillRun) return refuse(ctx, "confirm", 500, `Valkey did not confirm the ${action.name} change, so it may or may not have been made. Look again once Valkey answers; the console's log has the reason`, "partial");
+    // The code that threw knows a Valkey read or connect failed before anything was sent (issue #965, `valkeyNotSent`:
+    // the sandbox End's read of the session, an allocation write's client that did not connect): Valkey's refusal, as a
+    // write that answered `unreachable` gets, with Try again. Any other throw keeps the sentence below, which names no
+    // cause it does not know.
+    if (e?.valkeyNotSent) return refuse(ctx, "confirm", 503, VALKEY_UNREACHABLE, "valkey");
     return refuse(ctx, "confirm", 500, `the ${action.name} change could not be made; nothing was changed, and the console's log has the reason`, "failed");
   }
   if (entry.payload?.setupRef) deps.actionDeps?.setup?.discard?.(entry.payload.setupRef);

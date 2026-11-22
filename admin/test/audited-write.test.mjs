@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { makeConsoleAudit, verifyConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
-import { AUDIT_REFUSAL, auditedWrite, defaultFailure, panelActor, panelWrite, writeTicket } from "../src/audited-write.mjs";
+import { AGENT_REFUSED, AGENT_UNAVAILABLE, AGENT_UNCONFIRMED, AUDIT_REFUSAL, auditedWrite, defaultFailure, panelActor, panelWrite, writeTicket } from "../src/audited-write.mjs";
 import { stripAnsi } from "../src/style.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -96,6 +96,38 @@ test("a write that may still have run says so in its failed row's reason, since 
   const rows = rowsOf(logsDir);
   assert.equal(rows[1].outcome, "failed");
   assert.equal(rows[1].reason, "the write threw (ETIMEDOUT); Valkey did not confirm it, so it may or may not have been made");
+  assert.equal(verifyConsoleAudit({ logsDir }).ok, true);
+});
+
+test("a write that threw is one closed word in an agent's row, by what it may have done, and a sentence in a person's (#965)", async () => {
+  const logsDir = tempDir("pd-965-audited-write-");
+  const audit = makeConsoleAudit({ logsDir });
+  const AGENT = { ...ACTOR, role: "agent" };
+  const lost = () => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true });
+  const unsent = () => Object.assign(new Error("Valkey did not connect within 6 seconds"), { valkeyNotSent: true });
+  const plain = () => Object.assign(new Error("boom"), { code: "EBOOM" });
+  // A throw that knows Valkey could not be reached takes the word the caller's judge gives an unreachable answer: the
+  // tools' `action-unavailable`; a judge with none of its own (the default, the console's) leaves `action-refused`.
+  const tools = (r) => (r?.unreachable ? AGENT_UNAVAILABLE : r?.ok === true ? null : AGENT_REFUSED);
+  const cases = [
+    [AGENT, "cancel-active", lost, AGENT_UNCONFIRMED],
+    [AGENT, "cancel-active", unsent, AGENT_REFUSED],
+    [AGENT, "cancel-active", unsent, AGENT_UNAVAILABLE, tools],
+    [AGENT, "cancel-active", plain, AGENT_REFUSED, tools],
+    // A host setup step acts in several steps, so a throw may come after some of them landed.
+    [AGENT, "setup-worker-install", plain, AGENT_UNCONFIRMED],
+    [ACTOR, "sandbox-end", unsent, "the write threw (error); Valkey could not be reached, so nothing was changed"],
+    [ACTOR, "sandbox-end", unsent, "the write threw (error); Valkey could not be reached, so nothing was changed", tools],
+    [ACTOR, "setup-worker-install", plain, "the write threw (EBOOM)"],
+  ];
+  for (const [actor, kind, error, reason, failure = undefined] of cases) {
+    await assert.rejects(auditedWrite({ audit, actor, kind, target: "t", ...(failure ? { failure } : {}) }, async () => { throw error(); }));
+    assert.deepEqual(rowsOf(logsDir).slice(-2).map((r) => [r.kind, r.outcome, r.reason ?? null]), [[kind, "ok", null], [kind, "failed", reason]], `${actor.role} ${kind} ${reason}`);
+  }
+  // A synchronous throw takes the same word.
+  assert.throws(() => auditedWrite({ audit, actor: AGENT, kind: "limit-add", target: "t" }, () => { throw plain(); }), /boom/);
+  assert.equal(rowsOf(logsDir).at(-1).reason, AGENT_REFUSED);
+  assert.deepEqual([AGENT_REFUSED, AGENT_UNCONFIRMED, AGENT_UNAVAILABLE], ["action-refused", "action-unconfirmed", "action-unavailable"]);
   assert.equal(verifyConsoleAudit({ logsDir }).ok, true);
 });
 

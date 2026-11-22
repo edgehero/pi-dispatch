@@ -381,11 +381,14 @@ test("the budget writes on a Valkey that stops answering: an envelope's digest, 
       const got = await clocked(write());
       assert.equal(got.res.thrown?.message, `Valkey did not connect within ${CONNECT / 1000} seconds`, name);
       assert.equal(got.res.thrown?.valkeyMayStillRun, undefined, name);
+      assert.equal(got.res.thrown?.valkeyNotSent, true, name);
       assert.ok(got.ms < CONNECT + 2000, `${name}: ${got.ms} ms`);
     }
+    // The envelope's write too, before its key or its file (issue #965): the same error, thrown on with the same mark.
     const unsent = await clocked(writeEnvelope(envelope(proxy.url)));
-    assert.match(unsent.res.invalid, /^could not reach Valkey to record the new envelope's digest/);
-    assert.equal(unsent.res.partial, undefined);
+    assert.equal(unsent.res.thrown?.message, `Valkey did not connect within ${CONNECT / 1000} seconds`);
+    assert.equal(unsent.res.thrown?.valkeyNotSent, true);
+    assert.ok(unsent.ms < CONNECT + 2000, `${unsent.ms} ms`);
     assert.equal(readFileSync(files.envelope, "utf8"), before);
   } finally {
     proxy.thaw();

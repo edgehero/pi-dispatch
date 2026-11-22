@@ -66,18 +66,30 @@ const lostAnswer = () => Object.assign(new Error("Command timed out"), { code: "
 const settled = () => new Promise((resolve) => setImmediate(resolve));
 const sessionRead = (ack) => async (key) => (key === sandboxSessionKey(session.host, session.id) ? JSON.stringify(session) : ack(key));
 
-test("End's read of the session fails without the mark, whatever the client put on it: nothing was written", async () => {
+test("End's read of the session fails without the mark, whatever the client put on it, and says nothing was sent: nothing was written", async () => {
 	const shared = lostAnswer();
 	const redis = store({ get: async () => { throw shared; } });
 	const err = await requestSandboxEnd({ redis, ...session, now: () => at, timeoutMs: null }).catch((e) => e);
 	assert.equal(err.message, "Command timed out");
 	assert.equal(err.code, "ETIMEDOUT");
 	assert.equal(err.valkeyMayStillRun, undefined, "a read that reached a socket changed nothing");
+	assert.equal(err.valkeyNotSent, true, "issue #965: the console says Valkey could not be reached and nothing was changed");
 	assert.equal(shared.valkeyMayStillRun, true, "the client's own error keeps its mark: ioredis hands one error to every command it flushes");
 	assert.equal(err.cause, shared);
 	assert.equal(redis.calls.length, 0, "no request, and nothing to take back");
+	// An unmarked error, and this module's own timer, are said the same way, on an error of this read's own.
 	const plain = new Error("Stream isn't writeable and enableOfflineQueue options is false");
-	assert.equal(await requestSandboxEnd({ redis: store({ get: async () => { throw plain; } }), ...session, now: () => at, timeoutMs: null }).catch((e) => e), plain, "an unmarked error is thrown as it is");
+	const unsent = await requestSandboxEnd({ redis: store({ get: async () => { throw plain; } }), ...session, now: () => at, timeoutMs: null }).catch((e) => e);
+	assert.deepEqual([unsent.message, unsent.code, unsent.valkeyNotSent, unsent.cause], [plain.message, undefined, true, plain]);
+	assert.equal(plain.valkeyNotSent, undefined, "the client's error gains no mark another command could read");
+	const late = await requestSandboxEnd({ redis: store({ get: () => new Promise(() => {}) }), ...session, now: () => at, timeoutMs: 20 }).catch((e) => e);
+	assert.deepEqual([late.message, late.valkeyNotSent], ["sandbox control timed out", true]);
+	// Valkey's own error reply, or a refusal this project raised, is an answer: Valkey was reached, so no mark says it was not.
+	for (const answer of [Object.assign(new Error("NOPERM this user has no permissions to run the 'get' command"), { name: "ReplyError" }), Object.assign(new Error("database 9 is out of range"), { valkeyRefused: true })]) {
+		const said = await requestSandboxEnd({ redis: store({ get: async () => { throw answer; } }), ...session, now: () => at, timeoutMs: null }).catch((e) => e);
+		assert.equal(said, answer, "thrown as it is");
+		assert.equal(said.valkeyNotSent, undefined);
+	}
 });
 
 test("End's request that was never sent, or that Valkey refused, changed nothing and takes nothing back", async () => {

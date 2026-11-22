@@ -1911,8 +1911,9 @@ async function findSteerJob({ url, jobId, redisFn, queueFn, parseConnectionFn, t
 
 /**
  * Plan a MESSAGE into a running job (issue #646, REQ-STEER-RUNNING-JOB), typed into the console or the panel. Free;
- * `{ plan }` or `{ refusal }`. The CLI's `pi-dispatch steer` (worker/src/steer-cli.mjs) on the same footing, with the
- * same order of refusals, each one sentence an operator can act on:
+ * `{ plan }` or `{ refusal }`, with `status: 503` where Valkey did not answer a read (issue #965). The CLI's
+ * `pi-dispatch steer` (worker/src/steer-cli.mjs) on the same footing, with the same order of refusals, each one sentence
+ * an operator can act on:
  *
  *   - a `source` other than `console` or `panel`, then a `by` that is not a token-name word (the console's session
  *     name; the panel's `panel`), then a mode other than `steer` or `followUp`;
@@ -1978,15 +1979,21 @@ export async function planSteer({
     const open = await steerInbox.isOpen({ redis, runId: found.runId });
     if (open !== true) {
       if (open === false) return { refusal: "Nothing was sent: the run is not accepting messages; it is not steer-armed, not running, or its venue cannot deliver" };
-      return { refusal: `Nothing was sent: the run's inbox could not be read (Valkey said ${String(open?.error ?? "nothing")})` };
+      // A read refused before it was sent (`refused`, a run id the inbox does not take) says its own reason, as the
+      // withdraw plan does, and stays 400; a read Valkey failed is Valkey's refusal (issue #965), 503.
+      if (open?.error === "refused") return { refusal: `Nothing was sent: ${String(open.reason)}` };
+      return { refusal: `Nothing was sent: the run's inbox could not be read (Valkey said ${String(open?.error ?? "nothing")})`, status: 503 };
     }
     const kept = norm.entry.text;
     return { plan: { kind: "steer", jobId: target, queue: found.queue, runId: String(found.runId), id, mode, source, by: who, text: kept, bytes: Buffer.byteLength(kept, "utf8"), digest: sha256Hex(kept) } };
   })();
+  // Issue #965: a read that did not answer within the bound, or that threw, answers 503, the bar's Valkey state with Try
+  // again, as a failed job's preview does for the same condition (`failedJob`, console/actions.mjs). The refusals above
+  // are the run's own answers and stay the 400 of a change refused.
   try {
-    return await within(work, planTimeoutMs, () => ({ refusal: `Nothing was sent: the job or its inbox did not answer within ${planTimeoutMs / 1000} seconds` }));
+    return await within(work, planTimeoutMs, () => ({ refusal: `Nothing was sent: the job or its inbox did not answer within ${planTimeoutMs / 1000} seconds`, status: 503 }));
   } catch (err) {
-    return { refusal: `Nothing was sent: could not read the job or its inbox (${boundedText(err?.message ?? String(err))})` };
+    return { refusal: `Nothing was sent: could not read the job or its inbox (${boundedText(err?.message ?? String(err))})`, status: 503 };
   } finally {
     // Started, never awaited (`releaseOf`); a read still in flight when the bound fired is released when it settles.
     release();
@@ -2058,12 +2065,13 @@ function unwithdrawable(prior, id, jobId) {
 }
 
 /**
- * Plan taking a message BACK (issue #646). Free; `{ plan }`, `{ unchanged }` (already withdrawn) or `{ refusal }`. The
- * job is found across the fleet (any state: a run that just ended still holds its inbox for an hour), and the message's
- * state is read now: `queued` is withdrawn for certain, `written` only best effort (the relay may already have handed
- * the file to the agent), `delivered` and `late` cannot be, and an unknown id is refused. `plan`: `{ kind:
- * "steer-withdraw", jobId, runId, id, prior }`, where `prior` is the state the preview saw; the confirm's answer names
- * the state the withdraw script actually met, which can have moved on.
+ * Plan taking a message BACK (issue #646). Free; `{ plan }`, `{ unchanged }` (already withdrawn) or `{ refusal }` (with
+ * `status: 503` where Valkey did not answer a read, issue #965). The job is found across the fleet (any state: a run
+ * that just ended still holds its inbox for an hour), and the message's state is read now: `queued` is withdrawn for
+ * certain, `written` only best effort (the relay may already have handed the file to the agent), `delivered` and `late`
+ * cannot be, and an unknown id is refused. `plan`: `{ kind: "steer-withdraw", jobId, runId, id, prior }`, where `prior`
+ * is the state the preview saw; the confirm's answer names the state the withdraw script actually met, which can have
+ * moved on.
  */
 export async function planSteerWithdraw({ url, jobId, id, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, planTimeoutMs = STEER_PLAN_TIMEOUT_MS } = {}) {
   if (typeof id !== "string" || !steerInbox.STEER_ID_RE.test(id)) return { refusal: "the message id is 32 lowercase hex characters, as the inbox lists it" };
@@ -2077,16 +2085,18 @@ export async function planSteerWithdraw({ url, jobId, id, redisFn = makeRedisCli
     if (found.refusal) return { refusal: found.refusal.replace(/^Nothing was sent:/, "Nothing was changed:") };
     redis = steerClient(redisFn, url);
     const prior = await steerInbox.messageState({ redis, runId: found.runId, id });
-    if (prior !== null && typeof prior === "object") return { refusal: prior.error === "refused" ? String(prior.reason) : `the run's inbox could not be read (Valkey said ${String(prior.error)}); nothing was changed` };
+    // A read Valkey failed is Valkey's refusal (issue #965), 503; a state no release writes (`bad-reply`) is not.
+    if (prior !== null && typeof prior === "object") return prior.error === "refused" ? { refusal: `Nothing was changed: ${String(prior.reason)}` } : { refusal: `the run's inbox could not be read (Valkey said ${String(prior.error)}); nothing was changed`, ...(prior.error === "bad-reply" ? {} : { status: 503 }) };
     const no = unwithdrawable(prior, id, jobId);
     if (no) return { refusal: no };
     if (prior === "withdrawn") return { unchanged: steerWithdrawSentence(prior, id) };
     return { plan: { kind: "steer-withdraw", jobId, runId: String(found.runId), id, prior } };
   })();
+  // 503 for a read that did not answer or threw (issue #965), as `planSteer`.
   try {
-    return await within(work, planTimeoutMs, () => ({ refusal: `the job or its inbox did not answer within ${planTimeoutMs / 1000} seconds; nothing was changed` }));
+    return await within(work, planTimeoutMs, () => ({ refusal: `the job or its inbox did not answer within ${planTimeoutMs / 1000} seconds; nothing was changed`, status: 503 }));
   } catch (err) {
-    return { refusal: `could not read the job or its inbox (${boundedText(err?.message ?? String(err))}); nothing was changed` };
+    return { refusal: `could not read the job or its inbox (${boundedText(err?.message ?? String(err))}); nothing was changed`, status: 503 };
   } finally {
     release();
     work.then(release, release);

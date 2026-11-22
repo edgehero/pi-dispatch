@@ -153,6 +153,20 @@ test("the lazy fleet adapter preserves actual pause methods through the origin w
   assert.deepEqual(calls, [{ queue: "pi-jobs", paused: true }, "disposed"]);
 });
 
+test("a tool's write that throws is audited as one closed word: action-unconfirmed where Valkey may still run it, action-unavailable where it could not be reached, action-refused otherwise (#965)", async () => {
+  const marked = [
+    [() => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true }), "action-unconfirmed"],
+    [() => Object.assign(new Error("Valkey did not connect within 6 seconds"), { valkeyNotSent: true }), "action-unavailable"],
+    [() => Object.assign(new Error("boom"), { code: "EBOOM" }), "action-refused"],
+  ];
+  for (const [error, reason] of marked) {
+    const f = fixture();
+    const fleet = { snapshot: async () => ({ queueCounts: [{ queue: "pi-jobs", paused: false }] }), pauseQueue: async () => { throw error(); }, dispose: async () => {} };
+    await assert.rejects(executeToolAction("dispatch_pause", { queue: "pi-jobs" }, { hasUI: false }, { ...f.options, fleet }));
+    assert.deepEqual(f.rows.map((r) => [r.action, r.outcome, r.reason ?? null]), [["write", "ok", null], ["write", "failed", reason]], reason);
+  }
+});
+
 // Issue #964: over a REAL fleet reader whose host registry does not answer (its SMEMBERS rejects), so the reader itself
 // marks the set of queues it switched as one that may be short.
 test("dispatch_pause over a set of queues that may be short answers queuesMayBeShort with an audit row of its own, and a part-way one a fixed refusal naming no queue (#964)", async () => {

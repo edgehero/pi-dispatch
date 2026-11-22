@@ -1934,7 +1934,8 @@ export function planEnvelopeWrite({ envelopeFile, projectsPath = null, scopedLim
  *      so a second confirmed write that landed meanwhile keeps its own.
  *
  * A Valkey that cannot be reached refuses before the file is touched: an envelope the fleet would refuse is worse than
- * no change. Returns `{ ok, digest, previousDigest, unchanged? }` or `{ invalid }`.
+ * no change. Returns `{ ok, digest, previousDigest, unchanged? }` or `{ invalid }`, and throws `writeClient`'s
+ * `valkeyNotSent` error for a connect that got no answer (issue #965), before the key or the file is written.
  */
 export async function writeEnvelope({ envelopeFile, projectsPath = null, scopedLimitsPath = null, maxCostMicros = null, change = {}, expect = null, url, redisFn = makeRedisClient, prefix = null, fs = nodeFs, afterExpected = null, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS }) {
   const plan = planEnvelopeWrite({ envelopeFile, projectsPath, scopedLimitsPath, maxCostMicros, change, fs });
@@ -1946,6 +1947,10 @@ export async function writeEnvelope({ envelopeFile, projectsPath = null, scopedL
   try {
     redis = await writeClient(url, redisFn, connectTimeoutMs);
   } catch (err) {
+    // A connect that got no answer wrote nothing, neither the key nor the file: thrown on, as `applyPriorities` and
+    // `revertAllocation` throw it, so the confirm says the deployment's Valkey could not be reached (issue #965) where
+    // this answer read as a write the page refused.
+    if (err?.valkeyNotSent === true) throw err;
     return { invalid: `could not reach Valkey to record the new envelope's digest in ${key} (${boundedText(err?.message ?? String(err))}), so the file was not written: the fleet would read it as a hand edit and refuse its jobs` };
   }
   try {
@@ -2023,8 +2028,11 @@ async function writeClient(url, redisFn, connectTimeoutMs = CONFIRM_READ_TIMEOUT
       } catch {
         // already closed
       }
-      // A connect that failed sent nothing: never the mark of a command that may still run.
-      throw new Error(err?.message ?? String(err));
+      // A connect that failed sent nothing: never the mark of a command that may still run, and `valkeyNotSent` (issue
+      // #965), so the confirm says Valkey could not be reached and nothing was changed. ioredis 5.11.1 reports a connect
+      // Valkey refused (a wrong password, a database it does not have) as "Connection is closed." too, so that counts as
+      // no answer here, and "nothing was changed" stays true of it.
+      throw Object.assign(new Error(err?.message ?? String(err)), { valkeyNotSent: true });
     }
     if (got === LATE) {
       try {
@@ -2032,7 +2040,7 @@ async function writeClient(url, redisFn, connectTimeoutMs = CONFIRM_READ_TIMEOUT
       } catch {
         // already closed
       }
-      throw new Error(`Valkey did not connect within ${connectTimeoutMs / 1000} seconds`);
+      throw Object.assign(new Error(`Valkey did not connect within ${connectTimeoutMs / 1000} seconds`), { valkeyNotSent: true });
     }
   }
   return redis;
@@ -5910,14 +5918,18 @@ export function createFleetReader(
       return killSwitch(false);
     },
     /**
-     * One fleet queue (issue #642), the console's per-queue control, on this reader's Valkey and through its held pool
-     * (issue #842): `{ ok: true, paused, queue }`, `{ invalid }` for a name that is not a fleet queue, `{ invalid,
-     * partial: true }` for a pause or resume that may or may not have been made (`queueSwitchUnconfirmed`) or that Valkey
-     * answered with an error after its script may have run (`queueSwitchErrored`, issue #1014: read back, never "nothing
-     * was changed"), or `{ unreachable }` for one that did not change. Not a one-shot queue: one built while Valkey does not answer takes 36 to 39 s to give up, and could send
-     * its pause after this had answered. A queue the pool holds was named by a discovery already (the preview's read
-     * pools it), so it is flipped at once; any other name is checked against the kill switch's set first, so a mistyped
-     * one is refused rather than creating a paused queue nothing reads.
+     * Pause or resume ONE fleet queue (issue #642), the console's per-queue control, on this reader's Valkey and
+     * through its held pool (issue #842). Returns `{ ok: true, paused, queue }`, `{ invalid }` for a name that is not a
+     * fleet queue, `{ invalid, partial: true }` for a pause or resume that may or may not have been made
+     * (`queueSwitchUnconfirmed`) or that Valkey answered with an error after its script may have run
+     * (`queueSwitchErrored`, issue #1014: read back, never "nothing was changed"), or `{ unreachable }` for one that
+     * did not change, or a set of queues not read in time. Not a one-shot queue: one built while Valkey does not answer
+     * takes 36 to 39 s to give up, and could send its pause after this had answered. A queue the pool holds was named
+     * by a discovery already (the preview's read pools it), so it is flipped at once; any other name is checked against
+     * the kill switch's set first, so a mistyped one is refused rather than creating a paused queue nothing reads (the
+     * silent no-op `cli.mjs` warns about). One Valkey, this reader's: the fleet-wide two-Valkey rule (`killSwitchPlan`)
+     * is about stopping or starting a whole deployment, and a single queue is named on the Valkey its paused flag was
+     * read from.
      */
     async pauseQueue({ queue, paused }) {
       if (typeof queue !== "string" || queue === "") return { invalid: "a queue name is required" };
