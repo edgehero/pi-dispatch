@@ -4268,7 +4268,7 @@ export async function collectChecks(shellVars, seams) {
 			// the one line (issue #673, review round 1).
 			const envShapeBad = envShapeProblem.PI_MODEL !== null || envShapeProblem.PI_PROVIDER !== null;
 			checks.push(...unknownModelChecks(envShapeBad ? subjects.filter((s) => s.deployment !== true) : subjects, catalog.checkModelsKnown, readOverlayDoc));
-			checks.push(...costCapFitChecks(subjects, (ref) => boundModelOf(ref, { builtinModel: catalog.builtinModel, overlay: overlayDoc }), { unboundable: (ref) => outputUnboundable(outputCapView({ models: overlayDoc, provider: ref.provider, modelId: ref.id, builtinModel: catalog.builtinModel, builtinChatModels: catalog.builtinChatModels })), apiOf: (ref) => outputCapView({ models: overlayDoc, provider: ref.provider, modelId: ref.id, builtinModel: catalog.builtinModel, builtinChatModels: catalog.builtinChatModels })?.api }));
+			checks.push(...costCapFitChecks(subjects, (ref) => boundModelOf(ref, { builtinModel: catalog.builtinModel, overlay: overlayDoc }), { notional: (ref) => notionalRoute(ref, (subjectProvider) => subscriptionChecks.get(subjectProvider)), unboundable: (ref) => outputUnboundable(outputCapView({ models: overlayDoc, provider: ref.provider, modelId: ref.id, builtinModel: catalog.builtinModel, builtinChatModels: catalog.builtinChatModels })), apiOf: (ref) => outputCapView({ models: overlayDoc, provider: ref.provider, modelId: ref.id, builtinModel: catalog.builtinModel, builtinChatModels: catalog.builtinChatModels })?.api }));
 			checks.push(
 				...listedProviderCredentialChecks(subjects, {
 					candidatesOf: (name) => (typeof oracle?.providerKeyCandidates === "function" ? oracle.providerKeyCandidates(name) : []),
@@ -6868,7 +6868,7 @@ export function cappedModelNames(env, { runs, deployment, modelRoles = {}, proje
  * Radius and every composed pi-messages model have a separate diagnosis: their server-reported billing and input
  * rewrites are not bounded by the catalog, including rows whose listed rates are zero (issue #693).
  */
-export function costCapFitChecks(subjects, modelOf, { unboundable = () => false, apiOf = (ref) => modelOf(ref)?.api } = {}) {
+export function costCapFitChecks(subjects, modelOf, { unboundable = () => false, apiOf = (ref) => modelOf(ref)?.api, notional = () => false } = {}) {
 	const groups = new Map();
 	const unbounded = new Map();
 	const radius = new Map();
@@ -6879,6 +6879,10 @@ export function costCapFitChecks(subjects, modelOf, { unboundable = () => false,
 			const name = `${ref.provider}/${ref.id}`;
 			if (seen.has(name)) continue;
 			seen.add(name);
+			// Issue #1008: a model on a provider bound HERE to a subscription with no paid extra usage (`notionalRoute`) is not
+			// judged against the cap: the runner admits such a call with no bound, so no amount refuses it, and the console's
+			// trigger page skips it the same way.
+			if (notional(ref)) continue;
 			// The gateway reports its own prices and may rewrite input, so even a zero-rate catalog row is no bound.
 			const api = apiOf(ref);
 			if (api === "pi-messages" || (api === undefined && ref.provider === "radius")) {
@@ -7363,6 +7367,18 @@ export function mixedBillingPoolChecks(subjects, { verdictOf = () => undefined }
 /** The providers a subscription connection can bind: the adapters' (community-auth-metadata.mjs). */
 const SUBSCRIPTION_PROVIDERS = new Set(Object.values(COMMUNITY_AUTH_ADAPTERS).map((adapter) => adapter.provider));
 
+/**
+ * Whether a route is notional on THIS host (issue #1008): its provider is one a subscription adapter serves, and its
+ * subscription check SUCCEEDED and named the connection's credit as none (`notionalConnection`). Anything else is not:
+ * an API-key route, a connection with paid extra usage, a failed or unreadable check. `notionalCapChecks` and
+ * `costCapFitChecks` share it.
+ */
+export function notionalRoute(ref, verdictOf) {
+	if (!ref || !SUBSCRIPTION_PROVIDERS.has(ref.provider)) return false;
+	const verdict = verdictOf(ref.provider);
+	return verdict?.ok === true && verdict.managed === true && Object.hasOwn(verdict, "extraUsageCreditMicros") && notionalConnection(verdict);
+}
+
 export function notionalCapChecks(subjects, { verdictOf = () => undefined } = {}) {
 	const refOf = (entry) => {
 		const split = typeof entry === "string" ? splitModelEntry(entry) : null;
@@ -7377,11 +7393,7 @@ export function notionalCapChecks(subjects, { verdictOf = () => undefined } = {}
 		entry.routes.push(subject.main, ...(subject.list ?? []), ...(subject.auxiliaryModels ?? []).map(refOf), ...(subject.decisionModel ? [refOf(subject.decisionModel)] : []));
 		triggers.set(trigger, entry);
 	}
-	const notional = (ref) => {
-		if (!ref || !SUBSCRIPTION_PROVIDERS.has(ref.provider)) return false;
-		const verdict = verdictOf(ref.provider);
-		return verdict?.ok === true && verdict.managed === true && Object.hasOwn(verdict, "extraUsageCreditMicros") && notionalConnection(verdict);
-	};
+	const notional = (ref) => notionalRoute(ref, verdictOf);
 	const checks = [];
 	for (const [trigger, { cap, allowance, routes }] of triggers) {
 		if (!(Number.isSafeInteger(cap) && cap > 0) || routes.length === 0 || !routes.every(notional)) continue;

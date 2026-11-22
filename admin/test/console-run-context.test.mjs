@@ -158,3 +158,58 @@ test("a capped run's cost panel says what the cap charged, the part above pi's p
   const older = String(runCostPanel(view({ run: { record: record({ outcome: "policy", reason: "cost-cap", why: "over-cap", tokens: before, costRefusal: { spentMicros: 1, inflightMicros: -2, externalMicros: 0, boundMicros: 4 } }) } })));
   for (const label of ["Charged against the cap", "Above pi", "Calls that waited", "Cost warning", "Refused at"]) assert.doesNotMatch(older, new RegExp(label), `${label}: no row for a record from before the keys, or a malformed refusal`);
 });
+
+test("issue #1008: a mixed run's cost panel shows billed and notional apart and the allowance against its limit; the cap meter plots what the cap charged", () => {
+  const usage = { v: 1, truncated: 0, models: [{ provider: "anthropic", model: "claude-opus-5-5", calls: 600, input: 1, output: 1, cost: 59.75 }, { provider: "openrouter", model: "qwen-max", calls: 63, input: 1, output: 1, cost: 0.33 }] };
+  const tokens = { input: 1000, output: 100, total: 1100, cost: 60.08, metered: true, calls: 663, costNotional: 59.75, costCapMicros: 150_000_000, allowanceMicros: 100_000_000, costChargedMicros: 330_000 };
+  const mixed = record({ outcome: "completed", reason: null, tokens, usage, notionalProviders: ["anthropic"], dollars: { reservedMicros: 150_000_000, settledMicros: 330_000, basis: "metered" } });
+  const out = String(runCostPanel(view({ run: { record: mixed } })));
+  assert.match(out, /<dt>Cost<\/dt><dd>\$0\.33 \+ \$59\.75 notional<\/dd>/);
+  assert.match(out, /<dt>Billed<\/dt><dd>\$0\.33: the calls the job cap and the dollar windows count<\/dd>/);
+  assert.match(out, /<dt>Notional<\/dt><dd>\$59\.75 at list price on anthropic&#39;s subscription: not billed, so no cap or dollar window counts it<\/dd>/);
+  assert.match(out, /<dt>Subscription allowance<\/dt><dd>\$59\.75 of \$100\.00 at list price \(59%\)<\/dd>/);
+  assert.match(out, /aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Job cap \(dollars\)"/, "the cap charged $0.33 of $150, not the $60.08 recorded");
+  assert.equal((out.match(/role="meter"/g) ?? []).length, 1, "one meter, the cap's: the allowance is said in its row");
+  // The issue's own run: stopped at $141.70 charged with $37.50 recorded read 25% here.
+  const stopped = record({ outcome: "policy", reason: "cost-cap", tokens: { input: 1, output: 1, total: 2, cost: 37.5, metered: true, calls: 9, costCapMicros: 150_000_000, costChargedMicros: 141_700_000 } });
+  assert.match(String(runCostPanel(view({ run: { record: stopped } }))), /aria-valuenow="94" aria-valuemin="0" aria-valuemax="100" aria-label="Job cap \(dollars\)"/);
+  // An older image's record (notionalProviders without costNotional) and one with no subscription render as before.
+  const older = String(runCostPanel(view({ run: { record: record({ outcome: "completed", reason: null, tokens: { ...tokens, costNotional: undefined, allowanceMicros: undefined, costChargedMicros: undefined }, usage, notionalProviders: ["anthropic"] }) } })));
+  for (const label of ["Billed", "Notional", "Subscription allowance"]) assert.doesNotMatch(older, new RegExp(`<dt>${label}</dt>`));
+  assert.match(older, /<dt>Cost<\/dt><dd>\$60\.08<\/dd>/);
+  assert.match(older, /aria-valuenow="40" aria-valuemin="0" aria-valuemax="100" aria-label="Job cap \(dollars\)"/, "without costChargedMicros the recorded cost is what the cap counted");
+  const models = String(runModels(view({ run: { record: mixed } })));
+  assert.match(models, /\$59\.75 notional<\/td>/); assert.match(models, /\$0\.33<\/td>/);
+});
+
+test("issue #1008: a run that reserved nothing names the cap it ran under; one with no ledger reads billed and notional the same way in every row; the notional word needs costNotional", () => {
+  const subOnly = { input: 1, output: 1, total: 2, cost: 7.5, metered: true, calls: 9, costNotional: 7.5, costCapMicros: 150_000_000, costChargedMicros: 0, costRefused: 1 };
+  const refusal = { spentMicros: 0, inflightMicros: 0, externalMicros: 0, boundMicros: 151_000_000 };
+  const unreserved = record({ outcome: "policy", reason: "cost-cap", why: "over-cap", tokens: subOnly, usage: null, notionalProviders: ["anthropic"], provider: "anthropic", model: "claude-opus-5-5", dollars: { reservedMicros: 0, settledMicros: 0, basis: "unreserved" }, costRefusal: refusal });
+  const out = String(runCostPanel(view({ run: { record: unreserved } })));
+  assert.match(out, /<dt>Job cap<\/dt><dd>\$150\.00<\/dd>/, "never the reservation's $0.00");
+  assert.match(out, /against the \$150\.00 cap/);
+  assert.match(out, /<dt>Reserved<\/dt><dd>\$0\.00<\/dd>/);
+  // No usage ledger: the Cost row and the Billed and Notional rows say one split, the worker's.
+  assert.match(out, /<dt>Cost<\/dt><dd>\$7\.50 notional<\/dd>/);
+  assert.match(out, /<dt>Cost class<\/dt><dd>subscription<\/dd>/);
+  assert.match(out, /<dt>Billed<\/dt><dd>\$0\.00: /);
+  assert.match(out, /<dt>Notional<\/dt><dd>\$7\.50 at list price/);
+  // A reserved run keeps the reservation as its cap.
+  assert.match(String(runCostPanel(view({ run: { record: { ...unreserved, dollars: { reservedMicros: 120_000_000, settledMicros: 0, basis: "metered" } } } }))), /<dt>Job cap<\/dt><dd>\$120\.00<\/dd>/);
+  // The Model usage word follows the record's own word on both keys: no costNotional, no notional row.
+  const usage = { v: 1, truncated: 0, models: [{ provider: "anthropic", model: "claude-opus-5-5", calls: 9, input: 1, output: 1, cost: 7.5 }] };
+  const older = record({ outcome: "completed", reason: null, tokens: { ...subOnly, costNotional: undefined }, usage, notionalProviders: ["anthropic"] });
+  assert.doesNotMatch(String(runModels(view({ run: { record: older } }))), /notional/);
+  assert.match(String(runModels(view({ run: { record: { ...older, tokens: subOnly } } }))), /\$7\.50 notional<\/td>/);
+});
+
+test("issue #1008: the allowance used rounds up, as the runner's allowance guard reads it, and a damaged Model usage row is skipped", () => {
+  const tokens = { input: 1, output: 1, total: 2, cost: 12.3456781, metered: true, calls: 3, costNotional: 12.3456781, allowanceMicros: 100_000_000 };
+  const r = record({ outcome: "completed", reason: null, tokens, usage: { v: 1, truncated: 0, models: [null, { provider: "anthropic", model: "claude-opus-5-5", calls: 3, input: 1, output: 1, cost: 12.3456781 }] }, notionalProviders: ["anthropic"] });
+  const out = String(runCostPanel(view({ run: { record: r } })));
+  assert.match(out, /<dt>Subscription allowance<\/dt><dd>\$12\.345679 of \$100\.00 at list price \(12%\)<\/dd>/, "12,345,678.1 micro-dollars read as 12,345,679, the guard's Math.ceil");
+  const models = String(runModels(view({ run: { record: r } })));
+  assert.equal((models.match(/<tr><td>/g) ?? []).length, 1, "the null row is no table row");
+  assert.doesNotMatch(models, /undefined/);
+});

@@ -1828,3 +1828,22 @@ test("serve hands the Secrets page's read the file views beside the snapshot, wi
   assert.equal(typeof asked[0].env, "object");
   assert.deepEqual([asked[1].snapshot, asked[1].files], [{ settings: {} }, null], "and none is invented beside a snapshot");
 });
+
+test("issue #1008: the console's command wires the published subscription status, outside a snapshot, into the trigger page and the reserve estimates", async () => {
+  const dep = deployment();
+  const modules = fakeModules();
+  const asks = [];
+  modules.readModel.createFleetReader = () => ({ snapshot: async () => (asks.push(["snapshot"]), {}), dispose: async () => {} });
+  modules.readModel.readSubscriptionStatusOf = async (args) => (asks.push(["status", args.url]), { state: "ready", partial: false, connections: [] });
+  let options;
+  modules.triggerEnvironmentPlans = { createTriggerEnvironmentActions: (opts) => { options = opts; return { preview() {}, apply() {} }; } };
+  let captured;
+  modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+  const r = await cli(["serve"], { dir: dep.dir, env: dep.env, modules, platform: "linux", until: Promise.resolve() });
+  assert.equal(r.code, 0, r.err.join(" "));
+  const url = captured.actionDeps.paths.valkeyUrl;
+  assert.deepEqual(await options.readSubscriptionStatus(), { state: "ready", partial: false, connections: [] });
+  assert.deepEqual(await captured.actionDeps.readSubscriptionStatus(), { state: "ready", partial: false, connections: [] });
+  assert.deepEqual(asks.filter(([what]) => what === "status"), [["status", url], ["status", url]], "both read the deployment's Valkey");
+  assert.equal(asks.some(([what]) => what === "snapshot"), false, "no whole snapshot for it");
+});

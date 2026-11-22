@@ -473,7 +473,9 @@ Recovery retains its checkpoint's physical model and rechecks current authentica
 
 Connections shows the configured owner, selected profile, compatibility, credential state and expiry.
 Models shows typed quota windows, observation age, exhausted/unknown state, paid-overage facts and a published
-quota reserve. Operator terminal commands are offered where applicable; viewers receive no credential management
+quota reserve. Both say what the paid overage credit bounds (issue #1008): with none, the connection's calls bill
+nothing and the job cap and the dollar windows do not count them; with one, every call counts against both and the job's
+cap may not exceed it. Operator terminal commands are offered where applicable; viewers receive no credential management
 controls. Missing host publication remains unknown. Raw credentials, account/profile identities and provider errors are absent
 from both browser and machine projections.
 

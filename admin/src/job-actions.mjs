@@ -1438,7 +1438,9 @@ function notParkedRefusal(jobId, record) {
  * schedule? (cron), forge? (the forge kind), deliveryId? (forge), runFields? (forge: `runFieldsSummary`, names only) }`.
  * `reserve` is `estimateReserve`'s over the deployment's `overlay`, `env` (its PI_MAX_COST_USD, PI_PROVIDER, PI_MODEL
  * and PI_ALLOWED_MODELS) and the worker's pickup inputs `modelEndpoints` (`{ models, endpoints }`) and `builtinModel`;
- * without the last two a job is judged not zero-rated, so the figure is never below what the worker holds.
+ * without the last two a job is judged not zero-rated, so the figure is never below what the worker holds. `notional`
+ * (issue #1008) names the providers the hosts publish as bound to a subscription with no paid extra usage, so a job
+ * that reaches only those is estimated to hold nothing in the dollar windows; null keeps the cap's figure.
  */
 export async function planRerun({
   url,
@@ -1449,6 +1451,7 @@ export async function planRerun({
   env = {},
   modelEndpoints = null,
   builtinModel = () => null,
+  notional = null,
   redisFn = makeRedisClient,
   queueFn = makeQueue,
   parseConnectionFn = parseConnection,
@@ -1485,7 +1488,7 @@ export async function planRerun({
     if (!found && (fleet.blind || fleet.incomplete)) return { refusal: `the deployment's queues could not all be read, so ${jobId}'s job was not looked for in every queue; nothing was queued, try again`, unread: true };
     const data = found?.job?.data ?? null;
     const kind = typeof data?.kind === "string" ? data.kind : record.kind;
-    const reserveOf = (jobData) => estimateReserve(jobData, { overlay, env, modelEndpoints, builtinModel });
+    const reserveOf = (jobData) => estimateReserve(jobData, { overlay, env, modelEndpoints, builtinModel, notional });
     // Issue #710: the cheap refusals first, through the very function the run page asks before it offers the form, so
     // the page never offers a re-run this refuses on the record and the data alone, and never hides one this would plan.
     // The record under the id asked for, so each sentence names it as before.
@@ -1744,6 +1747,7 @@ export async function planParkedAnswer({
   env = {},
   modelEndpoints = null,
   builtinModel = () => null,
+  notional = null,
   redisFn = makeRedisClient,
   queueFn = makeQueue,
   parseConnectionFn = parseConnection,
@@ -1838,7 +1842,7 @@ export async function planParkedAnswer({
         comment: { body: bounded.text, ...(delivery.association ? { author_association: CONSOLE_ASSOCIATION } : {}) },
       },
     };
-    return { plan: { kind: "parked-answer", jobId, forge: kind, deliveryId, queue: approvalQueue ?? forgeQueueName(kind, job, fleet.hosts), job, runFields: runFieldsSummary(job), ...(approval ? { approval: { requestId: record.approval.requestId, action: record.approval.action, cap: rule.run.gateBudgetRaiseUsd ?? null } } : {}), reserve: estimateReserve(approval && record.approval.action === "budget-raise" && bounded.text.trim() === "/approve" ? { ...job, maxCostUsd: rule.run.gateBudgetRaiseUsd } : job, { overlay, env, modelEndpoints, builtinModel }) } };
+    return { plan: { kind: "parked-answer", jobId, forge: kind, deliveryId, queue: approvalQueue ?? forgeQueueName(kind, job, fleet.hosts), job, runFields: runFieldsSummary(job), ...(approval ? { approval: { requestId: record.approval.requestId, action: record.approval.action, cap: rule.run.gateBudgetRaiseUsd ?? null } } : {}), reserve: estimateReserve(approval && record.approval.action === "budget-raise" && bounded.text.trim() === "/approve" ? { ...job, maxCostUsd: rule.run.gateBudgetRaiseUsd } : job, { overlay, env, modelEndpoints, builtinModel, notional }) } };
   })();
   try {
     return await within(work, planTimeoutMs, () => ({ refusal: `could not read the parked run or its job (no answer within ${planTimeoutMs / 1000} seconds); nothing was queued` }));

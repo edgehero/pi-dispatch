@@ -10,8 +10,9 @@
  *     calls it), a cap of 0 or every callable model served by a declared endpoint and zero-rated (model-endpoints.mjs);
  *   - every job takes one job-count slot in each window that applies.
  * The processor's own reserve step goes one rule further (issue #1008, `reserveVerdict`): a job whose every route is
- * on a subscription with no paid extra usage reserves nothing and keeps its cap. The estimate below does not know this
- * host's connections, so for such a job it names the cap, the larger figure, never a smaller one than the worker holds.
+ * on a subscription with no paid extra usage reserves nothing and keeps its cap. The estimate follows it only when the
+ * caller names those providers (`notional`, from the hosts' published status); without them it names the cap, the larger
+ * figure, never a smaller one than the worker holds.
  *
  * The deployment's settings resolve as the worker's do, `overlay > env > default` per key (runtime-settings.mjs over
  * config.mjs), with an empty env value unset (`usdSetting`).
@@ -139,12 +140,17 @@ function envUsd(raw) {
  *     dollar invariant). With no dollar window set the worker holds nothing in dollars, and the runner still stops
  *     the job at `capMicros`.
  *   - `zeroRated`: whether the job can spend nothing at all.
+ *   - `unreserved` (issue #1008, only when true): the job reaches no billed route, so it holds nothing in any dollar
+ *     window (`dollarsMicros` 0) and still runs under `capMicros`, `reserveVerdict`'s "none" for a job that can spend.
  *
  * `modelEndpoints` (`{ models, endpoints }`, the worker's pickup snapshot) and `builtinModel` are the zero-rated
  * check's inputs; without them a job is judged not zero-rated, the fail-closed direction (the estimate then names the
- * larger figure, never a smaller one than the worker holds).
+ * larger figure, never a smaller one than the worker holds). `notional` (issue #1008) is the Set of providers the
+ * caller knows a subscription with no paid extra usage carries (the console reads them from the hosts' published
+ * status); null or empty keeps the cap's figure. The worker decides at pickup from the snapshots it prepared, so a binding
+ * that changes in between can move the figure either way; the estimate says what the published status said.
  */
-export function estimateReserve(jobData, { overlay = {}, env = {}, modelEndpoints = null, builtinModel = () => null } = {}) {
+export function estimateReserve(jobData, { overlay = {}, env = {}, modelEndpoints = null, builtinModel = () => null, notional = null } = {}) {
 	const data = jobData ?? {};
 	const o = overlay ?? {};
 	// The deployment's allowed-model list (PI_ALLOWED_MODELS, env only, never the overlay), the worker's `effectiveJobOf`
@@ -175,5 +181,9 @@ export function estimateReserve(jobData, { overlay = {}, env = {}, modelEndpoint
 	};
 	if (capMicros === null) return { slots: 1, dollarsMicros: null, capMicros: null, zeroRated: false };
 	const zero = allowedInvalid && (data.models ?? null) === null ? { zeroRated: false } : zeroRatedFor(job, { modelEndpoints, builtinModel });
-	return { slots: 1, dollarsMicros: zero.zeroRated ? 0 : capMicros, capMicros, zeroRated: zero.zeroRated === true };
+	if (zero.zeroRated) return { slots: 1, dollarsMicros: 0, capMicros, zeroRated: true };
+	// An env list the worker would refuse names no finite routes, so it reaches the cap's figure through reserveVerdict too.
+	const verdict = allowedInvalid && (data.models ?? null) === null ? { reserve: "cap" } : reserveVerdict(job, { notional, modelEndpoints, builtinModel });
+	if (verdict.reserve === "none") return { slots: 1, dollarsMicros: 0, capMicros, zeroRated: false, unreserved: true };
+	return { slots: 1, dollarsMicros: capMicros, capMicros, zeroRated: false };
 }

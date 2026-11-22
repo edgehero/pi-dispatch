@@ -989,6 +989,8 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
         return { env: read.env, unread: [...read.unread.map((row) => row.key), ...read.hazardSkipped], hazardLine: read.shellRunsLine ?? (read.hazardSkipped.length > 0 ? read.hazard?.line ?? null : null) };
       },
       readEndpoints: () => endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs })?.()?.endpoints ?? [],
+      // Issue #1008: which providers the live hosts bind to a subscription, so a cap is not judged against their models.
+      readSubscriptionStatus: () => m.readModel.readSubscriptionStatusOf({ url: side.paths.valkeyUrl, now }),
     });
     actionDeps = {
       // `timeoutMs: null` (issue #843): the client's command bound decides alone, so a write that reached a Valkey which then
@@ -1020,6 +1022,8 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     // Every reserve estimate's zero-rated inputs, the worker's: the endpoint snapshot and the builtin catalog's costs.
     modelEndpoints: endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs }),
     builtinModel: m.modelCatalog?.builtinModel,
+    // Issue #1008: the hosts' published subscription status, so a reserve estimate can say a job on subscriptions alone holds nothing.
+    readSubscriptionStatus: () => m.readModel.readSubscriptionStatusOf({ url: side.paths.valkeyUrl, now }),
       setup,
     };
     server = m.server.createConsoleServer({

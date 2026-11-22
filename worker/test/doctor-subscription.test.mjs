@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { writeFileSync, existsSync } from "node:fs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { collectChecks, runDoctor } from "./helpers/doctor.mjs";
-import { doctorSubscriptionCredentials, subscriptionCredentialCheck, listedProviderCredentialChecks, notionalCapChecks, WORKER_SERVICE_KEYS } from "../src/doctor.mjs";
+import { doctorSubscriptionCredentials, subscriptionCredentialCheck, listedProviderCredentialChecks, notionalCapChecks, notionalRoute, WORKER_SERVICE_KEYS } from "../src/doctor.mjs";
 import { TRIGGERS_FILE_VERSION } from "../src/triggers.mjs";
 
 const instant = 1_800_000_000_000;
@@ -215,4 +215,18 @@ test("a failed or unreadable subscription check never reads as notional: no fals
 		const checks = await collectChecks({ ...env, PI_TRIGGERS_FILE: path, PI_MAX_COST_USD: "5" }, { cwd: root, home: root, out() {}, spawn: missingBinary, fileExists: (p) => p === path, probeValkey: async () => false, nodeVersion: "22.19.0", platform: "linux", agentDir: join(root, "agent"), wallClock: now, modelCatalog: async () => null, subscriptionFactory: factory });
 		assert.equal(checks.some((c) => BOUNDS_NOTHING.test(c.label)), false, why);
 	}
+});
+
+test("issue #1008: doctor does not judge a model bound here to a subscription without paid extra usage against the cap, as the trigger page does; with paid extra usage it does", async () => {
+	const capFit = async (row) => {
+		const root = tempDir("doctor-notional-fit-");
+		const path = join(root, "triggers.json");
+		writeFileSync(path, JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", provider: "anthropic", model: "claude-sonnet-4-5-20250929", models: ["anthropic/claude-sonnet-4-5-20250929"], maxCostUsd: "1" } }] }));
+		const checks = await collectChecks({ ...env, PI_TRIGGERS_FILE: path }, { cwd: root, home: root, out() {}, spawn: missingBinary, fileExists: (p) => p === path, probeValkey: async () => false, nodeVersion: "22.19.0", platform: "linux", agentDir: join(root, "agent"), wallClock: now, modelCatalog: async () => import("../src/model-catalog.mjs"), subscriptionFactory: () => ({ auth: { async check(provider) { return provider === "anthropic" ? row : { ok: true, managed: false }; } } }) });
+		return checks.filter((c) => /needs at least \$1\.00608 a call under a \$1\.00 cap/.test(c.label));
+	};
+	assert.deepEqual(await capFit(claude), [], "bound here with no paid extra usage: the runner admits its calls with no bound");
+	assert.equal((await capFit({ ...claude, extraUsageCreditMicros: 5_000_000 })).length, 1, "paid extra usage: every call counts against the cap");
+	assert.equal((await capFit({ ok: false, managed: true, reason: "auth-reauth-required", provider: "anthropic" })).length, 1, "a check that names no credit says nothing of it");
+	assert.equal(notionalRoute({ provider: "openrouter", id: "x" }, () => ({ ok: true, managed: true, extraUsageCreditMicros: null })), false, "a provider no subscription adapter serves");
 });

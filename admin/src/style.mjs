@@ -77,6 +77,8 @@ const OVERLAY_ASCII = { tl: "+", tr: "+", bl: "+", br: "+", ml: "+", mr: "+", h:
 const COST_COLORS = {
   metered: "text",
   plan: "accent",
+  // Issue #1008: a subscription's list price is notional, prepaid like a plan, so it is colored like one, never as spend.
+  subscription: "accent",
   "zero-rated": "dim",
   estimated: "warning",
   seeded: "warning",

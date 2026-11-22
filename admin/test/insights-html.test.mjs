@@ -1393,3 +1393,14 @@ test("junk buckets, a window of no time yet, and every gap's own reason", () => 
   const late = listTexts(insightsHtml({ window: "7d", capacity: CAP_SLICE() }, { now: NOW + CH }), "insights-tips").map((t) => t.text);
   assert.ok(late.some((t) => t.endsWith("no data: after the report was read")));
 });
+
+test("issue #1008: a subscription bucket draws the plan's chip with its notional list price, never a bar, and a billed bucket says its notional part", () => {
+  const [sub, mixed] = layoutBarList([
+    { label: "anthropic/claude-opus-5-5", runs: 2, cost: { usd: 0, class: "subscription", floor: false, notional: 59.75 } },
+    { label: "fix", runs: 2, cost: { usd: 0.33, class: "metered", floor: false, notional: 59.75 } },
+  ]);
+  assert.equal(sub.barW, null);
+  assert.equal(sub.chipText, "$59.75 notional");
+  assert.equal(mixed.valueText, "$0.33 + $59.75 notional");
+  assert.ok(mixed.barW > 0);
+});

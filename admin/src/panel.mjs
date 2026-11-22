@@ -1069,9 +1069,24 @@ export function usd2(micros, { spent = false } = {}) {
  * read as $0.00), zero-rated is `$0 (unrated)` and never the word "free", estimated is `~` + figure +
  * ` est.`, seeded is `~~` + figure + ` seeded`, unknown is an em dash. Nullish or malformed input also
  * degrades to the em dash rather than guessing a class.
+ *
+ * Issue #1008: subscription is its list price + ` notional` and never a bare dollar (nobody was billed, and a bare
+ * figure would read as spend). A value of any other class that carries a positive `notional` (a bucket that billed some
+ * calls and ran others on a subscription) says it after its own shape, ` + $X notional`, so the billed figure and the
+ * list price are never one number. Without `notional` every shape is what it was.
  */
 export function fmtCost(cost) {
   if (!cost || typeof cost !== "object") return "—";
+  const notional = Number.isFinite(cost.notional) && cost.notional >= 0 ? cost.notional : null;
+  if (cost.class === "subscription") return `${cost.floor ? "≥" : ""}${fmtUsd(notional ?? 0)} notional`;
+  const own = fmtCostShape(cost);
+  // An unknown or malformed class keeps its one shape: a notional part beside it would read as a known figure.
+  const shaped = ["metered", "plan", "zero-rated", "estimated", "seeded"].includes(cost.class);
+  return notional !== null && notional > 0 && shaped ? `${own} + ${fmtUsd(notional)} notional` : own;
+}
+
+/** `fmtCost`'s shape of a value's own class, before any notional part. */
+function fmtCostShape(cost) {
   const floor = cost.floor ? "≥" : "";
   switch (cost.class) {
     case "metered":

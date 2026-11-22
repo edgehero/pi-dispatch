@@ -2084,6 +2084,20 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
 
+- **AMENDED 2026-11-22 (#1008), the run page's Tokens and dollars and Spend: billed and notional apart.** The run page's
+  job cap meter plots what the cap charged (`tokens.costChargedMicros`, else `tokens.cost` on a record from before
+  that key) against the cap, never the run's recorded cost, and its Job cap is the cap the run ran under
+  (`tokens.costCapMicros` for a run that reserved nothing, never that reservation's $0). A run whose record names
+  notional providers and carries `tokens.costNotional` shows Billed (`cost` less `costNotional`) and Notional (that list price and the providers)
+  apart, its Model usage rows of those providers say `notional`, and a record with `tokens.allowanceMicros` shows the
+  subscription allowance used against it, with its percentage. Spend's Today and daily amounts are billed only, with the list
+  price said after a day's amount and, on Today, once on a row of its own; its flow, model and project rows use the formatter's notional
+  shapes; where such work is in view, Today and Caps say that dollar windows hold billed spend only. A plan declared in
+  `subscriptions.json` keeps such work out of billed spend too, and a record with no ledger is split the worker's way
+  (`cost` less `costNotional`) on every row. A run on subscriptions alone counts as billed $0 wherever a run's billed
+  cost is measured (the average, the job sizes, a trigger's spend). A record without both keys, or with a
+  `costNotional` above its cost, renders as before. Tests: `admin/test/console-run-context.test.mjs`, `admin/test/console-spend.test.mjs`,
+  `admin/test/insights-views.test.mjs`, `admin/test/costs.test.mjs`.
 - **AMENDED 2026-11-18 (#920), (c), the run page's Artifacts card.** A run whose record says a forge job kept or dropped
   files (`INT-RUN-HISTORY-FILE-CONTRACT` `artifacts`) shows an Artifacts card, to an operator and a viewer alike: each
   kept file from this host's store with its size and kind (an image drawn small, text opened as text, anything else a
@@ -4177,8 +4191,12 @@ writes retain their existing interactive confirmation. This adds no unattended p
   - (g) **The reserve shown is the reserve held.** Given a job, `estimateReserve` equals what the worker reserves for
     the same job: the trigger's cap narrowing the deployment's, the overlay over the env, 0 for a zero-rated job, and
     no dollar figure when no cap is set. Given a paid action, its preview shows that figure before the confirm and the
-    audit row carries it as `reserve`. Tests: `worker/test/processor-console-answer.test.mjs` (`estimateReserve
-    equals what the worker holds`), `admin/test/console-actions.test.mjs`.
+    audit row carries it as `reserve`. Since issue #1008, given the live hosts' published subscription status, a job
+    whose every route is bound to a subscription with no paid extra usage is shown holding $0.00 in the dollar windows
+    under its cap (`unreserved`), as the worker's `reserveVerdict` holds it; a status that cannot be read shows the cap.
+    A fork and the reserve shown when a trigger is added keep the cap, the larger figure. Tests:
+    `worker/test/processor-console-answer.test.mjs` (`estimateReserve equals what the worker holds`),
+    `worker/test/reserve-estimate.test.mjs`, `admin/test/console-actions.test.mjs`.
   - (h) **Fleet.** Given a resume while the shell's and the deployment's Valkeys disagree, it is refused on the
     console, the TUI and the tools alike, and a pause reaches both; given one queue named, only that queue pauses or
     resumes, and a name the fleet does not drain is refused with nothing changed. Since #737 PR 3a a queue's pause
@@ -5689,7 +5707,10 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   call of a job's main model or of a model on its list (the model's output limit at its output rate, plus the
   runner's 8,192-token overhead and a 4,096-byte first request at its dearest input rate, times the runner's
   service-tier multiplier, a lower bound of the runner's own bound), then `pi-dispatch doctor` warns, naming the model, the amount and the cap; with the default
-  model and a $1 cap it says $1.00608 (issue #501's open question).
+  model and a $1 cap it says $1.00608 (issue #501's open question). Since issue #1008 a model on a provider this host
+  binds to a subscription connection with no paid extra usage (`notionalRoute`: its subscription check succeeded and
+  named no credit) is left out of that warning, since the runner admits its calls with no bound; with paid extra usage,
+  or a check that names no credit, it is judged as before.
 
 ## REQ-COST-ANALYTICS
 
@@ -5714,8 +5735,11 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   recorded token profiles under another model through the pricing façade
   (`INT-PRICING-EXPORT-CONTRACT`). The screen informs; it changes nothing — no auto-switching, no new
   network surface, no database. The **labeling rules are requirements, not conventions**:
-  (a) every displayed dollar carries its class — metered, plan, zero-rated, estimated, seeded, or
-  unknown — and is rendered only through the one shared formatter;
+  (a) every displayed dollar carries its class (metered, plan, zero-rated, estimated, seeded,
+  unknown, or since issue #1008 subscription) and is rendered only through the one shared formatter; a
+  subscription call's list price (a record that names the provider in `notionalProviders` and carries
+  `tokens.costNotional`) is never added to a billed dollar: it renders as `$X notional`, after a billed figure as
+  `+ $X notional`, and a declared plan covering it still renders `plan:<id>`;
   (b) a run covered by a declared plan **never renders as `$0.00`**, and an uncovered zero-rate run
   renders `$0 (unrated)`, **never the word "free"**;
   (c) an estimate is **always visibly marked** (`~`/`est.`/`seeded`) and never silently mixes with
@@ -9707,6 +9731,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-22 (#1008, console) | **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**, the Acceptance's doctor clause: a model on a provider this host binds to a subscription with no paid extra usage (`notionalRoute`) is left out of the cap-below-one-call warning. **`REQ-COST-ANALYTICS` AMENDED**, (a): a seventh class, `subscription`, for a call a record says a subscription with no paid extra usage carried; its list price is never added to a billed dollar and renders as notional, and a declared plan still renders `plan:<id>`. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, a dated bullet: the run page's cap meter plots what the cap charged and its Job cap is the cap a run that reserved nothing ran under; Billed, Notional and the subscription allowance on the run page; Spend billed only with the list price said apart, a declared plan keeping such work out of billed spend too, and "dollar windows hold billed spend only" where such work is in view; a record with no ledger split the worker's way on every row; a run on subscriptions alone counts as billed $0. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (g): given the published subscription status, a job reaching only notional subscriptions previews $0.00 in the dollar windows under its cap; the fork and the trigger add keep the cap. **Code evidence**: admin/src/costs.mjs -> classifyRow, recordNotionalProviders, recordNotionalMicros, classifiedRows, meteredRunMicros; admin/src/console/panels/common.mjs -> runCost, capMicrosOf; admin/src/panel.mjs -> fmtCost; worker/src/doctor.mjs -> notionalRoute, costCapFitChecks; admin/src/console/panels/run.mjs -> capChargeMicros, notionalRows, runModels; admin/src/console/panels/spend.mjs -> BILLED_ONLY_TEXT, spendToday, spendCaps; admin/src/insights-assembly.mjs -> recordSpendOf; admin/src/console/actions.mjs -> reserveInputsLive, reserveText; worker/src/reserve-estimate.mjs -> estimateReserve |
 | 2026-11-22 (#1008, allowance) | **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**, clause (d) and its acceptance: a trigger's optional list-price allowance for its notional subscription calls, `run.maxSubscriptionUsd` (`PI_SUBSCRIPTION_ALLOWANCE_MICROS`), refused once the settled list price of those calls is at or above it, between calls and with nothing held for calls in flight; the stop `subscription-allowance` (exit 2); never a billed call; absent is no limit, malformed reads as 0, unenforceable refuses as `cost-cap-unenforceable`. **`REQ-SUBSCRIPTION-AUTHENTICATION` AMENDED**, its billed-calls bullet: the allowance named among what bounds a notional call, and an image without `subscriptionAllowance` refused before spend. **`REQ-JOB-STATUS-COMMENTS` AMENDED**: the fifth policy stop's fixed sentence. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**: `CARD_FIELDS` gains `maxSubscriptionUsd`, so a person changes the allowance on a trigger's page. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, its spend-and-reach bullet: no model-callable tool may set `run.maxSubscriptionUsd`, in any spelling, and a person changes all ten on the trigger's page; and CORRECTED, the panel's list row: the longest reason token it is held to is `job-image-subscription-allowance-unsupported` (the sentence named one that was no longer the longest). Clause (d) also says that a notional call whose cost cannot be read refuses the next, that a zero-priced model is unbounded and that the allowance is per attempt. UNCHANGED, checked: `REQ-SPEND-CAPS-MULTI-WINDOW` (the allowance charges no window), `REQ-MODEL-POLICY`. **Code evidence**: image/runner/src/usage-meter.mjs -> createAllowanceGuard, STOP_MESSAGES; worker/src/triggers.mjs -> validateMaxSubscriptionUsd; worker/src/comment-tables.mjs -> TERMINAL_COMMENTS; admin/src/trigger-edit-core.mjs -> CARD_FIELDS; admin/src/write-plans.mjs -> TOOL_PROOF_FIELDS. |
 | 2026-11-22 (#1008) | **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**, clause (d) and its acceptance: the per-job cost cap counts only calls that can be billed; a call on a subscription connection with no paid extra usage is admitted with no bound, hold or charge, still priced into `cost` and reported as `costNotional`, and the dollar windows settle to the billed rest; a connection with paid extra usage keeps counting. **`REQ-MODEL-POLICY` AMENDED**, the #968 bullet: a capped mixed pool's cap bounds its API-key draws and its draws on a connection with paid extra usage, and a notional draw leaves the cap and every dollar window. **`REQ-SUBSCRIPTION-AUTHENTICATION` AMENDED**: a dated bullet (billed calls only: the marker, the runner's positive-evidence rule, the unreserved job that keeps its cap, the quota reserve named beside the quota, the two residuals named, ChatGPT purchased credits and Claude extra usage turned on at the provider mid-run, the acceptance), the Execution clause (a notional call carries no cost bound) and the Billing clause (notional API-equivalent cost charges no window). UNCHANGED, checked: `REQ-SPEND-CAPS-MULTI-WINDOW` (windows, keys and reservation order unchanged; only which calls a settlement charges), `REQ-TRIGGER-SECRETS`, the reason enum (no token added). **Code evidence**: image/runner/src/usage-meter.mjs -> notionalProviders, createCostGuard, createUsageMeter; image/runner/run-job.mjs -> notional; worker/src/subscription-runtime.mjs -> prepare; worker/src/reserve-estimate.mjs -> notionalConnection, reserveVerdict, billedModelRows; worker/src/dollar-budget.mjs -> notionalMicros, dollarSettlement. |
 | 2026-11-22 (#1008) | **`REQ-SUBSCRIPTION-AUTHENTICATION` AMENDED**, NEW bullet **Quota reserve**: `PI_QUOTA_RESERVE_PERCENT` (1 to 99, env only, on the host that owns a Claude connection) holds every job whose trigger does not set `run.quotaReserve: true` while a window admission counts for its Claude route stands at or above it, as a free `subscription-reserve` deferral, never a refusal; a measured percent counts while its reset is ahead, one with no reset only while fresh; unknown percents and ChatGPT connections never hold; exhaustion keeps its own wait; a random pool's first draw passes over a held Claude candidate and a committed draw waits; the flag is read from the owner's reviewed triggers file and no tool writes it, and a job with no trigger never passes the reserve; doctor names that triggers file (warning when it cannot be used), and doctor, the published host status and the Models page show the reserve. **`REQ-MODEL-POLICY` UNCHANGED, checked**: the random pool's billing classes and the trigger cap a mixed pool needs are as they were. **Code evidence**: worker/src/config.mjs -> loadConfig (quotaReservePercent); worker/src/subscription-runtime.mjs -> quotaReserveBlock, QUOTA_RESERVE_RECHECK_MS, makeSubscriptionRuntime (check, status); worker/src/triggers-file.mjs -> makeCheckQuotaReserve; worker/src/doctor.mjs -> quotaReserveChecks; worker/test/subscription-reserve.test.mjs, worker/test/subscription-reserve-pickup.test.mjs |

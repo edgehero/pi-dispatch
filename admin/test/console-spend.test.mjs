@@ -22,6 +22,8 @@ import {
   spendOver,
   spendTabs,
   spendCaps,
+  spendPlans,
+  BILLED_ONLY_TEXT,
 } from "../src/console/panels/spend.mjs";
 import {
   SPEND_CARD_CSS_HASHES,
@@ -1043,4 +1045,32 @@ test("expiry's retained plan id never makes its neutral weights a duplicate of t
     assert.doesNotMatch(text, /Same as row 1/);
     assert.equal(text.includes("Revert row 2"), role === "operator");
   }
+});
+
+test("issue #1008: Spend says subscription list prices apart from billed spend, and that dollar windows hold billed spend only, where any is in view", () => {
+  const windows = [{ name: "deployment", window: "day", counterMicros: 330_000, capMicros: 10_000_000, full: false }];
+  const draw = (today, fold = null) => ({ role: "viewer", query: {}, data: { insights: { spend: { today, daily: [] }, budget: { dollars: { windows } }, ...(fold ? { fold } : {}) } } });
+  const withNotional = draw({ usedMicros: 330_000, settledMicros: 330_000, notionalMicros: 59_750_000, heldMicros: 0, heldJobs: 0, counterConfigured: true, capMicros: 10_000_000 });
+  const today = String(spendToday(withNotional));
+  assert.match(today, /<dt>Settled in today&#39;s records<\/dt><dd>\$0\.33<\/dd>/, "the list price is said once, on its own row");
+  assert.match(today, /<dt>Subscription calls at list price, not billed<\/dt><dd>\$59\.75<\/dd>/);
+  assert.ok(today.includes("Dollar windows hold billed spend only."));
+  assert.ok(String(spendCaps(withNotional)).includes("Dollar windows hold billed spend only."));
+  // The fold's window total alone is enough for Caps to say it.
+  const byFold = draw({ usedMicros: 0, settledMicros: 0, heldMicros: 0, heldJobs: 0 }, { provenance: { total: { usd: 0, class: "subscription", floor: false, notional: 12 } } });
+  assert.ok(String(spendCaps(byFold)).includes("Dollar windows hold billed spend only."));
+  // No subscription work in view: both cards are drawn as they were.
+  const plain = draw({ usedMicros: 330_000, settledMicros: 330_000, heldMicros: 0, heldJobs: 0, counterConfigured: true, capMicros: 10_000_000 });
+  assert.doesNotMatch(String(spendToday(plain)), /notional|billed spend only/);
+  assert.doesNotMatch(String(spendCaps(plain)), /billed spend only/);
+  assert.match(BILLED_ONLY_TEXT, /^Dollar windows hold billed spend only\./);
+});
+
+test("issue #1008: Metered and plan names a model run on a subscription as one, with its list price as notional, never as metered", () => {
+  const byModel = [{ provider: "anthropic", model: "claude-opus-5-5", runs: 1, tokens: 4_500_000, cost: { usd: 0, class: "subscription", floor: false, notional: 59.75 } }, { provider: "openrouter", model: "qwen-max", runs: 1, tokens: 1000, cost: { usd: 0.33, class: "metered", floor: false } }];
+  const text = String(spendPlans({ role: "viewer", query: {}, data: { insights: { recent24h: { byModel } } } }));
+  assert.match(text, /<span class="sp-mp__k">subscription<\/span><span class="sp-mp__t"><b>claude-opus-5-5<\/b>/);
+  assert.match(text, /On a subscription with no paid extra usage: not billed, so no cap or dollar window counts it\./);
+  assert.match(text, /\$59\.75 notional/);
+  assert.match(text, /<span class="sp-mp__k">metered<\/span><span class="sp-mp__t"><b>qwen-max<\/b>/);
 });

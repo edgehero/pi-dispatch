@@ -46,6 +46,8 @@ Every dollar carries its class, rendered by one shared formatter — these marke
 | `≥$4.12`         | a floor: some spend was unpriced/unresolved, a `pi` child process could not be metered, a call was priced past a long-context threshold (`longContext`), legacy calls may have run unjudged (`costUnjudged`), a failed call may have been billed (`costUnanswered`), a call's answer reported no usage (`costUnreported`), the run fell back to the in-session meter (which cannot see subagent spend), or the run pre-dates the meter |
 | `plan:kimi`      | covered by a declared subscription — prepaid, **never shown as $0.00** |
 | `$0 (unrated)`   | a model the rate table prices at $0, with **no** declared subscription covering it: unrated, never "free" |
+| `$59.75 notional` | a subscription connection without paid extra usage carried these calls (issue #1008): their list price, which nobody was billed |
+| `$0.33 + $59.75 notional` | billed, then the list price of the bucket's subscription calls, never one number |
 | `~$4.12 est.`    | an estimate (what-if, API-equivalent, or a sum containing any estimate) |
 | `~~$4 seeded`    | seeded from no history — a band, never a point |
 | `—`              | there is no number behind this cell: a null typed value, such as a flow with no plan-covered rows (no api-equivalent) or a plan with no attributed runs (no amortized figure) |
@@ -65,6 +67,18 @@ unmetered one, and it does not change a bucket's class or coverage. A record tha
 the floor, because a run that did start can lack the other two. So some refusals stay a floor: `over-budget`
 and the soft hold keep the budget slot they took, so does any refusal whose job-count give-back failed, and a
 container the runtime failed to start (often exit 125) carries that exit code.
+
+**Billed and notional** (issue #1008). A run record names the providers whose calls a subscription without paid extra
+usage carried (`notionalProviders`) and their list price (`tokens.costNotional`). Each usage row of such a provider is of
+class `subscription` (`dispatch_costs` returns it so, with the list price as `notional`): it adds nothing to a billed
+total, and its list price is said beside it. A subscription row never demotes a sum to an estimate, since what it
+billed is an exact $0: a flow that billed $0.33 on an API key and ran its root on a subscription reads
+`$0.33 + $59.75 notional`, and one that billed nothing reads `$59.75 notional`. A plan declared in `subscriptions.json`
+still sets the price: a row it covers reads `plan:<id>` as before, and it is never billed either. Both keys are needed:
+a record from an image that predates `costNotional` names `notionalProviders` but charged those calls to the cap, so it
+reads as billed, as the worker settled it, and so does one whose `costNotional` is above its cost (the worker settles that
+at the floor on the whole cost). A record with no usage ledger is split the worker's way: `tokens.costNotional` is
+notional and the rest of `tokens.cost` billed, what its settlement charged.
 
 A bucket (a trigger, flow, repo or day) whose every run one declared plan covers reads `plan:<id>`, and
 `dispatch_costs` returns its typed value as class `"plan"` with that `planId`. A bucket that mixes plan
@@ -388,6 +402,14 @@ child process, such as a role's task, that stopped the job is recorded as the jo
 
 Before this, the numbers were only on the job log's `cost_refused` line.
 
+On the console's run page, the job cap's meter plots `costChargedMicros` against the cap (or `tokens.cost` on a record
+from before that key, which is what that image counted), never the run's recorded cost: a run stopped at $141.70 charged
+once read 25% of its $150 cap there, and its Job cap is the cap the run ran under (`tokens.costCapMicros` for a run that
+reserved nothing, never that reservation's $0). A run with subscription calls shows **Billed** (`tokens.cost` less
+`tokens.costNotional`, what the cap and the windows counted) and **Notional** (that list price and the providers) apart,
+the Model usage table marks each such row `notional`, and a run whose trigger set `run.maxSubscriptionUsd` shows
+**Subscription allowance**: the list price used of it, and the percentage.
+
 ### How a run settles
 
 `dollars.basis` is one of four words:
@@ -485,7 +507,9 @@ though the plan does not charge per token. A dollar cap or window on these provi
 not your bill. Declaring the plan in `subscriptions.json` changes how this page shows those runs; it does not
 change what the windows are charged. These are API keys on a prepaid plan, not
 [subscription connections](subscription-auth.md): only a call on a subscription connection without paid extra usage
-leaves the cap ([what the cap counts](#what-the-cap-counts)).
+leaves the cap ([what the cap counts](#what-the-cap-counts)), and such a call's record says so itself, so this page shows
+it as notional with no declaration ([how to read the numbers](#how-to-read-the-numbers)). Declare such a plan only to
+set its price for the plan cards: a declared plan covering it still reads `plan:<id>`.
 
 ### Where to look
 
@@ -512,6 +536,8 @@ leaves the cap ([what the cap counts](#what-the-cap-counts)).
   count.
 - **`dispatch_limits`** gives each scoped-limits row its caps in words and, for a dollar row, each window's cap
   and counter.
+- **The console's Spend page** says the list price of subscription calls apart from billed spend, and, where any is in
+  view, that dollar windows hold billed spend only ([Spend views](insights.md#settled-held-and-caps)).
 
 A non-zero `boundExceeded` anywhere means a call cost more than the bound said it could. The bound assumes one
 token is at least one byte for every tokenizer pi prices; that count is the evidence that would reopen it.
@@ -723,7 +749,9 @@ is an open issue.
 - **A cap too small for one call.** The runner refuses a call when the most it could cost would pass the cap.
   That bound includes the model's whole output limit, so a small cap can refuse a model's first call every time.
   Doctor warns when the per-job cap (the deployment's, or a trigger's smaller one) is below one full-output call of
-  the job's main model or of a model on its list, and names the amount. The amount is a lower bound: the model's
+  the job's main model or of a model on its list, and names the amount. A model on a provider this host binds to a
+  subscription connection without paid extra usage is left out (issue #1008): the cap does not count its calls, as the
+  console's trigger page says too. The amount is a lower bound: the model's
   output limit at its output rate, plus a minimal first request, times the service-tier multiplier the runner
   applies on the OpenAI responses apis. On the default model it is $1.00608, so a $1 cap
   runs nothing. Raise the cap above the amount named, with room for the request itself.

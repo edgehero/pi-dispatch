@@ -46,6 +46,7 @@ import { readOverlay } from "@edgehero/pi-dispatch/runtime-settings";
 import { DEFAULT_ON_TOOL_NAMES, EXCLUDABLE_TOOL_NAMES, parseTriggers, parseTriggersDocument, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
 import { triggersFileText, writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
 import { isSubscriptionAdapter } from "@edgehero/pi-dispatch/updates-subscription-adapters";
+import { notionalBoundProviders } from "./subscription-auth-view.mjs";
 import { dryRunFs } from "./console/actions.mjs";
 import { toolNamesOfRuns } from "./loaded-words.mjs";
 import { collectModelPolicies } from "./models-view.mjs";
@@ -458,7 +459,7 @@ function modelFacts({ paths, readHostEnv, fs }) {
   return { deployment, deploymentCap, ceiling, envList, note, capOf: (value) => effectiveCostCapMicros(value, deployment.maxCostUsd) };
 }
 
-export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, now = Date.now, checkModelsKnown = catalogCheck, builtinModel = catalogModel, builtinChatModels = catalogChatModels, readHosts = async () => ({ unreachable: "the live hosts are not wired" }), readHostLoads = async () => ({ hosts: [] }), readSkew = async () => ({ rows: [], incomplete: true }), readRunRecords = async () => null, versionTables = {}, jobsReadMs = JOBS_READ_MS, deploymentDir = ".", readHostEnv = () => ({ env, unread: [] }), readEndpoints = () => [] } = {}) {
+export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, now = Date.now, checkModelsKnown = catalogCheck, builtinModel = catalogModel, builtinChatModels = catalogChatModels, readHosts = async () => ({ unreachable: "the live hosts are not wired" }), readHostLoads = async () => ({ hosts: [] }), readSkew = async () => ({ rows: [], incomplete: true }), readRunRecords = async () => null, versionTables = {}, jobsReadMs = JOBS_READ_MS, deploymentDir = ".", readHostEnv = () => ({ env, unread: [] }), readEndpoints = () => [], readSubscriptionStatus = async () => null } = {}) {
   const triggersTables = versionTables.triggers ?? {};
   const jobDataTables = versionTables.jobData ?? {};
 
@@ -659,6 +660,25 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
   }
 
   /**
+   * The providers the live hosts' published status binds to a subscription with no paid extra usage (issue #1008,
+   * `notionalBoundProviders`), whose calls the job cap does not bound. Read at most once per judgement and within the jobs
+   * read's bound; a status that cannot be read, or one late, names none, so every model is judged against the cap as before.
+   */
+  async function notionalProviders() {
+    let timer;
+    try {
+      const late = new Promise((resolve) => {
+        timer = setTimeout(resolve, jobsReadMs, null);
+      });
+      return notionalBoundProviders(await Promise.race([Promise.resolve().then(() => readSubscriptionStatus()), late]), { now: now() });
+    } catch {
+      return new Set();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * What a job of this entry would call under the deployment's cap (issue #800), judged when the edit touches a model field or the
    * cap, and then of the proposed entry whole, so an edit of the flow is never refused over a pairing the person did not touch, and
    * taking a fallback off a row is not silent about a main the worker then refuses. Asking only of what moved said nothing of that.
@@ -783,10 +803,15 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       }
       const cap = facts.capOf(job.maxCostUsd);
       if (cap === null) continue;
+      facts.notional ??= await notionalProviders();
       // The main model and what the trigger itself names. Not the deployment's list or a role map's every model: a job under a
       // cap simply cannot call one it does not fit, and lowering this trigger's cap is no fault of a model it never asked for.
       for (const ref of new Map([...(random ? candidates : [main]), ...refsOf(run.models), ...fallbacks].map((one) => [`${one.provider}/${one.id}`, one])).values()) {
         const name = `${ref.provider}/${ref.id}`;
+        // Issue #1008: a model whose provider the published status binds to a subscription with no paid extra usage is
+        // not judged against the cap at all. The runner admits such a call with no bound (no first call, no output cap),
+        // so no amount of this cap can refuse it, and saying one would refuse a trigger the worker runs.
+        if (facts.notional.has(ref.provider)) continue;
         const said = unusable.has(name);
         const amountRefuses = random || name === mainName || name === startName;
         if (said && !amountRefuses) continue;

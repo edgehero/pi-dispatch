@@ -8,7 +8,7 @@
  */
 import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
-import { classifyRow } from "../../costs.mjs";
+import { classifiedRows } from "../../costs.mjs";
 import { beatAgeOf } from "../../doctor-view.mjs";
 import { fmtCost, usd2 } from "../../panel.mjs";
 import { resolveWorkerCount, forgeLinkOf, progressStaleFor } from "../../read-model.mjs";
@@ -236,26 +236,30 @@ function fromSnapshot(title, render) {
  * share a class keeps it; mixed classes read as an estimate. A fallback-metered run (`metered: false`) is a floor. Null
  * when the run measured nothing (no `tokens`). The pricing table is not consulted (`classifyRow` needs it only for a
  * cost that is not a number), so this needs no pi.
+ *
+ * Issue #1008: the rows are the fold's own (`classifiedRows`), so a row of a provider the record names notional is of
+ * class `subscription`, and a record with no ledger is split the worker's way into its notional and billed parts. `usd`
+ * is what was billed, never a list price, which rides as `notional`. Subscription rows take no part in the class, so a
+ * run that billed a key and ran its root on a subscription stays `metered`, and one that billed nothing is
+ * `subscription`. A record without both notional keys is classed as before.
  */
 export function runCost(record, subscriptions = []) {
   const tokens = record?.tokens;
   if (tokens === null || typeof tokens !== "object") return null;
-  const ledger = Array.isArray(record.usage?.models) && record.usage.models.length > 0 ? record.usage.models : null;
-  const models = ledger ?? [{ provider: record.provider ?? "unknown", model: record.model ?? "unknown", cost: tokens.cost }];
-  const rows = models.map((m) => {
-    const row = { provider: m?.provider ?? "unknown", model: m?.model ?? "unknown", cost: typeof m?.cost === "number" && Number.isFinite(m.cost) ? m.cost : 0 };
-    return { ...row, ...classifyRow(row, subscriptions, null) };
-  });
+  const rows = classifiedRows(record, subscriptions, null).map((row) => ({ ...row, provider: row.provider ?? "unknown", model: row.model ?? "unknown", cost: typeof row.cost === "number" && Number.isFinite(row.cost) ? row.cost : 0 }));
   const floor = tokens.metered === false;
-  const usd = rows.reduce((s, r) => s + (r.class === "plan" ? 0 : r.cost), 0);
-  const classes = [...new Set(rows.map((r) => r.class))];
+  const usd = rows.reduce((s, r) => s + (r.class === "plan" || r.class === "subscription" ? 0 : r.cost), 0);
+  const subscriptionRows = rows.filter((r) => r.class === "subscription");
+  const notional = subscriptionRows.length > 0 ? { notional: subscriptionRows.reduce((s, r) => s + Math.max(0, r.cost), 0) } : {};
+  const classes = [...new Set(rows.map((r) => r.class))].filter((c) => c !== "subscription");
+  if (classes.length === 0) return { usd: 0, class: "subscription", floor, planId: null, ...notional };
   if (classes.length === 1 && classes[0] === "plan") {
-    const ids = [...new Set(rows.map((r) => r.planId))];
-    if (ids.length === 1 && !floor) return { usd: 0, class: "plan", floor: false, planId: ids[0] };
-    return { usd, class: "estimated", floor };
+    const ids = [...new Set(rows.filter((r) => r.class === "plan").map((r) => r.planId))];
+    if (ids.length === 1 && !floor) return { usd: 0, class: "plan", floor: false, planId: ids[0], ...notional };
+    return { usd, class: "estimated", floor, ...notional };
   }
-  if (classes.length === 1) return { usd, class: classes[0], floor, planId: null };
-  return { usd, class: "estimated", floor, planId: null };
+  if (classes.length === 1) return { usd, class: classes[0], floor, planId: null, ...notional };
+  return { usd, class: "estimated", floor, planId: null, ...notional };
 }
 
 /** A typed cost as text (`fmtCost`'s shapes), or "not metered" for a run that measured nothing. */
@@ -263,11 +267,16 @@ function costText(cost) {
   return cost ? fmtCost(cost) : "not metered";
 }
 
-/** The per-job dollar cap a run was held to: what it reserved, else the cap its exit line names. */
+/**
+ * The per-job dollar cap a run was held to: what it reserved, else the cap its exit line names. A run that reserved
+ * nothing (`unreserved`: no dollar window held it, or, issue #1008, every route was a notional subscription or zero-rated)
+ * still ran under the cap its exit line names, so that one is its cap, never the reservation's $0.
+ */
 function capMicrosOf(record) {
   const reserved = record?.dollars?.reservedMicros;
-  if (Number.isSafeInteger(reserved)) return reserved;
   const cap = record?.tokens?.costCapMicros;
+  if (record?.dollars?.basis === "unreserved" && Number.isSafeInteger(cap)) return cap;
+  if (Number.isSafeInteger(reserved)) return reserved;
   return Number.isSafeInteger(cap) ? cap : null;
 }
 

@@ -2858,6 +2858,67 @@ test("every reserve estimate gets the worker's zero-rated inputs: a job that can
   assert.equal(seenArgs.length, 2);
 });
 
+test("issue #1008: a reserve estimate reads the hosts' published subscription status, so a job on a subscription alone previews no dollar reserve", async () => {
+  const { paths } = deployment();
+  const job = { kind: "github", provider: "anthropic", model: "claude-opus-5-5", models: ["anthropic/claude-opus-5-5"], maxCostUsd: "1.5" };
+  const bound = (extraUsageCreditMicros = null) => ({ state: "ready", partial: false, connections: [{ id: "claude-main", provider: "anthropic", adapter: "pi-anthropic-oauth@0.3.11", ownerHost: "mini2", active: true, state: "connected", compatibility: "verified", extraUsageCreditMicros }] });
+  let status = async () => bound();
+  const seenArgs = [];
+  const rm = {
+    ...RM,
+    planFailedBulk: async () => ({ jobs: [{ jobId: "gh-s", queue: "pi-jobs", attemptsMade: 1, finishedOn: 1 }], more: 0 }),
+    planRerun: async (args) => (seenArgs.push(["rerun", args]), { refusal: "stop here" }),
+    planParkedAnswer: async (args) => (seenArgs.push(["parked", args]), { refusal: "stop here" }),
+  };
+  const c = await start({ paths, a: { rm, env: {}, readSubscriptionStatus: () => status(), readJobsData: async ({ jobs }) => new Map(jobs.map((j) => [j.jobId, job])) } });
+  const sub = (await c.act("retry-failed", { jobId: "gh-s" })).json();
+  assert.deepEqual(sub.reserve, { slots: 1, dollarsMicros: 0, capMicros: 1_500_000, zeroRated: false, unreserved: true });
+  assert.match(sub.html, /It holds 1 job slot and \$0\.00 in the dollar windows: every model it may call runs on a subscription with no paid extra usage, which bills nothing/);
+  assert.match(sub.html, /Retry, no dollar reserve \(subscription\)/);
+  await c.act("rerun", { jobId: "gh-s" });
+  await c.act("parked-answer", { jobId: "gh-s", text: "x" });
+  for (const [which, args] of seenArgs) assert.deepEqual([...args.notional], ["anthropic"], `${which} gets the notional providers`);
+  // Paid overage, a status that cannot be read, or none: the cap, never a smaller figure.
+  for (const next of [async () => bound(5_000_000), async () => { throw new Error("down"); }, async () => null]) {
+    status = next;
+    assert.equal((await c.act("retry-failed", { jobId: "gh-s" })).json().reserve.dollarsMicros, 1_500_000);
+  }
+});
+
+test("issue #1008: every preview that shows a reserve reads the same live status, a re-run's confirm too, the bulk line says it, and a status that never answers is waited for only so long", { timeout: 20_000 }, async () => {
+  const { paths } = deployment();
+  const bound = { state: "ready", partial: false, connections: [{ id: "claude-main", provider: "anthropic", adapter: "pi-anthropic-oauth@0.3.11", ownerHost: "mini2", active: true, state: "connected", compatibility: "verified", extraUsageCreditMicros: null }] };
+  const job = { kind: "github", provider: "anthropic", model: "claude-opus-5-5", models: ["anthropic/claude-opus-5-5"], maxCostUsd: "1.5" };
+  const reserveFor = (notional) => (notional?.has("anthropic") ? { slots: 1, dollarsMicros: 0, capMicros: 1_500_000, zeroRated: false, unreserved: true } : { slots: 1, dollarsMicros: 1_500_000, capMicros: 1_500_000, zeroRated: false });
+  const asked = [];
+  let enqueued = 0;
+  const rm = {
+    ...RM,
+    planFailedBulk: async () => ({ jobs: [{ jobId: "gh-s", queue: "pi-jobs", attemptsMade: 1, finishedOn: 1 }, { jobId: "gh-t", queue: "pi-jobs", attemptsMade: 1, finishedOn: 2 }], more: 0, examinedAll: true }),
+    planTriggerFire: async (args) => (asked.push(["fire", args.notional]), { plan: { index: args.index, schedulerId: "daily", queue: "pi-jobs", fileDigest: "a".repeat(64), schedule: { data: {} }, reserve: reserveFor(args.notional) } }),
+    planRerun: async (args) => (asked.push(["rerun", args.notional]), { plan: { kind: "cron", jobId: "cron:t0:1", queue: "pi-jobs", schedule: {}, job: {}, runFields: null, reserve: reserveFor(args.notional) } }),
+    enqueueRerun: async () => (enqueued++, { ok: true, jobId: "cron:t0:2", queue: "pi-jobs" }),
+  };
+  const u = updatesDeps(updatesRow({ canary: null }));
+  let status = async () => bound;
+  const c = await start({ paths, a: { rm, env: {}, updates: u.updates, subscriptionStatusMs: 50, readSubscriptionStatus: () => status(), readJobsData: async ({ jobs }) => new Map(jobs.map((j) => [j.jobId, job])) } });
+  assert.equal((await c.act("trigger-fire", { index: 0 })).json().confirmLabel, "Fire now, no dollar reserve (subscription)");
+  assert.equal((await c.act("package-canary", { index: 2, name: "pi-lint", version: "1.4.3" })).json().confirmLabel, "Run the canary, no dollar reserve (subscription)");
+  assert.deepEqual(asked.map(([which, notional]) => [which, [...(notional ?? [])]]), [["fire", ["anthropic"]], ["fire", ["anthropic"]]]);
+  const bulk = (await c.act("retry-all-failed", {})).json();
+  assert.ok(bulk.summary.some((line) => line.endsWith(", reserve $0.00 (subscription)")), JSON.stringify(bulk.summary));
+  // A re-run's confirm plans again with the same live read, so the reserve its digest holds is the one the person saw.
+  const rerun = (await c.act("rerun", { jobId: "cron:t0:1" })).json();
+  assert.equal((await c.confirm("rerun", rerun.ticket)).status, 200);
+  assert.equal(enqueued, 1);
+  assert.deepEqual(asked.filter(([which]) => which === "rerun").map(([, notional]) => [...(notional ?? [])]), [["anthropic"], ["anthropic"]]);
+  // A status that never answers is waited for 50 ms here, and then names nothing: the cap.
+  status = () => new Promise(() => {});
+  const started = Date.now();
+  assert.equal((await c.act("trigger-fire", { index: 0 })).json().confirmLabel, "Fire now for up to $1.50");
+  assert.ok(Date.now() - started < 5_000, "answered within the bound");
+});
+
 test("rerun and parked-answer previews show the forge run fields the plan takes from the trigger now, escaped, the secret profile by name only", async () => {
   const { paths } = deployment();
   const runFields = { flow: "fix", model: "anthropic/claude-x", models: ["a/b", "c/d"], fallbackModels: ["anthropic/first", "openai/second<"], maxCostUsd: "1.25", secretsProfile: "prod<b>", image: "ghcr.io/acme/img:1", backend: "docker" };

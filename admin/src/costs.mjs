@@ -15,18 +15,20 @@
  * spend windows must agree on where a UTC day boundary falls, and sharing the one function is how the
  * two sides cannot drift.
  *
- * Every dollar this module emits is a TYPED value `{ usd, class, floor, coverage?, planId? }` -- never
+ * Every dollar this module emits is a TYPED value `{ usd, class, floor, coverage?, planId?, notional? }` -- never
  * a bare number. The class system makes a mislabeled estimate structurally impossible: a renderer
  * cannot print a dollar without also holding what KIND of dollar it is, and the panel's fmtCost is the
- * only renderer.
+ * only renderer. `usd` is what was billed; `notional` (issue #1008), present only beside rows of class
+ * "subscription", is their list price, which nobody was billed, so it is never added into `usd`.
  */
 
 import { dayKey } from "@edgehero/pi-dispatch/budget";
 import { fromNewerRelease, readableRecords } from "./newer-release.mjs";
 
 /** Every class a typed dollar can carry. Note what is NOT here: "free". A $0 is always "zero-rated"
- * (a rate table said zero) or "plan" (prepaid) -- the fold has no way to assert that anything is free. */
-export const COST_CLASSES = ["metered", "plan", "zero-rated", "estimated", "seeded", "unknown"];
+ * (a rate table said zero), "plan" (prepaid) or "subscription" (issue #1008: the record says a subscription with no
+ * paid extra usage carried the call, so its list price is notional) -- the fold has no way to assert that anything is free. */
+export const COST_CLASSES = ["metered", "plan", "zero-rated", "estimated", "seeded", "unknown", "subscription"];
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -64,11 +66,47 @@ function utcDay(ms) {
 }
 
 /** Construct a typed dollar -- the only shape a number leaves this module in. */
-function typed(usd, cls, { floor = false, coverage, planId } = {}) {
+function typed(usd, cls, { floor = false, coverage, planId, notional } = {}) {
   const value = { usd, class: cls, floor };
   if (coverage !== undefined) value.coverage = coverage;
   if (planId !== undefined) value.planId = planId;
+  if (notional !== undefined) value.notional = notional;
   return value;
+}
+
+/**
+ * The providers whose calls a record says were notional (issue #1008), as a Set, or null. Both keys are required: the
+ * record's `notionalProviders` (the subscription providers whose calls its container ran with no paid extra usage) AND
+ * `tokens.costNotional` (the meter's sum of those calls' list prices). An older image under a newer worker records
+ * `notionalProviders` without `costNotional`: its runner charged those calls to the cap like any other, and the
+ * worker settled them as billed, so such a record names no notional provider here either. The record's own word, never
+ * the subscriptions file's: the model guard ties a call's provider to the credential that carried it. A `costNotional`
+ * above the cost it is part of names none either: the worker settles such a line at the floor on the whole cost
+ * (dollar-budget.mjs `notionalMicros`), so it is billed in full here too (`recordNotionalMicros`).
+ */
+export function recordNotionalProviders(record) {
+  const named = record?.notionalProviders;
+  if (!Array.isArray(named) || named.length === 0 || recordNotionalMicros(record) === null) return null;
+  const providers = new Set(named.filter((provider) => typeof provider === "string" && provider !== ""));
+  return providers.size > 0 ? providers : null;
+}
+
+/**
+ * A record's cost split the worker's way (issue #1008, dollar-budget.mjs `meteredMicros` and `notionalMicros`, restated
+ * because this module imports nothing from the worker but `dayKey`): `{ costMicros, notionalMicros, billedMicros }` in
+ * micro-dollars, the cost rounded up and `costNotional` down, billed the difference; or null when `costNotional` is
+ * absent, not a number at or above 0, or above the cost, and when the cost does not convert. What the dollar windows
+ * were settled to, with or without a usage ledger.
+ */
+export function recordNotionalMicros(record) {
+  const tokens = record?.tokens;
+  const value = tokens?.costNotional;
+  const cost = tokens?.cost;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) return null;
+  const costMicros = Math.ceil(cost * 1e6);
+  const notionalMicros = Math.floor(value * 1e6);
+  if (!Number.isSafeInteger(costMicros) || !Number.isSafeInteger(notionalMicros) || notionalMicros > costMicros) return null;
+  return { costMicros, notionalMicros, billedMicros: costMicros - notionalMicros };
 }
 
 /**
@@ -111,10 +149,16 @@ function coveringSubscription(provider, model, subscriptions, { includeHypotheti
  *      "free" would claim nobody paid, which this fold cannot know. Nor "subscription": a $0 rate was
  *      once the mark of a coding plan, and 0.99.1 prices most of those plans while free models of
  *      metered providers stay at zero.
+ * Between 1 and 2 (issue #1008): a row whose provider is in `notional` (`recordNotionalProviders`, the record's own word that
+ * a subscription with no paid extra usage carried every call of that provider) -> "subscription". Nobody was billed for
+ * it, so it adds nothing to a billed total, and its recorded cost is its list price, said apart as notional. A declared
+ * plan still comes first: the record says which credential carried a call, and the subscriptions file still says what
+ * that credential costs (DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY).
  */
-export function classifyRow(row, subscriptions, pricing) {
+export function classifyRow(row, subscriptions, pricing, notional = null) {
   const sub = coveringSubscription(row.provider, row.model, Array.isArray(subscriptions) ? subscriptions : []);
   if (sub) return { class: "plan", planId: sub.id };
+  if (notional instanceof Set && notional.has(row.provider)) return { class: "subscription", planId: null };
   const cost = typeof row.cost === "number" ? row.cost : 0;
   if (cost > 0) return { class: "metered", planId: null };
   const priced = pricing?.getPricedModel?.(row.provider, row.model) ?? null;
@@ -138,9 +182,10 @@ export function classifyRow(row, subscriptions, pricing) {
  * the quad keeps the full split -- reprice rates may distinguish the tiers.
  */
 function attributionRows(record) {
-  const usage = record.usage;
-  if (usage && Array.isArray(usage.models) && usage.models.length > 0) {
-    return usage.models.map((m) => {
+  if (hasLedger(record)) {
+    // A ledger row that is not an object (a damaged record) is skipped, never a throw and never a row with no provider
+    // or model: the run page reads its cost through these rows too (`classifiedRows`), so both say the same rows.
+    return record.usage.models.filter(isLedgerRow).map((m) => {
       const quad = {};
       for (const key of QUAD_KEYS) quad[key] = m[key] ?? 0;
       return {
@@ -248,13 +293,72 @@ function runContribution(record, subscriptions, pricing) {
   // meter (metered:false) missed subagent/compaction spend entirely. Either way this run's number is a
   // floor, and floors are sticky -- any aggregate containing one is a floor.
   const floor = tokens.metered === false || floorCounted(tokens);
-  const rows = attributionRows(record).map((row) => ({ ...row, ...classifyRow(row, subscriptions, pricing), floor }));
+  const rows = classifiedRows(record, subscriptions, pricing).map((row) => ({ ...row, floor }));
   // Metered truth: the run's stream-time cost IS the number -- never re-priced here -- except that
   // plan-covered rows contribute $0 metered to totals: the plan already paid, and their recorded cost
-  // is an all-zero rate table artifact anyway. Their api-equivalent surfaces separately.
-  const usd = rows.reduce((sum, row) => sum + (row.class === "plan" ? 0 : row.cost), 0);
+  // is an all-zero rate table artifact anyway. Their api-equivalent surfaces separately. Subscription rows
+  // (issue #1008) contribute $0 too, nobody was billed for them, and their list price rides apart as `notional`.
+  const usd = rows.reduce((sum, row) => sum + (row.class === "plan" || row.class === "subscription" ? 0 : row.cost), 0);
   const classes = [...new Set(rows.map((row) => row.class))];
-  return { rows, usd, classes, floor };
+  return { rows, usd, classes, floor, ...notionalPart(rows) };
+}
+
+/** A usage ledger row the fold can read: an object. */
+function isLedgerRow(entry) {
+  return entry !== null && typeof entry === "object" && !Array.isArray(entry);
+}
+
+/** Whether a record carries a usage ledger with a row it can read (`attributionRows`' first rung); one whose rows are all
+ * damaged falls to the whole-run row, as a record with no ledger does. */
+export function hasLedger(record) {
+  return Array.isArray(record?.usage?.models) && record.usage.models.some(isLedgerRow);
+}
+
+/**
+ * A record's attribution rows, each classed (`attributionRows`, `classifyRow`), for the fold and the run page alike. With
+ * a usage ledger each row names the provider of its own calls, so a row of a notional provider (`recordNotionalProviders`)
+ * is classed by it. Without one (issue #1008) the record's cost is split the worker's way (`recordNotionalMicros`),
+ * because that is what its settlement did with no ledger: `costNotional` is the list price of the notional calls and the
+ * rest was billed. The notional part is one row on the host-effective provider when that one is notional, else on the
+ * first notional provider (model `unknown`), classed as a ledger row of it would be (a declared plan still wins); the
+ * billed rest, when above 0, is a row of its own on the host-effective provider when that one is not notional, else
+ * `unknown`, never matched against a plan, since nothing says which model billed it. The tokens stay on the first row.
+ */
+export function classifiedRows(record, subscriptions, pricing) {
+  const subs = Array.isArray(subscriptions) ? subscriptions : [];
+  const notional = recordNotionalProviders(record);
+  if (hasLedger(record) || notional === null) return attributionRows(record).map((row) => ({ ...row, ...classifyRow(row, subs, pricing, hasLedger(record) ? notional : null) }));
+  const [whole] = attributionRows(record);
+  const split = recordNotionalMicros(record);
+  const own = notional.has(whole.provider);
+  const notionalRow = { ...whole, provider: own ? whole.provider : [...notional][0], model: own ? whole.model : "unknown", cost: split.notionalMicros / 1e6 };
+  const rows = [{ ...notionalRow, ...classifyRow(notionalRow, subs, pricing, notional) }];
+  if (split.billedMicros > 0) {
+    const billedRow = { ...whole, provider: own ? "unknown" : whole.provider, model: own ? "unknown" : whole.model, calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: split.billedMicros / 1e6 };
+    rows.push({ ...billedRow, ...classifyRow(billedRow, [], pricing, null) });
+  }
+  return rows;
+}
+
+/** `{ notional }`, the list price of the subscription rows among `rows` (issue #1008), or `{}` when there are none. */
+function notionalPart(rows) {
+  const subscription = rows.filter((row) => row.class === "subscription");
+  return subscription.length > 0 ? { notional: subscription.reduce((sum, row) => sum + (Number.isFinite(row.cost) && row.cost > 0 ? row.cost : 0), 0) } : {};
+}
+
+/**
+ * The classes that decide a typed dollar's own class (issue #1008): every class but "subscription". A subscription row is
+ * an exact $0 of billed money (nobody was billed), so it never demotes a metered sum to an estimate; its list price is
+ * said beside the sum as `notional`. A bucket holding nothing else is of class "subscription", an exact $0 billed.
+ */
+function billedClasses(classes) {
+  return classes.filter((cls) => cls !== "subscription");
+}
+
+/** The `notional` option for `typed`: the sum over parts that carry one, or undefined when none does. */
+function notionalSum(parts) {
+  const carrying = parts.filter((part) => part.notional !== undefined);
+  return carrying.length > 0 ? { notional: carrying.reduce((sum, part) => sum + part.notional, 0) } : {};
 }
 
 /**
@@ -278,13 +382,17 @@ function combineContributions(contribs) {
   // denominator, so it neither demotes a bucket nor dilutes its coverage. A bucket of refusals alone is then
   // vacuously metered, an exact $0, like an empty bucket.
   const measured = contribs.filter((c) => c.refused !== true);
-  const allMetered = measured.every((c) => c.classes.length === 1 && c.classes[0] === "metered");
-  if (allMetered) return typed(usd, "metered", { floor });
-  const allPlan = !floor && measured.length > 0 && measured.every((c) => c.rows.length > 0 && c.classes.length === 1 && c.classes[0] === "plan");
-  const ids = allPlan ? [...new Set(measured.flatMap((c) => c.rows.map((row) => row.planId)))] : [];
-  if (ids.length === 1) return typed(usd, "plan", { floor, planId: ids[0] });
+  // Issue #1008: subscription rows take no part in the class (billedClasses), and their list price rides as `notional`.
+  const notional = notionalSum(measured);
+  const billed = measured.map((c) => billedClasses(c.classes));
+  if (notional.notional !== undefined && billed.every((classes) => classes.length === 0)) return typed(usd, "subscription", { floor, ...notional });
+  const allMetered = billed.every((classes) => classes.length === 0 || (classes.length === 1 && classes[0] === "metered"));
+  if (allMetered) return typed(usd, "metered", { floor, ...notional });
+  const allPlan = !floor && measured.length > 0 && measured.every((c, i) => c.rows.length > 0 && billed[i].length === 1 && billed[i][0] === "plan");
+  const ids = allPlan ? [...new Set(measured.flatMap((c) => c.rows.filter((row) => row.class === "plan").map((row) => row.planId)))] : [];
+  if (ids.length === 1) return typed(usd, "plan", { floor, planId: ids[0], ...notional });
   const meteredRuns = measured.filter((c) => c.classes.includes("metered")).length;
-  return typed(usd, "estimated", { floor, coverage: meteredRuns / measured.length });
+  return typed(usd, "estimated", { floor, coverage: meteredRuns / measured.length, ...notional });
 }
 
 /** A record's bucketing instant: `endedAt`, or `startedAt` for a record that never ended; null when
@@ -735,14 +843,19 @@ function buildByModel(runs) {
  * runs) demotes to "estimated" with run-grain coverage.
  */
 function combineRowCosts(rows) {
-  const usd = rows.reduce((sum, row) => sum + (row.class === "plan" ? 0 : row.cost), 0);
+  const usd = rows.reduce((sum, row) => sum + (row.class === "plan" || row.class === "subscription" ? 0 : row.cost), 0);
   const floor = rows.some((row) => row.floor);
-  const classes = [...new Set(rows.map((row) => row.class))];
+  // Issue #1008: a model reached on a subscription in one run and on a key in another keeps the key's class, and
+  // says the subscription's list price beside it (billedClasses).
+  const notional = notionalPart(rows);
+  const classes = billedClasses([...new Set(rows.map((row) => row.class))]);
+  if (classes.length === 0) return typed(usd, "subscription", { floor, ...notional });
+  const priced = rows.filter((row) => row.class !== "subscription");
   if (classes.length === 1) {
-    return typed(usd, classes[0], classes[0] === "plan" ? { floor, planId: rows[0].planId } : { floor });
+    return typed(usd, classes[0], classes[0] === "plan" ? { floor, planId: priced[0].planId, ...notional } : { floor, ...notional });
   }
-  const meteredRows = rows.filter((row) => row.class === "metered").length;
-  return typed(usd, "estimated", { floor, coverage: meteredRows / rows.length });
+  const meteredRows = priced.filter((row) => row.class === "metered").length;
+  return typed(usd, "estimated", { floor, coverage: meteredRows / priced.length, ...notional });
 }
 
 /** Score every declared plan -- owned and hypothetical -- against the window's attributed runs. */
@@ -1008,12 +1121,17 @@ export function whatIfRuns({ records, target, pricing, subscriptions = [] }) {
   return { class: "estimated", usd, originalUsd, runs, excluded, coverage: runs + excluded > 0 ? runs / (runs + excluded) : 0, ratesVersion, planId: plan?.id ?? null, ...(newerSkipped > 0 ? { newerSkipped } : {}) };
 }
 
-/** A metered-only run's cost, using the same row classification as every cost chart; mixed plan runs are excluded. */
+/**
+ * A metered-only run's cost, using the same row classification as every cost chart; mixed plan runs are excluded. A
+ * run's subscription rows (issue #1008) count as the $0 they billed, so a run that called a subscription and a key is
+ * measured by its billed part, which is all the job cap counted, and a run on subscriptions alone billed an exact $0.
+ */
 export function meteredRunMicros(record, { subscriptions = [], pricing = { getPricedModel: () => null, isZeroRated: () => false } } = {}) {
   if (fromNewerRelease(record)) return null; // a newer release's record: its cost is past the stable core (issue #761)
   if (record?.tokens?.metered !== true) return null;
   const contribution = runContribution(record, subscriptions, pricing);
-  if (contribution.refused || contribution.floor || contribution.rows.length === 0 || !contribution.rows.every((r) => r.class === "metered" || r.class === "zero-rated")) return null;
+  const billedRows = contribution.rows.filter((r) => r.class !== "subscription");
+  if (contribution.refused || contribution.floor || contribution.rows.length === 0 || !billedRows.every((r) => r.class === "metered" || r.class === "zero-rated")) return null;
   const micros = Math.round(contribution.usd * 1_000_000);
   return Number.isSafeInteger(micros) && micros >= 0 ? micros : null;
 }

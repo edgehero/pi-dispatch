@@ -2,8 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { COST_CLASSES, COSTS_WINDOWS, PROJECT_KEY_RE, costsSinceMs, matchesGlob, classifyRow, foldCosts, whatIfFlow, repoOfTarget, foldTriggerCosts, projectKeyOf, recordInProject, recordInRepo, repoKeyOf } from "../src/costs.mjs";
+import { COST_CLASSES, COSTS_WINDOWS, PROJECT_KEY_RE, costsSinceMs, matchesGlob, classifyRow, foldCosts, whatIfFlow, repoOfTarget, foldTriggerCosts, projectKeyOf, recordInProject, recordInRepo, repoKeyOf, meteredRunMicros, recordNotionalMicros, recordNotionalProviders } from "../src/costs.mjs";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
+import { runCost } from "../src/console/panels/common.mjs";
 import { parseSubscriptions } from "@edgehero/pi-dispatch/subscriptions";
 
 test("costs.mjs is pure: no fs, no redis, no queue, no env, no console -- records and opinions in, typed dollars out", () => {
@@ -191,7 +192,7 @@ function fold(records, { subscriptions = [], nowMs = NOW, piAiPin = "1.2.3", sin
 // ---- classification ----
 
 test("COST_CLASSES is the closed class set, and 'free' is not in it", () => {
-  assert.deepEqual(COST_CLASSES, ["metered", "plan", "zero-rated", "estimated", "seeded", "unknown"]);
+  assert.deepEqual(COST_CLASSES, ["metered", "plan", "zero-rated", "estimated", "seeded", "unknown", "subscription"]);
   assert.ok(!COST_CLASSES.includes("free"), "'free' is a claim the fold cannot make");
 });
 
@@ -880,4 +881,100 @@ test("a bucket every run of which one plan covers, no run a floor, keeps plan:<i
   assert.equal(splitMap["trigger:4"].cost.class, "estimated", "a run with a billed row is not plan covered");
   // A bucket of only metered runs is untouched.
   assert.equal(foldTriggerCosts({ records: [metered], subscriptions: subs, pricing: cannedPricing(), triggerJoin })["trigger:1"].cost.class, "metered");
+});
+
+// ---- issue #1008: billed and notional apart ----
+
+/** A mixed run: the root on a Claude subscription with no paid extra usage, an auxiliary on an API key. */
+function mixedRun(over = {}) {
+  return rec({
+    jobId: "mix-1",
+    endedAt: "2026-07-14T18:00:00.000Z",
+    tokens: { ...tok(60.08), costNotional: 59.75 },
+    usage: usage([row("anthropic", "claude-opus-5-5", { cost: 59.75 }), row("openrouter", "qwen-max", { cost: 0.33 })]),
+    provider: "anthropic",
+    model: "claude-opus-5-5",
+    notionalProviders: ["anthropic"],
+    ...over,
+  });
+}
+
+test("issue #1008: classifyRow classes a notional provider's row as subscription, after a declared plan and before metered", () => {
+  const notional = new Set(["anthropic"]);
+  assert.deepEqual(classifyRow({ provider: "anthropic", model: "claude-opus-5-5", cost: 59.75 }, [], cannedPricing(), notional), { class: "subscription", planId: null });
+  assert.deepEqual(classifyRow({ provider: "openrouter", model: "qwen-max", cost: 0.33 }, [], cannedPricing(), notional), { class: "metered", planId: null });
+  // A declared plan still sets the price: the record says which credential carried the call, the file what it costs.
+  assert.deepEqual(classifyRow({ provider: "anthropic", model: "claude-opus-5-5", cost: 59.75 }, [sub({ id: "max", provider: "anthropic" })], cannedPricing(), notional), { class: "plan", planId: "max" });
+  assert.deepEqual(classifyRow({ provider: "anthropic", model: "claude-opus-5-5", cost: 59.75 }, [], cannedPricing()), { class: "metered", planId: null });
+});
+
+test("issue #1008: a mixed run folds billed apart from notional, by model, by flow and in the total; a sum it joins stays metered", () => {
+  const f = fold([mixedRun(), ledgeredMetered]);
+  const opus = f.byModel.find((m) => m.model === "claude-opus-5-5");
+  assert.equal(opus.cost.class, "subscription");
+  assert.equal(opus.cost.usd, 0, "nobody was billed for the subscription calls");
+  assert.equal(opus.cost.notional, 59.75);
+  const qwen = f.byModel.find((m) => m.model === "qwen-max");
+  assert.deepEqual(qwen.cost, { usd: 0.33, class: "metered", floor: false });
+  const flow = f.byFlow.find((r) => r.flow === "fix");
+  assert.equal(flow.cost.class, "metered", "a subscription row demotes no sum: its billed part is an exact $0");
+  assert.ok(Math.abs(flow.cost.usd - 0.83) < 1e-9, "billed only: 0.33 + the other run's 0.5");
+  assert.equal(flow.cost.notional, 59.75);
+  assert.equal(f.provenance.total.notional, 59.75);
+  // A bucket of subscription work alone is of class subscription, an exact $0 billed.
+  const alone = fold([mixedRun({ usage: usage([row("anthropic", "claude-opus-5-5", { cost: 59.75 })]), tokens: { ...tok(59.75), costNotional: 59.75 } })]);
+  assert.deepEqual(alone.byFlow[0].cost, { usd: 0, class: "subscription", floor: false, notional: 59.75 });
+});
+
+test("issue #1008: a record naming notionalProviders without costNotional (an older image), or with one above its cost, stays billed", () => {
+  const older = fold([mixedRun({ tokens: tok(60.08) })]);
+  const opus = older.byModel.find((m) => m.model === "claude-opus-5-5");
+  assert.deepEqual(opus.cost, { usd: 59.75, class: "metered", floor: false }, "that image charged the call to the cap, and the worker settled it as billed");
+  assert.equal(older.byFlow[0].cost.notional, undefined);
+  // Above the cost it is part of, the worker settles the line at the floor on the whole cost: billed in full here too.
+  const above = mixedRun({ tokens: { ...tok(60.08), costNotional: 60.09 } });
+  assert.equal(recordNotionalProviders(above), null);
+  assert.deepEqual(fold([above]).byFlow[0].cost, { usd: 60.08, class: "metered", floor: false });
+  assert.deepEqual(recordNotionalMicros(mixedRun()), { costMicros: 60_080_000, notionalMicros: 59_750_000, billedMicros: 330_000 });
+});
+
+test("issue #1008: a record with both notional keys and no ledger is split the worker's way, cost less costNotional billed", () => {
+  const unledgered = fold([mixedRun({ usage: null })]);
+  assert.equal(unledgered.byFlow[0].cost.class, "metered");
+  assert.ok(Math.abs(unledgered.byFlow[0].cost.usd - 0.33) < 1e-9, "the billed rest");
+  assert.equal(unledgered.byFlow[0].cost.notional, 59.75);
+  const opus = unledgered.byModel.find((m) => m.provider === "anthropic");
+  assert.deepEqual([opus.model, opus.cost.class, opus.cost.notional], ["claude-opus-5-5", "subscription", 59.75], "the notional part on the host-effective provider, which is notional");
+  assert.ok(unledgered.byModel.some((m) => m.provider === "unknown" && m.cost.class === "metered"), "the billed rest names no model it cannot know");
+  // A subscription-only record with no ledger billed nothing.
+  assert.deepEqual(fold([mixedRun({ usage: null, tokens: { ...tok(7.5), costNotional: 7.5 } })]).byFlow[0].cost, { usd: 0, class: "subscription", floor: false, notional: 7.5 });
+});
+
+test("issue #1008: meteredRunMicros measures a mixed run by its billed part and a run on subscriptions alone as the $0 it billed", () => {
+  assert.equal(meteredRunMicros(mixedRun()), 330_000);
+  assert.equal(meteredRunMicros(mixedRun({ usage: usage([row("anthropic", "claude-opus-5-5", { cost: 59.75 })]), tokens: { ...tok(59.75), costNotional: 59.75 } })), 0);
+  assert.equal(meteredRunMicros(mixedRun({ tokens: tok(60.08) })), 60_080_000, "an older image's record is billed whole");
+});
+
+test("a damaged ledger row is skipped, never a throw or an undefined model, and a ledger with none left reads as the whole run; the run page says the same", () => {
+  const damaged = rec({ jobId: "dmg-1", tokens: tok(0.5), usage: usage([null, 7, row("anthropic", "claude-sonnet-4", { cost: 0.5 })]), provider: "anthropic", model: "claude-sonnet-4" });
+  const f = fold([damaged]);
+  assert.deepEqual(f.byModel.map((m) => `${m.provider}/${m.model}`), ["anthropic/claude-sonnet-4"]);
+  assert.deepEqual(f.byFlow[0].cost, { usd: 0.5, class: "metered", floor: false });
+  assert.deepEqual(runCost(damaged), { usd: 0.5, class: "metered", floor: false, planId: null }, "the run page reads the same rows");
+  const allDamaged = rec({ jobId: "dmg-2", tokens: tok(0.25), usage: usage([null, "x"]), provider: "anthropic", model: "claude-sonnet-4" });
+  assert.deepEqual(fold([allDamaged]).byModel.map((m) => [`${m.provider}/${m.model}`, m.cost.usd]), [["anthropic/claude-sonnet-4", 0.25]], "the whole-run row, as with no ledger");
+  assert.equal(runCost(allDamaged).usd, 0.25);
+});
+
+test("issue #1008: a no-ledger record whose root is an API model splits into its billed root and the notional provider's list price", () => {
+  const apiRoot = mixedRun({ usage: null, provider: "openrouter", model: "qwen-max" });
+  const f = fold([apiRoot]);
+  assert.deepEqual(f.byModel.map((m) => [`${m.provider}/${m.model}`, m.cost.class]).sort(), [["anthropic/unknown", "subscription"], ["openrouter/qwen-max", "metered"]]);
+  assert.equal(f.byModel.find((m) => m.provider === "anthropic").cost.notional, 59.75);
+  assert.ok(Math.abs(f.byModel.find((m) => m.provider === "openrouter").cost.usd - 0.33) < 1e-9);
+  const cost = runCost(apiRoot);
+  assert.equal(cost.class, "metered");
+  assert.ok(Math.abs(cost.usd - 0.33) < 1e-9);
+  assert.equal(cost.notional, 59.75);
 });

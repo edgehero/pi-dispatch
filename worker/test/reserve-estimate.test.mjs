@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { estimateReserve, zeroRatedFor } from "../src/reserve-estimate.mjs";
+import { estimateReserve, reserveVerdict, zeroRatedFor } from "../src/reserve-estimate.mjs";
 import { effectiveJobOf } from "../src/index.mjs";
 import { allowedModelsFrom } from "../src/config.mjs";
 import { resolveSettings } from "../src/runtime-settings.mjs";
@@ -59,4 +59,18 @@ test("an empty PI_MAX_COST_USD is unset: no cap and no throw, so the overlay's c
 	assert.deepEqual(estimateReserve(forge, { env: { PI_MAX_COST_USD: "" } }), { slots: 1, dollarsMicros: null, capMicros: null, zeroRated: false });
 	assert.equal(estimateReserve(forge, { env: { PI_MAX_COST_USD: "" }, overlay: { maxCostUsd: "1" } }).capMicros, USD);
 	assert.equal(estimateReserve({ ...forge, maxCostUsd: "0.5" }, { env: { PI_MAX_COST_USD: "" } }).capMicros, 500_000, "a trigger-only cap applies alone");
+});
+
+test("issue #1008: named notional providers make a job that reaches only them hold nothing, keep its cap, and say so; a billed route keeps the cap's figure", () => {
+	const env = { PI_MAX_COST_USD: "150" };
+	const claude = { ...forge, provider: "anthropic", model: "claude-opus-5-5", models: ["anthropic/claude-opus-5-5"] };
+	const notional = new Set(["anthropic"]);
+	assert.deepEqual(estimateReserve(claude, { env, notional }), { slots: 1, dollarsMicros: 0, capMicros: 150 * USD, zeroRated: false, unreserved: true });
+	assert.equal(reserveVerdict({ ...claude, maxCostMicros: 150 * USD }, { notional }).reserve, "none", "the worker's own rule agrees");
+	// An auxiliary on an API key is a billed route, and so is a job with no finite list: the cap, as before.
+	assert.deepEqual(estimateReserve({ ...claude, models: ["anthropic/claude-opus-5-5", "openrouter/qwen-max"], auxiliaryModels: ["openrouter/qwen-max"] }, { env, notional }), { slots: 1, dollarsMicros: 150 * USD, capMicros: 150 * USD, zeroRated: false });
+	assert.equal(estimateReserve({ ...claude, models: undefined }, { env, notional }).dollarsMicros, 150 * USD);
+	// No providers named (a status that could not be read): the cap's figure, never a smaller one.
+	assert.deepEqual(estimateReserve(claude, { env }), { slots: 1, dollarsMicros: 150 * USD, capMicros: 150 * USD, zeroRated: false });
+	assert.equal(estimateReserve(claude, { env, notional: new Set() }).dollarsMicros, 150 * USD);
 });

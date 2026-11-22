@@ -90,6 +90,7 @@ export { evaluateActionPolicy } from "../action-policy.mjs";
 import { checkAgentRerun, paidStartEnvironment } from "../agent-starts.mjs";
 import { ANSWERER_ACTIONS, ANSWERER_WRITE_RULES } from "./answerer-actions.mjs";
 import { agentReadProjection } from "../agent-read.mjs";
+import { notionalBoundProviders } from "../subscription-auth-view.mjs";
 import { SETUP_HTTP_ACTIONS, SETUP_WRITE_RULES } from "./setup-actions.mjs";
 import { MODEL_ROLE_EDIT_FIELDS } from "../model-role-plans.mjs";
 // The names only. `trigger-environment-plans.mjs` must stay out of this module's imports, which every tool reaches: the planner
@@ -307,6 +308,7 @@ export function reserveText(r) {
   if (r.unknown) return "Reserve unknown: the job's data could not be read, so what the worker will hold for it cannot be said.";
   if (r.invalid) return `The deployment's dollar setting does not parse (${r.invalid}), so the worker refuses every job until it is fixed.`;
   if (r.zeroRated) return "It holds 1 job slot and $0.00: every model it may call is zero-rated.";
+  if (r.unreserved) return `It holds 1 job slot and $0.00 in the dollar windows: every model it may call runs on a subscription with no paid extra usage, which bills nothing (as the hosts publish their connections now). Its ${Number.isSafeInteger(r.capMicros) ? `$${formatMicros(r.capMicros)} ` : ""}job cap still applies to any call that could be billed.`;
   if (!Number.isSafeInteger(r.dollarsMicros)) return "It holds 1 job slot. No per-job dollar cap is set, so no dollar window can hold anything for it.";
   return `It holds 1 job slot and $${formatMicros(r.dollarsMicros)} (the per-job cap) in each dollar window that applies, until it settles.`;
 }
@@ -319,7 +321,7 @@ export function reserveText(r) {
 async function retryReserves(ctx, jobs) {
   const { rm, paths, readJobsData } = ctx.a;
   const data = typeof readJobsData === "function" ? await readJobsData({ url: paths.valkeyUrl, jobs }) : new Map();
-  const opts = reserveInputs(ctx);
+  const opts = await reserveInputsLive(ctx);
   return new Map(jobs.map((j) => {
     const d = data.get(j.jobId);
     if (!d || typeof rm.estimateReserve !== "function") return [j.jobId, { unknown: true }];
@@ -330,6 +332,38 @@ async function retryReserves(ctx, jobs) {
     }
   }));
 }
+
+/**
+ * `reserveInputs` and (issue #1008) `notional`: the providers the hosts' published status binds to a subscription with no
+ * paid extra usage (`notionalBoundProviders`), so the estimate of a job that reaches only those says it holds nothing in
+ * the dollar windows, as the worker's reserve step does. Read within a short bound; a status that cannot be read names
+ * none, and the estimate then names the cap, never less than the worker holds. The re-run, parked answer, retry, Fire now
+ * and package canary previews use it; a re-run's confirm reads it again, so a figure that moved asks for a new preview. A
+ * fork (its reserve is part of what the worker checks) and a trigger add keep `reserveInputs`, so their figure is the cap.
+ */
+async function reserveInputsLive(ctx) {
+  const inputs = reserveInputs(ctx);
+  const read = ctx.a.readSubscriptionStatus;
+  if (typeof read !== "function") return inputs;
+  let timer;
+  try {
+    const late = new Promise((resolve) => {
+      timer = setTimeout(resolve, ctx.a.subscriptionStatusMs ?? RESERVE_STATUS_MS, null);
+      timer.unref?.();
+    });
+    const status = await Promise.race([Promise.resolve().then(() => read()), late]);
+    const notional = notionalBoundProviders(status, { now: typeof ctx.now === "function" ? ctx.now() : Date.now() });
+    return notional.size > 0 ? { ...inputs, notional } : inputs;
+  } catch {
+    return inputs;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** How long a reserve estimate waits for the published subscription status (issue #1008), the registry read's bound;
+ * `ctx.a.subscriptionStatusMs` replaces it in a test. */
+const RESERVE_STATUS_MS = 2500;
 
 /**
  * What every reserve estimate is judged against, the worker's own inputs (issue #642): the settings overlay, the
@@ -399,7 +433,7 @@ function bulkReserve(reserves) {
 }
 
 /** One job's reserve as a summary line's tail. */
-const reserveTail = (r) => (!r || r.unknown || r.invalid ? ", reserve unknown" : r.zeroRated ? ", reserve $0.00 (zero-rated)" : Number.isSafeInteger(r.dollarsMicros) ? `, reserve $${formatMicros(r.dollarsMicros)}` : ", reserve 1 slot (no dollar cap)");
+const reserveTail = (r) => (!r || r.unknown || r.invalid ? ", reserve unknown" : r.zeroRated ? ", reserve $0.00 (zero-rated)" : r.unreserved ? ", reserve $0.00 (subscription)" : Number.isSafeInteger(r.dollarsMicros) ? `, reserve $${formatMicros(r.dollarsMicros)}` : ", reserve 1 slot (no dollar cap)");
 
 /** The reserve's micro-dollars for the audit row, or null. */
 function reserveMicros(r) {
@@ -1418,7 +1452,7 @@ const jobActions = [
         const grants = paidStartEnvironment(ctx.a.env, ctx.a.grantsEnv);
         if (grants.refusal) return grants;
       }
-      const result = await ctx.a.rm.planTriggerFire({ index: index(body), triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now, lookAlready: true });
+      const result = await ctx.a.rm.planTriggerFire({ index: index(body), triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...(await reserveInputsLive(ctx)), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now, lookAlready: true });
       if (result.unreachable) return { refusal: "The deployment's queue could not be read, so Fire now could not be previewed. Nothing was changed." };
       const got = planned(result);
       if (!got.plan) return got;
@@ -1444,7 +1478,7 @@ const jobActions = [
     async preview(body, ctx) {
       const jobId = jobIdOf(body);
       const { rm, paths } = ctx.a;
-      const read = await rm.planRerun({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), fs: ctx.fs, now: ctx.now });
+      const read = await rm.planRerun({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId, triggersPath: paths.triggersPath ?? null, ...(await reserveInputsLive(ctx)), fs: ctx.fs, now: ctx.now });
       const got = planned(read);
       if (!got.plan) return got;
       const p = got.plan;
@@ -1474,7 +1508,7 @@ const jobActions = [
         // read compare the same route; actual host/queue or execution changes must still refuse.
         replay = { random: n => { if (n !== 8) throw new Error("unexpected re-run identity size"); return Buffer.from(id[1], "hex"); } };
       }
-      const fresh = await rm.planRerun({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId: entry.target, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), ...replay, fs: ctx.fs, now: ctx.now, lookAlready: false });
+      const fresh = await rm.planRerun({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId: entry.target, triggersPath: paths.triggersPath ?? null, ...(await reserveInputsLive(ctx)), ...replay, fs: ctx.fs, now: ctx.now, lookAlready: false });
       // A re-plan whose reads went unanswered (issue #961) showed no change: nothing was sent, and Valkey is why.
       if (fresh?.unread === true) return { unreachable: true };
       if (!fresh?.plan || rerunAuthorityDigest(fresh.plan) !== entry.expect?.rerunAuthority) return { invalid: "The re-run source or current trigger changed; preview the run again before enqueueing." };
@@ -1505,7 +1539,7 @@ const jobActions = [
       const text = body.decision === "approve" ? "/approve" : body.decision === "decline" ? `/decline${answerText.trim() ? ` ${answerText.trim()}` : ""}` : answerText;
       const { rm, paths } = ctx.a;
       // `by` is the session's token name, never anything the body says: the trail comment names who answered.
-      const got = planned(await rm.planParkedAnswer({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId, text, by: ctx.session.name, triggersPath: paths.triggersPath ?? null, ...(body.draftRunId !== undefined ? { draftRunId: str(body, "draftRunId", { required: true, max: 200 }), draftDigest: str(body, "draftDigest", { required: true, max: 64 }) } : {}), ...reserveInputs(ctx), fs: ctx.fs, now: ctx.now }));
+      const got = planned(await rm.planParkedAnswer({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId, text, by: ctx.session.name, triggersPath: paths.triggersPath ?? null, ...(body.draftRunId !== undefined ? { draftRunId: str(body, "draftRunId", { required: true, max: 200 }), draftDigest: str(body, "draftDigest", { required: true, max: 64 }) } : {}), ...(await reserveInputsLive(ctx)), fs: ctx.fs, now: ctx.now }));
       if (!got.plan) return got;
       const p = got.plan;
       const answer = String(p.job?.trigger?.comment?.body ?? "");
@@ -1996,6 +2030,7 @@ const byHand = (what, field) => `Edit ${what} back by hand: ${field} had no valu
 function paidLabel(verb, r) {
   if (!r || r.unknown || r.invalid) return `${verb} (reserve unknown)`;
   if (r.zeroRated) return `${verb} (zero-rated)`;
+  if (r.unreserved) return `${verb}, no dollar reserve (subscription)`;
   if (!Number.isSafeInteger(r.dollarsMicros)) return `${verb}, 1 job slot`;
   return `${verb} for up to $${formatMicros(r.dollarsMicros)}`;
 }
@@ -2592,7 +2627,7 @@ const packageActions = [
       const canary = packageOf(body);
       // The facts and the plan are asked at once (issue #961): one after the other, a Valkey that stopped answering
       // held this preview for the bound of each.
-      const planning = Promise.resolve().then(() => ctx.a.rm.planTriggerFire({ index: at, triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now, lookAlready: true }));
+      const planning = Promise.resolve().then(async () => ctx.a.rm.planTriggerFire({ index: at, triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...(await reserveInputsLive(ctx)), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now, lookAlready: true }));
       planning.catch(() => {});
       const row = stagedRow(await ctx.a.updates.read(), canary.name);
       if (!row) return { refusal: `${canary.name} is not staged on this host, so there is nothing for a candidate to replace. Nothing was queued.` };

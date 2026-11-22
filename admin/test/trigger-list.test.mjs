@@ -270,3 +270,11 @@ test("list facts keep auxiliary grants distinct from the allowed ceiling and cop
   assert.deepEqual(got.rows[0].trigger.auxiliaryModels, auxiliaryModels);
   assert.notEqual(got.rows[0].trigger.auxiliaryModels, auxiliaryModels);
 });
+
+test("issue #1008: a run on a subscription alone billed an exact $0, so the week's spend is complete and adds nothing for it", () => {
+  const sub = record({ jobId: "sub", provider: "anthropic", model: "claude-opus-5-5", notionalProviders: ["anthropic"], tokens: { cost: 59.75, costNotional: 59.75, metered: true, input: 1, output: 1, total: 2, calls: 3 }, usage: { v: 1, truncated: 0, models: [{ provider: "anthropic", model: "claude-opus-5-5", calls: 3, cost: 59.75 }] } });
+  const got = build({ records: [sub] });
+  assert.equal(got.stats.weekCostMicros, 0);
+  assert.equal(got.stats.costIncomplete, false, "no run of unknown cost");
+  assert.equal(got.stats.weekCost.class, "subscription");
+});
