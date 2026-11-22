@@ -76,10 +76,14 @@ test("a GitHub auth setting, WEBHOOK_SECRET, RECEIVER_PORT and the identity retr
 	const cases = [
 		{ env: { GITHUB_AUTH_SOURCE: "token", WEBHOOK_SECRET: "w" }, line: 'GITHUB_AUTH_SOURCE is "token", which is none of pat, gh or app: ', pulled: "the worker, the receiver and the poller refuse to start on it (exit 2)", pushed: "the worker, the receiver and the poller refuse to start on it (exit 2)", refusal: /^invalid GITHUB_AUTH_SOURCE/ },
 		{ env: { GITHUB_AUTH_SOURCE: "pat", WEBHOOK_SECRET: "w" }, line: "GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: ", pulled: "the worker, the receiver and the poller refuse to start (exit 2)", pushed: "the worker, the receiver and the poller refuse to start (exit 2)", refusal: /^GITHUB_AUTH_SOURCE=pat requires/ },
+		// An inline App key cut short after its header (issue #1028): doctor judges it by the loaders' own rule, so it names
+		// every reader of the auth block, and the collector, which loads none, is not one.
+		{ env: { GITHUB_AUTH_SOURCE: "app", GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: "-----BEGIN RSA PRIVATE KEY-----", WEBHOOK_SECRET: "w" }, line: 'GITHUB_APP_PRIVATE_KEY is not a PEM private key (it must begin "-----BEGIN ... PRIVATE KEY-----" and end "-----END ... PRIVATE KEY-----") -- ', pulled: "the worker, the receiver and the poller refuse to start (exit 2)", pushed: "the worker, the receiver and the poller refuse to start (exit 2)", refusal: /^GITHUB_APP_PRIVATE_KEY is not a PEM private key/ },
 		// What only a listener reads is the receiver's alone (issue #1006): the poller and the collector load without it, a
-		// WEBHOOK_SECRET of spaces and a port they never bind included.
-		{ env: {}, line: "triggers.json has github triggers but WEBHOOK_SECRET is unset -- ", pulled: "the receiver will refuse to start", pushed: "the receiver will refuse to start", refusal: /^WEBHOOK_SECRET is required/ },
-		{ env: { WEBHOOK_SECRET: "   " }, line: "triggers.json has github triggers but WEBHOOK_SECRET is unset -- ", pulled: "the receiver will refuse to start", pushed: "the receiver will refuse to start", refusal: /^WEBHOOK_SECRET is required/ },
+		// WEBHOOK_SECRET of spaces and a port they never bind included. The secret's words are the same for both rows,
+		// "unset or blank", since the receiver trims it: doctor said "unset" of a line that sets it to spaces.
+		{ env: {}, line: "triggers.json has github triggers but WEBHOOK_SECRET is unset or blank -- ", pulled: "the receiver will refuse to start", pushed: "the receiver will refuse to start", refusal: /^WEBHOOK_SECRET is required/ },
+		{ env: { WEBHOOK_SECRET: "   " }, line: "triggers.json has github triggers but WEBHOOK_SECRET is unset or blank -- ", pulled: "the receiver will refuse to start", pushed: "the receiver will refuse to start", refusal: /^WEBHOOK_SECRET is required/ },
 		{ env: { WEBHOOK_SECRET: "w", RECEIVER_PORT: "http" }, line: 'RECEIVER_PORT is "http", which is not a positive integer -- ', pulled: "the receiver will refuse to start", pushed: "the receiver will refuse to start", refusal: /^invalid RECEIVER_PORT/ },
 		// The identity retry window: serve and the poller resolve an identity at their start, the collector none (issue #1006).
 		// A value that is not short and plain is never shown: a token pasted into the wrong line is a token.
