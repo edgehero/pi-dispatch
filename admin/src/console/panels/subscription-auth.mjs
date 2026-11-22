@@ -20,7 +20,11 @@ const facts = rows => html`<dl class="sa-facts">${rows.map(([label, value]) => h
 const selected = value => value === true ? "selected" : value === false ? "not selected" : "selection unknown";
 const owner = row => row.ownerHost ? html`<a href="${`/fleet/host?name=${encodeURIComponent(row.ownerHost)}`}">${row.ownerHost}</a>` : "Owner not published";
 const extra = row => row.quota.extraUsage.enabled === true ? "Enabled" : row.quota.extraUsage.enabled === false ? "Disabled" : row.extraUsage === "enabled" ? "Enabled" : row.extraUsage === "disabled" ? "Disabled" : "Unknown";
-const credit = row => row.extraUsageCreditMicros === null ? "Not authorized for paid overage" : `${row.extraUsageCreditMicros / 1_000_000} USD per job (conservative model-cost bound); deployment dollar caps still apply`;
+// Issue #1008: what the credit bounds now. With none (or 0, which the worker reads as none) the provider bills no call, so
+// the calls leave the job cap and every dollar window; with one any call may be billed, so each counts in both, and the
+// job's cap may be no larger than the credit (auth-credit-cap-required).
+export const CREDIT_NONE_TEXT = "Not authorized for paid overage: its calls bill nothing, so the job cap and the dollar windows do not count them; quota and a trigger's run.maxSubscriptionUsd bound them";
+const credit = row => !(row.extraUsageCreditMicros > 0) ? CREDIT_NONE_TEXT : `${row.extraUsageCreditMicros / 1_000_000} USD per job: any call may be billed, so every call counts against the job cap, which may not exceed this, and the deployment dollar windows`;
 const allowed = view => view.role === "operator" && !view.readOnly;
 const source = (view, page) => subscriptionAuthView(view.data?.[page]?.subscriptionAuth ?? view.data?.subscriptionAuth, { now: view.now ?? view.data?.now ?? 0 });
 const title = (row, status) => html`<div class="sa-title"><h3>${code(row.id)}</h3>${ui.badge(...status)}</div>`;

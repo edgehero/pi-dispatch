@@ -279,3 +279,12 @@ test("the trigger field inventory is the loader's normalized run contract, inclu
   assert.ok(HAND_FIELDS.includes("auxiliaryModels"), "auxiliary billing is hand-authored, never a root-model editor field");
   assert.ok(!actual.includes("modelRoles"), "modelRoles is a top-level file policy, never a run field");
 });
+
+test("issue #1008: a run on a subscription alone counts as billed $0 on the trigger page, never as a run with no cost", () => {
+  const sub = rec("sub", 1, { provider: "anthropic", model: "claude-opus-5-5", notionalProviders: ["anthropic"], tokens: { cost: 59.75, costNotional: 59.75, metered: true, input: 1, output: 1, total: 2, calls: 3 }, usage: { v: 1, truncated: 0, models: [{ provider: "anthropic", model: "claude-opus-5-5", calls: 3, cost: 59.75 }] } });
+  const snapshot = { readAt: AT, triggers: { triggers: [{ index: 2, type: "label" }] }, recordDetails: new Map([[sub.jobId, sub], ["paid", rec("paid", 2)]]), runs: [] };
+  const got = triggerDetailOf(snapshot, 2, { now: AT });
+  assert.equal(got.count24h, 2);
+  assert.equal(got.cost24hMicros, 250_000, "the billed run alone");
+  assert.equal(got.costIncomplete, false);
+});

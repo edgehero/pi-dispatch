@@ -655,6 +655,31 @@ test("a cap below what any call needs refuses with a short task's amount, naming
   assert.equal(f.read(), before);
 });
 
+/** The hosts' published subscription status (issue #1008) with one Claude connection, bound or not, with or without paid overage. */
+const claudeStatus = ({ active = true, extraUsageCreditMicros = null } = {}) => ({ state: "ready", partial: false, connections: [{ id: "claude-main", provider: "anthropic", adapter: "pi-anthropic-oauth@0.3.11", ownerHost: "mini2", active, state: "connected", compatibility: "verified", extraUsageCreditMicros }] });
+
+test("issue #1008: a model the published status binds to a subscription with no paid extra usage is not judged against the cap", async () => {
+  const reads = [];
+  const bound = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, settings: { maxCostUsd: "5" }, deps: { readSubscriptionStatus: async () => (reads.push(1), claudeStatus()) } });
+  const out = await bound.service.preview(ask(bound, { model: "claude-opus-5-5", maxCostUsd: "2" }), operator);
+  assert.ok(out.plan, JSON.stringify(out));
+  assert.doesNotMatch(out.summary.join(" "), /needs at least/);
+  assert.equal(reads.length, 1, "read once for the change and its Undo");
+  // Paid overage: its calls may be billed and count against the cap, so the cap is judged as before.
+  const paid = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, settings: { maxCostUsd: "5" }, deps: { readSubscriptionStatus: async () => claudeStatus({ extraUsageCreditMicros: 5_000_000 }) } });
+  assert.match((await refusal(paid, { model: "claude-opus-5-5", maxCostUsd: "2" })).refusal, /needs at least \$2\.654295/);
+  // Not bound, a status that cannot be read, or none: as before.
+  for (const readSubscriptionStatus of [async () => claudeStatus({ active: false }), async () => { throw new Error("down"); }, async () => null]) {
+    const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, settings: { maxCostUsd: "5" }, deps: { readSubscriptionStatus } });
+    assert.match((await refusal(f, { model: "claude-opus-5-5", maxCostUsd: "2" })).refusal, /needs at least \$2\.654295/);
+  }
+});
+
+test("issue #1008: a published status that never answers is waited for only the jobs read's bound, and then names nothing", { timeout: 20_000 }, async () => {
+  const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, settings: { maxCostUsd: "5" }, deps: { jobsReadMs: 50, readSubscriptionStatus: () => new Promise(() => {}) } });
+  assert.match((await refusal(f, { model: "claude-opus-5-5", maxCostUsd: "2" })).refusal, /needs at least \$2\.654295/);
+});
+
 test("under the deployment's cap the way out is another model or its settings, never this page, and never raising it here", async () => {
   const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, settings: { maxCostUsd: "2" } });
   const out = await refusal(f, { model: "claude-opus-5-5" });

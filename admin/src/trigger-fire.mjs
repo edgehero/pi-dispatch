@@ -38,7 +38,7 @@ export const FIRE_UNCONFIRMED = "A run may have been queued and one start of thi
  */
 export async function planTriggerFire({
   index, triggersPath, url, env = {}, grantsEnv = process.env, overlay = {}, modelEndpoints = null,
-  builtinModel = () => null, fs = nodeFs, queueFn = makeQueue, parseConnectionFn = parseConnection,
+  builtinModel = () => null, notional = null, fs = nodeFs, queueFn = makeQueue, parseConnectionFn = parseConnection,
   loadSchedulesFn = loadSchedules, admissionFn = checkDispatchRun, now = Date.now, planTimeoutMs = PAID_PLAN_TIMEOUT_MS, lookAlready = false,
 } = {}) {
   if (!Number.isSafeInteger(index) || index < 0) return { refusal: "index must be a non-negative trigger index. Nothing was queued." };
@@ -99,7 +99,8 @@ export async function planTriggerFire({
     reads.then(release, release);
   }
   if (stopped) return stopped;
-  const reserve = estimateReserve(schedule.data, { overlay, env, modelEndpoints, builtinModel });
+  // Issue #1008: `notional`, the providers the hosts publish as bound to a subscription with no paid extra usage.
+  const reserve = estimateReserve(schedule.data, { overlay, env, modelEndpoints, builtinModel, notional });
   const summary = [`Fire cron trigger row ${index + 1} (${schedule.schedulerId}) now, once`, `Flow ${schedule.data.flow}, on queue ${queueName}; its schedule stays unchanged`];
   return { plan: { index, schedulerId: schedule.schedulerId, queue: queueName, schedule, reserve, fileDigest: digest(source), title: "Fire cron trigger now", summary, message: summary.join("\n") }, already };
 }

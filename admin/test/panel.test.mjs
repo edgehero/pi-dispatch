@@ -339,3 +339,14 @@ test("trimClusters drops whitespace-only clusters at either end and never trims 
   assert.equal(trimClusters("   "), "");
   assert.equal(trimClusters(""), "");
 });
+
+test("issue #1008: fmtCost says a subscription's list price as notional, never a bare dollar, and after a billed shape; without it every shape is unchanged", () => {
+  assert.equal(fmtCost({ usd: 0, class: "subscription", notional: 59.75 }), "$59.75 notional");
+  assert.equal(fmtCost({ usd: 0, class: "subscription", floor: true, notional: 59.75 }), "≥$59.75 notional");
+  assert.equal(fmtCost({ usd: 0.33, class: "metered", notional: 59.75 }), "$0.33 + $59.75 notional");
+  assert.equal(fmtCost({ usd: 0.33, class: "estimated", coverage: 0.5, notional: 59.75 }), "~$0.33 est. + $59.75 notional");
+  assert.equal(fmtCost({ class: "plan", planId: "max", notional: 1.5 }), "plan:max + $1.50 notional");
+  assert.equal(fmtCost({ usd: 0.33, class: "metered", notional: 0 }), "$0.33", "a zero list price adds nothing");
+  assert.equal(fmtCost({ usd: 0.33, class: "metered" }), "$0.33");
+  assert.equal(fmtCost({ usd: 1, class: "unknown", notional: 2 }), fmtCost({ usd: 1, class: "unknown" }), "an unknown keeps its one shape");
+});

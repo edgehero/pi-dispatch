@@ -111,13 +111,32 @@ function markedMoneyText(amount, flags) {
     ? "unknown"
     : `${moneyMarks(flags)}$${(amount / 1e6).toFixed(2)}`;
 }
-function settledMoney(row) {
+/** The list price of subscription calls nobody was billed for (issue #1008), as micro-dollars, or null when none. */
+const notionalOf = (row) => (Number.isSafeInteger(row?.notionalMicros) && row.notionalMicros > 0 ? row.notionalMicros : null);
+/** The words that follow a billed amount when some of the work ran on a subscription: its list price, said apart. */
+const notionalTail = (row) => (notionalOf(row) === null ? "" : `; ${markedMoneyText(row.notionalMicros)} notional, not billed`);
+/** A settled amount with its marks; `notional: false` where the list price has a row of its own (Today), said once. */
+function settledMoney(row, { notional = true } = {}) {
   const unknown = unknownCount(row);
-  return html`${markedMoney(row?.settledMicros, { floor: row?.settledFloor, estimated: row?.settledEstimated })}${unknown ? html`; ${unknown} ${unknown === 1 ? "run has" : "runs have"} unknown cost` : null}`;
+  return html`${markedMoney(row?.settledMicros, { floor: row?.settledFloor, estimated: row?.settledEstimated })}${unknown ? html`; ${unknown} ${unknown === 1 ? "run has" : "runs have"} unknown cost` : null}${notional ? notionalTail(row) : ""}`;
 }
 function settledMoneyText(row) {
   const unknown = unknownCount(row);
-  return `${markedMoneyText(row?.settledMicros, { floor: row?.settledFloor, estimated: row?.settledEstimated })}${unknown ? `; ${unknown} ${unknown === 1 ? "run has" : "runs have"} unknown cost` : ""}`;
+  return `${markedMoneyText(row?.settledMicros, { floor: row?.settledFloor, estimated: row?.settledEstimated })}${unknown ? `; ${unknown} ${unknown === 1 ? "run has" : "runs have"} unknown cost` : ""}${notionalTail(row)}`;
+}
+
+/**
+ * Issue #1008: what every dollar window holds, said where subscription work is in view. A call on a subscription with
+ * no paid extra usage bills nothing, so it leaves the job cap and every dollar window; its list price stays in the
+ * records' cost and is said apart as notional. Null where nothing notional is in view, so a page without subscription
+ * work is drawn as it was.
+ */
+export const BILLED_ONLY_TEXT = "Dollar windows hold billed spend only. A subscription call with no paid extra usage bills nothing, so its list price (notional) stays out of every window and the job cap; a connection with paid extra usage counts its calls.";
+function billedOnlyNote(v) {
+  const p = payload(v);
+  const total = fold(v)?.provenance?.total;
+  const seen = notionalOf(p.spend?.today) !== null || (Array.isArray(p.spend?.daily) && p.spend.daily.some((d) => notionalOf(d) !== null)) || (Number.isFinite(total?.notional) && total.notional > 0);
+  return seen ? note(BILLED_ONLY_TEXT) : null;
 }
 
 /** Legacy chart geometry is in pixels. A viewBox preserves it when the Pulse card changes width. */
@@ -283,7 +302,8 @@ export function spendToday(v) {
           : "The daily dollar cap could not be read",
     )}${progress(s?.usedMicros, s?.capMicros, "Today's spend and held against its daily dollar cap")}${factsOne(
       [
-        ["Settled in today's records", settledMoney(s)],
+        ["Settled in today's records", settledMoney(s, { notional: false })],
+        ...(notionalOf(s) !== null ? [["Subscription calls at list price, not billed", usd(s.notionalMicros)]] : []),
         [heldLabel(s?.heldJobs), usd(s?.heldMicros)],
         ...(chargedDiffers
           ? [["Charged to dollar windows", usd(s.ledgerMicros)]]
@@ -297,7 +317,7 @@ export function spendToday(v) {
             ]
           : []),
       ],
-    )}${s?.unknownHosts?.length ? note(`Holds not published by: ${s.unknownHosts.join(", ")}. Those jobs are not counted as zero.`) : null}<details class="sp-provenance"><summary>Cost and counter details</summary>${chargedDiffers ? note("Readable record cost includes work outside dollar windows or cost that is not fully known. Charged to dollar windows is the recorded window charge, not the cost of all readable work.") : null}${note(
+    )}${s?.unknownHosts?.length ? note(`Holds not published by: ${s.unknownHosts.join(", ")}. Those jobs are not counted as zero.`) : null}${notionalOf(s) !== null ? note(BILLED_ONLY_TEXT) : null}<details class="sp-provenance"><summary>Cost and counter details</summary>${chargedDiffers ? note("Readable record cost includes work outside dollar windows or cost that is not fully known. Charged to dollar windows is the recorded window charge, not the cost of all readable work.") : null}${note(
       capped
         ? "The counter remainder is not explained by readable window charges and published holds. It can include records this host cannot read, such as another host's on an unshared PI_LOGS_DIR. Held money is reported by running jobs, never inferred from the counter."
         : uncapped
@@ -534,7 +554,7 @@ export function spendCaps(v) {
             )
           : null,
       ),
-    )}</div><p class="keyrow sp-cap-key"><span><i class="k tone-ok"></i>Open</span><span><i class="k tone-attention"></i>From the job soft hold new starts are refused; nothing is spent.</span><span><i class="k tone-failed"></i>Full: another job at its per-job cap would not fit.</span></p>${note("The soft-hold tick applies to global job windows only. Scoped job windows, tokens and dollars have hard caps.")}`,
+    )}</div>${windows.length > 0 ? billedOnlyNote(v) : null}<p class="keyrow sp-cap-key"><span><i class="k tone-ok"></i>Open</span><span><i class="k tone-attention"></i>From the job soft hold new starts are refused; nothing is spent.</span><span><i class="k tone-failed"></i>Full: another job at its per-job cap would not fit.</span></p>${note("The soft-hold tick applies to global job windows only. Scoped job windows, tokens and dollars have hard caps.")}`,
     v.role === "operator"
       ? ui.btn({
           label: "Edit caps",
@@ -683,7 +703,7 @@ export function spendPlans(v) {
   const f = normFold(payload(v).recent24h);
   return card(
     "Metered and plan",
-    html`${f ? html`<ul class="sp-mp">${f.byModel.map((r) => html`<li><span class="sp-mp__k">${r.cost?.class === "plan" ? "plan" : "metered"}</span><span class="sp-mp__t"><b>${r.model}</b><small>${r.provider}; ${r.runs} runs in 24 hours, ${r.tokens.toLocaleString("en-US")} tokens${payload(v).triggersByModel?.[`${r.provider}/${r.model}`]?.length ? ` (${payload(v).triggersByModel[`${r.provider}/${r.model}`].join(", ")})` : ""}. ${r.cost?.class === "plan" ? `Billed by plan:${r.cost.planId ?? "unknown"}, not per run.` : ""}</small></span><b class="sp-mp__v">${moneyCost(r.cost)}</b></li>`)}</ul>` : note("No runs could be read for the last 24 hours.")}${note("Plan runs are billed by plan:<id>, not per run. They count against every cap, with dollar windows charged at their API-equivalent price.")}`,
+    html`${f ? html`<ul class="sp-mp">${f.byModel.map((r) => html`<li><span class="sp-mp__k">${r.cost?.class === "plan" ? "plan" : r.cost?.class === "subscription" ? "subscription" : "metered"}</span><span class="sp-mp__t"><b>${r.model}</b><small>${r.provider}; ${r.runs} runs in 24 hours, ${r.tokens.toLocaleString("en-US")} tokens${payload(v).triggersByModel?.[`${r.provider}/${r.model}`]?.length ? ` (${payload(v).triggersByModel[`${r.provider}/${r.model}`].join(", ")})` : ""}. ${r.cost?.class === "plan" ? `Billed by plan:${r.cost.planId ?? "unknown"}, not per run.` : r.cost?.class === "subscription" ? "On a subscription with no paid extra usage: not billed, so no cap or dollar window counts it." : ""}</small></span><b class="sp-mp__v">${moneyCost(r.cost)}</b></li>`)}</ul>` : note("No runs could be read for the last 24 hours.")}${note("Plan runs are billed by plan:<id>, not per run. They count against every cap, with dollar windows charged at their API-equivalent price.")}`,
     null,
     "last 24 hours",
   );

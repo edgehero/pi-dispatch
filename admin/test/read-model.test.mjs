@@ -63,6 +63,7 @@ import {
   collectGraphInputs,
   forgeRepoTargets,
   readHosts,
+  readSubscriptionStatusOf,
   resolveWorkerCount,
   mergedRunsOn,
   listRunsMerged,
@@ -3424,4 +3425,16 @@ test("trigger reads preserve the reviewed auxiliary grant through safe agent pro
   const read = readTriggers({ triggersPath: "/t.json", fs: { readFileSync: () => JSON.stringify(raw) } });
   assert.deepEqual(read.triggers[0].auxiliaryModels, auxiliaryModels);
   assert.deepEqual(agentReadProjection(read).triggers[0].auxiliaryModels, auxiliaryModels);
+});
+
+test("issue #1008: readSubscriptionStatusOf reads the live hosts' published status alone, and a registry it cannot read is null, no fact", async () => {
+  const status = { state: "ready", partial: false, connections: [{ id: "claude-main", provider: "anthropic", ownerHost: "mini2", active: true, state: "connected", extraUsageCreditMicros: null }] };
+  const gets = [];
+  const redisFn = () => ({ ...fakeFleetRedis(["mini2"])(), async get(key) { gets.push(key); return key === "dispatch:subscription-status:mini2" ? JSON.stringify(status) : null; } });
+  const read = await readSubscriptionStatusOf({ url: "redis://x", redisFn });
+  assert.deepEqual(gets, ["dispatch:subscription-status:mini2"]);
+  assert.equal(read.partial, false);
+  assert.deepEqual(read.connections.map((row) => [row.id, row.provider, row.active]), [["claude-main", "anthropic", true]]);
+  assert.equal(await readSubscriptionStatusOf({ url: "redis://x", redisFn: () => ({ async smembers() { throw new Error("ECONNREFUSED"); }, disconnect() {} }) }), null);
+  assert.equal(await readSubscriptionStatusOf({ url: "not a url" }), null);
 });

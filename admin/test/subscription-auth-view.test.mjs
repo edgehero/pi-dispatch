@@ -2,7 +2,7 @@ import { COMMUNITY_AUTH_ADAPTERS } from "../../worker/src/community-auth-patches
 import { SUBSCRIPTION_QUOTA_LIMITS } from "../../worker/src/subscription-quota.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { subscriptionAuthView, readSubscriptionAuthView, subscriptionAuthForAgent, SUBSCRIPTION_ADAPTERS, SUBSCRIPTION_VIEW_LIMITS } from "../src/subscription-auth-view.mjs";
+import { subscriptionAuthView, readSubscriptionAuthView, subscriptionAuthForAgent, notionalBoundProviders, SUBSCRIPTION_ADAPTERS, SUBSCRIPTION_VIEW_LIMITS } from "../src/subscription-auth-view.mjs";
 import { consoleSubscriptionFixture } from "./helpers/subscription-auth-fixture.mjs";
 
 const NOW = Date.UTC(2026, 9, 31, 12);
@@ -92,4 +92,16 @@ test("monitoring preferences survive safe machine projection and malformed choic
     assert.equal(value.connections[0].quotaWindows, null);
     assert.doesNotMatch(JSON.stringify(value), /private-window-sentinel/);
   }
+});
+
+test("issue #1008: notionalBoundProviders names each provider bound to a connection with no paid extra usage, and nothing for a doubt", () => {
+  const row = (over) => ({ id: "c1", provider: "anthropic", adapter: "pi-anthropic-oauth@0.3.11", ownerHost: "mini2", active: true, state: "connected", extraUsageCreditMicros: null, ...over });
+  const providers = (connections) => [...notionalBoundProviders({ state: "ready", partial: false, connections }, { now: 1 })];
+  assert.deepEqual(providers([row({}), row({ id: "c2", provider: "openai", adapter: "openai-chatgpt", state: "reauth-required" })]), ["anthropic", "openai"], "a bound provider never falls back to a key, whatever its state");
+  assert.deepEqual(providers([row({ extraUsageCreditMicros: 0 })]), ["anthropic"], "a credit of 0 is none, the worker's rule");
+  assert.deepEqual(providers([row({ extraUsageCreditMicros: 5_000_000 })]), [], "paid overage: its calls may be billed");
+  assert.deepEqual(providers([row({ active: false })]), [], "not bound");
+  assert.deepEqual(providers([row({ provider: "radius" })]), [], "a provider no connection can bind");
+  assert.deepEqual([...notionalBoundProviders(null, { now: 1 })], []);
+  assert.deepEqual([...notionalBoundProviders({ connections: [row({})] }, { now: -1 })], [], "a status that cannot be read names none");
 });

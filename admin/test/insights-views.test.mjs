@@ -395,3 +395,44 @@ test("an unread registry cannot publish venue or slot claims, while the capacity
   assert.equal(got.capacity.venuesUnreadable, true);
   assert.deepEqual(got.capacity.coverage, ["history was read"]);
 });
+
+test("issue #1008: a subscription call's list price leaves today's spend and is said apart; a settled amount is billed already", () => {
+  const usage = { v: 1, truncated: 0, models: [{ provider: "anthropic", model: "claude-opus-5-5", input: 1, cost: 59.75 }, { provider: "openrouter", model: "qwen-max", input: 1, cost: 0.33 }] };
+  const unreserved = run("sub-only", { usage: { v: 1, truncated: 0, models: [usage.models[0]] }, tokens: { cost: 59.75, metered: true, costNotional: 59.75 }, notionalProviders: ["anthropic"], dollars: { reservedMicros: 0, settledMicros: 0, basis: "unreserved" } });
+  const mixed = run("mixed", { usage, tokens: { cost: 60.08, metered: true, costNotional: 59.75 }, notionalProviders: ["anthropic"], dollars: { reservedMicros: 150_000_000, settledMicros: 330_000, basis: "metered" } });
+  const a = recordSpendOf(unreserved);
+  assert.equal(a.micros, 0, "nothing was billed");
+  assert.equal(a.notionalMicros, 59_750_000);
+  const b = recordSpendOf(mixed);
+  assert.equal(b.micros, 330_000);
+  assert.equal(b.notionalMicros, 59_750_000);
+  const today = spendSummaryOf({ records: [unreserved, mixed], hosts: [], budget: {}, nowMs: NOW }).today;
+  assert.equal(today.settledMicros, 330_000);
+  assert.equal(today.notionalMicros, 119_500_000);
+  // An older image's record (notionalProviders without costNotional) is billed whole, as the worker settled it.
+  const older = recordSpendOf(run("older", { usage: { v: 1, truncated: 0, models: [usage.models[0]] }, tokens: { cost: 59.75, metered: true }, notionalProviders: ["anthropic"], dollars: { reservedMicros: 0, settledMicros: 0, basis: "unreserved" } }));
+  assert.equal(older.micros, 59_750_000);
+  assert.equal(older.notionalMicros, undefined);
+  assert.equal(spendSummaryOf({ records: [run("plain")], hosts: [], budget: {}, nowMs: NOW }).today.notionalMicros, undefined, "no key without subscription work");
+});
+
+test("issue #1008: a declared plan covering subscription work keeps it out of billed spend, and a record with no ledger is split the worker's way", () => {
+  const model = { provider: "anthropic", model: "claude-opus-5-5", input: 1, cost: 59.75 };
+  const plan = [{ id: "claude-max", provider: "anthropic", models: ["claude-*"], counterfactualModel: { provider: "test", id: "api" } }];
+  const subOnly = run("sub", { usage: { v: 1, truncated: 0, models: [model] }, tokens: { cost: 59.75, metered: true, costNotional: 59.75 }, notionalProviders: ["anthropic"], dollars: { reservedMicros: 0, settledMicros: 0, basis: "unreserved" } });
+  const covered = recordSpendOf(subOnly, { subscriptions: plan, pricing });
+  assert.equal(covered.micros, 0, "the plan prices the plan cards, never a billed amount");
+  assert.equal(covered.notionalMicros, 59_750_000, "and the list price is still said apart, so Spend says the windows hold billed spend only");
+  // A notional row takes no part in the row sum, even where an old zero-price plan row elsewhere sends the amount there.
+  const kimi = [{ id: "kimi", provider: "kimi-coding", models: ["*"], counterfactualModel: { provider: "test", id: "api" } }];
+  const withOldPlan = run("both", { usage: { v: 1, truncated: 0, models: [model, { provider: "kimi-coding", model: "k2", input: 1, cost: 0 }] }, tokens: { cost: 59.75, metered: true, costNotional: 59.75 }, notionalProviders: ["anthropic"], dollars: { reservedMicros: 0, settledMicros: 0, basis: "unreserved" } });
+  assert.equal(recordSpendOf(withOldPlan, { subscriptions: kimi, pricing }).micros, 1_000_000, "the repriced plan row alone");
+  // No ledger: the cost less costNotional, what the worker's settlement charged.
+  const unledgered = recordSpendOf(run("none", { usage: null, tokens: { cost: 60.08, metered: true, costNotional: 59.75 }, notionalProviders: ["anthropic"], dollars: { reservedMicros: 0, settledMicros: 0, basis: "unreserved" } }));
+  assert.equal(unledgered.micros, 330_000);
+  assert.equal(unledgered.notionalMicros, 59_750_000);
+  // A costNotional above the cost names nothing: billed in full, as the worker's floor settles it.
+  const above = recordSpendOf(run("above", { usage: { v: 1, truncated: 0, models: [model] }, tokens: { cost: 59.75, metered: true, costNotional: 60 }, notionalProviders: ["anthropic"], dollars: { reservedMicros: 0, settledMicros: 0, basis: "unreserved" } }));
+  assert.equal(above.micros, 59_750_000);
+  assert.equal(above.notionalMicros, undefined);
+});

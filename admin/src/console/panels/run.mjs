@@ -11,7 +11,7 @@ import { fixButton, loadedFoot, loadedList, stateLine, wordsHtml } from "./loade
  * the PATHS rule) are stated once, in `../panels.mjs`'s header.
  */
 import { providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
-import { refusedBeforeSpend } from "../../costs.mjs";
+import { recordNotionalMicros, recordNotionalProviders, refusedBeforeSpend } from "../../costs.mjs";
 import { FORK_THINKING_LEVELS } from "../../run-fork.mjs";
 import { forkArchiveFact } from "@edgehero/pi-dispatch/fork-job";
 import { modelIdProblem } from "@edgehero/pi-dispatch/model-ref";
@@ -859,6 +859,42 @@ function capChargeRows(r) {
   ];
 }
 
+/** US dollars as whole micro-dollars, rounded to the nearest, or null for a value that is not an amount. */
+const dollarsToMicros = (usd) => (typeof usd === "number" && Number.isFinite(usd) && usd >= 0 && Number.isSafeInteger(Math.round(usd * 1e6)) ? Math.round(usd * 1e6) : null);
+
+/**
+ * What the job cap's meter plots (issue #1008's console part): what the cap CHARGED, `costChargedMicros` (the run and its
+ * subprocesses, issue #985), where the record carries it, else the recorded `tokens.cost`, which is what an image from
+ * before those keys counted against the cap. Never the run's billed or list price: a run stopped at $141.70 charged once
+ * read 25% of its $150 cap here, because the meter plotted the recorded cost. Null when neither is an amount.
+ */
+export function capChargeMicros(r) {
+  const t = r?.tokens ?? null;
+  return microsOf(t?.costChargedMicros) ?? dollarsToMicros(t?.cost);
+}
+
+/**
+ * Billed and notional apart (issue #1008), from a record that names its notional providers AND carries
+ * `tokens.costNotional` (`recordNotionalProviders`), split the worker's way (`recordNotionalMicros`, the same split the
+ * Cost row's typed cost makes, ledger or none): what was billed (`cost` less `costNotional`, what the worker settled the
+ * dollar windows to), and the list price of the subscription calls nobody was billed for, with the providers. And the
+ * trigger's list-price allowance (`allowanceMicros`) against that list price, rounded up as the allowance guard reads it,
+ * whenever the record carries one. No row for any other record, so a run without a subscription renders as it did.
+ * Numbers, fixed words and closed-enum providers only.
+ */
+export function notionalRows(r) {
+  const t = r?.tokens ?? null;
+  const providers = recordNotionalProviders(r);
+  const split = providers ? recordNotionalMicros(r) : null;
+  const allowance = microsOf(t?.allowanceMicros);
+  const used = typeof t?.costNotional === "number" && Number.isFinite(t.costNotional) && t.costNotional >= 0 && Number.isSafeInteger(Math.ceil(t.costNotional * 1e6)) ? Math.ceil(t.costNotional * 1e6) : null;
+  return [
+    ["Billed", split ? `${usdText(split.billedMicros)}: the calls the job cap and the dollar windows count` : null],
+    ["Notional", split ? `${usdText(split.notionalMicros)} at list price on ${[...providers].join(" and ")}'s subscription: not billed, so no cap or dollar window counts it` : null],
+    ["Subscription allowance", allowance !== null ? (used !== null ? `${usdText(used)} of ${usdText(allowance)} at list price${allowance > 0 ? ` (${Math.floor((100 * used) / allowance)}%)` : ""}` : `${usdText(allowance)} at list price; what was used is not recorded`) : null],
+  ];
+}
+
 /** Dollar windows have no soft hold; these are settlement facts, never a promise to spend again. */
 export function settlementText(basis) {
   return ({ metered: "settled from the reported model cost", floor: "the window keeps the whole hold because the full cost was not known", refunded: "the hold was released before the run spent", unreserved: "no dollar hold was reserved" })[basis] ?? "no settlement explanation was recorded";
@@ -870,13 +906,14 @@ export const runCostPanel = withRun("Tokens and dollars", (r, view) => {
   const cost = runCost(r, Array.isArray(view.data.subscriptions) ? view.data.subscriptions : []);
   const attempts = view.data?.recoveryRuns ?? [];
   const holds = Array.isArray(view.data?.runHolds) ? view.data.runHolds : [];
-  return html`${attempts.length > 1 || holds.length ? html`<h3>Each attempt</h3>${attempts.map((a) => html`<p>${runLink(a.jobId)}: ${costText(runCost(a, view.data.subscriptions ?? []))}${a.dollars ? `; ${usdText(a.dollars.settledMicros)} settled` : ""}.</p>`)}${holds.map((h) => html`<p>Container attempt ${h.seq}: ${usdText(h.amountMicros)} ${h.state === "held" ? "held while it runs" : h.state === "settled-crashed" ? "settled at the whole hold after it was lost" : h.state}.</p>`)}<p>A durable run can hold up to ${(2 + RECOVERY_CAP)} per-job caps: two queue attempts and ${RECOVERY_CAP} recoveries. Each settles on its own.</p>` : null}${capMicrosOf(r) > 0 && cost ? ui.meter({ value: Math.round(cost.usd * 1e6), max: capMicrosOf(r), label: "Job cap (dollars)" }) : null}${facts([
+  return html`${attempts.length > 1 || holds.length ? html`<h3>Each attempt</h3>${attempts.map((a) => html`<p>${runLink(a.jobId)}: ${costText(runCost(a, view.data.subscriptions ?? []))}${a.dollars ? `; ${usdText(a.dollars.settledMicros)} settled` : ""}.</p>`)}${holds.map((h) => html`<p>Container attempt ${h.seq}: ${usdText(h.amountMicros)} ${h.state === "held" ? "held while it runs" : h.state === "settled-crashed" ? "settled at the whole hold after it was lost" : h.state}.</p>`)}<p>A durable run can hold up to ${(2 + RECOVERY_CAP)} per-job caps: two queue attempts and ${RECOVERY_CAP} recoveries. Each settles on its own.</p>` : null}${capMicrosOf(r) > 0 && cost && capChargeMicros(r) !== null ? ui.meter({ value: capChargeMicros(r), max: capMicrosOf(r), label: "Job cap (dollars)" }) : null}${facts([
     ["Cost", costText(cost)],
     ["Cost class", cost ? `${cost.class}${cost.floor ? " (a floor: the meter could not see all of it)" : ""}` : "not metered"],
     ["Input tokens", t ? count(t.input) : "-"],
     ["Output tokens", t ? count(t.output) : "-"],
     ["Total tokens", t ? count(t.total) : "-"],
     ["Model calls", t ? cell(t.calls) : "-"],
+    ...notionalRows(r),
     ["Job cap", usdText(capMicrosOf(r))],
     ...capChargeRows(r),
     ["Reserved", d ? usdText(d.reservedMicros) : "no dollar window applied"],
@@ -1072,8 +1109,11 @@ export function runSecrets(view) {
 export function runModels(view) {
   const r = recordOf(view), u = r?.usage;
   if (hiddenRecord(view) || !u) return html``;
-  const models = Array.isArray(u.models) ? u.models : [];
-  return titled("Model usage", html`${table("Model usage", ["Provider", "Model", "Calls", "Input", "Output", "Cost"], models.map((m) => html`<tr><td>${m.provider}</td><td>${m.model}</td><td>${count(m.calls)}</td><td>${count(m.input)}</td><td>${count(m.output)}</td><td>${usdText(Number.isFinite(m.cost) ? Math.round(m.cost * 1e6) : null)}</td></tr>`), "No per-model usage was recorded.")}${facts([["Cache reads", models.reduce((n, m) => n + (m.cacheRead ?? 0), 0)], ["Cache writes", models.reduce((n, m) => n + (m.cacheWrite ?? 0) + (m.cacheWrite1h ?? 0), 0)], ["Unpriced calls", r.tokens?.unpriced], ["No model resolved", r.tokens?.unresolved]])}<p>Priced by pi-ai ${u.piAi ?? "unknown"} at stream time.</p>`);
+  // A damaged ledger row (not an object) is skipped, as the cost fold skips it (costs.mjs `hasLedger`).
+  const models = Array.isArray(u.models) ? u.models.filter((m) => m !== null && typeof m === "object" && !Array.isArray(m)) : [];
+  // Issue #1008: a row of a provider the record names notional is its list price, not billed, and says so.
+  const notional = recordNotionalProviders(r);
+  return titled("Model usage", html`${table("Model usage", ["Provider", "Model", "Calls", "Input", "Output", "Cost"], models.map((m) => html`<tr><td>${m.provider}</td><td>${m.model}</td><td>${count(m.calls)}</td><td>${count(m.input)}</td><td>${count(m.output)}</td><td>${usdText(Number.isFinite(m.cost) ? Math.round(m.cost * 1e6) : null)}${notional?.has(m.provider) ? " notional" : ""}</td></tr>`), "No per-model usage was recorded.")}${facts([["Cache reads", models.reduce((n, m) => n + (m.cacheRead ?? 0), 0)], ["Cache writes", models.reduce((n, m) => n + (m.cacheWrite ?? 0) + (m.cacheWrite1h ?? 0), 0)], ["Unpriced calls", r.tokens?.unpriced], ["No model resolved", r.tokens?.unresolved]])}<p>Priced by pi-ai ${u.piAi ?? "unknown"} at stream time.</p>`);
 }
 
 export function runTail(view) {

@@ -1,4 +1,5 @@
 /** Closed subscription DTO (#781). Credential documents and provider payloads never cross this boundary. */
+import { notionalConnection } from "@edgehero/pi-dispatch/reserve-estimate";
 export const SUBSCRIPTION_ADAPTERS = Object.freeze({
   "openai-chatgpt": Object.freeze({ provider: "openai", package: null, version: null, community: false }),
   "pi-anthropic-oauth@0.3.6": Object.freeze({ provider: "anthropic", package: "pi-anthropic-oauth", version: "0.3.6", community: true }),
@@ -71,6 +72,28 @@ export function subscriptionAuthView(value, { now = Date.now() } = {}) {
     }];
   });
   return { now, state: value && (Array.isArray(value) || value.state === "ready") ? "ready" : "unknown", partial: value?.partial !== false || truncated || connections.length < Math.min(rows.length, SUBSCRIPTION_VIEW_LIMITS.connections), truncated: value?.truncated === true || truncated, connections };
+}
+
+/**
+ * The providers the published status says a subscription with no paid extra usage carries (issue #1008): each provider
+ * with a bound (`active`) connection whose `extraUsageCreditMicros` is unset, the worker's own rule
+ * (`notionalConnection`), as any live host publishes it: the union of the hosts' bindings. Where it holds: on a host
+ * whose own connections file binds that provider, a current worker marks its calls notional and a current image leaves
+ * them out of the job cap, and a bound provider never falls back to an API key whatever its connection's state. Where it
+ * does not: a host without that binding (each host reads its own file) runs the provider on an API key under the cap, a
+ * worker from before issue #1008 never marks a connection, and an image from before it counts every subscription call,
+ * so a preview read from this set can say less than such a host does (docs/upgrading.md, mixed versions). A Set; empty
+ * for a status that is missing or names none, so a doubt keeps every model under the cap. `value` is raw published
+ * status, normalized here.
+ */
+export function notionalBoundProviders(value, { now = Date.now() } = {}) {
+  let view;
+  try {
+    view = subscriptionAuthView(value, { now });
+  } catch {
+    return new Set();
+  }
+  return new Set(view.connections.filter((row) => row.active === true && row.provider !== null && notionalConnection(row)).map((row) => row.provider));
 }
 
 /** Optional reader seam: the console observes published safe status and never opens a host credential file. */

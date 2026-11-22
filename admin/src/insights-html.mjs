@@ -33,7 +33,7 @@ import { escapeInterpreted, fmtCost, fmtUsd } from "./panel.mjs";
 
 // Must equal costs.mjs's COST_CLASSES; the parity test compares the two literals. Duplicated rather
 // than re-exported because loading costs.mjs is exactly the worker coupling this module refuses.
-export const INSIGHTS_COST_CLASSES = Object.freeze(["metered", "plan", "zero-rated", "estimated", "seeded", "unknown"]);
+export const INSIGHTS_COST_CLASSES = Object.freeze(["metered", "plan", "zero-rated", "estimated", "seeded", "unknown", "subscription"]);
 
 // The verdict vocabulary buildPlans emits; anything else degrades to NO_BASELINE, which renders a
 // sentence and never a number -- the safe direction for a malformed verdict to fail in.
@@ -117,7 +117,9 @@ function cmpStr(a, b) {
 
 /**
  * The typed-cost allowlist: usd finite-or-0, class from the known list else "unknown", floor only on
- * an exact true, coverage clamped into 0..1 or null, planId clipped or null. Nullish input stays null
+ * an exact true, coverage clamped into 0..1 or null, planId clipped or null, and (issue #1008) `notional`,
+ * the list price of a bucket's subscription rows, kept only when it is a finite amount at least 0 and
+ * absent otherwise, so every value without one is what it was. Nullish input stays null
  * so fmtCost renders the em dash -- inventing a zero here would be the exact mislabeling the class
  * system exists to prevent.
  */
@@ -129,6 +131,7 @@ function normCost(v) {
     floor: v.floor === true,
     coverage: Number.isFinite(v.coverage) ? Math.min(1, Math.max(0, v.coverage)) : null,
     planId: typeof v.planId === "string" ? clip(v.planId, 40) : null,
+    ...(Number.isFinite(v.notional) && v.notional >= 0 ? { notional: v.notional } : {}),
   };
 }
 
@@ -738,7 +741,8 @@ export function layoutBarList(rows, { width } = {}) {
       // "seeded" cannot appear on this page (only the what-if emits it), but a total function
       // still draws SOMETHING if it ever does: the ~~ text already carries the class.
       barW = max > 0 ? Math.max(1, (Math.max(0, c.usd) / max) * span) : 1;
-    } else if (cls === "plan") {
+    } else if (cls === "plan" || cls === "subscription") {
+      // Issue #1008: a subscription's list price is no billed dollar either, so it gets the plan's chip, never a bar.
       chipText = fmtCost(c);
     } else if (cls === "zero-rated") {
       barW = 1;

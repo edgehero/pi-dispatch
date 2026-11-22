@@ -2435,6 +2435,29 @@ export async function readHosts({ url, redisFn = makeRedisClient, timeoutMs = 25
 }
 
 /**
+ * The subscription connections the live hosts publish (issue #1008, `INT-AUTH-CONNECTIONS-FILE-CONTRACT`'s host status
+ * key), the same read the snapshot makes for the Connections card, without the rest of a snapshot: a preview that only
+ * needs to know which providers are bound to a subscription reads this. `{ state, partial, connections }` from
+ * `readSubscriptionStatus`, or null when the registry or the status could not be read, which is no fact about any
+ * connection. One client, one bound, closed after.
+ */
+export async function readSubscriptionStatusOf({ url, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now() } = {}) {
+  let redis;
+  try {
+    parseConnection(url, { failFast: true });
+    redis = redisFn(url);
+    redis.on?.("error", () => {});
+    const hosts = await withTimeout(readLiveHosts(redis, { now, timeoutMs: Math.max(250, Math.floor(timeoutMs / 2)) }), timeoutMs, { unreachable: "timed out reaching the registry" });
+    if (hosts.unreachable || !Array.isArray(hosts.hosts)) return null;
+    return await readSubscriptionStatus(redis, hosts.hosts.map((h) => h.name), { timeoutMs });
+  } catch {
+    return null;
+  } finally {
+    if (redis) redis.disconnect?.();
+  }
+}
+
+/**
  * How many workers this deployment has, and what they are called.
  *
  * TWO SOURCES, and the precedence is the point. The registry is authoritative because it is ordinary

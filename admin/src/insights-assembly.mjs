@@ -40,7 +40,7 @@ import {
 import { buildGraphModel } from "./graph-model.mjs";
 import { readGraphTriggers } from "./graph-triggers.mjs";
 import { INSIGHTS_SPLIT_REFUSALS } from "./insights-html.mjs";
-import { costsSinceMs, foldCosts, foldTriggerCosts, recordInProject, recordInRepo, matchesGlob, meteredRunMicros, repoKeyOf, projectKeyOf, refusedBeforeSpend } from "./costs.mjs";
+import { costsSinceMs, foldCosts, foldTriggerCosts, hasLedger, recordInProject, recordInRepo, matchesGlob, meteredRunMicros, recordNotionalMicros, recordNotionalProviders, repoKeyOf, projectKeyOf, refusedBeforeSpend } from "./costs.mjs";
 import { sizeBits, outsideEdit, splitTotalMicros } from "./render.mjs";
 import { escapeInterpreted } from "./panel.mjs";
 import { deploymentWindowsAt, meteredMicros, reservedInOf, valkeyEndpointTag } from "@edgehero/pi-dispatch/dollar-budget";
@@ -554,15 +554,28 @@ export function heldMoneyOf(hosts, { nowMs, project = null } = {}) {
  * Enforcement settlement is not a history price: without a dollar reservation the worker writes unreserved/0 even
  * when a paid run reports money. Keep genuine settlements (including refunds and floors), otherwise use recorded
  * prices. Plans retain their recorded API equivalent; old zero-price plan rows need a declared counterfactual.
+ *
+ * Issue #1008: the calls a record says a subscription with no paid extra usage carried (`recordNotionalProviders`) billed
+ * nothing, so their list price is no spend, whether a declared plan covers them or not (a plan prices the plan cards,
+ * never a billed amount). It leaves the amount the worker's way (`recordNotionalMicros`: the cost less `costNotional`,
+ * with or without a usage ledger, which is what the settlement charged), the ledger rows of those providers take no part
+ * in the sum below, and it comes back as `notionalMicros`, present only when above 0, so a page can say it apart. A
+ * settled amount is already billed only. A `costNotional` above the cost names nothing: billed in full, as the worker's
+ * floor settles it.
  */
 export function recordSpendOf(record, { subscriptions = [], pricing } = {}) {
   const dollars = record?.dollars;
-  if (safeAmount(dollars?.settledMicros) && dollars.basis !== "unreserved") return { micros: dollars.settledMicros, ledgerMicros: dollars.settledMicros, floor: dollars.basis === "floor", estimated: false, unknown: false };
+  const usage = record?.usage;
+  // The fold's ledger rule (`hasLedger`): a damaged row is skipped, and a ledger with none left is the whole-run cost.
+  const rows = hasLedger(record) ? usage.models.filter((row) => row !== null && typeof row === "object" && !Array.isArray(row)) : null;
+  const notional = recordNotionalProviders(record);
+  const notionalSum = notional ? recordNotionalMicros(record).notionalMicros : 0;
+  const notionalPart = notionalSum > 0 ? { notionalMicros: notionalSum } : {};
+  const covered = (row) => subscriptions.find((sub) => !sub.hypothetical && sub.provider === row?.provider && sub.models?.some((glob) => matchesGlob(row?.model, glob)));
+  if (safeAmount(dollars?.settledMicros) && dollars.basis !== "unreserved") return { micros: dollars.settledMicros, ledgerMicros: dollars.settledMicros, floor: dollars.basis === "floor", estimated: false, unknown: false, ...notionalPart };
   const ledgerMicros = dollars?.basis === "unreserved" ? 0 : null;
   if (refusedBeforeSpend(record)) return { micros: 0, ledgerMicros: ledgerMicros ?? 0, floor: false, estimated: false, unknown: false };
   const toMicros = meteredMicros;
-  const usage = record?.usage;
-  const rows = Array.isArray(usage?.models) && usage.models.length > 0 ? usage.models : null;
   let estimated = record?.tokens?.metered !== true;
   let missing = false;
   let planUnknown = false;
@@ -570,8 +583,9 @@ export function recordSpendOf(record, { subscriptions = [], pricing } = {}) {
   let knownRows = 0;
   let rowMicros = 0;
   for (const row of rows ?? []) {
+    if (notional?.has(row?.provider)) continue;
     let cost = toMicros(row?.cost);
-    const plan = subscriptions.find((sub) => !sub.hypothetical && sub.provider === row?.provider && sub.models?.some((glob) => matchesGlob(row?.model, glob)));
+    const plan = covered(row);
     if (plan && cost === 0) {
       const priced = plan.counterfactualModel && pricing?.reprice?.({ input: row.input ?? 0, output: row.output ?? 0, cacheRead: row.cacheRead ?? 0, cacheWrite: row.cacheWrite ?? 0, cacheWrite1h: row.cacheWrite1h ?? 0 }, plan.counterfactualModel);
       cost = toMicros(priced?.usd);
@@ -581,15 +595,16 @@ export function recordSpendOf(record, { subscriptions = [], pricing } = {}) {
     if (cost === null) missing = true;
     else { knownRows++; rowMicros += cost; }
   }
-  const recordedMicros = toMicros(record?.tokens?.cost);
+  const recorded = toMicros(record?.tokens?.cost);
+  const recordedMicros = recorded === null ? null : recorded - notionalSum;
   let micros = repricedPlan || planUnknown ? knownRows > 0 ? rowMicros : null : recordedMicros ?? (knownRows > 0 ? rowMicros : null);
   // Before ledgers, a plan's flat zero is no API baseline either. Its cache split cannot be reconstructed to reprice it.
-  if (!rows && recordedMicros === 0 && subscriptions.some((sub) => !sub.hypothetical && sub.provider === record?.provider && sub.models?.some((glob) => matchesGlob(record?.model, glob)))) { micros = null; missing = true; }
-  if (micros === null || !safeAmount(micros)) return { micros: null, ledgerMicros, floor: true, estimated, unknown: true };
+  if (!rows && recorded === 0 && subscriptions.some((sub) => !sub.hypothetical && sub.provider === record?.provider && sub.models?.some((glob) => matchesGlob(record?.model, glob)))) { micros = null; missing = true; }
+  if (micros === null || !safeAmount(micros)) return { micros: null, ledgerMicros, floor: true, estimated, unknown: true, ...notionalPart };
   const facade = pricing ?? { getPricedModel: () => null, isZeroRated: () => false, piAiVersion: () => null };
   const at = recordInstant(record);
   const cost = foldCosts({ records: [record], subscriptions: [], pricing: facade, nowMs: Number.isFinite(at) ? at : 0 }).provenance.total;
-  return { micros, ledgerMicros, floor: cost.floor === true || missing || usage?.truncated > 0, estimated, unknown: missing };
+  return { micros, ledgerMicros, floor: cost.floor === true || missing || usage?.truncated > 0, estimated, unknown: missing, ...notionalPart };
 }
 
 function spendAccumulator(readable) {
@@ -598,6 +613,8 @@ function spendAccumulator(readable) {
 function addRecordSpend(sum, record, opts) {
   const amount = recordSpendOf(record, opts);
   sum.records++;
+  // Issue #1008: the list price nobody was billed for, beside the amount and never in it; the key only once there is some.
+  if (amount.notionalMicros > 0) sum.notionalMicros = (sum.notionalMicros ?? 0) + amount.notionalMicros;
   if (amount.micros === null) sum.unpriced++;
   else { sum.settledMicros += amount.micros; sum.known++; if (amount.unknown) sum.unpriced++; }
   sum.settledFloor ||= amount.floor;

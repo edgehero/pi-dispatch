@@ -96,8 +96,16 @@ test("over-cap usage remains visible, granted trials are not offered again, and 
   const value = consoleSubscriptionFixture(NOW, v => { const row = v.connections[0]; row.quota.windows[0].usedPercent = 101; row.quota.blockedUnknownReset = true; row.quota.trialAvailable = true; row.extraUsageCreditMicros = 250000; });
   const doc = text(draw("models", value));
   assert.ok(doc.includes("101% used")); assert.ok(doc.includes("One quota trial is already authorized")); assert.ok(doc.includes("One trial is authorized; other pickup gates still apply"));
-  assert.ok(!doc.includes("pi-dispatch auth trial")); assert.ok(doc.includes("0.25 USD per job (conservative model-cost bound)"));
+  assert.ok(!doc.includes("pi-dispatch auth trial")); assert.ok(doc.includes("0.25 USD per job: any call may be billed, so every call counts against the job cap, which may not exceed this, and the deployment dollar windows"));
   assert.ok(!doc.includes("0.25 provider credits"));
+});
+
+test("issue #1008: the paid overage line says what the credit bounds: none leaves the cap and the windows, a credit holds every call to both", () => {
+  const none = text(draw("models", consoleSubscriptionFixture(NOW, v => { v.connections[0].extraUsageCreditMicros = null; })));
+  assert.ok(none.includes("Not authorized for paid overage: its calls bill nothing, so the job cap and the dollar windows do not count them; quota and a trigger&#39;s run.maxSubscriptionUsd bound them"));
+  const zero = text(draw("models", consoleSubscriptionFixture(NOW, v => { v.connections[0].extraUsageCreditMicros = 0; })));
+  assert.ok(zero.includes("Not authorized for paid overage: its calls bill nothing"), "a credit of 0 is none, the worker's rule");
+  assert.ok(!zero.includes("0 USD per job"));
 });
 
 test("access-token expiry does not invent a sign-in refusal when the host may refresh it", () => {
