@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { test } from "node:test";
 import { Command, Redis } from "ioredis";
 import { freezingProxy } from "./helpers/freezing-proxy.mjs";
-import { JudgedConnector, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, passwordDeclinedOf, replyErrorCode, useValkeyContext } from "../src/connection.mjs";
+import { JudgedConnector, REPLY_CODES_BY_CLASS, REPLY_ERROR_CLASSES, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, passwordDeclinedOf, replyErrorClass, replyErrorCode, useValkeyContext } from "../src/connection.mjs";
 
 // Issue #464, gate round 1 (measured on Fedora 44): WHATWG URL keeps an IPv6 literal's brackets in `hostname`, and the
 // queue client then looked up the name "[::1]", which never resolves, so a `redis://[::1]:port` VALKEY_URL never
@@ -837,6 +837,62 @@ test("replyErrorCode: Valkey's error reply's code alone, a word for a reply with
 	assert.equal(replyErrorCode(new Error("Connection is closed.")), null);
 	assert.equal(replyErrorCode(Object.assign(new Error("WRONGTYPE x"), { name: "Error" })), null, "the name decides, never the text");
 	assert.equal(replyErrorCode(null), null);
+});
+
+// Issue #1036: a code is one word of at most 32 characters. Past that it is no code, and the reply reads as one without.
+test("replyErrorCode takes a first word of at most 32 characters, and a longer one is a reply with no code (#1036)", () => {
+	const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+	assert.equal(replyErrorCode(reply(`${"E".repeat(32)} a reason`)), "E".repeat(32));
+	assert.equal(replyErrorCode(reply("E".repeat(32))), "E".repeat(32), "at the end of the reply too");
+	assert.equal(replyErrorCode(reply(`${"E".repeat(33)} a reason`)), "error");
+	assert.equal(replyErrorCode(reply("E1_ x")), "E1_", "letters, digits and _");
+	assert.equal(replyErrorCode(reply("Err lower case")), "error");
+	assert.equal(replyErrorCode(reply("1ERR x")), "error", "a code starts with a letter");
+});
+
+// The docs' table restates the classifier, so it is held to it: each row's codes are that class's, in the same order.
+test("docs/service.md's table of what an error reply's code means names the classifier's codes, class by class (#1036)", async () => {
+	const { readFileSync } = await import("node:fs");
+	const text = readFileSync(new URL("../../docs/service.md", import.meta.url), "utf8");
+	const from = text.indexOf("### What an error reply's code means");
+	assert.ok(from > 0, "the section is there");
+	const rows = text.slice(from).split("\n").filter((line) => line.startsWith("| ") && !line.startsWith("| Code") && !line.startsWith("|---")).slice(0, 4);
+	const codesOf = (row) => [...row.split("|")[1].matchAll(/`([A-Z]+)`/g)].map((m) => m[1]);
+	assert.deepEqual(rows.slice(0, 3).map(codesOf), [REPLY_CODES_BY_CLASS.key, REPLY_CODES_BY_CLASS.permission, REPLY_CODES_BY_CLASS.passing]);
+	assert.ok(rows[3].startsWith("| any other code |"), rows[3]);
+	// What each row says of waiting is the class's `lasting`, and only the passing row says to try again.
+	assert.deepEqual(rows.map((row) => row.split("|")[3].trim()), ["No", "No", "It may", "Not known"]);
+	assert.deepEqual([REPLY_ERROR_CLASSES.key.lasting, REPLY_ERROR_CLASSES.permission.lasting, REPLY_ERROR_CLASSES.passing.lasting, REPLY_ERROR_CLASSES.other.lasting], [true, true, false, null]);
+	assert.deepEqual(rows.map((row) => /[Tt]ry again/.test(row.split("|")[4])), [false, false, true, false]);
+	assert.match(rows[1].split("|")[4], /never remove it/);
+});
+
+// Issue #1036: every error reply was worded as a key of the wrong type.
+test("replyErrorClass: a key of another type, a permission, a passing state, and every other code said as it is (#1036)", () => {
+	for (const [code, cls] of [["WRONGTYPE", "key"], ["NOPERM", "permission"], ["NOAUTH", "permission"], ["WRONGPASS", "permission"], ["BUSY", "passing"], ["LOADING", "passing"], ["TRYAGAIN", "passing"], ["CLUSTERDOWN", "passing"], ["MASTERDOWN", "passing"]]) assert.equal(replyErrorClass(code), cls, code);
+	// Anything the table does not name claims nothing: READONLY on purpose, the word for a reply without a code, and no code at all.
+	for (const code of ["ERR", "READONLY", "OOM", "MISCONF", "NOSCRIPT", "EXECABORT", "error", "wrongtype", "WRONGTYPE ", "", null, undefined, 7, {}]) assert.equal(replyErrorClass(code), "other", String(code));
+	assert.equal(replyErrorClass("toString"), "other", "a name every object has is no code");
+	// What a sentence may claim, by class. Only a class that lasts says waiting changes nothing, and only a passing one says to try again.
+	assert.deepEqual(Object.keys(REPLY_ERROR_CLASSES), ["key", "permission", "passing", "other"]);
+	assert.deepEqual(Object.fromEntries(Object.entries(REPLY_ERROR_CLASSES).map(([name, c]) => [name, [c.lasting, c.waiting]])), {
+		key: [true, "Waiting does not change that"], permission: [true, "Waiting does not change that"], passing: [false, "A later read may succeed"], other: [null, null],
+	});
+	assert.equal(REPLY_ERROR_CLASSES.key.remedy, "remove or repair the key");
+	assert.match(REPLY_ERROR_CLASSES.permission.remedy, /ACL/);
+	assert.doesNotMatch(REPLY_ERROR_CLASSES.permission.remedy, /remove|repair/, "a permission is never the key's fault");
+	assert.equal(REPLY_ERROR_CLASSES.passing.remedy, "try again");
+	assert.deepEqual([REPLY_ERROR_CLASSES.other.means, REPLY_ERROR_CLASSES.other.remedy], [null, null], "no claim and no remedy");
+	for (const name of ["key", "permission", "passing"]) assert.equal(typeof REPLY_ERROR_CLASSES[name].means, "string");
+	// The lists a text names the codes from are the classifier's own.
+	assert.deepEqual(REPLY_CODES_BY_CLASS, { key: ["WRONGTYPE"], permission: ["NOPERM", "NOAUTH", "WRONGPASS"], passing: ["BUSY", "LOADING", "TRYAGAIN", "CLUSTERDOWN", "MASTERDOWN"], other: [] });
+	for (const [name, codes] of Object.entries(REPLY_CODES_BY_CLASS)) for (const code of codes) assert.equal(replyErrorClass(code), name);
+	// Through the code helper, as a reader does it: the reply's first word decides, never a word later in it.
+	const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+	assert.equal(replyErrorClass(replyErrorCode(reply("NOPERM this user has no permissions to run the 'hgetall' command"))), "permission");
+	assert.equal(replyErrorClass(replyErrorCode(reply("BUSY Valkey is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE."))), "passing");
+	assert.equal(replyErrorClass(replyErrorCode(reply("ERR Error running script: WRONGTYPE Operation against a key"))), "other");
+	assert.equal(replyErrorClass(replyErrorCode(new Error("Connection is closed."))), "other", "an error that is no reply has no class to claim");
 });
 
 // Issue #986: a queue's scheduler child and its repeat child each hold a connection promise of their own, one INFO over the

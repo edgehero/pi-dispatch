@@ -1,6 +1,7 @@
 // The person's change to what a trigger's jobs get (issue #800): the real planner against a real triggers file, its bytes read
 // back after each write. Nothing here hand-writes a plan or a file the writer did not write, because a shape written by hand
 // can hide the defect it stands in for.
+import { CONSOLE_AUDIT_FIELD_MAX } from "@edgehero/pi-dispatch/console-audit";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import * as nodeFs from "node:fs";
@@ -2399,18 +2400,42 @@ test("an unreadable registry refuses, since unknown is not every host", async ()
   const partial = fixture({ deps: { versionTables: tables, readHosts: async () => ({ hosts: [host("a", "2")], incomplete: "1 of 2 host rows not read" }) } });
   const cut = await partial.service.preview(ask(partial, { packages: false }), operator);
   assert.deepEqual([cut.refusal, cut.status], ["Not every live host could be read (1 of 2 host rows not read), so nothing says each reads what this change needs. Nothing was written; try again.", 503]);
-  // Issue #1036: a row Valkey answers with an error (its key is not a hash) is not read on the next try either. The
-  // refusal names the row with what Valkey answered, says what to put right, and does not say to try again. Through the
-  // real registry read, over a client that answers that row's read with WRONGTYPE.
-  const client = { on() {}, disconnect() {}, smembers: async () => ["a", "hostw"], hgetall: (key) => (key === "host:h:hostw" ? Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" })) : Promise.resolve({ name: "a", triggersVersion: "2", jobDataVersion: "1" })) };
-  const errored = fixture({ deps: { versionTables: tables, readHosts: () => readHosts({ url: "redis://127.0.0.1:1", redisFn: () => client }) } });
-  const lasting = await errored.service.preview(ask(errored, { packages: false }), operator);
-  assert.deepEqual([lasting.refusal, lasting.status], ["Not every live host could be read (1 of 2 host rows not read, of which Valkey answered with an error: hostw (WRONGTYPE)), so nothing says each reads what this change needs. Nothing was written. A row Valkey answers with an error reads the same on the next try: remove or repair its key first (pi-dispatch doctor on a worker host names it).", 409]);
+  // Issue #1036: a row Valkey answers with an error is named by its key and the reply's code, and what the refusal
+  // tells a person is the code's class's. Through the real registry read, over a client that answers that row's read
+  // with each kind of reply. A key of another type and a permission last, so each is a conflict that says what to put
+  // right first and never to try again; a Valkey that could not serve the read then is a read to repeat; any other
+  // code is said as it is.
+  const reply = (message) => Promise.reject(Object.assign(new Error(message), { name: "ReplyError" }));
+  const client = { on() {}, disconnect() {}, smembers: async () => ["a", "hostw"], hgetall: (key) => (key === "host:h:hostw" ? reply("WRONGTYPE Operation against a key holding the wrong kind of value") : Promise.resolve({ name: "a", triggersVersion: "2", jobDataVersion: "1" })) };
+  const gateOver = async (c, opts = {}) => {
+    const f = fixture({ deps: { versionTables: tables, readHosts: () => readHosts({ url: "redis://127.0.0.1:1", redisFn: () => c, ...opts }) } });
+    const out = await f.service.preview(ask(f, { packages: false }), operator);
+    return [out.refusal, out.status];
+  };
+  const rowAnswers = (message) => ({ ...client, hgetall: (key) => (key === "host:h:hostw" ? reply(message) : client.hgetall(key)) });
+  assert.deepEqual(await gateOver(client), ["Not every live host could be read: Valkey answers host:h:hostw with WRONGTYPE. Remove or repair that key first. Nothing was written.", 409]);
+  assert.deepEqual(await gateOver(rowAnswers("NOPERM this user has no permissions to run the 'hgetall' command")), ["Not every live host could be read: Valkey answers host:h:hostw with NOPERM. Fix this Valkey user's ACL first. Nothing was written.", 409]);
+  assert.deepEqual(await gateOver(rowAnswers("BUSY Valkey is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.")), ["Not every live host could be read: Valkey answers host:h:hostw with BUSY. Nothing was written; try again.", 503]);
+  assert.deepEqual(await gateOver(rowAnswers("ERR something this table does not name")), ["Not every live host could be read: Valkey answers host:h:hostw with ERR. Nothing was written.", 503]);
+  // Two rows, one that passes and one that lasts: the one that needs a hand is the one named.
+  const two = { ...client, smembers: async () => ["a", "busy1", "hostw"], hgetall: (key) => (key === "host:h:busy1" ? reply("LOADING Valkey is loading the dataset in memory") : client.hgetall(key)) };
+  assert.deepEqual(await gateOver(two), ["Not every live host could be read: Valkey answers host:h:hostw with WRONGTYPE. Remove or repair that key first. Nothing was written.", 409]);
+  // The index itself answered with an error (it said "try again" for every one): the same classes, of `host:live`.
+  const indexAnswers = (message) => ({ ...client, smembers: () => reply(message) });
+  assert.deepEqual(await gateOver(indexAnswers("WRONGTYPE Operation against a key holding the wrong kind of value")), ["The live hosts could not be read: Valkey answers host:live with WRONGTYPE. Remove or repair that key first. Nothing was written.", 409]);
+  assert.deepEqual(await gateOver(indexAnswers("NOAUTH Authentication required.")), ["The live hosts could not be read: Valkey answers host:live with NOAUTH. Fix this Valkey user's ACL first. Nothing was written.", 409]);
+  assert.deepEqual(await gateOver(indexAnswers("LOADING Valkey is loading the dataset in memory")), ["The live hosts could not be read: Valkey answers host:live with LOADING. Nothing was written; try again.", 503]);
+  // An audit row keeps 200 code points of a refusal, and the sentence this replaced had 339: its remedy was what the
+  // row lost. With the longest name a worker can have and the longest code, each refusal fits whole.
+  const long = `h${"x".repeat(63)}`;
+  const longest = (message) => ({ ...client, smembers: async () => ["a", long], hgetall: (key) => (key === `host:h:${long}` ? reply(message) : client.hgetall(key)) });
+  for (const message of ["WRONGTYPE x", "WRONGPASS x", "CLUSTERDOWN x", `${"E".repeat(32)} x`]) {
+    const [refusal] = await gateOver(longest(message));
+    assert.ok([...refusal].length <= CONSOLE_AUDIT_FIELD_MAX && refusal.includes(`host:h:${long}`) && refusal.endsWith("."), `${[...refusal].length}: ${refusal}`);
+  }
   // The same row answering nothing in time is a read to repeat, as before.
-  client.hgetall = (key) => (key === "host:h:hostw" ? new Promise(() => {}) : Promise.resolve({ name: "a", triggersVersion: "2", jobDataVersion: "1" }));
-  const waiting = fixture({ deps: { versionTables: tables, readHosts: () => readHosts({ url: "redis://127.0.0.1:1", redisFn: () => client, timeoutMs: 300 }) } });
-  const again = await waiting.service.preview(ask(waiting, { packages: false }), operator);
-  assert.deepEqual([again.refusal, again.status], ["Not every live host could be read (1 of 2 host rows not read), so nothing says each reads what this change needs. Nothing was written; try again.", 503]);
+  const silent = { ...client, hgetall: (key) => (key === "host:h:hostw" ? new Promise(() => {}) : client.hgetall(key)) };
+  assert.deepEqual(await gateOver(silent, { timeoutMs: 300 }), ["Not every live host could be read (1 of 2 host rows not read), so nothing says each reads what this change needs. Nothing was written; try again.", 503]);
 });
 
 test("every host at or above the need passes, with the stamp said out loud and written", async () => {

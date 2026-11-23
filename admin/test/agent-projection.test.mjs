@@ -123,3 +123,34 @@ test("an agent's copy keeps the queues and hosts Valkey answered with an error, 
   const state = agentReadProjection(stateOf({ queueErrors: { "pi-jobs@hostb": "WRONGTYPE" } }, "viewer", { now: NOW }));
   assert.deepEqual(state.queueErrors, { "pi-jobs@hostb": "WRONGTYPE" });
 });
+
+// Issue #1036: an agent's copy of the state document had no `fleetError`, and its `unreadHosts` had names without codes.
+test("an agent's copy of the state keeps the registry's error code and each unread host's, one word each, off a real reader over a row and an index Valkey answers with an error (#1036)", async () => {
+  const { createFleetReader } = await import("../src/read-model.mjs");
+  const { keyedRedis, quietQueue, registryKeys } = await import("./helpers/fleet-reader-fakes.mjs");
+  const { readLiveHosts } = await import("@edgehero/pi-dispatch/host-registry");
+  const logsDir = tempDir("pd-1036-agent-state-");
+  const reply = (message) => Promise.reject(Object.assign(new Error(message), { name: "ReplyError" }));
+  // The real registry read, over a client that answers one row's read, or the index's, with an error reply.
+  const stateOver = async (wrap) => {
+    const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") }, {
+      makeQueueFn: quietQueue(), parseConnectionFn: () => ({}), redisFn: () => wrap(keyedRedis(registryKeys({ hosta: { beatAt: String(NOW) }, hostw: {}, late: {} }))),
+      readLiveHostsFn: (r, o) => readLiveHosts(r, { ...o, now: () => NOW, timeoutMs: 200 }), discoverHostQueuesFn: async () => ({ names: [], incomplete: null }), nowFn: () => NOW, readOnly: true,
+    });
+    try {
+      const snapshot = await reader.snapshot();
+      return { viewer: stateOf(snapshot, "viewer", { now: NOW }), agent: agentReadProjection(stateOf(snapshot, "viewer", { now: NOW })) };
+    } finally { await reader.dispose(); }
+  };
+  // One row answered with WRONGTYPE, one that got no answer: both named, the first with its code, the second with null.
+  const rows = await stateOver((r) => ({ ...r, hgetall: (key) => (key === "host:h:hostw" ? reply("WRONGTYPE Operation against a key holding the wrong kind of value") : key === "host:h:late" ? new Promise(() => {}) : r.hgetall(key)) }));
+  assert.deepEqual(rows.viewer.unreadHosts, [{ name: "hostw", error: "WRONGTYPE" }, { name: "late", error: null }]);
+  assert.deepEqual([rows.agent.unreadHosts, rows.agent.fleetError, rows.agent.registryReadInPart], [rows.viewer.unreadHosts, null, true], "an agent reads what a viewer does");
+  // The index itself answered with an error.
+  const index = await stateOver((r) => ({ ...r, smembers: () => reply("NOPERM this user has no permissions to run the 'smembers' command") }));
+  assert.deepEqual([index.viewer.fleetError, index.agent.fleetError, index.agent.fleetDegraded], ["NOPERM", "NOPERM", true]);
+  assert.ok(!JSON.stringify([rows.agent, index.agent]).includes("Operation against") && !JSON.stringify(index.agent).includes("no permissions"), "the code alone");
+  // Only a code passes in either place, and only there: a sentence is null, and another key named `error` stays withheld.
+  assert.deepEqual(agentReadProjection({ fleetError: "WRONGTYPE Operation against a key", unreadHosts: [{ name: "hostw", error: "a sentence" }, { name: "hostx", error: 7 }] }), { fleetError: null, unreadHosts: [{ name: "hostw", error: null }, { name: "hostx", error: null }] });
+  assert.deepEqual(agentReadProjection({ other: [{ name: "hostw", error: "WRONGTYPE" }], error: "WRONGTYPE" }), { other: [{ name: "hostw" }] });
+});

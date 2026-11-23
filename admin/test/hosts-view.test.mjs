@@ -428,8 +428,50 @@ test("a registry read in part says so, never that it could not be read (#1062)",
   await comp.dispose();
   // The panel wraps the line inside its box: read it as one sentence.
   const flat = text.replace(/\s*│\s*\n\s*│\s*/g, " ");
-  assert.match(flat, /host registry read in part \(1 of 3 host rows not read\): the rows not read are the last read/);
+  assert.match(flat, /host registry read in part \(1 of 3 host rows not read\): a row not read now is shown as it was last read, and a host never read here has no row/);
   assert.doesNotMatch(text, /host registry unreadable/);
+});
+
+// Issue #1036: "the rows not read are the last read" was false of a host this panel never read, which has no row.
+test("a registry read in part names each host it did not read and says whether its row is the last one read or it was never read here (#1036)", async () => {
+  const { createFleetReader } = await import("../src/read-model.mjs");
+  const { keyedRedis, quietQueue, registryKeys } = await import("./helpers/fleet-reader-fakes.mjs");
+  const { readLiveHosts } = await import("@edgehero/pi-dispatch/host-registry");
+  const { tempDir } = await import("./helpers/temp-dir.mjs");
+  const { join } = await import("node:path");
+  const logsDir = tempDir("pd-1036-hosts-view-");
+  const AT = Date.UTC(2026, 10, 21, 12);
+  // The real reader over the real registry read, whose rows answer as `broken` says: an error reply, or their hash.
+  let broken = new Set(["hostw"]);
+  const keys = registryKeys({ hosta: { beatAt: String(AT) }, hostb: { beatAt: String(AT) }, hostw: { beatAt: String(AT) } });
+  const client = keyedRedis(keys);
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") }, {
+    makeQueueFn: quietQueue(), parseConnectionFn: () => ({}), nowFn: () => AT, discoverHostQueuesFn: async () => ({ names: [], incomplete: null }),
+    redisFn: () => ({ ...client, hgetall: (key) => (broken.has(key.slice("host:h:".length)) ? Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" })) : client.hgetall(key)) }),
+    readLiveHostsFn: (r, o) => readLiveHosts(r, { ...o, now: () => AT }),
+  });
+  const lineOf = async () => {
+    const snapshot = await reader.snapshot();
+    const comp = await openHosts({ fetchSnapshot: async () => snapshot, capacityInfo: async () => ({ report: reportOf() }) });
+    // The frame wraps the sentence: its rows, borders off, up to the blank row after it, read as one line.
+    const rows = comp.render(120).map((l) => stripAnsi(l).trim().replace(/^│ ?/, "").replace(/ *│$/, "").trim());
+    await comp.dispose();
+    const from = rows.findIndex((row) => row.startsWith("host registry read in part"));
+    if (from < 0) return null;
+    const to = rows.findIndex((row, i) => i > from && row === "");
+    return rows.slice(from, to < 0 ? rows.length : to).join(" ");
+  };
+  try {
+    // hostw's row has answered with an error since before this panel's first read: no row of it exists here.
+    assert.equal(await lineOf(), "host registry read in part (1 of 3 host rows not read, of which Valkey answered with an error: hostw (WRONGTYPE)): hostw was never read here and has no row");
+    // Read whole once, then hostb's row breaks too: hostb and hostw have last rows now, and are said so.
+    broken = new Set();
+    assert.equal(await lineOf(), null, "read whole: no such line");
+    broken = new Set(["hostb", "hostw"]);
+    assert.equal(await lineOf(), "host registry read in part (2 of 3 host rows not read, of which Valkey answered with an error: hostb (WRONGTYPE), hostw (WRONGTYPE)): hostb and hostw are shown as last read");
+  } finally {
+    await reader.dispose();
+  }
 });
 
 const LONG_HOST = `a${"b".repeat(63)}`;

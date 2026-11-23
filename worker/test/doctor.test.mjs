@@ -6311,6 +6311,49 @@ test("a host row Valkey answered with an error is named with its code and the ke
 	assert.ok(!late.some((c) => /answered the read of its row/.test(c.label)));
 });
 
+// Issue #1036: every error reply was worded as a key of the wrong type. An ACL user without HGETALL made doctor say
+// "that key is not a host's row" and "remove or repair the key" of sound rows, and a busy Valkey was told the same.
+test("what doctor says of a row answered with an error is the code's class's: a permission is the user's ACL and never the key, a busy Valkey is a run to repeat, and any other code claims nothing (#1036)", async () => {
+	const { readLiveHosts } = await import("../src/host-registry.mjs");
+	const rows = { "host:h:mini2": { name: "mini2", tz: Intl.DateTimeFormat().resolvedOptions().timeZone, beatAt: String(Date.now()) } };
+	const rowOver = async (message) => {
+		const client = { smembers: async () => ["mini2", "hostw"], hgetall: (key) => (key === "host:h:hostw" ? Promise.reject(Object.assign(new Error(message), { name: "ReplyError" })) : Promise.resolve(rows[key] ?? {})) };
+		const checks = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, fleetSeams([], { readHosts: () => readLiveHosts(client, { prune: false }) }));
+		const row = checks.find((c) => /answered the read of its row/.test(c.label));
+		assert.deepEqual([row.ok, row.warn], [false, true], message);
+		return row;
+	};
+	const said = "Fleet: host:live lists hostw, and Valkey answered the read of its row with an error";
+	const perm = await rowOver("NOPERM this user has no permissions to run the 'hgetall' command");
+	assert.equal(perm.label, `${said} (NOPERM): the Valkey user this connects as may not run the command or read the key`);
+	assert.equal(perm.fix, "give that Valkey user the permission in its ACL, or connect as a user that has it: it needs HGETALL on host:h:hostw. The key itself is not at fault; until then that host is in none of the fleet's checks, and every read of the fleet says it is not whole");
+	assert.doesNotMatch(`${perm.label} ${perm.fix}`, /remove or repair|not a host's row/, "a sound row is never called a key to remove");
+	const busy = await rowOver("BUSY Valkey is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.");
+	assert.equal(busy.label, `${said} (BUSY): Valkey could not serve the command just then`);
+	assert.equal(busy.fix, "run doctor again: a later read may succeed, and nothing has to be repaired. In this run that host is in none of the fleet's checks, and every read of the fleet says it is not whole");
+	const other = await rowOver("ERR something this table does not name");
+	assert.equal(other.label, `${said} (ERR); what that says of the row is not known here`);
+	assert.equal(other.fix, "see what Valkey answers for HGETALL host:h:hostw; until it reads, that host is in none of the fleet's checks, and every read of the fleet says it is not whole");
+	assert.doesNotMatch(`${busy.fix} ${other.fix}`, /remove or repair/);
+	const key = await rowOver("WRONGTYPE Operation against a key holding the wrong kind of value");
+	assert.deepEqual([key.label, key.fix], [`${said} (WRONGTYPE): that key is not a host's row`, "remove or repair the key host:h:hostw; until then that host is in none of the fleet's checks, and every read of the fleet says it is not whole"]);
+});
+
+test("doctor names at most twenty rows answered with an error and counts the rest in one line (#1036)", async () => {
+	const { readLiveHosts, UNREAD_HOSTS_MAX } = await import("../src/host-registry.mjs");
+	const names = Array.from({ length: UNREAD_HOSTS_MAX + 3 }, (_, i) => `bad${String(i).padStart(2, "0")}`);
+	const client = { smembers: async () => names, hgetall: () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" })) };
+	const checks = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, fleetSeams([], { readHosts: () => readLiveHosts(client, { prune: false }) }));
+	const rows = checks.filter((c) => /answered the read of its row/.test(c.label));
+	assert.deepEqual([rows.length, rows[0].label.includes("bad00"), rows.at(-1).label.includes("bad19")], [20, true, true], "the first twenty in name order");
+	const more = checks.find((c) => /more host rows? w/.test(c.label));
+	assert.deepEqual([more.ok, more.warn, more.label, more.fix], [false, true, "Fleet: 3 more host rows were answered with an error and are not named here (at most 20 are)", "put the rows named above right and run doctor again, which names the next ones"]);
+	// At the bound there is no such line.
+	client.smembers = async () => names.slice(0, UNREAD_HOSTS_MAX);
+	const twenty = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, fleetSeams([], { readHosts: () => readLiveHosts(client, { prune: false }) }));
+	assert.deepEqual([twenty.filter((c) => /answered the read of its row/.test(c.label)).length, twenty.some((c) => /are not named here/.test(c.label))], [20, false]);
+});
+
 test("a registry read in part is SAID: the hosts whose rows were not read are in none of the fleet's checks (#1062)", async () => {
 	const checks = await collectChecks(
 		{ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" },

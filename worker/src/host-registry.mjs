@@ -327,9 +327,10 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
  * reader stated "no such host" and "$0 held" of a host the registry lists. It counts in `incomplete`, is named in
  * `unreadHosts`, and its reply's code is kept in `hostErrors` (`{ <member>: "WRONGTYPE" }`, present only when not
  * empty), which `incomplete`'s words name as well, so a caller that prints them says which row and what Valkey
- * answered. It is not pruned. What sets it apart from a row that got no answer is that waiting does not help: the key
- * has to be removed or repaired. The index itself answered with an error is `{ unreachable, error }`, the code beside
- * the words.
+ * answered. It is not pruned. What the code means is not said here: whether waiting helps and what there is to repair
+ * depend on it (a key of another type, a permission this user lacks, a Valkey that could not serve the read just
+ * then), and a caller that says either asks `replyErrorClass` (connection.mjs). The index itself answered with an
+ * error is `{ unreachable, error }`, the code beside the words.
  */
 export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs = REGISTRY_OP_TIMEOUT_MS, prune = true, ttlMs = HOST_TTL_MS } = {}) {
 	// On the monotonic clock: a wall clock stepped mid-read must not widen or cut the bound.
@@ -426,6 +427,26 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 
 /** How many rows answered with an error `readLiveHosts`' `incomplete` words name; `hostErrors` holds every one. */
 const HOST_ERRORS_NAMED = 5;
+
+/**
+ * How many hosts a LIST of the hosts a registry read did not read names, on every surface that prints one or hands it
+ * on (issue #1036): the fleet reader's `unreadHosts`, `dispatch_hosts`, `status`' and `dispatch_status`' `hostErrors`,
+ * doctor's warnings. The rest are counted beside it. A member of `host:live` is anyone's to add who holds the
+ * Valkey's URL, so a list without a bound is theirs to grow: 23 broken rows gave 23 warnings and 23 entries.
+ */
+export const UNREAD_HOSTS_MAX = 20;
+
+/**
+ * `hostErrors` as a surface shows it: `{ hostErrors, hostErrorsMore }`, the first `UNREAD_HOSTS_MAX` hosts in name
+ * order with their codes and how many more there are (present only when there are), or `{}` when the read holds none.
+ * `readLiveHosts`' own map stays whole: `liveHostNamesOf` and the readers that keep a host's last row need every name.
+ */
+export function hostErrorsShown(hostErrors) {
+	if (hostErrors === null || typeof hostErrors !== "object") return {};
+	const names = Object.keys(hostErrors).sort();
+	if (names.length === 0) return {};
+	return { hostErrors: Object.fromEntries(names.slice(0, UNREAD_HOSTS_MAX).map((name) => [name, hostErrors[name]])), ...(names.length > UNREAD_HOSTS_MAX ? { hostErrorsMore: names.length - UNREAD_HOSTS_MAX } : {}) };
+}
 
 /**
  * The code of Valkey's error reply, or null for an error that is no reply: `replyErrorCode`'s rule (connection.mjs),

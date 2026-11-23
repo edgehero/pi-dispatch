@@ -13,6 +13,7 @@ import { readJobsData } from "./console/job-data.mjs";
 import { allocRedis, allocNow, envelopeProblem } from "./insights-assembly.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
 import { builtinModel } from "@edgehero/pi-dispatch/model-catalog";
+import { hostKey } from "@edgehero/pi-dispatch/host-registry";
 
 export const TOOL_ACTIONS = Object.freeze({
   dispatch_set: "setting-set", dispatch_trigger_add: "trigger-add", dispatch_trigger_edit: "trigger-edit", dispatch_trigger_delete: "trigger-delete", dispatch_trigger_fire: "trigger-fire",
@@ -23,6 +24,33 @@ export const TOOL_ACTIONS = Object.freeze({
   dispatch_wait_cancel: "cancel-held", dispatch_cancel: "cancel-active", dispatch_retry_failed: "retry-failed", dispatch_remove_failed: "remove-failed",
   dispatch_rerun: "rerun", dispatch_pause: "fleet-pause", dispatch_resume: "fleet-resume", dispatch_run: "run-enqueue",
 });
+
+/**
+ * BullMQ's states of a job that is not running: not started (a paused queue's jobs read `waiting`), or ended. Each
+ * goes to the queued job's planner, which cancels the first kind and says what the second is, as on the console.
+ */
+const NOT_RUNNING_STATES = Object.freeze(["waiting", "delayed", "prioritized", "waiting-children", "completed", "failed"]);
+
+/**
+ * `dispatch_cancel`'s action for a job the running list could not vouch for (issue #1036), by the job's own state in
+ * the queue that holds it (`jobStatus`, the by-id lookup over the registry's queues and the ones that exist): running
+ * is `cancel-active`, any state that is not running is `cancel-queued`, whose planner judges the job again and refuses
+ * one that ended. A job no queue that was read holds, or one whose state could not be read, may be running on a queue
+ * that was not asked, so that is refused, in words that say why: over a host
+ * row Valkey answered with an error, the host, the key and the code, and what the code's class says to do first
+ * (`erroredReadWords`), never "try again" for a cause that lasts; over anything else, the sentence as it was.
+ */
+async function cancelActionById(fleet, jobId, snapshot) {
+  const status = typeof fleet?.jobStatus === "function" ? await fleet.jobStatus(jobId, { tellAbsent: false }).catch(() => null) : null;
+  if (status?.found === true && status.state === "active") return "cancel-active";
+  if (status?.found === true && NOT_RUNNING_STATES.includes(status.state)) return "cancel-queued";
+  const unread = (Array.isArray(snapshot?.queue?.unreadHosts) ? snapshot.queue.unreadHosts : []).filter((u) => typeof u?.name === "string" && rm.replyCodeOf(u?.error) !== null);
+  // The row that most needs a hand first: a key of another type, then a permission, then any other code.
+  const words = unread.map((u) => ({ name: u.name, ...rm.erroredReadWords(hostKey(u.name), u.error) }));
+  const named = ["key", "permission", "other", "passing"].flatMap((cls) => words.filter((w) => w.class === cls))[0];
+  if (!named) throw publicToolRefusal("the running jobs could not be read, so whether this job is running is not known; nothing was changed, try again");
+  throw publicToolRefusal(`whether this job is running is not known: no queue that was read says, and the queue of host ${named.name} was not asked, since ${named.said}. ${named.first !== null ? `${named.first}; nothing was changed` : `Nothing was changed${named.again ? "; try again" : ""}`}`);
+}
 
 /** The tool's vocabulary is translated once; all validation and writes belong to the action. */
 export async function toolActionRequest(name, params = {}, { fleet } = {}) {
@@ -45,8 +73,12 @@ export async function toolActionRequest(name, params = {}, { fleet } = {}) {
       if ((snapshot.active ?? []).some((r) => r.jobId === params.jobId)) action = "cancel-active";
       else if ((snapshot.held?.rows ?? []).some((r) => r.jobId === params.jobId)) action = "cancel-held";
       // An active list that is not whole cannot say this job is not running, and a cancel planned for a queued job
-      // would be the wrong one for a running job (issue #962).
-      else if (snapshot.activeUnreachable === true) throw publicToolRefusal("the running jobs could not be read, so whether this job is running is not known; nothing was changed, try again");
+      // would be the wrong one for a running job (issue #962). So the job is looked up by its id, as the console's own
+      // cancel does (issue #1036): one found in a queue that WAS read is running or waiting there whatever another
+      // host's row says. Until this, one host row Valkey answers with an error refused every such cancel for as long
+      // as the row stayed: this tool's reader is new on every call, so that host never has a last row and its queue
+      // is never asked.
+      else if (snapshot.activeUnreachable === true) action = await cancelActionById(fleet, params.jobId, snapshot);
       else action = "cancel-queued";
     }
   }

@@ -868,7 +868,25 @@ test("every read tool that rests on the queues' reads tells a model what queueEr
   const t = tools();
   for (const [name, , unread] of READ_TOOLS) assert.equal(/queueErrors/.test(t[name].description), unread !== null, name);
   assert.match(t.dispatch_failed.description, /`queueErrors` gives the code of Valkey's error reply for each queue whose paused state or counts was answered with one: its failed jobs are in no total, so `more` is null and `complete` false/);
-  assert.match(t.dispatch_waiting.description, /whether that queue is paused is not known, so a job of it listed as waiting for a free slot may be waiting on a pause, `complete` is false/);
+  assert.match(t.dispatch_waiting.description, /whether that queue is paused is not known, so a job in its wait list or its prioritized set is listed in the bucket `unknown`, neither a free slot nor a pause, and `complete` is false/);
+});
+
+// Issue #1036: every description that hands a model an error reply's code says what a code means by its class, in the
+// one sentence built from the worker's table, and none tells it to repair a key whatever the code is.
+test("the tools that hand on an error reply's code say what a code means by its class, and none says a row did not answer or that a key has to be repaired whatever the code (#1036)", async () => {
+  const { REPLY_CODE_MEANING } = readModel;
+  const { REPLY_CODES_BY_CLASS, replyErrorClass } = await import("@edgehero/pi-dispatch/connection");
+  const t = tools();
+  for (const name of ["dispatch_status", "dispatch_hosts", "dispatch_failed", "dispatch_waiting"]) assert.ok(t[name].description.includes(REPLY_CODE_MEANING), name);
+  // The sentence names every code the table names, each under its own class, and claims a remedy for the lasting two alone.
+  for (const [cls, codes] of Object.entries(REPLY_CODES_BY_CLASS)) for (const code of codes) assert.ok(REPLY_CODE_MEANING.includes(code) && replyErrorClass(code) === cls, code);
+  assert.match(REPLY_CODE_MEANING, /WRONGTYPE, the key holds another kind of value and has to be removed or repaired; NOPERM, NOAUTH, WRONGPASS, this deployment's Valkey user lacks a permission \(its ACL\) and no key is at fault; BUSY, LOADING, TRYAGAIN, CLUSTERDOWN, MASTERDOWN, Valkey could not serve the read then and a later call may read it; any other code says no more than itself/);
+  for (const [name, tool] of Object.entries(t)) assert.doesNotMatch(tool.description, /row did not answer|its key has to be repaired|waiting does not read it/, name);
+  // A registry read in part: the row was not read, whatever the reason, and the workers counted are the rows that were.
+  assert.match(t.dispatch_status.description, /the schedulers of a host whose row was not read may be missing from the list/);
+  assert.match(t.dispatch_status.description, /registryReadInPart true means the registry answered and some hosts' rows were not read, and workers is then a floor: it counts the rows that were read/);
+  assert.match(t.dispatch_status.description, /at most 20 of them \(hostErrorsMore counts the rest\)/);
+  assert.match(t.dispatch_capacity.description, /the jobs running now on a host whose row was not read are not counted/);
 });
 
 /**

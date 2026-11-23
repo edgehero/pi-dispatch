@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { defaultWorkerName, loadConfig, sanitizeWorkerName, WORKER_NAME_RE } from "../src/config.mjs";
-import { HOST_BEAT_MS, HOST_SET, HOST_SKEW_CLAIM_MS, HOST_TTL_MS, hostKey, liveHostNamesOf, makeHostRegistry, readLiveHosts } from "../src/host-registry.mjs";
+import { HOST_BEAT_MS, HOST_SET, HOST_SKEW_CLAIM_MS, HOST_TTL_MS, hostKey, liveHostNamesOf, makeHostRegistry, readLiveHosts, UNREAD_HOSTS_MAX, hostErrorsShown } from "../src/host-registry.mjs";
 import { replyErrorCode } from "../src/connection.mjs";
 
 // A fake Valkey: a Map of hashes plus one set, recording every call so the ORDER and the SHAPE of what
@@ -687,6 +687,40 @@ test("the words name at most five rows answered with an error and count the rest
 	const read = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
 	assert.equal(read.incomplete, "7 of 7 host rows not read, of which Valkey answered with an error: h1 (ERR), h2 (ERR), h3 (ERR), h4 (ERR), h5 (ERR) and 2 more");
 	assert.deepEqual([Object.keys(read.hostErrors), read.unreadHosts], [names, names]);
+});
+
+// Issue #1036: the registry module's copy of the code rule, held to the original AT its bound (32 characters), where a
+// copy that took fewer or more would differ from it and no other reply shows it.
+test("the registry's copy of the code rule is replyErrorCode's at the bound: 32 characters is a code, 33 is none (#1036)", async () => {
+	for (const error of [replyError(`${"E".repeat(32)} x`), replyError("E".repeat(32)), replyError(`${"E".repeat(33)} x`), replyError(`${"E".repeat(31)} x`), replyError("E1_ x"), replyError("Err x"), replyError("1ERR x")]) {
+		const redis = fakeRedis();
+		rowsFor(redis, ["hosta"]);
+		redis.hgetall = () => Promise.reject(error);
+		assert.deepEqual((await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 })).hostErrors, { hosta: replyErrorCode(error) }, error.message);
+		redis.smembers = () => Promise.reject(error);
+		assert.equal((await readLiveHosts(redis, { timeoutMs: 300 })).error, replyErrorCode(error), error.message);
+	}
+	assert.equal(replyErrorCode(replyError(`${"E".repeat(32)} x`)), "E".repeat(32));
+	assert.equal(replyErrorCode(replyError(`${"E".repeat(33)} x`)), "error");
+});
+
+// Issue #1036: a list of the hosts a read did not read had no bound where it was printed.
+test("hostErrorsShown names at most UNREAD_HOSTS_MAX hosts, in name order, and counts the rest; the read's own map stays whole (#1036)", async () => {
+	assert.equal(UNREAD_HOSTS_MAX, 20);
+	const names = Array.from({ length: UNREAD_HOSTS_MAX + 3 }, (_, i) => `h${String(i).padStart(2, "0")}`);
+	const redis = fakeRedis();
+	rowsFor(redis, names);
+	redis.hgetall = () => Promise.reject(replyError(WRONGTYPE));
+	const read = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
+	assert.equal(Object.keys(read.hostErrors).length, 23, "every one, for the readers that act on the names");
+	const shown = hostErrorsShown(read.hostErrors);
+	assert.deepEqual([Object.keys(shown.hostErrors), shown.hostErrorsMore], [names.slice(0, 20), 3]);
+	// At the bound nothing is counted, and with none there is no key at all.
+	const twenty = hostErrorsShown(Object.fromEntries(names.slice(0, 20).map((n) => [n, "ERR"])));
+	assert.deepEqual([Object.keys(twenty.hostErrors).length, Object.hasOwn(twenty, "hostErrorsMore")], [20, false]);
+	for (const none of [null, undefined, {}, "x", 7]) assert.deepEqual(hostErrorsShown(none), {});
+	// Name order, whatever order the map came in.
+	assert.deepEqual(Object.keys(hostErrorsShown({ zed: "ERR", abe: "WRONGTYPE" }).hostErrors), ["abe", "zed"]);
 });
 
 test("the index itself answered with an error is unreachable with the reply's code beside the words; any other failure has none (#1036)", async () => {

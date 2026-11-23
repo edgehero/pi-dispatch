@@ -27,6 +27,7 @@ import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { basename, join } from "node:path";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, allowedModelsFrom, forwardEnvList } from "@edgehero/pi-dispatch/config";
+import { HOST_SET, hostKey } from "@edgehero/pi-dispatch/host-registry";
 import { egressArmed } from "@edgehero/pi-dispatch/egress";
 import { parseAllowlist } from "@edgehero/pi-dispatch/egress-allowlist";
 import { jobDataVersionFor } from "@edgehero/pi-dispatch/job-data-version";
@@ -51,7 +52,7 @@ import { dryRunFs } from "./console/actions.mjs";
 import { toolNamesOfRuns } from "./loaded-words.mjs";
 import { collectModelPolicies } from "./models-view.mjs";
 import { PROVIDER_KEY_NAMES, providerKeyNames } from "./provider-key-names.mjs";
-import { writeInputs } from "./read-model.mjs";
+import { erroredReadWords, writeInputs } from "./read-model.mjs";
 import { CARD_FIELDS, TRIGGER_ENVIRONMENT_EDIT_FIELDS, planTriggerEditCore, rowName, triggerEntryDigest } from "./trigger-edit-core.mjs";
 import { alsoNaming } from "./trigger-gets-view.mjs";
 import { fieldNamed, listed } from "./words.mjs";
@@ -1037,6 +1038,23 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
    * and on a registry it cannot read, since "unknown" is not "every host reads it". Nothing is read while the need is 1: every
    * release reads that, and a Valkey blink must not refuse an edit that needs nothing of it.
    */
+  /**
+   * What the gate's refusal says after its lead over a read of `key` that Valkey answered with an error (issue #1036),
+   * and the status it answers with: the key and the reply's code, then what the code's class supports and nothing more (`erroredReadWords`, over `replyErrorClass`). A key of another type and a
+   * permission this Valkey user lacks last until someone puts them right, so each is a conflict (409) that names what
+   * to do first and never says to try again; a Valkey that could not serve the read just then is a read to repeat
+   * (503, "try again"); any other code is said as it is, with no remedy claimed. Each was the one sentence before,
+   * "remove or repair its key", which was false of a sound row an ACL kept this user from reading, and of a row read
+   * whole three seconds after a busy script. Short on purpose: an audit row keeps 200 code points of a refusal
+   * (`CONSOLE_AUDIT_FIELD_MAX`), the sentence it replaces had 339, and the part that was cut was the remedy. With the
+   * longest worker name (64) each of these fits, which a test holds.
+   */
+  function answeredWithError(key, code) {
+    const w = erroredReadWords(key, code);
+    if (w.first !== null) return { said: `${w.said}. ${w.first}. Nothing was written.`, status: 409 };
+    return { said: `${w.said}. Nothing was written${w.again ? "; try again" : ""}.`, status: 503 };
+  }
+
   async function versionGate(need) {
     const wanted = Object.entries(need).filter(([, version]) => version > 1);
     if (wanted.length === 0) return { hosts: null };
@@ -1046,14 +1064,25 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     } catch {
       read = null;
     }
-    if (!Array.isArray(read?.hosts)) return refuse("The live hosts could not be read, so nothing says each reads what this change needs. Nothing was written; try again.", 503);
+    // The index itself answered with an error (issue #1036, `readHosts`' `error`) is said with its code, by its class.
+    if (!Array.isArray(read?.hosts)) {
+      if (typeof read?.error === "string") {
+        const index = answeredWithError(HOST_SET, read.error);
+        return refuse(`The live hosts could not be read: ${index.said}`, index.status);
+      }
+      return refuse("The live hosts could not be read, so nothing says each reads what this change needs. Nothing was written; try again.", 503);
+    }
     // A listing whose rows were not all read in time (issue #1062) is "unknown" too: the host whose row was not read
     // may read less, and the gate would pass the change over it. A row Valkey answered with an error (issue #1036,
-    // `hostErrors`, which the listing's words name with its code) is not read on the next try either, so that refusal
-    // does not say to try again: it says what has to be put right first, and is a conflict, not a read to repeat.
+    // `hostErrors`) is named with its key and its code, and what the refusal tells a person depends on the code's
+    // class: the first row of the class that most needs a hand is the one named.
     if (read.incomplete) {
-      const lasting = read.hostErrors !== null && typeof read.hostErrors === "object" && Object.keys(read.hostErrors).length > 0;
-      if (lasting) return refuse(`Not every live host could be read (${read.incomplete}), so nothing says each reads what this change needs. Nothing was written. A row Valkey answers with an error reads the same on the next try: remove or repair its key first (pi-dispatch doctor on a worker host names it).`, 409);
+      const errored = read.hostErrors !== null && typeof read.hostErrors === "object" ? Object.entries(read.hostErrors).filter(([, code]) => typeof code === "string").sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)) : [];
+      const first = ["key", "permission", "other", "passing"].flatMap((cls) => errored.filter(([name, code]) => erroredReadWords(hostKey(name), code).class === cls))[0];
+      if (first) {
+        const row = answeredWithError(hostKey(first[0]), first[1]);
+        return refuse(`Not every live host could be read: ${row.said}`, row.status);
+      }
       return refuse(`Not every live host could be read (${read.incomplete}), so nothing says each reads what this change needs. Nothing was written; try again.`, 503);
     }
     const hosts = read.hosts.filter((host) => typeof host?.name === "string");

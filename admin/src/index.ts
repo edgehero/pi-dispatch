@@ -59,6 +59,7 @@ import {
   resolvePaths,
   panelEnv,
   readQueueState,
+  REPLY_CODE_MEANING,
   readSchedulers,
   readBudget,
   listRuns,
@@ -611,7 +612,7 @@ function registerTools(pi: ExtensionAPI): void {
     name: "dispatch_status",
     label: "pi-dispatch status",
     description:
-      "Read-only. Reports pi-dispatch queue/worker state: paused flag, job counts, connected workers, today's budget use, schedulers, runtime settings overlay. schedulersReadInPart true means the host registry was read in part, so the schedulers of a host whose row did not answer may be missing from the list. In queue: partial true means a queue's read failed: unavailableQueues names each queue left out of the counts, and queueErrors gives the code of Valkey's error reply for each one answered with an error (its key has to be repaired; waiting does not read it); pausedState is false while a queue is left out, since whether that queue is paused is not known, and pausedPartial true means a queue that was read is paused. queuesMayBeShort true means the host registry or the look for queues was not read whole, so other queues may exist and the counts leave them out; registryReadInPart true means the registry answered and some hosts' rows were not read; hostErrors names each host whose row Valkey answered with an error, with that reply's code (such a row is not read on a later call either: its key has to be repaired).",
+      "Read-only. Reports pi-dispatch queue/worker state: paused flag, job counts, connected workers, today's budget use, schedulers, runtime settings overlay. schedulersReadInPart true means the host registry was read in part, so the schedulers of a host whose row was not read may be missing from the list. In queue: partial true means a queue's read failed: unavailableQueues names each queue left out of the counts, and queueErrors gives the code of Valkey's error reply for each one answered with an error; pausedState is false while a queue is left out, since whether that queue is paused is not known, and pausedPartial true means a queue that was read is paused. queuesMayBeShort true means the host registry or the look for queues was not read whole, so other queues may exist and the counts leave them out; registryReadInPart true means the registry answered and some hosts' rows were not read, and workers is then a floor: it counts the rows that were read; hostErrors names each host whose row Valkey answered with an error, with that reply's code, at most 20 of them (hostErrorsMore counts the rest). " + REPLY_CODE_MEANING,
     parameters: Type.Object({}),
     async execute() {
       const paths = resolvePaths(deploymentEnv());
@@ -765,7 +766,7 @@ function registerTools(pi: ExtensionAPI): void {
       "milliseconds, and ratios per mille). Jobs only: a machine busy with other work reads as idle. Time before a " +
       "host's history starts is reported as missing (`missingMs`, `coverage`), never as idle; a host that is new, or " +
       "was down, inside history that is there reads as idle for that time. registryReadInPart true means the host " +
-      "registry was read in part: the jobs running now on a host whose row did not answer are not counted.",
+      "registry was read in part: the jobs running now on a host whose row was not read are not counted.",
     parameters: Type.Object({ window: Type.Optional(Type.String()), host: Type.Optional(Type.String()) }),
     async execute(_toolCallId, params) {
       const paths = resolvePaths(deploymentEnv());
@@ -1322,9 +1323,9 @@ function registerTools(pi: ExtensionAPI): void {
 
   // Issue #963: what a read that failed looks like, so a model never takes it for an empty fleet.
   const unreadWords: Record<string, string> = {
-    failed: " `jobs` is null when the failed jobs could not be read; `complete` is true only when every queue was read and no failed job is past the list. `queueErrors` gives the code of Valkey's error reply for each queue whose paused state or counts was answered with one: its failed jobs are in no total, so `more` is null and `complete` false, and its key has to be repaired (waiting does not read it).",
-    waiting: " `jobs` is null when the waiting jobs could not be read; `complete` is true only when every queue was read and none was cut. `queueErrors` gives the code of Valkey's error reply for each queue whose paused state or counts was answered with one: whether that queue is paused is not known, so a job of it listed as waiting for a free slot may be waiting on a pause, `complete` is false, and its key has to be repaired (waiting does not read it).",
-    hosts: " `hosts` is null and `unavailable` true when the host registry could not be read; `readAt` is when the rows were read. `readInPart` true when some hosts' rows were not read: `unreadHosts` names them (`unreadHostsMore` counts those past the ones named), a kept row is marked `notRead`, its last row, with no beat, and a host this read never read has no row. `hostErrors` gives the code of Valkey's error reply for each host whose row was answered with one: that row is not read on a later call either, its key has to be repaired.",
+    failed: " `jobs` is null when the failed jobs could not be read; `complete` is true only when every queue was read and no failed job is past the list. `queueErrors` gives the code of Valkey's error reply for each queue whose paused state or counts was answered with one: its failed jobs are in no total, so `more` is null and `complete` false. " + REPLY_CODE_MEANING,
+    waiting: " `jobs` is null when the waiting jobs could not be read; `complete` is true only when every queue was read and none was cut. `queueErrors` gives the code of Valkey's error reply for each queue whose paused state or counts was answered with one, a stopped host's queue among them: whether that queue is paused is not known, so a job in its wait list or its prioritized set is listed in the bucket `unknown`, neither a free slot nor a pause, and `complete` is false. " + REPLY_CODE_MEANING,
+    hosts: " `hosts` is null and `unavailable` true when the host registry could not be read; `readAt` is when the rows were read. `readInPart` true when some hosts' rows were not read: `unreadHosts` names them (`unreadHostsMore` counts those past the ones named), a kept row is marked `notRead`, its last row, with no beat, and a host this read never read has no row. `hostErrors` gives the code of Valkey's error reply for each host whose row was answered with one. " + REPLY_CODE_MEANING,
   };
   for (const [name, kind] of [["dispatch_failed", "failed"], ["dispatch_waiting", "waiting"], ["dispatch_setup", "setup"], ["dispatch_hosts", "hosts"]]) {
     registerTool({ name, label: `pi-dispatch ${kind}`, description: `Read-only machine facts. Never raw failure, operator or job text.${unreadWords[kind] ?? ""}`, parameters: Type.Object({}),

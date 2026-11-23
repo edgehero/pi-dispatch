@@ -5,6 +5,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { keyedRedis, quietQueue, registryKeys } from "./helpers/fleet-reader-fakes.mjs";
 import { WAITING_QUEUES_MAX, createFleetReader, readHeldJobs } from "../src/read-model.mjs";
 import { readOperationalTool, readHeldForAgent, waitingForAgent } from "../src/tool-reads.mjs";
+import { toolActionRequest } from "../src/tool-actions.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
 
@@ -27,16 +28,17 @@ function paths() {
  * A real fleet reader over `keys`. `registryDown()` and `scanDown()` fail the registry's SMEMBERS and the keyspace
  * SCAN; `failed` is each queue's failed jobs; `clock` an object whose `t` is the reader's now; `pttl` a host row's PTTL
  * (-1: no expiry); `built`, when given, gets the name of each queue the reader builds; `errored` names the queues whose
- * paused read Valkey answers with WRONGTYPE (a meta key that holds a string).
+ * paused read Valkey answers with WRONGTYPE (a meta key that holds a string); `jobs` is each queue's jobs by id, each
+ * with the state BullMQ says it is in, for a lookup by id.
  */
-function readerOver(keys, { registryDown, scanDown, failed, clock = { t: AT }, readLiveHostsFn, redis: wrap = (r) => r, pttl = PTTL, built = null, errored = [] } = {}) {
+function readerOver(keys, { registryDown, scanDown, failed, clock = { t: AT }, readLiveHostsFn, redis: wrap = (r) => r, pttl = PTTL, built = null, errored = [], jobs = {} } = {}) {
   const redis = wrap(keyedRedis(keys, { registryDown, scanDown, pttlOf: (key) => (key.startsWith("host:h:") ? pttl : -1) }));
   const make = quietQueue([], { failed });
   const wrongtype = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
   return createFleetReader(paths(), {
     makeQueueFn: (c, opts) => {
       built?.push(opts?.name ?? "pi-jobs");
-      const q = make(c, opts);
+      const q = { ...make(c, opts), async getJob(id) { const state = jobs[opts?.name ?? "pi-jobs"]?.[id]; return state ? { id, data: {}, opts: {}, getState: async () => state } : null; } };
       return errored.includes(q.name) ? { ...q, isPaused: wrongtype } : q;
     },
     parseConnectionFn: () => ({}),
@@ -276,6 +278,69 @@ test("over a queue Valkey answered with an error, the tools whose answer rests o
     parseConnectionFn: () => ({}), redisFn: () => keyedRedis(registryKeys({})), readLiveHostsFn: (r, o) => readLiveHosts(r, { ...o, now: () => AT }), nowFn: () => AT, readOnly: true,
   }));
   assert.deepEqual([odd.complete, odd.queueErrors], [false, {}]);
+});
+
+// Issue #1036: a stopped host's queue is in no registry row, so only the waiting read looks at its paused flag. An
+// error reply there read as "not paused", and the tool called its answer complete.
+test("dispatch_waiting over a queue only the keyspace scan found, whose paused flag Valkey answers with an error: named in queueErrors, not complete, its waiting job in no slot (#1036)", async () => {
+  const keys = { ...registryKeys({ mini1: row({ routes: "true" }) }), ...metas("pi-jobs@mini1", "pi-jobs@gone"), "bull:pi-jobs@gone:wait": ["gh-gone-1"], "bull:pi-jobs@gone:gh-gone-1": { name: "github", timestamp: String(AT - MIN), atm: "0" } };
+  const wrongtype = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+  // The flag's look alone fails, and for that queue alone: its lists and its job answer.
+  const flagFails = (how) => (r) => ({ ...r, hexists: (key, field) => (key === "bull:pi-jobs@gone:meta" ? how() : r.hexists(key, field)) });
+  const got = await read("waiting", readerOver(keys, { redis: flagFails(wrongtype) }));
+  assert.deepEqual([got.unavailable, got.complete, got.queueErrors], [false, false, { "pi-jobs@gone": "WRONGTYPE" }]);
+  assert.deepEqual(got.jobs.map((j) => [j.jobId, j.queue, j.bucket]), [["gh-gone-1", "pi-jobs@gone", "unknown"]], "the job is listed, in neither the slot nor the paused bucket");
+  assert.ok(!JSON.stringify(got).includes("Operation against"));
+  // A look that got no answer has no code to name: not complete either, with an empty map.
+  const silent = await read("waiting", readerOver(keys, { redis: flagFails(() => Promise.reject(new Error("Command timed out"))) }));
+  assert.deepEqual([silent.complete, silent.queueErrors, silent.jobs.map((j) => j.bucket)], [false, {}, ["unknown"]]);
+  // Read whole: complete, the job waits for a slot, and no map.
+  const whole = await read("waiting", readerOver(keys));
+  assert.deepEqual([whole.complete, Object.hasOwn(whole, "queueErrors"), whole.jobs.map((j) => j.bucket)], [true, false, ["slot"]]);
+});
+
+// Issue #1036: the tool's reader is new on every call, so a host whose row Valkey answers with an error never has a
+// last row there, the running jobs are never whole, and every cancel of a job that was not seen running was refused
+// with "try again" for as long as the row stayed.
+test("dispatch_cancel over a host row Valkey answers with an error: a job found in a queue that was read is cancelled as what it is, and one found nowhere is refused with the host, the key, the code and what to put right (#1036)", async () => {
+  const keys = { ...registryKeys({ mini1: row({ routes: "true" }), hostw: row({ routes: "true" }) }), ...metas("pi-jobs@mini1") };
+  const reply = (message) => () => Promise.reject(Object.assign(new Error(message), { name: "ReplyError" }));
+  const rowFails = (how) => (r) => ({ ...r, hgetall: (key) => (key === "host:h:hostw" ? how() : r.hgetall(key)) });
+  const jobs = { "pi-jobs": { "gh-queued": "waiting", "gh-late": "delayed" }, "pi-jobs@mini1": { "gh-running": "active", "gh-done": "completed", "gh-odd": "unknown" } };
+  const over = (how) => readerOver(keys, { redis: rowFails(how), jobs });
+  const cancel = async (jobId, how = reply("WRONGTYPE Operation against a key holding the wrong kind of value")) => {
+    const fleet = over(how);
+    try { return await toolActionRequest("dispatch_cancel", { jobId }, { fleet }); } finally { await fleet.dispose(); }
+  };
+  // The state the refusal came from: hostw was never read, so the running jobs are a floor.
+  const fleet = over(reply("WRONGTYPE Operation against a key holding the wrong kind of value"));
+  const snap = await fleet.snapshot({ waiting: true });
+  await fleet.dispose();
+  assert.deepEqual([snap.activeUnreachable, snap.queue.unreadHosts], [true, [{ name: "hostw", error: "WRONGTYPE" }]]);
+  // Found in a queue that was read: cancelled as what it is, whatever hostw's row says.
+  assert.equal((await cancel("gh-queued")).action, "cancel-queued");
+  assert.equal((await cancel("gh-late")).action, "cancel-queued");
+  assert.equal((await cancel("gh-running")).action, "cancel-active");
+  // In no queue that was read: it may be running on hostw's. Refused with the cause, by the code's class.
+  const refusal = async (how) => { try { await cancel("gh-nowhere", how); return null; } catch (e) { return e.message; } };
+  assert.equal(await refusal(), "whether this job is running is not known: no queue that was read says, and the queue of host hostw was not asked, since Valkey answers host:h:hostw with WRONGTYPE. Remove or repair that key first; nothing was changed");
+  assert.equal(await refusal(reply("NOPERM this user has no permissions to run the 'hgetall' command")), "whether this job is running is not known: no queue that was read says, and the queue of host hostw was not asked, since Valkey answers host:h:hostw with NOPERM. Fix this Valkey user's ACL first; nothing was changed");
+  assert.equal(await refusal(reply("BUSY Valkey is busy running a script")), "whether this job is running is not known: no queue that was read says, and the queue of host hostw was not asked, since Valkey answers host:h:hostw with BUSY. Nothing was changed; try again");
+  assert.equal(await refusal(reply("ERR something else")), "whether this job is running is not known: no queue that was read says, and the queue of host hostw was not asked, since Valkey answers host:h:hostw with ERR. Nothing was changed");
+  // A job that ended is found too: the queued job's planner says what it is, as on the console. One whose state could
+  // not be read is not known to be at rest, so it is refused like one found nowhere.
+  assert.equal((await cancel("gh-done")).action, "cancel-queued");
+  await assert.rejects(() => cancel("gh-odd"), /^Error: whether this job is running is not known/);
+  // A row that got no answer has no code: the sentence as it was, where trying again is true.
+  assert.equal(await refusal(() => new Promise(() => {})), "the running jobs could not be read, so whether this job is running is not known; nothing was changed, try again");
+  // Two rows answered with an error, one that passes and one that lasts: the one named is the one that needs a hand,
+  // whatever their names' order, so the refusal never says "try again" while a key waits to be repaired.
+  const both = readerOver({ ...keys, ...registryKeys({ mini1: row({ routes: "true" }), busyh: row({ routes: "true" }), hostw: row({ routes: "true" }) }) }, {
+    redis: (r) => ({ ...r, hgetall: (key) => (key === "host:h:busyh" ? reply("BUSY Valkey is busy running a script")() : key === "host:h:hostw" ? reply("WRONGTYPE Operation against a key holding the wrong kind of value")() : r.hgetall(key)) }), jobs,
+  });
+  try {
+    await assert.rejects(() => toolActionRequest("dispatch_cancel", { jobId: "gh-nowhere" }, { fleet: both }), /the queue of host hostw was not asked, since Valkey answers host:h:hostw with WRONGTYPE\. Remove or repair that key first; nothing was changed$/);
+  } finally { await both.dispose(); }
 });
 
 test("dispatch_failed over a failed set that could not be read: jobs null and unavailable", async () => {

@@ -117,7 +117,7 @@ import { SUGGEST_WINDOW_DAYS, cpusText, hostCap, refusalWords, sizeRefusal, sugg
 import { SIZING_RECORD_MAX_BYTES, readSizingRecords } from "./size-records.mjs";
 import { CAPACITY_WINDOWS, computeCapacity } from "./capacity.mjs";
 import { JOBS_ONLY, durationText, milliText, notSharedWhy, percentText, shareText } from "./capacity-cli.mjs";
-import { HOST_SET, hostKey } from "./host-registry.mjs";
+import { HOST_SET, UNREAD_HOSTS_MAX, hostErrorsShown, hostKey } from "./host-registry.mjs";
 import { CGROUP_PARENT, DOCTOR_HELPER_NAME_RE, DOCTOR_HELPER_PREFIX, HELPER_LABEL_KEY, RESERVE_STEP_TIMEOUT_MS, cgroupParentFor, guardHelperRun, helperName as cpuReserveHelperName, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
@@ -3589,17 +3589,31 @@ export async function collectChecks(shellVars, seams) {
 	// Issue #1062: a registry read in part. The hosts whose rows were not read in time are in none of the fleet's checks,
 	// which is said, as a registry that could not be read at all is.
 	if (!fleet.unreachable && fleet.incomplete) checks.push({ ok: true, label: `Fleet: the host registry was read in part (${printable(fleet.incomplete)}); the fleet's checks leave those hosts out` });
-	// Issue #1036: a row Valkey answered with an error is one of them, and waiting will not read it: the index lists the
-	// host and its key is not a hash. Named with the key to act on, since every reader leaves that host out until then.
-	if (!fleet.unreachable && fleet.hostErrors !== null && typeof fleet.hostErrors === "object") {
-		for (const [name, code] of Object.entries(fleet.hostErrors)) {
+	// Issue #1036: a row Valkey answered with an error is one of them, named with its code, since every reader leaves
+	// that host out. What the line says of the cause, and what it tells a person to do, are the code's class's
+	// (`replyErrorClass`): only a key of another type is "not a host's row" to remove or repair. An ACL user without
+	// HGETALL answers NOPERM for sound rows, and a busy Valkey answers BUSY and reads them a moment later. At most
+	// `UNREAD_HOSTS_MAX` rows are named, the rest counted, so the index cannot make this list as long as it likes.
+	if (!fleet.unreachable) {
+		const { replyErrorClass, REPLY_ERROR_CLASSES } = await import("./connection.mjs");
+		const { hostErrors: erroredRows = {}, hostErrorsMore = 0 } = hostErrorsShown(fleet.hostErrors);
+		const leftOut = "that host is in none of the fleet's checks, and every read of the fleet says it is not whole";
+		for (const [name, code] of Object.entries(erroredRows)) {
+			const key = printable(hostKey(name));
+			const cls = replyErrorClass(code);
+			const { means, remedy } = REPLY_ERROR_CLASSES[cls];
+			const said = `Fleet: ${HOST_SET} lists ${printable(name)}, and Valkey answered the read of its row with an error (${printable(code)})`;
 			checks.push({
 				ok: false,
 				warn: true,
-				label: `Fleet: ${HOST_SET} lists ${printable(name)}, and Valkey answered the read of its row with an error (${printable(code)}): that key is not a host's row`,
-				fix: `remove or repair the key ${printable(hostKey(name))}; until then that host is in none of the fleet's checks, and every read of the fleet says it is not whole`,
+				label: cls === "key" ? `${said}: that key is not a host's row` : means !== null ? `${said}: ${means}` : `${said}; what that says of the row is not known here`,
+				fix: cls === "key" ? `${remedy} ${key}; until then ${leftOut}`
+					: cls === "permission" ? `${remedy}: it needs HGETALL on ${key}. The key itself is not at fault; until then ${leftOut}`
+					: cls === "passing" ? `run doctor again: a later read may succeed, and nothing has to be repaired. In this run ${leftOut}`
+					: `see what Valkey answers for HGETALL ${key}; until it reads, ${leftOut}`,
 			});
 		}
+		if (hostErrorsMore > 0) checks.push({ ok: false, warn: true, label: `Fleet: ${hostErrorsMore} more host ${hostErrorsMore === 1 ? "row was" : "rows were"} answered with an error and ${hostErrorsMore === 1 ? "is" : "are"} not named here (at most ${UNREAD_HOSTS_MAX} are)`, fix: "put the rows named above right and run doctor again, which names the next ones" });
 	}
 	// Issue #761: the pi-dispatch versions the live workers report, and this doctor's own against this host's running
 	// worker, after the peers block so the second is said on a single host too. Workers only: a receiver's status row is

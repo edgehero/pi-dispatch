@@ -615,6 +615,7 @@ async function targetStatus(item, url, { env, write, label, urlShown, valkeyRefu
 	const { parseConnection } = await import("./connection.mjs");
 	const { closeWithin, makeQueue } = await import("./queue.mjs");
 	const { readTargetStatus, TARGET_STATUS_TIMEOUT_MS } = await import("./target-status.mjs");
+	const { hostErrorsShown } = await import("./host-registry.mjs");
 	const refused = await valkeyRefusal(url, env, { deadlineAt: deadline.at });
 	if (refused) return fail(refused);
 	const { names, blind, registryShort, hostErrors, incomplete } = await deploymentQueueNames(url, controlClients, deadline.within);
@@ -627,7 +628,7 @@ async function targetStatus(item, url, { env, write, label, urlShown, valkeyRefu
 		const degraded = blind !== null || registryShort !== null || incomplete;
 		// `queuesMayBeShort` and the sentence as plain `status` has them (issue #1043): `complete` is false for a cut read
 		// too, so it alone does not say that a queue may be missing from the list.
-		write(`${JSON.stringify({ ...(label ? { valkey: urlShown(url) } : {}), ...read, ...(degraded ? { complete: false, discoveryIncomplete: true, queuesMayBeShort: true } : {}), ...(blind ? { fleet: blind } : {}), ...(registryShort ? { fleetIncomplete: registryShort } : {}), ...(hostErrors ? { hostErrors } : {}) })}\n`);
+		write(`${JSON.stringify({ ...(label ? { valkey: urlShown(url) } : {}), ...read, ...(degraded ? { complete: false, discoveryIncomplete: true, queuesMayBeShort: true } : {}), ...(blind ? { fleet: blind } : {}), ...(registryShort ? { fleetIncomplete: registryShort } : {}), ...hostErrorsShown(hostErrors) })}\n`);
 		if (degraded) process.stderr.write(`warning: ${label}${statusShortNote(true)}\n`);
 	} catch (error) {
 		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${urlShown(url)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${error.message}`);
@@ -681,8 +682,9 @@ export function statusShortNote(target) {
 /**
  * The hosts of a registry listing whose rows Valkey answered with an error (issue #1036, `readLiveHosts`' `hostErrors`),
  * `{ <host>: <the reply's code> }`, or null when there is none or the registry could not be read at all. `status` prints
- * it beside `fleetIncomplete`, whose words name them too: such a row is not read on the next try either, so it names
- * what to repair, where a row not read in time is only waited for.
+ * it beside `fleetIncomplete`, whose words name them too, at most `UNREAD_HOSTS_MAX` of them with `hostErrorsMore` the
+ * count of the rest (`hostErrorsShown`). What a code means for the row, whether waiting reads it and what there is to
+ * repair, is its class's (`replyErrorClass`), which `pi-dispatch doctor` says row by row.
  */
 function registryHostErrors(fleet) {
 	if (!fleet || fleet.unreachable || fleet.hostErrors === null || typeof fleet.hostErrors !== "object") return null;
@@ -732,7 +734,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	// probe before it is closed, so this keeps the probe open across both reads.
 	const { parseConnection, makeRedisClient } = await import("./connection.mjs");
 	const { closeWithin, fleetQueueNames, discoverHostQueuesReporting, unionQueueNames, makeQueue } = await import("./queue.mjs");
-	const { readLiveHosts } = await import("./host-registry.mjs");
+	const { readLiveHosts, hostErrorsShown } = await import("./host-registry.mjs");
 	// One deadline over everything each verb asks of this Valkey (`statusDeadline`), from here, before the refusal check:
 	// `status`'s reads since issue #1003, and `pause`'s and `resume`'s discovery and writes since issue #1007, which
 	// waited for as long as a Valkey that took the connection and stopped answering stayed so, printed nothing, and could
@@ -877,7 +879,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 			// read is `partial`, exit 1; a list that may be short is not a failure by itself, as #964 has it for a switch.
 			const listMayBeShort = blind !== null || registryShort !== null || Boolean(existing?.incomplete);
 			const errored = Object.keys(codes).length > 0 ? { queueErrors: codes } : {};
-			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i] === true) } : {}), ...counts, ...(unread.length > 0 ? { partial: true, unavailableQueues: unread, ...errored } : {}), ...(listMayBeShort ? { queuesMayBeShort: true } : {}), ...(blind ? { fleet: blind } : {}), ...(registryShort ? { fleetIncomplete: registryShort } : {}), ...(registryHostErrors(fleet) ? { hostErrors: registryHostErrors(fleet) } : {}), waitingDetails: waiting, consumers, pollers };
+			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i] === true) } : {}), ...counts, ...(unread.length > 0 ? { partial: true, unavailableQueues: unread, ...errored } : {}), ...(listMayBeShort ? { queuesMayBeShort: true } : {}), ...(blind ? { fleet: blind } : {}), ...(registryShort ? { fleetIncomplete: registryShort } : {}), ...hostErrorsShown(registryHostErrors(fleet)), waitingDetails: waiting, consumers, pollers };
 			write(`${JSON.stringify(out)}\n`);
 			if (listMayBeShort) process.stderr.write(`warning: ${label}${statusShortNote(false)}\n`);
 			// The line is printed with what was read, and the exit code says status could not read what it exists to say, as

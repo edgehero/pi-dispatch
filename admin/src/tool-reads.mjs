@@ -58,7 +58,8 @@ export function waitingForAgent(read) {
  * A read in part also NAMES the hosts it did not read (issue #1036): `unreadHosts`, their names, at most the
  * snapshot's (`unreadHostsMore` counts the rest, when there is one), and `hostErrors`, `{ <host>: <code> }` for those
  * whose row Valkey answered with an error, present only when not empty. Such a host may have no row in `hosts` at all
- * (this reader never read it), and a row Valkey answers with an error is not read on the next call either.
+ * (this reader never read it). Whether a later call reads the row is the code's class's to say (`replyErrorClass`,
+ * which the tool's description spells out): a key of another type or a missing permission lasts, a busy Valkey passes.
  */
 export function hostsForAgent(snapshot) {
   if (hostsUnread(snapshot) || !Array.isArray(snapshot.hostBudgets)) return { unavailable: true, readAt: null, hosts: null };
@@ -106,15 +107,19 @@ export function setupForAgent(snapshot, { deployment = null } = {}) {
  *
  * Which tools rest on those reads: `dispatch_failed`, whose count past the list is the queues' failed counts, and
  * `dispatch_waiting`, where why a job in the wait list or the prioritized set waits depends on whether its queue is
- * paused, which is not known for such a queue. `dispatch_status` says the same of its own read (`readQueueState`:
+ * paused, which is not known for such a queue (the waiting read's own look at the flag counts too: `pausedUnread`). `dispatch_status` says the same of its own read (`readQueueState`:
  * `partial`, `unavailableQueues`, `queueErrors`). The other read tools that build a reader answer from the host
  * registry's rows, the files, the run records and Valkey's own counters, none of which a queue's paused state or
  * counts enters, so they answer as over any other fleet and add nothing (a test holds the list to the registered
  * read tools, each against a live key of the wrong type).
  */
-function overQueueErrors(answer, snapshot) {
-  const errored = queueErrorsOf(snapshot);
-  if (errored.length === 0) return answer;
+function overQueueErrors(answer, snapshot, pausedUnread = []) {
+  // The waiting read's own (`readWaiting`'s `pausedUnread`, issue #1036): the queues whose paused flag it could not
+  // read, a stopped host's among them, which no other read asks. One answered with an error joins the map by its code;
+  // one that got no answer has no code, and the answer is not complete over it either.
+  const unread = (Array.isArray(pausedUnread) ? pausedUnread : []).filter((u) => typeof u?.queue === "string");
+  const errored = [...queueErrorsOf(snapshot), ...queueErrorsOf({ queueErrors: Object.fromEntries(unread.filter((u) => typeof u.error === "string").map((u) => [u.queue, u.error])) })];
+  if (errored.length === 0 && unread.length === 0) return answer;
   return { ...answer, complete: false, queueErrors: agentReadProjection({ queueErrors: Object.fromEntries(errored.map((e) => [e.queue, e.error])) }).queueErrors };
 }
 
@@ -134,7 +139,7 @@ export async function readOperationalTool(kind, { paths, env = {}, now = Date.no
     // there are is not known, and the set is not whole, though its failed list may still be among the rows.
     const errored = queueErrorsOf(snapshot).length > 0;
     if (kind === "failed") return overQueueErrors(failedForAgent(errored && snapshot.failed && !snapshot.failed.unreachable ? { ...snapshot.failed, more: null } : snapshot.failed, { whole: !errored && !snapshot.queue?.fleetDegraded && snapshot.switchTruncated === false && snapshot.switchIncomplete === null }), snapshot);
-    if (kind === "waiting") return overQueueErrors(waitingForAgent(snapshot.waiting), snapshot);
+    if (kind === "waiting") return overQueueErrors(waitingForAgent(snapshot.waiting), snapshot, snapshot.waiting?.pausedUnread);
     if (kind === "hosts") return hostsForAgent(snapshot);
     if (kind === "setup") return setupForAgent(snapshot);
     throw new RangeError("unknown operational tool");
