@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { refusedBeforeScript } from "../src/bullmq-internals.mjs";
-import { entryExitCode, killSwitchShortNote, main } from "../src/cli.mjs";
+import { entryExitCode, killSwitchShortNote, main, statusShortNote } from "../src/cli.mjs";
 import { POLLER_GRACE_MS, parsePollerStatus, pollerKey, triggersDigest } from "../src/poller-status.mjs";
 import { readPollerFacts } from "../src/poller-facts.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -90,6 +90,7 @@ test("status marks a failed queue scan incomplete even when the registry and vis
 		assert.equal(result.waiting, 1);
 		assert.equal(result.waitingDetails.partial, scanFails);
 		assert.equal(result.waitingDetails.discoveryIncomplete, scanFails ? true : undefined);
+		assert.equal(result.queuesMayBeShort, scanFails ? true : undefined, "said at the top too (issue #1043)");
 		assert.deepEqual(result.waitingDetails.rows, []);
 		assert.ok(!Object.hasOwn(result, "fleet"), "the registry answered; only the keyspace discovery failed");
 		assert.ok(!output.includes("private connection detail"));
@@ -112,8 +113,9 @@ test("pause and resume flip this host's own queue and say when the set of queues
 			write: (text) => { out += text; },
 			valkeyRefusal: async () => null,
 			controlClients: {
-				// A registry and a keyspace scan that do not answer: only the shared queue and this host's own are named.
-				makeRedisClient: () => ({ on() {}, disconnect() {}, async smembers() { throw new Error("registry boom"); }, async scan() { throw new Error("scan refused"); } }),
+				// A registry and a keyspace scan that do not answer: only the shared queue and this host's own are named. This
+				// host's queue has no meta key yet (EXISTS answers 0), so a resume has nothing to resume there.
+				makeRedisClient: () => ({ on() {}, disconnect() {}, async smembers() { throw new Error("registry boom"); }, async scan() { throw new Error("scan refused"); }, async exists() { return 0; } }),
 				// Each queue named with the database its connection selects, so the Valkey it was flipped on is seen.
 				makeQueue: (connection, { name }) => ({ name, async pause() { if (pauseFails(name)) throw new Error("down"); flipped.push(`${connection.db}:${name}`); }, async resume() { flipped.push(`${connection.db}:${name}`); }, async close() {} }),
 			},
@@ -252,8 +254,10 @@ test("a resume on a Valkey that answers nothing, with PI_WORKER_NAME in the .env
 	assert.ok(ms < 500, `ended at its 300 ms deadline (took ${Math.round(ms)} ms)`);
 	assert.deepEqual(asked, ["bull:pi-jobs@hosta:meta"]);
 	assert.equal(code, 1);
+	// This host's queue, whose meta key did not answer either, is named as not resumed (issue #1042): it may be paused.
 	assert.equal(errs.join(""), "error: could not resume the whole deployment at redis://127.0.0.1:1/15 [registry unreadable: registry timeout] [queue scan incomplete]\n"
 		+ "  pi-jobs: not sent (no connection within 0.3 seconds)\n"
+		+ "  pi-jobs@hosta: not sent (whether it exists could not be read in time)\n"
 		+ "  nothing changed\n"
 		+ `  ${killSwitchShortNote(false)}\n`
 		+ "  run pi-dispatch status once Valkey answers to see each queue, then pi-dispatch resume again\n");
@@ -641,12 +645,15 @@ test("status against a Valkey that takes the connection and answers nothing prin
 	assert.deepEqual(status.waitingDetails.unavailableQueues, ["pi-jobs"]);
 	assert.equal(status.pollers.complete, false);
 	assert.deepEqual(status.consumers, []);
-	assert.match(err, /^error: Valkey at redis:\/\/127\.0\.0\.1:6379 did not answer within 0\.3 seconds: is it running\? .*\n {2}the line above leaves out the paused state and counts of pi-jobs\n$/);
+	assert.equal(status.queuesMayBeShort, true, "the registry and the scan did not answer (issue #1043)");
+	const warned = `warning: ${statusShortNote(false)}\n`;
+	assert.ok(err.startsWith(warned), err);
+	assert.match(err.slice(warned.length), /^error: Valkey at redis:\/\/127\.0\.0\.1:6379 did not answer within 0\.3 seconds: is it running\? .*\n {2}the line above leaves out the paused state and counts of pi-jobs\n$/);
 	assert.deepEqual(closed, [], "the deadline was spent before the queues: none was built, so none is left half open");
 	// A connection that never came up is said in the connection's own words, as before the deadline.
 	const unreached = await silentStatus({ probeError: "nothing answers VALKEY_URL (127.0.0.1:6379), so whose Valkey it is cannot be judged yet" });
 	assert.equal(unreached.code, 1);
-	assert.match(unreached.err, /^error: could not reach Valkey at redis:\/\/127\.0\.0\.1:6379: is it running\? .*\n {2}nothing answers VALKEY_URL \(127\.0\.0\.1:6379\), so whose Valkey it is cannot be judged yet\n {2}the line above leaves out the paused state and counts of pi-jobs\n$/);
+	assert.match(unreached.err, /\nerror: could not reach Valkey at redis:\/\/127\.0\.0\.1:6379: is it running\? .*\n {2}nothing answers VALKEY_URL \(127\.0\.0\.1:6379\), so whose Valkey it is cannot be judged yet\n {2}the line above leaves out the paused state and counts of pi-jobs\n$/);
 });
 
 test("status counts the queues that answered by its deadline and names the one that did not, and pausedState is decided only by what answered (issue #1003)", { timeout: 15_000 }, async () => {
@@ -788,8 +795,9 @@ test("status --target against a Valkey that answers nothing ends at the same dea
 	assert.ok(silent.ms < 1500, `took ${Math.round(silent.ms)} ms`);
 	const left = silent.asked[0]?.deadlineAt - silent.asked[0]?.calledAt;
 	assert.ok(left > 0 && left <= 300, "the refusal check's PING is held to the deadline");
-	assert.equal(silent.code, 0, "complete false already says the list may be short");
-	assert.deepEqual(silent.status, { item: "owner/repo#12", jobs: [], windows: [], complete: false, unavailableQueues: ["pi-jobs"], discoveryIncomplete: true, fleet: "registry timeout" });
+	assert.equal(silent.code, 0, "complete false already says the line may be short");
+	assert.deepEqual(silent.status, { item: "owner/repo#12", jobs: [], windows: [], complete: false, unavailableQueues: ["pi-jobs"], discoveryIncomplete: true, queuesMayBeShort: true, fleet: "registry timeout" });
+	assert.equal(silent.err, `warning: ${statusShortNote(true)}\n`, "the sentence under the line, as plain status says it (issue #1043)");
 	assert.deepEqual(silent.closed, []);
 	// The discovery answers and the queue does not: the read ends at the deadline, and the probe and the queue drop
 	// their sockets at once.
@@ -1083,4 +1091,243 @@ test("pause and resume that confirm every queue they found over a list that may 
 	assert.equal(doubt.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379 [queue scan incomplete]\n"
 		+ "  pi-jobs: sent, not confirmed (no answer within 0.3 seconds); it may still be paused when Valkey answers\n"
 		+ `  ${killSwitchShortNote(true)}\n` + PAUSE_NEXT);
+});
+
+// Issue #1042: Valkey answers one connection's commands in order, so the look for this host's own queue's meta key waited
+// behind a scan that stalled on the probe's connection, until its bound, and the resume left that queue paused.
+/**
+ * A fake client that answers its commands in order, as one Valkey connection does: one that never settles holds the rest.
+ * `hosts` are registry rows (`readLiveHosts` reads them by HGETALL); `disconnected` counts its `disconnect()` calls.
+ */
+function inOrderClient({ scan = never, exists = async () => 1, hosts = [] } = {}) {
+	let last = Promise.resolve();
+	const sent = [];
+	const queued = (name, answer) => (...args) => {
+		sent.push(name);
+		const reply = last.then(() => answer(...args));
+		last = reply.catch(() => {});
+		return reply;
+	};
+	const client = {
+		sent, disconnected: 0, on() {}, disconnect() { client.disconnected += 1; },
+		smembers: queued("SMEMBERS", async () => hosts),
+		hgetall: queued("HGETALL", async (key) => ({ name: String(key).split(":").at(-1), routes: "true", beatAt: "1800000000000" })),
+		scan: queued("SCAN", scan), exists: queued("EXISTS", exists),
+	};
+	return client;
+}
+
+/**
+ * `resume` from a deployment whose .env holds `envFile`, over `inOrderClient`s built from `client` (or `makeClient(i)`
+ * for the i-th client asked for), with stderr collected; past the scan's own two seconds by default, so a scan that never
+ * answers ends at its bound with time left to resume.
+ */
+async function resumeInOrder(dir, envFile, client = {}, { makeClient = null, deadlineMs = 3_000 } = {}) {
+	writeFileSync(join(dir, ".env"), envFile);
+	const clients = [];
+	const resumed = [];
+	const errs = [];
+	let out = "";
+	const origErr = process.stderr.write;
+	process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+	const started = performance.now();
+	let code;
+	try {
+		code = await main(["resume"], { VALKEY_URL: "redis://127.0.0.1:1/15" }, {
+			cwd: dir, statusDeadlineMs: deadlineMs, write: (text) => { out += text; }, valkeyRefusal: async () => null,
+			controlClients: {
+				makeRedisClient: () => { const c = makeClient ? makeClient(clients.length) : inOrderClient(client); clients.push(c); return c; },
+				makeQueue: (_c, { name }) => ({ name, client: Promise.resolve({}), async resume() { resumed.push(name); }, async close() {} }),
+			},
+		});
+	} finally {
+		process.stderr.write = origErr;
+	}
+	return { code, out, err: errs.join(""), resumed, clients, ms: performance.now() - started };
+}
+
+const replyError = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+
+test("a resume whose queue scan stalls reads this host's own queue on a connection of its own and resumes it, and names it when that read does not answer either (#1042)", { timeout: 20_000 }, async () => {
+	const dir = tempDir("pd-1042-own-");
+	const own = "PI_WORKER_NAME=hosta\n";
+	// The scan never answers and the meta key exists: the resume reaches the queue, read on a client that sent no scan,
+	// and that client is dropped once it answered.
+	const stalled = await resumeInOrder(dir, own);
+	assert.deepEqual([stalled.code, stalled.resumed], [0, ["pi-jobs", "pi-jobs@hosta"]], stalled.err);
+	assert.equal(stalled.out, `resumed [2 queues] [queue scan incomplete]\n  but ${killSwitchShortNote(false)}\n`);
+	const asking = stalled.clients.filter((c) => c.sent.includes("EXISTS"));
+	assert.deepEqual(asking.map((c) => [c.sent, c.disconnected]), [[["EXISTS"], 1]], "the meta key is read on a client of its own, never behind the scan, and that client is dropped");
+	// Valkey answers the read with an error: whether the queue exists is not known, so the report names it as not resumed,
+	// exit 1, and the other queues are resumed as before. Valkey answered, so the advice is to put the cause right, not
+	// to wait for an answer.
+	const refused = await resumeInOrder(dir, own, { exists: () => Promise.reject(replyError("ERR unknown command 'exists', with args beginning with: 'bull:pi-jobs@hosta:meta' ")) });
+	assert.deepEqual([refused.code, refused.resumed, refused.out], [1, ["pi-jobs"], ""]);
+	assert.equal(refused.err, "error: could not resume the whole deployment at redis://127.0.0.1:1/15 [queue scan incomplete]\n"
+		+ "  pi-jobs: resumed\n"
+		+ "  pi-jobs@hosta: not sent (whether it exists could not be read: ERR unknown command 'exists', with args beginning with: 'bull:pi-jobs@hosta:meta' )\n"
+		+ `  ${killSwitchShortNote(false)}\n`
+		+ "  run pi-dispatch status to see each queue, then pi-dispatch resume again once what Valkey refused or failed on is put right\n");
+	// A read whose connection was lost got no answer: then the advice is to wait for one.
+	const lost = await resumeInOrder(dir, own, { exists: () => Promise.reject(new Error("Connection is closed.")) });
+	assert.equal(lost.code, 1);
+	assert.ok(lost.err.endsWith("  pi-jobs@hosta: not sent (whether it exists could not be read: Connection is closed.)\n"
+		+ `  ${killSwitchShortNote(false)}\n`
+		+ "  run pi-dispatch status once Valkey answers to see each queue, then pi-dispatch resume again\n"), lost.err);
+	// A client that cannot even be made has answered nothing either, and the queue is named the same way.
+	const unmade = await resumeInOrder(dir, own, {}, { makeClient: (i) => { if (i === 1) throw new Error("no client for that address"); return inOrderClient(); } });
+	assert.equal(unmade.code, 1);
+	assert.match(unmade.err, /\n {2}pi-jobs@hosta: not sent \(whether it exists could not be read: no client for that address\)\n/);
+	// A scan that finished is the answer: a queue it did not name has no meta key, whatever the EXISTS said.
+	const scanned = await resumeInOrder(dir, own, { scan: async () => ["0", []], exists: () => Promise.reject(new Error("Connection is closed.")) });
+	assert.deepEqual([scanned.code, scanned.resumed, scanned.out, scanned.err], [0, ["pi-jobs"], "resumed\n", ""]);
+});
+
+test("a resume whose scan failed reaches this host's queue through the registry once, never also as not sent, when the look for its meta key gets an error (#1042)", { timeout: 15_000 }, async () => {
+	const dir = tempDir("pd-1042-registry-");
+	const res = await resumeInOrder(dir, "PI_WORKER_NAME=hosta\n", { hosts: ["hosta"], scan: () => Promise.reject(new Error("scan refused")), exists: () => Promise.reject(replyError("ERR unknown command 'exists'")) });
+	assert.deepEqual([res.code, res.resumed, res.err], [0, ["pi-jobs", "pi-jobs@hosta"], ""]);
+	assert.equal(res.out, `resumed [2 queues] [queue scan incomplete]\n  but ${killSwitchShortNote(false)}\n`);
+});
+
+test("a resume whose scan finished does not wait for a look at this host's queue that does not answer, and drops its client; one with no name for this host's queue makes none (#1042)", { timeout: 15_000 }, async () => {
+	const dir = tempDir("pd-1042-scanned-");
+	// The scan names the queue at once; the EXISTS client never answers. The deadline is three seconds and the look's own
+	// bound two: a resume that waited for it would take two seconds.
+	const res = await resumeInOrder(dir, "PI_WORKER_NAME=hosta\n", { scan: async () => ["0", ["bull:pi-jobs@hosta:meta"]], exists: never });
+	assert.ok(res.ms < 1_000, `ended once the scan finished, not at the look's bound (took ${Math.round(res.ms)} ms)`);
+	assert.deepEqual([res.code, res.resumed, res.out], [0, ["pi-jobs", "pi-jobs@hosta"], "resumed [2 queues]\n"]);
+	const asking = res.clients.filter((c) => c.sent.includes("EXISTS"));
+	assert.deepEqual(asking.map((c) => c.disconnected), [1], "its client is dropped, so it is not dialled again");
+	// No PI_WORKER_NAME in the .env: no queue of this host's to look for, and no client is made for one.
+	const unnamed = await resumeInOrder(dir, "", { scan: () => Promise.reject(new Error("scan refused")) });
+	assert.deepEqual([unnamed.code, unnamed.clients.length, unnamed.clients[0].sent.includes("EXISTS")], [0, 1, false], "the probe alone");
+});
+
+// Issue #1043: a status whose registry or queue scan did not finish summed the queues it found and said so only inside
+// `waitingDetails`, exit 0, while a queue it never found may hold paused or waiting jobs.
+test("status over a list of queues that may be short says so at the top with the sentence under the line, exit 0, and a found queue that did not answer still exits 1 (#1043)", { timeout: 15_000 }, async () => {
+	const warned = `warning: ${statusShortNote(false)}\n`;
+	// The scan failed and the shared queue answered: the sums are what was found, said as such.
+	const unscanned = await silentStatus({ queues: { "pi-jobs": true }, probe: { on() {}, disconnect() {}, async smembers() { return []; }, async scan() { throw new Error("scan refused"); } } });
+	assert.equal(unscanned.code, 0, "a list that may be short is not a failure by itself");
+	assert.equal(unscanned.status.queuesMayBeShort, true);
+	assert.deepEqual([unscanned.status.pausedState, unscanned.status.paused, unscanned.status.partial], [true, 3, undefined]);
+	assert.equal(unscanned.status.waitingDetails.discoveryIncomplete, true);
+	assert.equal(unscanned.err, warned);
+	assert.equal(statusShortNote(false), "the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and the sums above leave them out. Run pi-dispatch status again once Valkey answers");
+	// The registry could not be read, and a host queue the scan found did not answer: both, and exit 1 for the queue.
+	const both = await silentStatus({ queues: { "pi-jobs": false, "pi-jobs@mini2": null }, probe: { on() {}, disconnect() {}, async smembers() { throw new Error("registry refused"); }, async scan() { return ["0", ["bull:pi-jobs@mini2:meta"]]; } } });
+	assert.equal(both.code, 1);
+	assert.deepEqual([both.status.queuesMayBeShort, both.status.partial, both.status.unavailableQueues, both.status.fleet], [true, true, ["pi-jobs@mini2"], "registry refused"]);
+	assert.ok(both.err.startsWith(`${warned}error: Valkey at redis://127.0.0.1:6379 did not answer every read within 0.3 seconds\n`), both.err);
+	// A whole list: no flag and no sentence, as before.
+	const whole = await silentStatus({ queues: { "pi-jobs": false }, probeAnswers: true });
+	assert.deepEqual([whole.code, Object.hasOwn(whole.status, "queuesMayBeShort"), whole.err], [0, false, ""]);
+});
+
+test("status and status --target over two Valkeys name which one each list-may-be-short line is about (#1043)", { timeout: 15_000 }, async () => {
+	const dir = tempDir("pd-1043-two-");
+	writeFileSync(join(dir, ".env"), "VALKEY_URL=redis://127.0.0.1:1/14\n");
+	for (const argv of [["status"], ["status", "--target", "owner/repo#12"]]) {
+		const errs = [];
+		const origErr = process.stderr.write;
+		process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+		let code;
+		try {
+			code = await main(argv, { VALKEY_URL: "redis://127.0.0.1:1/15" }, {
+				cwd: dir, now: () => new Date(1_800_000_000_000), write: () => {}, valkeyRefusal: async () => null,
+				controlClients: {
+					makeRedisClient: () => ({ on() {}, disconnect() {}, async smembers() { return []; }, async scan() { throw new Error("scan refused"); } }),
+					makeQueue: (_c, { name }) => ({ name, client: { async zrange() { return []; }, async scan() { return ["0", []]; } }, async isPaused() { return false; }, async getJobCounts() { return { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }; }, async getJobs() { return []; }, async close() {} }),
+				},
+			});
+		} finally {
+			process.stderr.write = origErr;
+		}
+		const warned = errs.join("").split("\n").filter((line) => line.includes("the list of queues may be short"));
+		const note = statusShortNote(argv.length > 1);
+		assert.deepEqual(warned.sort(), [`warning: [redis://127.0.0.1:1/14] ${note}`, `warning: [redis://127.0.0.1:1/15] ${note}`], `${argv.join(" ")} (exit ${code}): ${errs.join("")}`);
+	}
+});
+
+/**
+ * `argv` in this process, with the real clients, through a real Valkey's proxy that holds each connection's SCAN (or
+ * `holdFrom`) and what that connection sends after it: a scan that does not finish while every other connection answers.
+ * Each queue but `keep` is built under `prefix`, so no other test's queue is read or switched. Stderr is collected.
+ */
+async function throughHeldScan(argv, { prefix, keep = null, cwd, holdFrom = "SCAN" }) {
+	const { makeQueue } = await import("../src/queue.mjs");
+	const { freezingProxy } = await import("./helpers/freezing-proxy.mjs");
+	const proxy = await freezingProxy(process.env.VALKEY_TEST_URL, { holdFrom });
+	let out = "";
+	const errs = [];
+	const origErr = process.stderr.write.bind(process.stderr);
+	process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+	const started = performance.now();
+	try {
+		const code = await main([...argv, "--valkey-url", proxy.url], { VALKEY_URL: proxy.url }, {
+			cwd, valkeyRefusal: async () => null, write: (text) => { out += text; },
+			controlClients: { makeQueue: (connection, { name }) => makeQueue(connection, { name: name === keep ? name : `${prefix}${name}` }) },
+		});
+		return { code, out, err: errs.join(""), ms: performance.now() - started };
+	} finally {
+		process.stderr.write = origErr;
+		proxy.close();
+	}
+}
+
+/** Every key under `pattern` on `direct`, deleted. */
+async function dropKeys(direct, pattern) {
+	let cursor = "0";
+	do {
+		const [next, keys] = await direct.scan(cursor, "MATCH", pattern, "COUNT", 500);
+		cursor = String(next);
+		if (keys.length > 0) await direct.del(...keys);
+	} while (cursor !== "0");
+}
+
+test("a resume through a real Valkey whose queue scan does not finish resumes this host's own queue, and status there says its list may be short (issues #1042, #1043, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
+	const { makeQueue } = await import("../src/queue.mjs");
+	const { makeRedisClient, parseConnection } = await import("../src/connection.mjs");
+	const url = process.env.VALKEY_TEST_URL;
+	// This host's queue under a name of this test's own, since its meta key is read by name; every other queue prefixed.
+	const worker = `pd1042-${process.pid}-${Date.now()}`;
+	const own = `pi-jobs@${worker}`;
+	const prefix = `${worker}-`;
+	const cwd = tempDir("pd-1042-held-");
+	writeFileSync(join(cwd, ".env"), `PI_WORKER_NAME=${worker}\n`);
+	const direct = makeRedisClient(url);
+	direct.on("error", () => {});
+	try {
+		const q = makeQueue(parseConnection(url), { name: own });
+		await q.pause();
+		await q.close();
+		assert.equal(await direct.hexists(`bull:${own}:meta`, "paused"), 1);
+		const resumed = await throughHeldScan(["resume"], { prefix, keep: own, cwd });
+		assert.equal(resumed.code, 0, resumed.err);
+		assert.match(resumed.out, /^resumed \[2 queues\].* \[queue scan incomplete\]\n/);
+		assert.equal(await direct.hexists(`bull:${own}:meta`, "paused"), 0, "resumed, though the scan never named it");
+		assert.ok(resumed.ms < 4500, `within the deadline (took ${Math.round(resumed.ms)} ms)`);
+		// Conversely, the look for its meta key is held and the scan finishes, which answers it, so the resume does
+		// not wait for the look's two seconds.
+		const q2 = makeQueue(parseConnection(url), { name: own });
+		await q2.pause();
+		await q2.close();
+		const scanned = await throughHeldScan(["resume"], { prefix, keep: own, cwd, holdFrom: "EXISTS" });
+		assert.equal(scanned.code, 0, scanned.err);
+		assert.equal(await direct.hexists(`bull:${own}:meta`, "paused"), 0, "resumed, the scan having named it");
+		assert.ok(scanned.ms < 1500, `ended once the scan finished, not at the look's bound (took ${Math.round(scanned.ms)} ms)`);
+		// `status` through the same held scan: the queues it found answered, so exit 0, and the line says at the top that its
+		// sums may leave out queues it did not find.
+		const status = await throughHeldScan(["status"], { prefix, cwd });
+		assert.equal(status.code, 0, status.err);
+		const line = JSON.parse(status.out);
+		assert.deepEqual([line.queuesMayBeShort, line.waitingDetails.discoveryIncomplete, line.partial], [true, true, undefined]);
+		assert.ok(status.err.startsWith(`warning: ${statusShortNote(false)}\n`), status.err);
+	} finally {
+		await dropKeys(direct, `bull:${prefix}*`);
+		await dropKeys(direct, `bull:${own}:*`);
+		direct.disconnect();
+	}
 });

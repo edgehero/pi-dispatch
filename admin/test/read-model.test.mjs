@@ -2781,6 +2781,81 @@ test("a pause or resume Valkey answers with an error after its script may have r
   assert.deepEqual({ ...resumed.partial, error: null }, { done: [], failed: "pi-jobs", error: null, unconfirmed: [], refused: [], notTried: ["pi-jobs@mini1", "pi-jobs@mini2"], errored: [{ queue: "pi-jobs", reads: "running" }] });
 });
 
+// Issue #1041: a read back Valkey answers with an error is Valkey answering, so the queue stays one answered with an error,
+// its state unknown; only a read back that gets no answer leaves it not confirmed.
+test("a pause whose read back Valkey answers with an error too stays answered with an error, its state unknown, and only a read back with no answer is not confirmed (#1041)", async () => {
+  const wrongType = "WRONGTYPE Operation against a key holding the wrong kind of value";
+  // name -> what a read back of the queue does, after its pause was answered with an error raised inside the script
+  const readBack = {
+    "pi-jobs@mini1": () => Promise.reject(replyError(wrongType)),
+    "pi-jobs@mini2": () => Promise.reject(Object.assign(new Error("Connection is closed."), { valkeyMayStillRun: true })),
+    "pi-jobs@mini3": () => Promise.resolve(1),
+    "pi-jobs@mini4": neverSettles,
+  };
+  const makeQueueFn = (_c, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    const act = name === "pi-jobs" ? () => Promise.resolve() : () => Promise.reject(replyError(WRONGTYPE_IN_SCRIPT));
+    return { name, pause: act, resume: act, isPaused: () => readBack[name](), async close() {}, disconnect() {} };
+  };
+  const res = await orHung(setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1", "mini2", "mini3", "mini4"]), stepTimeoutMs: 80 }));
+  assert.notEqual(res, "hung");
+  assert.deepEqual({ ...res.partial, error: null }, {
+    done: ["pi-jobs"],
+    failed: "pi-jobs@mini1",
+    error: null,
+    unconfirmed: ["pi-jobs@mini2", "pi-jobs@mini4"],
+    refused: [],
+    notTried: [],
+    errored: [{ queue: "pi-jobs@mini1", reads: "unknown" }, { queue: "pi-jobs@mini3", reads: "unknown" }],
+  }, "an error reply to the read, or an answer that is not a yes or no, is an answer; a lost connection or no reply is not");
+});
+
+test("the console's own switch, through a real Valkey whose queue's meta key holds a string, says the pause was answered with an error and its state unknown, never only not confirmed (#1041, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
+  const { makeQueue } = await import("@edgehero/pi-dispatch/queue");
+  const { makeRedisClient, parseConnection } = await import("@edgehero/pi-dispatch/connection");
+  const url = process.env.VALKEY_TEST_URL;
+  const prefix = `pd1041-${process.pid}-${Date.now()}-`;
+  const direct = makeRedisClient(url);
+  direct.on("error", () => {});
+  const logsDir = tempDir("pd-1041-switch-");
+  const triggersPath = join(logsDir, "triggers.json");
+  writeFileSync(triggersPath, '{ "triggers": [] }\n');
+  const asked = (connection, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    const queue = makeQueue(connection, { name: `${prefix}${name}` });
+    return new Proxy(queue, { get: (target, key) => (key === "name" ? name : typeof target[key] === "function" ? target[key].bind(target) : target[key]) });
+  };
+  const reader = createFleetReader({ valkeyUrl: url, logsDir, triggersPath }, {
+    makeQueueFn: asked,
+    readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => ({ names: ["pi-jobs@hostb"] }), readOnly: true,
+  });
+  const key = (name, part) => `bull:${prefix}${name}:${part}`;
+  try {
+    // A job waiting on the host queue, whose meta key then holds a string: the pause script moves the job and fails at
+    // the meta key, and the read back of the paused flag fails on it too.
+    const seed = makeQueue(parseConnection(url), { name: `${prefix}pi-jobs@hostb` });
+    await seed.add("seed", { kind: "local" }, { jobId: "seed-1041" });
+    await seed.close();
+    await direct.del(key("pi-jobs@hostb", "meta"));
+    await direct.set(key("pi-jobs@hostb", "meta"), "not a hash");
+    const paused = (await reader.pause()).results[0].res;
+    assert.deepEqual(paused.partial.errored, [{ queue: "pi-jobs@hostb", reads: "unknown" }], JSON.stringify(paused));
+    assert.deepEqual([paused.partial.done, paused.partial.unconfirmed, paused.partial.refused], [["pi-jobs"], [], []]);
+    assert.deepEqual([await direct.llen(key("pi-jobs@hostb", "paused")), await direct.llen(key("pi-jobs@hostb", "wait"))], [1, 0], "the job moved, so part of the pause applied, as said");
+    // One queue's pause of it says the same in its own sentence.
+    assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@hostb", paused: true }), { invalid: queueSwitchErrored("pi-jobs@hostb", true, "unknown"), partial: true });
+  } finally {
+    await reader.dispose();
+    let cursor = "0";
+    do {
+      const [next, keys] = await direct.scan(cursor, "MATCH", `bull:${prefix}*`, "COUNT", 500);
+      cursor = String(next);
+      if (keys.length > 0) await direct.del(...keys);
+    } while (cursor !== "0");
+    direct.disconnect();
+  }
+});
+
 test("the console's own switch, through a real Valkey whose pause and resume scripts fail after they switched the queue, says the queue as Valkey holds it (#1014, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
   const { makeQueue } = await import("@edgehero/pi-dispatch/queue");
   const { makeRedisClient } = await import("@edgehero/pi-dispatch/connection");

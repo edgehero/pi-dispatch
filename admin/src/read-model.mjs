@@ -127,7 +127,7 @@ import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT } from "@edg
 // Issue #710: what counts as a refusal on the overview is what both surfaces call one; issue #737: a failure too.
 // A record reason as every surface carries it (issue #737): `recordReason`, the worker's own token charset (its
 // import-free leaf), else null. The one door: no reader here hands out a record's reason another way.
-import { OUTCOME_KEYS, OUTCOME_WORDS, outcomeKey, outcomeWord, recordReason, rowNumber } from "./words.mjs";
+import { OUTCOME_KEYS, OUTCOME_WORDS, outcomeKey, outcomeWord, recordReason, rowNumber, SWITCH_READ_UNKNOWN } from "./words.mjs";
 import { outcomeNote } from "./loaded-words.mjs";
 
 // Re-exported so the command layer reaches the key contract through the admin's single worker-coupling
@@ -405,8 +405,11 @@ const SWITCH_LATE = Symbol("late");
  *                  CLI's rule, issue #1014): this queue did not change.
  *   "errored"      Valkey answered with any other error, which can come after the script already switched the queue
  *                  (a Lua script is not rolled back; BullMQ's XADD to the events stream comes last), so the queue's
- *                  paused state is read back within what is left of `ms`: `reads` is "paused" or "running". A read
- *                  back that does not answer makes the step "unconfirmed" instead: it may or may not have been made.
+ *                  paused state is read back within what is left of `ms`: `reads` is "paused" or "running", or
+ *                  "unknown" when Valkey answered that read with an error too (issue #1041: a meta key of another type
+ *                  fails the script after it moved the jobs, and the read with it), which is Valkey answering, so the
+ *                  step stays "errored": it may have partly applied. A read back that gets no answer (none in time, or
+ *                  a connection that failed) makes the step "unconfirmed" instead: it may or may not have been made.
  *   "unconfirmed"  it was sent and not answered (the client's `valkeyMayStillRun`), or the queue was not connected
  *                  within `ms` (`late`: it may still be sent when the connection comes up). The queue may or may not
  *                  have changed, now or when Valkey wakes.
@@ -430,14 +433,17 @@ async function switchStep(q, paused, ms) {
     const error = got.err?.message ?? String(got.err);
     if (got.err?.valkeyMayStillRun === true) return { state: "unconfirmed", error };
     if (got.err?.name !== "ReplyError" || refusedBeforeScript(got.err)) return { state: "refused", error };
+    // The CLI's rule (`switchQueue`, issue #1007): an error reply to the read is Valkey answering it, null here; any other
+    // failure (a lost connection, the client's own bound) is no answer, as the step's end is. Read as one, the queue was
+    // said only "not confirmed", which drops the error the switch was answered with (issue #1041).
     const reads = await Promise.race([
       Promise.resolve()
         .then(() => q.isPaused())
-        .then((p) => (typeof p === "boolean" ? p : null), () => null),
+        .then((p) => (typeof p === "boolean" ? p : null), (err) => (err?.name === "ReplyError" ? null : SWITCH_LATE)),
       late,
     ]);
-    if (typeof reads !== "boolean") return { state: "unconfirmed", error };
-    return { state: "errored", error, reads: reads ? "paused" : "running" };
+    if (reads === SWITCH_LATE) return { state: "unconfirmed", error };
+    return { state: "errored", error, reads: reads === null ? "unknown" : reads ? "paused" : "running" };
   } finally {
     clearTimeout(timer);
   }
@@ -482,7 +488,8 @@ async function flipQueues({ paused, names, queueOf, stepMs, steps = new Map(), l
  * `unconfirmed` those whose pause or resume may or may not have been made, `refused` those that did not change,
  * `notTried` those a resume never reached, and `errored` (issue #1014, present only when not empty) each queue whose
  * pause or resume Valkey answered with an error after its script may have run, `{ queue, reads }` with `reads`
- * "paused" or "running" as read back: such a queue may be switched, or partly. `blind` (the registry could not be read)
+ * "paused" or "running" as read back, or "unknown" where Valkey answered that read with an error too (issue #1041): such
+ * a queue may be switched, or partly. `blind` (the registry could not be read)
  * and `incomplete` (the keyspace scan did not finish) ride both shapes: the set of queues itself may be short.
  */
 function switchOutcome({ paused, names, steps, blind = null, incomplete = null }) {
@@ -555,10 +562,13 @@ export function queueSwitchUnconfirmed(queue, paused) {
 
 /**
  * What a ONE-queue pause or resume says when Valkey answered it with an error after its script may have run (issue
- * #1014): what the queue reads now, read back, never "nothing was changed", and no client's words.
+ * #1014): what the queue reads now, read back, never "nothing was changed", and no client's words. A read back Valkey
+ * answered with an error too (`reads` "unknown", issue #1041) says that it may have partly applied, as the CLI does.
  */
 export function queueSwitchErrored(queue, paused, reads) {
-  return `Valkey answered the ${paused ? "pause" : "resume"} of ${queue} with an error; it reads ${reads} now${(reads === "paused") === paused ? "" : `, and part of the ${paused ? "pause" : "resume"} may have applied`}. Look at the fleet`;
+  const noun = paused ? "pause" : "resume";
+  if (reads !== "paused" && reads !== "running") return `Valkey answered the ${noun} of ${queue} with an error; ${SWITCH_READ_UNKNOWN}. Look at the fleet`;
+  return `Valkey answered the ${noun} of ${queue} with an error; it reads ${reads} now${(reads === "paused") === paused ? "" : `, and part of the ${noun} may have applied`}. Look at the fleet`;
 }
 
 /**

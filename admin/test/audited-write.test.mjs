@@ -497,6 +497,9 @@ test("the TUI's switch note reads killSwitchSet's results shape: a half switch a
   assert.equal(switchUnconfirmed(errored), "ANSWERED WITH AN ERROR for q2 (reads running now); not tried: q3; known switched: q1");
   assert.equal(switchFailure({ results: [{ shown: "redis://a:6379", res: { unreachable: "WRONGTYPE", partial: errored } }] }), "ANSWERED WITH AN ERROR for q2 (reads running now); not tried: q3; known switched: q1 on redis://a:6379");
   assert.equal(switchUnconfirmed({ ...errored, unconfirmed: ["q5"] }), "NOT CONFIRMED for q5: the switch may or may not have been made there; ANSWERED WITH AN ERROR for q2 (reads running now); not tried: q3; known switched: q1");
+  // Issue #1041: a queue whose read back Valkey answered with an error too is still one answered with an error, said as
+  // possibly partly applied, never left out (which left the note calling the deployment half switched at it).
+  assert.equal(switchUnconfirmed({ ...errored, errored: [{ queue: "q2", reads: "unknown" }] }), "ANSWERED WITH AN ERROR for q2 (its state could not be read, so it may have partly applied); not tried: q3; known switched: q1");
   // Every Valkey that failed is said, a lost answer first: one that could not be reached must not hide a pause that
   // was sent to the other and may have been made there.
   const two = { results: [{ shown: "redis://a:6379", res: { unreachable: "ECONNREFUSED" } }, { shown: "redis://b:6379", res: lost }, { shown: "redis://c:6379", res: { ok: true, queues: ["q"] } }] };

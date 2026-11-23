@@ -145,6 +145,25 @@ export function switchShortNote(paused) {
   return `the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not ${paused ? "paused" : "resumed"}. ${paused ? "Pause" : "Resume"} the fleet again once Valkey answers`;
 }
 
+/**
+ * What a queue whose pause or resume Valkey answered with an error after its script may have run (issue #1014) reads
+ * as, read back: "paused" or "running", or "unknown" where Valkey answered that read with an error too (issue #1041).
+ * That second error is an answer, so the queue stays one answered with an error, never one not confirmed, which is for a
+ * read that got no answer. The console keeps no other value, so no client's words reach a page or the audit.
+ */
+export const SWITCH_ERRORED_READS = Object.freeze(["paused", "running", "unknown"]);
+
+/** What a queue whose read back Valkey answered with an error too may have become (issue #1041), the CLI's words. */
+export const SWITCH_READ_UNKNOWN = "its state could not be read, so it may have partly applied";
+
+/**
+ * One queue Valkey answered with an error after its script may have run (issue #1014), as the console's confirm, its
+ * audit row, the panel's note and the `/dispatch` line name it: what it reads now, or `SWITCH_READ_UNKNOWN` (issue #1041).
+ */
+export function switchErroredQueue({ queue, reads }) {
+  return `${queue} (${reads === "paused" || reads === "running" ? `reads ${reads} now` : SWITCH_READ_UNKNOWN})`;
+}
+
 /** Names in a sentence: "a", "a and b", "a, b and c". The order is the caller's. */
 export function listed(names) {
   return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;

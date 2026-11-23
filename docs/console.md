@@ -1029,7 +1029,9 @@ queues it knows are paused (or resumed), those not confirmed, whose pause or res
 did not try, since a resume stops at the first queue that does not answer. A queue whose pause or resume Valkey answered with an
 error is read back and named with what it reads now ("answered with an error for pi-jobs (reads paused now)"): the error can come
 after the queue already switched, so only a refusal made before the switch ran (an ACL that denies it, a read-only replica, a Valkey
-still loading or busy) is called not paused. The answer then starts by saying Valkey answered with an error, so the audit row keeps
+still loading or busy) is called not paused. When Valkey answers that read with an error too (the queue's own record holding the
+wrong type of value, say), the queue is named as answered with an error whose state could not be read, so it may have partly
+applied; not confirmed is for a read that got no answer. The answer then starts by saying Valkey answered with an error, so the audit row keeps
 that whatever the Valkey's address. When the host registry or the look for queues could not be read, the list of queues it
 switched may be short. The answer then starts by saying so, beside a pause that was sent and may or may not have been made and a pause
 Valkey answered with an error, so the audit row keeps each of them, and ends with what to do: other queues may exist and were not

@@ -234,6 +234,22 @@ test("dispatch_pause answered with an error over a set that may be short tells a
   }
 });
 
+// Issue #1041: a read back Valkey answers with an error too keeps the queue answered with an error, so a model is told
+// the same fixed clause, where it was told only that some queues may be paused and others not.
+test("dispatch_pause whose read back Valkey answered with an error too tells a model that Valkey answered with an error, naming no queue (#1041)", async () => {
+  const f = fixture();
+  const make = quietQueue();
+  const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+  const reader = createFleetReader(f.paths, { makeQueueFn: (c, o) => ({ ...make(c, o), pause: async () => { throw reply("WRONGTYPE Operation against a key holding the wrong kind of value script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:30."); }, isPaused: async () => { throw reply("WRONGTYPE Operation against a key holding the wrong kind of value"); } }), parseConnectionFn: () => ({}), redisFn: () => keyedRedis({}), readOnly: true, switchStepTimeoutMs: 80, closeTimeoutMs: 30 });
+  const rm = await import("../src/read-model.mjs");
+  const options = { ...f.options, fleet: reader, readModel: { ...rm, killSwitchPlan: () => ({ urls: [f.paths.valkeyUrl], disagreement: null, context: null }) } };
+  try {
+    await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => modelToolRefusal(e) === switchPartialRefusal(true, false, false, true));
+  } finally {
+    await reader.dispose();
+  }
+});
+
 test("bulk and cancellation selectors refuse ambiguous or ignored arguments", async () => {
   for (const [name, params] of [["dispatch_cancel", { allHeld: true, jobId: "j1" }], ["dispatch_cancel", {}], ["dispatch_remove_failed", { all: true, jobId: "j1" }], ["dispatch_retry_failed", { jobId: "j1", repo: "acme/web" }]]) {
     await assert.rejects(toolActionRequest(name, params), /send either/);

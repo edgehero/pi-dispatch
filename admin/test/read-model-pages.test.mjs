@@ -2566,6 +2566,24 @@ test("createFleetReader: one queue's pause or resume Valkey answers with an erro
   await reader.dispose();
 });
 
+test("createFleetReader: one queue's pause whose read back Valkey answers with an error too says it may have partly applied, and one whose read back gets no answer says not confirmed (#1041)", async () => {
+  const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+  const inScript = "WRONGTYPE Operation against a key holding the wrong kind of value script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57.";
+  let read = async () => false;
+  const { mk } = switchQueues(() => Promise.reject(reply(inScript)));
+  const reader = endingReader((conn, opts) => Object.assign(mk(conn, opts), { isPaused: () => read() }), [{ name: "hostb", routes: true }], { switchStepTimeoutMs: 80, closeTimeoutMs: 30 });
+  await reader.snapshot();
+  await settle();
+  // The pause's script fails after it moved the jobs, and the read back of the queue fails on the same key.
+  read = () => Promise.reject(reply("WRONGTYPE Operation against a key holding the wrong kind of value"));
+  for (const paused of [true, false]) assert.deepEqual(await orHung(reader.pauseQueue({ queue: "pi-jobs@hostb", paused })), { invalid: queueSwitchErrored("pi-jobs@hostb", paused, "unknown"), partial: true });
+  assert.equal(queueSwitchErrored("pi-jobs@hostb", true, "unknown"), "Valkey answered the pause of pi-jobs@hostb with an error; its state could not be read, so it may have partly applied. Look at the fleet");
+  // A read back whose connection was lost got no answer: the pause may or may not have been made.
+  read = () => Promise.reject(Object.assign(new Error("Connection is closed."), { valkeyMayStillRun: true }));
+  assert.deepEqual(await orHung(reader.pauseQueue({ queue: "pi-jobs@hostb", paused: true })), { invalid: queueSwitchUnconfirmed("pi-jobs@hostb", true), partial: true });
+  await reader.dispose();
+});
+
 test("createFleetReader: one queue's switch over a registry it could not read refuses a name it does not find, saying the list may be short", async () => {
   const { built, mk } = switchQueues();
   const reader = endingReader(mk, [], { readLiveHostsFn: async () => ({ unreachable: "registry down" }) });

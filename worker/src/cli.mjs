@@ -604,9 +604,10 @@ export async function workerHint(queue, { timeoutMs = 2000 } = {}) {
 /**
  * `pi-dispatch status --target <item>` (issue #932, target-status.mjs): one JSON line, `{ item, jobs, windows, complete,
  * unavailableQueues }`, over every queue the kill switch would act on (`deploymentQueueNames`), the same discovery and
- * the same loud degraded read (`fleet`, `discoveryIncomplete`). Under plain `status`'s deadline (issue #1003,
- * `statusDeadline`): a queue that has not answered by then is in `unavailableQueues` and `complete` is false, the exit
- * code 0 as before, since `complete` already says the list may be short.
+ * the same loud degraded read (`fleet`, `discoveryIncomplete`, and `queuesMayBeShort` with its sentence under the line
+ * since issue #1043). Under plain `status`'s deadline (issue #1003, `statusDeadline`): a queue that has not answered by
+ * then is in `unavailableQueues` and `complete` is false, the exit code 0 as before, since `complete` already says the
+ * line may be short.
  */
 async function targetStatus(item, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients, deadlineMs = STATUS_DEADLINE_MS }) {
 	const deadline = statusDeadline(deadlineMs);
@@ -623,7 +624,10 @@ async function targetStatus(item, url, { env, write, label, urlShown, valkeyRefu
 		for (const name of names) queues.push(spent ? unansweredQueue(name) : (controlClients.makeQueue ?? makeQueue)({ ...parseConnection(url, { failFast: true }), disconnectTimeout: 0 }, { name }));
 		const read = await readTargetStatus(queues, item, { now: () => Number(now()), timeoutMs: deadline.within(TARGET_STATUS_TIMEOUT_MS) });
 		const degraded = blind !== null || incomplete;
-		write(`${JSON.stringify({ ...(label ? { valkey: urlShown(url) } : {}), ...read, ...(degraded ? { complete: false, discoveryIncomplete: true } : {}), ...(blind ? { fleet: blind } : {}) })}\n`);
+		// `queuesMayBeShort` and the sentence as plain `status` has them (issue #1043): `complete` is false for a cut read
+		// too, so it alone does not say that a queue may be missing from the list.
+		write(`${JSON.stringify({ ...(label ? { valkey: urlShown(url) } : {}), ...read, ...(degraded ? { complete: false, discoveryIncomplete: true, queuesMayBeShort: true } : {}), ...(blind ? { fleet: blind } : {}) })}\n`);
+		if (degraded) process.stderr.write(`warning: ${label}${statusShortNote(true)}\n`);
 	} catch (error) {
 		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${urlShown(url)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${error.message}`);
 	} finally {
@@ -660,6 +664,15 @@ async function deploymentQueueNames(url, controlClients, within = (ms) => ms) {
  */
 export function killSwitchShortNote(paused) {
 	return `the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not ${paused ? "paused" : "resumed"}. ${paused ? "Pause" : "Resume"} the fleet again once Valkey answers`;
+}
+
+/**
+ * `status`'s sentence for a line whose list of queues may be short (issue #1043), the fleet's (`killSwitchShortNote`,
+ * issue #964) for a read: the queues it did not find are in none of its sums (`target`: `status --target`, none of its
+ * jobs and windows), and what to do.
+ */
+export function statusShortNote(target) {
+	return `the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and ${target ? "the line above leaves out what they hold" : "the sums above leave them out"}. Run pi-dispatch status again once Valkey answers`;
 }
 
 /**
@@ -749,12 +762,18 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	// triggers file: they need nothing the other two answer, and read after them they made a Valkey that never answers
 	// wait one bound longer. Never a reason for status to fail: what cannot be read is said in `pollers` itself.
 	// On a resume, this host's own queue's meta key beside them (`ownQueuesThatExist`, issue #1007): a scan that did not
-	// finish may not name it, and the resume then left it paused without a word.
+	// finish may not name it, and the resume then left it paused without a word. On a connection of its own (issue #1042):
+	// Valkey answers one connection's commands in order, so on the probe it waited behind a scan that stalled, which is
+	// when it is needed. A scan that finished answers the question itself, so the look is not waited for once it has. The
+	// registry is asked first, as before, so its list of hosts goes ahead of the scan on the probe; each host's row is
+	// read after that list, and so behind a scan that stalls.
+	const registry = readLiveHosts(probe, { timeoutMs: within(FLEET_READ_TIMEOUT_MS) }).catch((error) => ({ unreachable: error?.message ?? String(error) }));
+	const discovery = discoverHostQueuesReporting(probe, { timeoutMs: within(FLEET_READ_TIMEOUT_MS) });
 	const [fleet, existing, pollers, ownFound] = await Promise.all([
-		readLiveHosts(probe, { timeoutMs: within(FLEET_READ_TIMEOUT_MS) }).catch((error) => ({ unreachable: error?.message ?? String(error) })),
-		discoverHostQueuesReporting(probe, { timeoutMs: within(FLEET_READ_TIMEOUT_MS) }),
+		registry,
+		discovery,
 		status ? readPollerFacts(probe, { env, cwd, now: () => Number(now()), timeoutMs: within(FLEET_READ_TIMEOUT_MS) }).catch(() => ({ expected: null, hosts: [], complete: false })) : null,
-		cmd === "resume" ? ownQueuesThatExist(probe, own?.names ?? [], within(FLEET_READ_TIMEOUT_MS)) : [],
+		cmd === "resume" ? ownQueuesThatExist(() => (controlClients.makeRedisClient ?? makeRedisClient)(url, { disconnectTimeoutMs: 0 }), own?.names ?? [], within(FLEET_READ_TIMEOUT_MS), discovery.then((found) => !found?.incomplete, () => false)) : { found: [], unread: [] },
 	]);
 	// Consumer demand (issue #924) is read beside the queue reads below rather than before them, so a demand read that
 	// does not answer cannot spend the queues' share of the deadline. The probe stays open until it ends (the `finally`);
@@ -765,7 +784,11 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	// With this host's own queue on a pause (issue #964, `ownQueueOf`), which a registry or a scan that did not answer cannot
 	// name. On a resume only where it exists, by discovery or by its own meta key (`ownFound`, issue #1007): a queue that
 	// does not exist has nothing to resume, and a queue built to resume it would write its meta key.
-	const names = unionQueueNames(fleetQueueNames(fleet?.hosts), [...existing.names, ...(cmd === "pause" ? own?.names ?? [] : ownFound)]);
+	const names = unionQueueNames(fleetQueueNames(fleet?.hosts), [...existing.names, ...(cmd === "pause" ? own?.names ?? [] : ownFound.found)]);
+	// This host's own queue whose meta key did not answer, where the scan did not finish and did not name it (issue #1042):
+	// whether it exists is not known, so it may be paused and stay so, and the report names it as not resumed. A scan that
+	// finished is the answer: a queue it did not name has no meta key.
+	const ownUnread = existing?.incomplete ? ownFound.unread.filter(({ name }) => !names.includes(name)) : [];
 	// The registry being unreadable no longer means we saw one queue: the keyspace scan may well have
 	// found them. Report the count we ACTED on, and name the degraded read separately, the scan's too (issue #964), on the
 	// line of a whole switch and on the first line of `switchReport`'s (issue #1007).
@@ -790,10 +813,13 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 			// "nothing happened" and walks away from a fleet with one host still spending (issue #1007: the line that said
 			// so came only from a queue whose write failed, never from one that was never answered).
 			const steps = await switchQueues(queues, cmd, () => within(deadlineMs), deadlineMs / 1000);
-			// A queue it found and did not confirm is a failure, exit 1 (issue #1007). A list that may be short, beside a switch
-			// that confirmed every queue it found, is not: it is said (`short`, issue #964), as the console says it over its
-			// answer that the fleet was paused.
-			if (steps.some((step) => step.state !== "confirmed")) return fail(switchReport({ cmd, shown: urlShown(url), names, steps, blind, incomplete: Boolean(existing?.incomplete), ownNote }));
+			// A queue it found and did not confirm is a failure, exit 1 (issue #1007), and so is this host's own queue whose
+			// meta key did not answer (`ownUnread`, issue #1042), reported as not sent. A list that may be short, beside a
+			// switch that confirmed every queue it found, is not: it is said (`short`, issue #964), as the console says it over
+			// its answer that the fleet was paused.
+			if (steps.some((step) => step.state !== "confirmed") || ownUnread.length > 0) {
+				return fail(switchReport({ cmd, shown: urlShown(url), names: [...names, ...ownUnread.map(({ name }) => name)], steps: [...steps, ...ownUnread.map(({ why, answered }) => ({ state: "not-sent", why, ...(answered ? { answered: true } : {}) }))], blind, incomplete: Boolean(existing?.incomplete), ownNote }));
+			}
 			write(`${label}${cmd === "pause" ? `paused: worker will stop taking new jobs (jobs still enqueue)${span}` : `resumed${span}`}${short}\n`);
 		} else {
 			// "paused" is included in the counts because jobs enqueued while paused land in the
@@ -824,8 +850,14 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 			const pausedState = known.includes(false) ? false : known.length === states.length ? true : null;
 			const pausedPartial = known.includes(true) && known.includes(false);
 			if (blind || existing?.incomplete) { waiting.partial = true; waiting.discoveryIncomplete = true; }
-			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i] === true) } : {}), ...counts, ...(unread.length > 0 ? { partial: true, unavailableQueues: unread } : {}), ...(blind ? { fleet: blind } : {}), waitingDetails: waiting, consumers, pollers };
+			// A list that may be short (issue #1043): the registry or the scan did not finish, so a queue it did not find is in
+			// none of the sums, and only `waitingDetails` said so. `queuesMayBeShort` says it at the top, the agent tools' flag
+			// for a switch over such a list (issue #964), and the sentence goes under the line. A queue it found and did not
+			// read is `partial`, exit 1; a list that may be short is not a failure by itself, as #964 has it for a switch.
+			const listMayBeShort = blind !== null || Boolean(existing?.incomplete);
+			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i] === true) } : {}), ...counts, ...(unread.length > 0 ? { partial: true, unavailableQueues: unread } : {}), ...(listMayBeShort ? { queuesMayBeShort: true } : {}), ...(blind ? { fleet: blind } : {}), waitingDetails: waiting, consumers, pollers };
 			write(`${JSON.stringify(out)}\n`);
+			if (listMayBeShort) process.stderr.write(`warning: ${label}${statusShortNote(false)}\n`);
 			// The line is printed with what was read, and the exit code says status could not read what it exists to say,
 			// as it does for a Valkey that refuses the connection. "Is it running?" only when nothing at all answered.
 			if (unread.length > 0) {
@@ -961,31 +993,53 @@ function switchReport({ cmd, shown, names, steps, blind = null, incomplete = fal
 	if (blind || incomplete) lines.push(killSwitchShortNote(cmd === "pause"));
 	// "Once Valkey answers" only where something waits on it: a write not answered, a read back that did not answer, or a
 	// connection that did not come up. A refusal or an error is Valkey's answer, a read back it answered with an error
-	// included, and the next step is putting its cause right.
+	// included, and so is an error reply to the look for this host's queue (`answered`, issue #1042): the next step is
+	// putting its cause right.
 	const pending = steps.some((step) => step.state === "unconfirmed" || (step.state === "errored" && step.readUnanswered === true));
-	const waiting = pending || steps.some((step) => step.state === "not-sent" && !step.skipped);
-	const failedOn = steps.some((step) => step.state === "refused" || step.state === "errored");
+	const waiting = pending || steps.some((step) => step.state === "not-sent" && !step.skipped && !step.answered);
+	const failedOn = steps.some((step) => step.state === "refused" || step.state === "errored" || (step.state === "not-sent" && step.answered === true));
 	lines.push(`run pi-dispatch status ${waiting ? "once Valkey answers " : ""}to see each queue, then pi-dispatch ${cmd} again${!waiting && failedOn ? " once what Valkey refused or failed on is put right" : ""}${cmd === "resume" && pending ? "; a resume not confirmed may start jobs when it lands" : ""}`);
 	const unread = `${blind ? ` [registry unreadable: ${blind}]` : ""}${incomplete ? " [queue scan incomplete]" : ""}`;
 	return `could not ${cmd} the whole deployment at ${shown}${unread}${ownNote}\n  ${lines.join("\n  ")}`;
 }
 
 /**
- * Which of `names` (this host's own queue, issue #964) have a meta key, read by EXISTS on `probe` within `ms` (issue
- * #1007): a resume's look at a queue its discovery may not have named, since a scan that did not finish left it paused
- * without a word. EXISTS writes nothing, where a queue built to look would write its meta key. One whose read does not
- * answer in time, or fails, is left out, as a queue nobody found.
+ * Which of `names` (this host's own queue, issue #964) have a meta key, read by EXISTS within `ms` (issue #1007): a
+ * resume's look at a queue its discovery may not have named, since a scan that did not finish left it paused without a
+ * word. EXISTS writes nothing, where a queue built to look would write its meta key. `{ found, unread }`: `found` the
+ * names whose key exists, `unread` `{ name, why, answered }` for each whose read did not answer in time or failed (issue
+ * #1042), `answered` where Valkey answered it with an error, which the caller names when its scan did not finish
+ * either. A name whose key Valkey says is absent is in neither.
+ *
+ * On a client of its own, `connect()`, made only when there is a name to look for and dropped once it answered: on the
+ * probe, the EXISTS waited behind the probe's scan, since Valkey answers one connection's commands in order, so a scan
+ * that stalled (the case this look exists for) held it to its bound and the queue stayed paused (issue #1042).
+ * `scanned` settles true once the scan finished: that answers the question (a queue the scan did not name has no meta
+ * key), so the look ends there with nothing found or unread and its client is dropped, rather than waiting out `ms` on
+ * a connection that does not answer while ioredis dials it again and again.
  */
-async function ownQueuesThatExist(probe, names, ms) {
-	if (names.length === 0) return [];
+async function ownQueuesThatExist(connect, names, ms, scanned = new Promise(() => {})) {
+	if (names.length === 0) return { found: [], unread: [] };
 	const { QUEUE_KEY, queueKey } = await import("./bullmq-internals.mjs");
+	const unanswered = Symbol("no answer");
+	const moot = Symbol("answered by the scan");
 	let timer;
-	const late = new Promise((resolve) => { timer = setTimeout(resolve, ms, null); });
+	const late = new Promise((resolve) => { timer = setTimeout(resolve, ms, unanswered); });
+	let client = null;
 	try {
-		const found = await Promise.all(names.map((name) => Promise.race([Promise.resolve().then(() => probe.exists(queueKey(name, QUEUE_KEY.meta))).then((n) => Number(n) === 1, () => false), late])));
-		return names.filter((_, i) => found[i] === true);
+		client = connect();
+		client.on?.("error", () => {});
+		const asked = Promise.all(names.map((name) => Promise.race([Promise.resolve().then(() => client.exists(queueKey(name, QUEUE_KEY.meta))).then((n) => Number(n) === 1, (error) => ({ error })), late])));
+		const got = await Promise.race([asked, Promise.resolve(scanned).then((finished) => (finished === true ? moot : new Promise(() => {})))]);
+		if (got === moot) return { found: [], unread: [] };
+		const why = (answer) => (answer === unanswered ? "whether it exists could not be read in time" : `whether it exists could not be read: ${answer.error?.message ?? String(answer.error)}`);
+		return { found: names.filter((_, i) => got[i] === true), unread: names.flatMap((name, i) => (typeof got[i] === "boolean" ? [] : [{ name, why: why(got[i]), answered: got[i]?.error?.name === "ReplyError" }])) };
+	} catch (error) {
+		// A client that could not be made (an address it refuses) has answered nothing, as one that never connects.
+		return { found: [], unread: names.map((name) => ({ name, why: `whether it exists could not be read: ${error?.message ?? String(error)}` })) };
 	} finally {
 		clearTimeout(timer);
+		client?.disconnect?.();
 	}
 }
 

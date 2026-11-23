@@ -37,7 +37,8 @@ From any terminal:
   queue the host registry and a look for queues name, and this host's own (`pi-jobs@<name>`) when the deployment's `.env` sets
   `PI_WORKER_NAME`, only on the deployment's Valkey: the `.env`'s `VALKEY_URL` when it and the shell's differ, else the one the command
   reaches with no `--valkey-url`. A resume reaches that queue only once it exists, and looks for it itself when the look for queues
-  did not name it. When the shell sets another name, or sets one the
+  did not name it, on a connection of its own, so a look for queues that stalls does not hold it up. When that look fails too
+  (no answer, or an error from Valkey), the report names the queue as not resumed and the command exits 1. When the shell sets another name, or sets one the
   `.env` does not, or the `.env` cannot be read, the line says so (`[this host's queue not added: ...]`) and leaves that queue out. When the registry or the look could not be read
   (`[registry unreadable: ...]`, `[queue scan incomplete]`), a second line says the list of queues may be short and to pause (or resume)
   again once Valkey answers; the exit code stays 0.
@@ -100,6 +101,11 @@ their own words: `fleet` for the registry, `waitingDetails.partial`, `pollers.co
 queue's demand did not answer is never called stalled. With two Valkeys (this shell's and the `.env`'s disagree), each
 gets its own five seconds. `status --target` waits the same way; a queue that did not answer is in its own
 `unavailableQueues` with `complete: false`, and its exit code stays 0.
+
+When the host registry or the look for queues could not be read, the list of queues may be short: a queue it did not
+find is in none of the sums. The line then has `queuesMayBeShort: true`, and a `warning:` line under it says so and to run
+`pi-dispatch status` again once Valkey answers. That alone does not change the exit code; a queue it found that did not
+answer still does. `status --target` says the same.
 
 `waitingDetails.rows` explains a bounded sample of delayed entries. A row contains `jobId`, `queue`, `dueAt`,
 `bucket`, `why` and `until`; the two times are epoch milliseconds, and absent reason fields are `null`. For example,

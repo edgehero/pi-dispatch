@@ -71,7 +71,7 @@ import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { PAUSE_WINDOW_FIELDS, heldPauseWindows, parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
 import { AGENT_REFUSED, AGENT_UNCONFIRMED, auditedWrite } from "../audited-write.mjs";
 import { pauseWindowsNewerRefusal } from "../newer-release.mjs";
-import { fieldNamed, NO_EXPLANATION, switchShortNote, UNNAMED_FIELD } from "../words.mjs";
+import { fieldNamed, NO_EXPLANATION, SWITCH_ERRORED_READS, switchErroredQueue, switchShortNote, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
 import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, REFUSAL_STATES, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
 import { bindingFailure } from "./device-trust.mjs";
@@ -1839,7 +1839,8 @@ function fleetSwitch({ name, kind, paused }) {
         // Issue #842: which queues are KNOWN switched (`done`) and which are not: `unconfirmed` (sent and not
         // answered), `refused` (did not change), `notTried` (a resume stops at the first lost answer). A result
         // without those lists is a loop that stopped at `failed`, as before. Issue #1014: `errored`, each queue Valkey
-        // answered with an error after its script may have run, with what it reads now ("paused" or "running").
+        // answered with an error after its script may have run, with what it reads now ("paused" or "running", or
+        // "unknown" where Valkey answered the read back with an error too, issue #1041).
         ...(r.res?.partial ? { partial: { done: names(r.res.partial.done), failed: String(r.res.partial.failed ?? "-"), ...(Array.isArray(r.res.partial.unconfirmed) ? { unconfirmed: names(r.res.partial.unconfirmed), refused: names(r.res.partial.refused), notTried: names(r.res.partial.notTried), errored: erroredOf(r.res.partial.errored) } : {}) } } : {}),
         // The set of queues itself may be short: the registry or the keyspace scan was not read whole.
         ...(r.res?.blind || r.res?.incomplete ? { short: true } : {}),
@@ -1879,7 +1880,8 @@ function fleetSwitch({ name, kind, paused }) {
  * One Valkey's part-way kill switch in words (issue #842): the queues NOT known paused (or resumed) first, since they
  * are what an operator must look at and an audit row keeps the start of a sentence, with what "not confirmed" means
  * said once (the pause or resume was sent and may or may not have been made); then those Valkey answered with an
- * error after the script may have run, with what each reads now (issue #1014); then those that did not change, those a
+ * error after the script may have run, with what each reads now (issue #1014), or that it may have partly applied where
+ * its read back was answered with an error too (issue #1041); then those that did not change, those a
  * resume never tried, and those known switched. Queue names and closed words only, never a client's words. A result
  * without the lists (a loop that stopped at one queue) keeps its sentence.
  */
@@ -1889,7 +1891,7 @@ export function switchPartialWords(partial, paused) {
   const errored = Array.isArray(partial.errored) ? partial.errored : [];
   return [
     ...(partial.unconfirmed.length > 0 ? [`not confirmed for ${partial.unconfirmed.join(", ")} (the ${paused ? "pause" : "resume"} may or may not have been made)`] : []),
-    ...(errored.length > 0 ? [`answered with an error for ${errored.map((e) => `${e.queue} (reads ${e.reads} now)`).join(", ")}`] : []),
+    ...(errored.length > 0 ? [`answered with an error for ${errored.map(switchErroredQueue).join(", ")}`] : []),
     ...(partial.refused.length > 0 ? [`not ${verb}: ${partial.refused.join(", ")}`] : []),
     ...(partial.notTried.length > 0 ? [`not tried: ${partial.notTried.join(", ")}`] : []),
     // Beside a queue answered with an error, which may read paused too, the queues known switched are said as confirmed.
@@ -1899,10 +1901,11 @@ export function switchPartialWords(partial, paused) {
 
 /**
  * A part-way switch's `errored` list (issue #1014) as the console keeps it: `{ queue, reads }` with a queue name and
- * "paused" or "running", anything else left out, so no client's words reach a page or the audit.
+ * "paused", "running" or "unknown" (`SWITCH_ERRORED_READS`; "unknown" since issue #1041, where it was left out and the
+ * error with it), anything else left out, so no client's words reach a page or the audit.
  */
 function erroredOf(list) {
-  return (Array.isArray(list) ? list : []).filter((e) => typeof e?.queue === "string" && (e.reads === "paused" || e.reads === "running")).map((e) => ({ queue: e.queue, reads: e.reads }));
+  return (Array.isArray(list) ? list : []).filter((e) => typeof e?.queue === "string" && SWITCH_ERRORED_READS.includes(e.reads)).map((e) => ({ queue: e.queue, reads: e.reads }));
 }
 
 /**
