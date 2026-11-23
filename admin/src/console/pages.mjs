@@ -774,6 +774,12 @@ function formsDrawn(who) {
  * fallback with it, none goes on behind a load that has ended, and none rejects with nobody to take it. Such a throw
  * is then this call's own, the first in the order the reads were given, so which error a load ends with does not
  * depend on which read was quicker.
+ *
+ * THE COST, on a load that ends in such a throw: its other reads are still made and waited for, so the error page
+ * comes when the slowest of them has ended (each inside the load's deadline), where a load that read one after
+ * another stopped at the throw. Ending the wave at the first throw would answer sooner and leave the rest reading
+ * behind an answered load, which is what this function is for; and a throw here is a fault of the console or a shape
+ * no reader gives, never an outage, which every read catches for itself.
  */
 async function together(reads) {
   const ended = await Promise.allSettled(reads.map(async (read) => read()));
@@ -908,7 +914,9 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   }
   if (["config", "trigger", "trigger-add", "triggers"].includes(name) && typeof deps.configLocations === "function") data.configLocations = deps.configLocations();
   // The by-id lookups' one question for this load (see above): the hub's, or this request's, read before any of them.
-  const lookup = who?.live === true ? { live: true } : typeof deps.fleet?.lookupQuestion === "function" ? deps.fleet.lookupQuestion() : {};
+  // Asked only on the two pages that look a job up by its id (issue #988): no other page's load calls the reader before
+  // its reads start, so nothing can end an Insights page's load between the start of its assembly above and the reads.
+  const lookup = who?.live === true ? { live: true } : ["run", "parked"].includes(name) && typeof deps.fleet?.lookupQuestion === "function" ? deps.fleet.lookupQuestion() : {};
   if (name === "run" && typeof deps.env?.PI_CHAIN_MAX_PER_JOB === "string" && /^\d{1,9}$/.test(deps.env.PI_CHAIN_MAX_PER_JOB)) data.chainMaxPerJob = Number(deps.env.PI_CHAIN_MAX_PER_JOB);
   // Issue #849: whether the host-setup grant is on, for the pages that send an operator to /setup rather than a terminal. One boolean, none of `setup`'s reads.
   if (["overview", "fleet", "host"].includes(name) && typeof deps.setupGranted === "function") {
@@ -1372,10 +1380,13 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       }
     }
     await together([
-      childrenRead, progressRead, liveFactsRead, workspaceRead, refusedSnapshotRead, refusedWindowRead, runActionsRead,
+      childrenRead, progressRead, workspaceRead, refusedSnapshotRead, refusedWindowRead, runActionsRead,
       async () => {
         await together([runChatRead, relatedRead]);
-        await continuationRead();
+        // The live facts of a run with no record look the job up by its id, as the chat facts just did (issue #988):
+        // after them they are answered from that lookup, where beside them both missed and each scanned the hosts'
+        // queues for itself.
+        await together([continuationRead, liveFactsRead]);
       },
     ]);
   };

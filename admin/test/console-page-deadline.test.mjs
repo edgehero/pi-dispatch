@@ -133,6 +133,15 @@ const BOUNDS = {
  * page's catch does (the answer rules keep the rules and standing answers of the triggers file; the touched runs keep
  * this host's part and say the window is partial) shows here the moment the page cuts it from outside.
  *
+ * THE GAP, named: that client ends every command AT ONCE, in the words a bounded client ends a command a silent socket
+ * never answered ("Command timed out"). A read that takes no bound from the page ends that way on a silent socket
+ * too, later. But a service that ends a silent read by a timer of its own may word it differently (the fleet reader's
+ * "no answer in time" beside "Command timed out" in the same sentence), and that wording is not what this table
+ * holds a page against. It is held by the tests of the real reader and services on a socket that stays silent, near
+ * the end of this file: a run's record and the runs' window, a run asked of the host that holds it, a trigger's skew
+ * check, the zero touch report with its touched runs, and the answer rules. The sandbox report and the hosts' doctor
+ * runs have no such case: neither takes a bound from the page.
+ *
  * Three kinds of read have no service to run here and keep a stand-in. The gateway view and the Fire now check are
  * the console's own wiring around a reader and a planner: a throw, which is what the page catches. The views over
  * the snapshot (Setup, Models, Connections, Updates, a project, the trigger list, a host's capacity) are handed their
@@ -617,7 +626,10 @@ const STARTS = {
   // What takes the snapshot.
   setup: [1], modelsView: [1], connections: [1], projectView: [1], triggerList: [1], "fleet.triggerSkew": [1], "fleet.parkedAnswerCheck": [1],
   // What is keyed on a run's record.
-  "fleet.progressOfRun": [1], "fleet.progress": [1], "fleet.runLiveFacts": [1], "fleet.jobStatus": [1], "fleet.rerunCheck": [1], "sandboxes.workspace": [1], "fleet.runHolds": [1],
+  "fleet.progressOfRun": [1], "fleet.progress": [1], "fleet.jobStatus": [1], "fleet.rerunCheck": [1], "sandboxes.workspace": [1], "fleet.runHolds": [1],
+  // The live facts of a run with no record look the job up by its id, as the chat facts do: after them, so that the
+  // one lookup answers both (issue #988).
+  "fleet.runLiveFacts": [2],
   // The watch pages' one read makes its own one after another: each says what the next is asked for.
   "watch.listRules": [0], "watch.listFindings": [1], "watch.listSources": [2], "watch.readBoard": [3], "watch.readFinding": [4], "watch.readTrace": [5],
   // What the files answer is started beside the rest: nothing waits behind a slow disk either.
@@ -648,7 +660,8 @@ test("a page takes its longest chain of reads, not their sum: on every page each
 test("the Insights assembly is started as soon as the load has read its clock, before anything else of the load: its window and the page's instant stay together", async () => {
   // The assembly reads the clock for its own window as it starts, and the capacity chart is drawn against the page's
   // instant: a millisecond between the two marks the newest bar as one with part of it missing. So nothing of the
-  // load, not even the lookup's one question, comes between the page's reading and the assembly's start. The
+  // load comes between the page's reading and the assembly's start, and the lookup's one question, which only the
+  // pages that look a job up by its id ask, is not asked on these pages at all. The
   // assembly is asked for through the console's own cache, as a console asks: that cache starts it one turn of the
   // microtask queue later, and a load that went on without giving that turn would put all its setup in between.
   for (const page of ["insights", "insights-budget-split", "insights-capacity", "insights-breakdown", "insights-flows"]) {
@@ -659,7 +672,7 @@ test("the Insights assembly is started as soon as the load has read its clock, b
       deps.insights = cachedPerWindow((...args) => { order.push("the assembly"); return insights(...args); }, { now: () => NOW });
       deps.fleet.lookupQuestion = () => { order.push("the lookup's question"); return {}; };
     } });
-    assert.deepEqual(order, ["the page's clock", "the assembly", "the lookup's question"], page);
+    assert.deepEqual(order, ["the page's clock", "the assembly"], page);
     assert.deepEqual(data.insights, { window: "30d" }, `${page}: and its answer is the page's`);
   }
   // An assembly that throws as it is started, or fails later, is the page's one sentence.
@@ -667,17 +680,30 @@ test("the Insights assembly is started as soon as the load has read its clock, b
     const { data } = await loaded("insights", {}, OP, {}, { wire: { insights: failing } });
     assert.deepEqual([data.insights, data.insightsError], [null, "The spend history could not be assembled."]);
   }
-  // A load that ends before it reaches the assembly's answer (here the lookup's question throws) leaves a failing
-  // assembly behind it: that failure is nobody's unhandled rejection.
+  // Nothing ends an Insights page's load between the start of its assembly and its reads (issue #988): the one call
+  // of the reader that came between them, the lookup's question, is the run page's and Parked's. A question that
+  // throws ended such a load with its assembly already started; it is not asked there, so the page is drawn.
   const unhandled = [];
   const note = (reason) => unhandled.push(reason);
   process.on("unhandledRejection", note);
   try {
     const time = handTime();
-    const { deps } = probe(time, {});
-    deps.insights = () => Promise.reject(new Error("the assembly failed"));
-    deps.fleet.lookupQuestion = () => { throw new Error("the lookup's question"); };
-    await assert.rejects(() => loadPageData("insights", {}, deps, OP), /the lookup's question/);
+    for (const page of ["insights", "insights-capacity"]) {
+      const { deps } = probe(time, {});
+      let started = 0;
+      deps.insights = async () => { started += 1; return { window: "30d" }; };
+      deps.fleet.lookupQuestion = () => { throw new Error("the lookup's question"); };
+      const loading = loadPageData(page, {}, deps, OP);
+      await time.settled();
+      assert.deepEqual([(await loading).insights, started], [{ window: "30d" }, 1], page);
+    }
+    // The pages that ask it still do, before any of their reads, and a load it ends starts no read.
+    for (const page of ["run", "parked"]) {
+      const { deps, calls } = probe(time, {});
+      deps.fleet.lookupQuestion = () => { throw new Error("the lookup's question"); };
+      await assert.rejects(() => loadPageData(page, page === "run" ? { id: "gh-1" } : {}, deps, OP), /the lookup's question/, page);
+      assert.deepEqual(calls.map((call) => call.name), [], page);
+    }
     await time.settled();
   } finally {
     process.off("unhandledRejection", note);
@@ -729,7 +755,12 @@ test("what a read needs is in its hand when it is started: the snapshot for its 
   assert.deepEqual(handedRecord.map(([name, record]) => [name, record === RECOVERED]).sort(), [["artifacts", true], ["progressOfRun", true], ["runHolds", true], ["workspace", true]]);
   // No record: the live facts of a run that has none are asked for only once the record's read says so.
   const none = await loaded("run", { id: "gh-1" }, OP, { takes: slow("fleet.runById") });
-  assert.deepEqual([startOf(none.calls, "fleet.runLiveFacts"), startOf(none.calls, "fleet.jobStatus")], [3 * T, 3 * T]);
+  assert.deepEqual([startOf(none.calls, "fleet.jobStatus"), startOf(none.calls, "fleet.runLiveFacts")], [3 * T, 4 * T]);
+  // And only once the chat facts have looked the job up (issue #988): the two lookups ask one question, and beside
+  // each other both missed what the first to end would have left for the second.
+  const lookedUp = await loaded("run", { id: "gh-1" }, OP, { takes: slow("fleet.jobStatus") });
+  const chatLookup = lookedUp.calls.find((call) => call.name === "fleet.jobStatus");
+  assert.deepEqual([chatLookup.at, chatLookup.end, startOf(lookedUp.calls, "fleet.runLiveFacts")], [T, 4 * T, 4 * T]);
   // A run refused before it started: the snapshot and the runs' window its page draws, together, once the record says so.
   const refusedRun = CASES.find((one) => one.label === "a run refused before it started");
   const refusal = await loaded("run", queryOf(refusedRun), OP, { takes: slow("fleet.runById"), answers: refusedRun.answers });
