@@ -24,6 +24,51 @@ export const quietQueue = (asked = [], { failed = {} } = {}) => (_c, opts) => {
   };
 };
 
+/** What the reader's bounded client ends a command with when Valkey has not answered it in time: ioredis's own words. */
+const NO_ANSWER = "Command timed out";
+
+/**
+ * A Valkey that is connected and does not answer (issue #988): every command rejects the way the reader's bounded
+ * client ends one, a pipeline's `exec` too, and `asked` records each command by name. A rejection and never a throw
+ * from the call itself: the reader catches its reads as promises, and a client that threw there would skip those
+ * catches and leave a state no real client makes. Its events and `disconnect` do nothing.
+ */
+export function downRedis(asked = []) {
+  const late = (name) => () => {
+    asked.push(name);
+    return Promise.reject(new Error(NO_ANSWER));
+  };
+  const chain = new Proxy({}, { get: (_, key) => (typeof key === "symbol" || key === "then" ? undefined : key === "exec" ? late("exec") : () => chain) });
+  const silent = new Set(["on", "once", "off", "removeListener", "disconnect"]);
+  return new Proxy({ status: "ready", options: {} }, {
+    get(held, key) {
+      if (typeof key === "symbol" || key === "then") return undefined;
+      if (Object.hasOwn(held, key)) return held[key];
+      if (silent.has(key)) return () => {};
+      if (key === "pipeline" || key === "multi") return () => chain;
+      return late(key);
+    },
+  });
+}
+
+/** The BullMQ queue calls that ask Valkey, of those the console makes. */
+const QUEUE_ASKS = Object.freeze(["isPaused", "getJobCounts", "getWorkers", "getJobSchedulers", "getActive", "getFailed", "getFailedCount", "getJob", "getJobs", "getJobState", "getRanges", "pause", "resume"]);
+
+/**
+ * A queue on that Valkey, as `makeQueueFn`: each call that asks Valkey rejects the same way and `asked` records it by
+ * `<queue>.<method>`. Its client is connected (a Valkey that stopped answering ends no connection), so the reader
+ * keeps the queue rather than replacing it, and `close` settles. The calls are named, not caught whole: a queue that
+ * answered every property with a function would also pass for one that has BullMQ's own `toKey`, which asks nothing.
+ */
+export const downQueue = (asked = []) => (_c, opts) => {
+  const name = opts?.name ?? "pi-jobs";
+  const late = (method) => () => {
+    asked.push(`${name}.${method}`);
+    return Promise.reject(new Error(NO_ANSWER));
+  };
+  return { name, client: Promise.resolve({ status: "ready", on() {}, once() {} }), on() {}, once() {}, off() {}, async close() {}, ...Object.fromEntries(QUEUE_ASKS.map((method) => [method, late(method)])) };
+};
+
 /** A Valkey that holds nothing, recording each range read on the run index; `mirrorDown` makes those reads throw. */
 export function emptyRedis({ mirrorDown = false } = {}) {
   const ranges = [];
