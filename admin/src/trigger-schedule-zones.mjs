@@ -103,7 +103,7 @@ export async function readTriggerScheduleZones({ url, triggers = [], now = () =>
     const names = fleetQueueNames(hosts);
     const queues = await Promise.all(names.slice(0, SCHEDULE_ZONE_LIMITS.queues).map(async (name) => {
       try {
-        const q = makeQueueFn(consoleQueueConnection(url, parseConnectionFn), { name });
+        const q = makeQueueFn(consoleQueueConnection(url, parseConnectionFn), { name, metaWrite: false });
         opened.push(q);
         const schedulers = await bounded(async () => { await q.client; return q.getJobSchedulers(0, SCHEDULE_ZONE_LIMITS.schedulers, true); }, timeoutMs, null);
         return { name, schedulers };

@@ -346,7 +346,9 @@ function parseNonNegInt(raw, fallback) {
  * `readOnly` (issue #1036, default false) makes it write NOTHING: its queues are built without BullMQ's meta write
  * (`makeQueue`'s `metaWrite: false`) and its registry read prunes no stale member. For `dispatch_status`, which is
  * described to a model as read-only. `/dispatch status` and the setup wizard's probe are a person's and keep the
- * default: they are pruning readers, beside the worker and the receiver, and somebody has to be.
+ * default: they prune as they read. Who else does depends on the index, and for one of them nobody else does
+ * (`INT-HOST-REGISTRY-CONTRACT`, "WHO PRUNES": a `host:live` member, the worker and the receiver at times, the CLI and
+ * doctor; a `wait:held` member, no service at all), so no read may depend on a prune.
  */
 export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500, readOnly = false } = {}) {
   let queue;
@@ -2708,6 +2710,36 @@ export async function readDollarWindows({ paths, env = {}, now = new Date(), fs 
 const HELD_HYDRATE_MAX = 200;
 
 /**
+ * How many members of the held index one read LOOKS AT (issue #1036), stale ones included: 2,000, ten times what it
+ * hydrates. A member with no hash is stale and is skipped, and the ceiling above used to cut the index before the
+ * stale ones were skipped: the first 200 members, whatever they were. A reader that prunes got through a crowd of
+ * stale members 200 a read; a reader that writes nothing never did, and nothing else prunes this index (only the
+ * `/dispatch` panel and `/dispatch status` do, no service), so on a deployment run from the tools and the web console
+ * 2,000 stale members beside 4 real holds answered no hold at all, on every read. The walk now goes on past a stale
+ * member, a page at a time, until it holds `HELD_HYDRATE_MAX` real holds, has looked at every member, or has looked at
+ * this many. Past this bound the read says it is not whole (`truncated`), which then means: members remain that
+ * nobody looked at, so a hold may be missing from the list.
+ */
+export const HELD_LOOK_MAX = 2_000;
+
+/**
+ * The walk both held readers share: `ids` are the index's members and `hydrate(jobId)` answers a member's row, or
+ * null for one that is stale or cannot be read. `{ rows, truncated }`: the real holds found, at most
+ * `HELD_HYDRATE_MAX`, and whether a member was left that this read did not look at. With no stale member it is the
+ * one pass it always was: the first `HELD_HYDRATE_MAX` members, `truncated` when the index holds more.
+ */
+async function walkHeldIndex(ids, hydrate) {
+  const rows = [];
+  let looked = 0;
+  while (looked < ids.length && looked < HELD_LOOK_MAX && rows.length < HELD_HYDRATE_MAX) {
+    const page = ids.slice(looked, looked + Math.min(HELD_HYDRATE_MAX - rows.length, HELD_LOOK_MAX - looked));
+    looked += page.length;
+    rows.push(...(await Promise.all(page.map(hydrate))).filter(Boolean));
+  }
+  return { rows, truncated: looked < ids.length };
+}
+
+/**
  * The jobs the worker is currently HOLDING on `run.waitFor` (issue #230).
  *
  * Read from the worker's own `wait:job:*` hashes rather than by enumerating the delayed set, and the
@@ -2838,7 +2870,7 @@ export async function readSubscriptionStatusOf({ url, redisFn = makeRedisClient,
     parseConnection(url, { failFast: true });
     redis = redisFn(url);
     redis.on?.("error", () => {});
-    const hosts = await withTimeout(readLiveHosts(redis, { now, timeoutMs: Math.max(250, Math.floor(timeoutMs / 2)) }), timeoutMs, { unreachable: "timed out reaching the registry" });
+    const hosts = await withTimeout(readLiveHosts(redis, { now, timeoutMs: Math.max(250, Math.floor(timeoutMs / 2)), prune: false }), timeoutMs, { unreachable: "timed out reaching the registry" });
     if (hosts.unreachable || !Array.isArray(hosts.hosts)) return null;
     return await readSubscriptionStatus(redis, hosts.hosts.map((h) => h.name), { timeoutMs });
   } catch {
@@ -2880,7 +2912,9 @@ export function resolveWorkerCount({ hosts, workerCount }) {
  *
  * `prune` (issue #1036, default true): a member with no hash is stale and is removed in passing, which is what keeps an
  * index a set cannot expire from only growing. False skips it the same and writes nothing, for `dispatch_waits`, which
- * is described to a model as read-only; `/dispatch status` keeps the default and prunes, as the worker does.
+ * is described to a model as read-only; `/dispatch status` keeps the default and prunes. No service prunes this
+ * index, so a read must not depend on one: either way the walk goes on past a stale member, to `HELD_LOOK_MAX`
+ * members looked at (`walkHeldIndex`), and the real holds are listed whatever stale members sit before them.
  */
 export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now(), prune = true } = {}) {
   let redis;
@@ -2892,8 +2926,7 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
       // SMEMBERS of the worker's index, not a SCAN. A scan of `wait:job:*` walks the whole keyspace, and
       // walks ALL of it precisely when nothing is held, which is the deployment least willing to pay for it.
       const ids = await redis.smembers(HELD_SET);
-      const hydrated = await Promise.all(
-        ids.slice(0, HELD_HYDRATE_MAX).map(async (jobId) => {
+      const { rows, truncated } = await walkHeldIndex(ids, async (jobId) => {
           try {
             const h = await redis.hgetall(jobKey(jobId));
             // A member with no hash is STALE: the hash expired or the hold was released without the index
@@ -2915,18 +2948,17 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
             // One unreadable member degrades one row, never the listing (a stray key of the wrong type).
             return null;
           }
-        }),
-      );
-      const rows = hydrated.filter(Boolean);
+      });
       // Sorted BEFORE the cut, so the row an operator is looking for -- the one that has been stuck longest
       // -- is in the listing. Slicing first would have shown an arbitrary sample and called it the top.
       rows.sort((a, b) => (b.waitedMs ?? -1) - (a.waitedMs ?? -1));
       return {
         rows: rows.slice(0, limit),
         more: Math.max(0, rows.length - limit),
-        // True when the index itself was longer than this reader will hydrate: `more` is then a floor, and
-        // a caller that renders a total must say so rather than state a number it cannot know.
-        truncated: ids.length > HELD_HYDRATE_MAX,
+        // True when the index holds a member this read did not look at (`walkHeldIndex`): it found as many holds as
+        // it hydrates, or looked at `HELD_LOOK_MAX` members. `more` is then a floor, and a caller that renders a
+        // total must say so rather than state a number it cannot know.
+        truncated,
       };
     })();
     return await withTimeout(settled, timeoutMs, { unreachable: "timed out reaching the queue" });
@@ -4883,13 +4915,14 @@ function heldAnswersOf(h) {
 async function heldJobs(redis, { prune = true } = {}) {
   const ids = await redis.smembers("wait:held");
   const at = Date.now();
-  const hydrated = await Promise.all(
-    ids.slice(0, HELD_HYDRATE_MAX).map(async (jobId) => {
+  // The same walk as `readHeldJobs` (issue #1036): past stale members, to `HELD_LOOK_MAX` looked at.
+  const { rows, truncated } = await walkHeldIndex(ids, async (jobId) => {
       try {
         const h = await redis.hgetall(`wait:job:${jobId}`);
         if (!h || !h.since) {
           // Stale index member: prune as we go, which is what makes an index safe when a SET cannot expire. Not on a
-          // read-only reader (the console's): the row is skipped the same and left for the TUI or the worker to prune.
+          // read-only reader (the console's): the row is skipped the same and left for the panel or `/dispatch status`,
+          // the only two that prune this index.
           if (prune) await redis.srem("wait:held", jobId).catch(() => {});
           return null;
         }
@@ -4906,11 +4939,9 @@ async function heldJobs(redis, { prune = true } = {}) {
       } catch {
         return null; // one unreadable member degrades one row, never the section
       }
-    }),
-  );
-  const rows = hydrated.filter(Boolean);
+  });
   rows.sort((a, b) => (b.waitedMs ?? -1) - (a.waitedMs ?? -1));
-  return { rows: rows.slice(0, HELD_LIMIT), more: Math.max(0, rows.length - HELD_LIMIT), truncated: ids.length > HELD_HYDRATE_MAX };
+  return { rows: rows.slice(0, HELD_LIMIT), more: Math.max(0, rows.length - HELD_LIMIT), truncated };
 }
 
 /**
@@ -7350,6 +7381,16 @@ function triggerListOf(triggers) {
  * this read cannot tell apart for it. A job in that queue's paused list is `paused` as before (the list itself says
  * so), and a delayed one keeps its record's bucket.
  *
+ * `listsUnread` (issue #1036), present only when not empty: the queues ONE OF WHOSE FOUR LISTS this read asked for and
+ * did not read (the delayed set, the prioritized set, the wait list, the paused list), `[{ queue, error }]`, `error`
+ * the code of Valkey's error reply for the first of them answered with one (`replyErrorCode`), or null where none
+ * got an answer; each of them also carries `listsUnread: true` in `byQueue`, and is `truncated`, so the read's own
+ * `truncated` is true and its rows are a floor. A list Valkey answered with an error (a `bull:<queue>:wait` key of
+ * another type) read as an EMPTY list: the jobs in it were in no row and no count, and nothing said so, so a page drew
+ * "nothing is waiting" over a job that waits. The jobs of that queue's other lists are still rows. A reader that takes
+ * the rows for every job that waits (the trigger skew, `dispatch_waiting`'s `complete`) reads `truncated`, as for any
+ * other floor; one that has to say WHY reads this mark.
+ *
  * WHY A JOB WAITS is the worker's own record of it (`defer:job:<id>`, written as it defers: `INT-DEFER-REASON-KEY`),
  * never a guess from the job:
  *   - a delayed job whose due instant is more than `WAITING_DUE_GRACE_MS` before the read is `due` ("Due since {due};
@@ -7408,16 +7449,21 @@ export async function readWaiting(redis, { queues, now = () => Date.now(), perLi
     const entries = [];
     const perQueueInfo = [];
     const pausedUnread = [];
+    const listsUnread = [];
     list.forEach((q, qi) => {
       const base = qi * 5;
       const lists = [idsOf(got[base], { withScores: true }), idsOf(got[base + 1]), idsOf(got[base + 2]), idsOf(got[base + 3])];
+      // A list that was not read (issue #1036) is no empty list: the queue is named, with the first error reply's
+      // code, and its rows are a floor.
+      const failed = [got[base], got[base + 1], got[base + 2], got[base + 3]].filter((answer) => answer?.error !== undefined);
+      if (failed.length > 0) listsUnread.push({ queue: q.name, error: failed.map((answer) => replyErrorCode(answer.error)).find((code) => code !== null) ?? null });
       const [delayed, prioritized, wait, paused] = lists.map((l) => l.ids);
       // The flag, or null where the look at it failed (issue #1036): an error reply, kept by its code, or no answer.
       const flag = pausedFlagOf(cmds[base + 4][0], got[base + 4]);
       const queuePaused = flag.paused;
       if (queuePaused === null) pausedUnread.push({ queue: q.name, error: flag.error });
       // A member that is no run id is a job this read cannot show (`idsOf`): the queue's rows are then a floor.
-      let truncated = lists.some((l) => l.refused > 0);
+      let truncated = lists.some((l) => l.refused > 0) || failed.length > 0;
       // The delayed and prioritized sets are read from their head (soonest due, next to run): the extra is the last.
       // The lists from their tail (oldest): the extra is the first.
       const cut = (items, fromHead) => {
@@ -7437,21 +7483,22 @@ export async function readWaiting(redis, { queues, now = () => Date.now(), perLi
       add(cut(prioritized, true), "prioritized");
       add(cut(wait, false), "waiting");
       add(cut(paused, false), "paused");
-      perQueueInfo.push({ queue: q.name, truncated, pausedUnread: queuePaused === null });
+      perQueueInfo.push({ queue: q.name, truncated, pausedUnread: queuePaused === null, listsUnread: failed.length > 0 });
     });
     const { rows, scheduled } = await hydrateWaiting(redis, entries, { heldIds, projectList, triggerList, nowMs: at });
     rows.sort(byQueuedAt);
     scheduled.sort((a, b) => (a.dueAt ?? Infinity) - (b.dueAt ?? Infinity) || (a.jobId < b.jobId ? -1 : a.jobId > b.jobId ? 1 : 0));
     const byBucket = Object.fromEntries(DEFER_BUCKETS.map((b) => [b, 0]));
     for (const r of rows) byBucket[r.bucket] += 1;
-    const byQueue = perQueueInfo.map(({ queue, truncated, pausedUnread: unread }) => ({
+    const byQueue = perQueueInfo.map(({ queue, truncated, pausedUnread: unread, listsUnread: unlisted }) => ({
       queue,
       inLine: rows.filter((r) => r.queue === queue).length,
       scheduled: scheduled.filter((s) => s.queue === queue).length,
       truncated,
       ...(unread ? { pausedUnread: true } : {}),
+      ...(unlisted ? { listsUnread: true } : {}),
     }));
-    return { at, rows, scheduled, byBucket, byQueue, truncated: queuesCut > 0 || byQueue.some((q) => q.truncated), queuesCut, ...(pausedUnread.length > 0 ? { pausedUnread } : {}) };
+    return { at, rows, scheduled, byBucket, byQueue, truncated: queuesCut > 0 || byQueue.some((q) => q.truncated), queuesCut, ...(pausedUnread.length > 0 ? { pausedUnread } : {}), ...(listsUnread.length > 0 ? { listsUnread } : {}) };
   };
   try {
     return await withTimeout(read(), timeoutMs, { unreachable: true });
@@ -7465,13 +7512,17 @@ export async function readWaiting(redis, { queues, now = () => Date.now(), perLi
  * (it is its scheduler's next run), `{ gone: true }` (its hash is gone) or `{ unreachable: true }`. `q` is the queue that
  * holds it and `state` the state the caller read; `now` the clock it is `due` against. The same reads per job as
  * `readWaiting` (its delayed score, its queue's paused flag, its short hash fields, its record and its hold), never its
- * data. Its hold is read whatever `wait:held` says, since one key costs one read here. Never throws.
+ * data. Its hold is read whatever `wait:held` says, since one key costs one read here. Never throws. Unreachable too
+ * when a delayed job's score was answered with an error or not at all (issue #1036).
  */
 export async function readWaitingRow(redis, { q, jobId, state, now = () => Date.now(), timeoutMs = FLEET_READ_TIMEOUT_MS, projects = null, triggers = null } = {}) {
   if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId) || !WAITING_STATES.includes(state)) return { gone: true };
   const read = async () => {
     const ask = pausedAsk(redis, q);
     const [meta, score] = await batched(redis, [ask, ...(state === "delayed" ? [["zscore", queueKeyOf(q, QUEUE_KEY.delayed), jobId]] : [])]);
+    // A delayed job's due instant that was not read (issue #1036: the delayed set answered with an error) is no job
+    // without one: when it is due, and whether it is its scheduler's next run, rest on it, so the row is not read.
+    if (score?.error !== undefined) return { unreachable: true };
     const entry = { q, jobId, state, score: score?.value ?? null, queuePaused: pausedFlagOf(ask[0], meta).paused };
     const { rows, scheduled } = await hydrateWaiting(redis, [entry], { heldIds: null, projectList: projectListOf(projects), triggerList: triggerListOf(triggers), nowMs: now() });
     if (scheduled.length > 0) return { scheduled: scheduled[0] };

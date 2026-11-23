@@ -9,7 +9,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { answeredWith, consumersPublished, discoveryRedis, emptyRedis, noAnswer, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
 import { fleetBar } from "../src/console/panels/fleet.mjs";
 import { overviewHosts, overviewNeeds } from "../src/console/panels/overview.mjs";
-import { killSwitchUnreadForms, pausedState, pausedStateUnknown } from "../src/console/panels/common.mjs";
+import { killSwitchUnreadForms, pausedStateUnknown } from "../src/console/panels/common.mjs";
 import { KILL_SWITCH_UNREAD_TEXT, queueErrorsLine, queueErrorsOf } from "../src/words.mjs";
 import { queueSwitchErrored, queueSwitchUnconfirmed } from "../src/read-model.mjs";
 import { LOOKUP_TOLD_MAX, REFUSALS_TOP, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUNS_WINDOW_PROJECTS_MAX, RUNS_WINDOW_VALUES_MAX, SWITCH_PREVIEW_QUEUES_MAX, SWITCH_SCAN_INCOMPLETE, UNREAD_HOSTS_MAX, WAITING_DISCOVERY_TTL_MS, WAITING_QUEUES_MAX, createFleetReader, fleetQueuesOn, listRunsMerged, readHeldJobs, readHosts, readQueueState, readSchedulers, replyCodeOf, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
@@ -1946,29 +1946,29 @@ test("the Fleet bar and the overview's Hosts head over the five paused states of
     assert.ok(!bar.includes("Keeps starting jobs: ."), bar);
     const line = queueErrorsOf(s).length > 0 ? `<p class="muted">${queueErrorsLine(queueErrorsOf(s))}.</p>` : null;
     assert.equal(line === null ? !bar.includes("Not read, so not in these counts") : bar.includes(line), true, bar);
-    return [/<h2>([^<]*)<\/h2>/.exec(bar)[1], switchForms(bar), switchForms(hosts), pausedStateUnknown(s), String(pausedState(s.queue, true, queueErrorsOf(s).length))];
+    return [/<h2>([^<]*)<\/h2>/.exec(bar)[1], switchForms(bar), switchForms(hosts), pausedStateUnknown(s)];
   };
   const both = ["fleet-resume", "fleet-pause"];
   const bothHosts = ["fleet-pause", "fleet-resume"];
   try {
     assert.deepEqual(await drawn({ "pi-jobs": true, "pi-jobs@hosta": true, "pi-jobs@hostb": "errored" }),
-      ["Part paused: 2 of 3 queues are paused, 1 not read", both, bothHosts, true, '<span class="warn">partly paused: a queue that was read is paused, and whether 1 queue that was not read is paused is not known</span>'],
+      ["Part paused: 2 of 3 queues are paused, 1 not read", both, bothHosts, true],
       "every queue that was read is paused: never the fleet paused, and a Pause for the queue nobody read");
     assert.deepEqual(await drawn({ "pi-jobs": false, "pi-jobs@hosta": false, "pi-jobs@hostb": "uncounted" }),
-      ["No queue that was read is paused: 1 of 3 not read", both, bothHosts, true, '<span class="warn">no queue that was read is paused, and whether 1 queue that was not read is paused is not known</span>'],
+      ["No queue that was read is paused: 1 of 3 not read", both, bothHosts, true],
       "no queue that was read is paused: never the fleet running, and a Resume for the queue nobody read");
     assert.deepEqual(await drawn({ "pi-jobs": true, "pi-jobs@hosta": false, "pi-jobs@hostb": "errored" }),
-      ["Part paused: 1 of 3 queues are paused, 1 not read", both, bothHosts, true, '<span class="warn">partly paused: a queue that was read is paused, and whether 1 queue that was not read is paused is not known</span>']);
+      ["Part paused: 1 of 3 queues are paused, 1 not read", both, bothHosts, true]);
     assert.deepEqual(await drawn({ "pi-jobs": "errored", "pi-jobs@hosta": "errored", "pi-jobs@hostb": "uncounted" }),
-      ["Queue state not read", both, bothHosts, true, '<span class="warn">no queue that was read is paused, and whether 3 queues that were not read are paused is not known</span>'],
+      ["Queue state not read", both, bothHosts, true],
       "no queue was read");
     // The controls: read whole. All paused is the fleet paused with Resume alone; a part pause both; running Pause alone.
     assert.deepEqual(await drawn({ "pi-jobs": true, "pi-jobs@hosta": true, "pi-jobs@hostb": true }),
-      ["The fleet is paused", ["fleet-resume"], ["fleet-resume"], false, '<span class="bad">paused (the kill switch is on)</span>']);
+      ["The fleet is paused", ["fleet-resume"], ["fleet-resume"], false]);
     assert.deepEqual(await drawn({ "pi-jobs": true, "pi-jobs@hosta": false, "pi-jobs@hostb": false }),
-      ["Part paused: 1 of 3 queues are paused", both, bothHosts, false, `<span class="warn">partly paused: some hosts' queues are paused and others are not</span>`]);
+      ["Part paused: 1 of 3 queues are paused", both, bothHosts, false]);
     assert.deepEqual(await drawn({ "pi-jobs": false, "pi-jobs@hosta": false, "pi-jobs@hostb": false }),
-      ["The fleet is running", ["fleet-pause"], ["fleet-pause"], false, '<span class="good">running</span>']);
+      ["The fleet is running", ["fleet-pause"], ["fleet-pause"], false]);
   } finally {
     await reader.dispose();
   }

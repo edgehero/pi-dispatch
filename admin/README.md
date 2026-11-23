@@ -275,8 +275,14 @@ One command puts a live terminal view over the whole deployment:
   [`SECURITY.md`](https://github.com/edgehero/pi-dispatch/blob/main/SECURITY.md) before enabling it.
   The bundled `operate-pi-dispatch` skill explains each action mark and refusal.
 - **Agent reads expose operational facts.** Failed jobs, all waiting jobs, hosts and setup have dedicated
-  read tools. A read tool writes nothing to Valkey: it creates no queue key and removes no stale entry, which
-  the panel, `/dispatch status` and the worker still do. A queue Valkey answers with an error is left out of
+  read tools. A read tool writes nothing to Valkey: it creates no queue key and removes no stale entry. What
+  does remove one depends on the index. A `host:live` member whose row is gone: the worker (when it starts
+  serving a cron schedule, and on a triggers reload), the receiver (on a delivery that binds a secret or a wait
+  profile), `pi-dispatch status`, doctor, the panel, `/dispatch status`, `/dispatch triggers`, the setup wizard,
+  and a confirmed action. A `wait:held` member with no hash: the panel and `/dispatch status` alone, no service.
+  A run mirror id whose record is gone: the panel, and the worker once the id is past the window or the count
+  cap. No read depends on any of them: `dispatch_waits` skips stale members and lists the real holds, looking at
+  up to 2,000 members, and says it is not `complete` past that. A queue Valkey answers with an error is left out of
   `dispatch_status`' counts and named: `partial`, `unavailableQueues` and `queueErrors` (the queue to the reply's
   code), the keys `pi-dispatch status` prints. `dispatch_failed` and `dispatch_waiting` name it in `queueErrors` too
   and are then not `complete`; the other read tools hold nothing of a queue's paused state or counts and answer as

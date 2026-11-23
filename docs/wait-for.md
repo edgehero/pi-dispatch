@@ -235,7 +235,9 @@ held · 4 waiting · h view
 ```
 
 Three rows and a count of the rest, always. (The `dispatch_waits` tool lists the same rows as data, with
-the job ids.)
+the job ids.) The index behind them can hold entries whose hold is gone. The panel and `/dispatch status` remove
+those as they read, and nothing else does; the tool and the web console write nothing, skip them, and still list the
+real holds, looking at up to 2,000 entries. Past that the tool says its list is not `complete`.
 
 Every cell is chosen by the worker: an id-only target, the operator-authored condition label, and an honest
 duration. No issue title and no issue body reaches the panel, which is why the reader takes the worker's own

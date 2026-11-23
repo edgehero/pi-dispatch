@@ -2044,7 +2044,9 @@ you set it up otherwise, so a link to it would open nothing for the people readi
 
 Operators can change the deployment from the pages that show it. Every action is the same two steps as any write
 ([Writes](#writes)): **Preview** shows exactly what will happen (a diff for a file, the list of jobs for a job
-action) and **Confirm** does it. Nothing happens on a preview. If something changed in between, the confirm is
+action) and **Confirm** does it. Nothing happens on a preview: like opening a page, it only reads, so it creates no
+queue key in Valkey and removes no stale entry (signing in, which writes its audit row, and the zero touch page, which
+first repairs an accounting entry left pending, are the two exceptions). If something changed in between, the confirm is
 refused with "changed since the preview" and nothing is done; preview again and you see the new state. Every action
 goes through the same functions as the `/dispatch` panel and the pi extension's tools, so a value the panel refuses
 is refused here with the same words, and every action lands in the [audit log](#the-audit-log).

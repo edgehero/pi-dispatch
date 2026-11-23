@@ -1,7 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { readWaiting } from "../src/read-model.mjs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createFleetReader, readWaiting } from "../src/read-model.mjs";
+import { readOperationalTool } from "../src/tool-reads.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeQueue } from "@edgehero/pi-dispatch/queue";
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { deferHsetArgs, deferKey, deferTtlMs, DELAYED_SCORE_SHIFT } from "@edgehero/pi-dispatch/defer-reasons";
@@ -206,6 +210,55 @@ test("a queue whose meta key holds a string: its paused flag is named as answere
   } finally {
     // A string left in place would fail the queue's own teardown: taken away first, whatever an assertion did.
     if (broken !== null && (await v.redis.type(`bull:${broken.name}:meta`).catch(() => null)) === "string") await v.redis.del(`bull:${broken.name}:meta`).catch(() => {});
+    await v.done();
+  }
+});
+
+// Issue #1036: a queue whose wait list is not a list. LRANGE on it is answered with WRONGTYPE, which read as an empty
+// list: the overview said nothing was waiting, over a job that waits.
+test("a queue whose wait list holds a string: the queue is named as answered with WRONGTYPE, its rows are a floor, and the reader's snapshot, dispatch_waiting and the trigger skew all say they are not whole (#1036)", { skip, timeout: 60_000 }, async () => {
+  const v = await setup();
+  let broken = null;
+  let reader = null;
+  try {
+    broken = await v.q();
+    const sound = await v.q();
+    const waits = v.id("broken-waits");
+    const later = v.id("broken-later");
+    const other = v.id("sound-waits");
+    await broken.add("github", { kind: "github" }, { jobId: waits });
+    await broken.add("github", { kind: "github" }, { jobId: later, delay: 600_000 });
+    await sound.add("github", { kind: "github" }, { jobId: other });
+    // The job waits: its hash is there and the wait list names it. Then the list's key holds another kind of value.
+    assert.deepEqual((await readWaiting(v.redis, { queues: [broken, sound] })).rows.map((r) => r.jobId).sort(), [waits, later, other].sort());
+    const kept = await v.redis.lrange(`bull:${broken.name}:wait`, 0, -1);
+    await v.redis.del(`bull:${broken.name}:wait`);
+    await v.redis.set(`bull:${broken.name}:wait`, "not a list");
+    const got = await readWaiting(v.redis, { queues: [broken, sound] });
+    assert.deepEqual(got.listsUnread, [{ queue: broken.name, error: "WRONGTYPE" }]);
+    assert.deepEqual(got.byQueue.map((q) => [q.queue, q.inLine, q.truncated, q.listsUnread === true]), [[broken.name, 1, true, true], [sound.name, 1, false, false]], "the delayed job is still a row; the one in the list is in none");
+    assert.deepEqual([got.truncated, got.rows.map((r) => r.jobId).sort()], [true, [later, other].sort()]);
+    // The real reader over those queues: its snapshot carries the mark, the tool is not complete and names the queue
+    // with the code, and the trigger skew, which takes the rows for every job in line, says it is not whole.
+    const dir = tempDir("pd-1036-wait-list-");
+    mkdirSync(join(dir, "logs"));
+    writeFileSync(join(dir, "triggers.json"), JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "triage" } }] }));
+    const paths = { valkeyUrl: URL_, logsDir: join(dir, "logs"), triggersPath: join(dir, "triggers.json") };
+    reader = createFleetReader(paths, { readOnly: true, readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => ({ names: [broken.name, sound.name], incomplete: null }) });
+    const snapshot = await reader.snapshot({ waiting: true });
+    assert.deepEqual([snapshot.waiting.listsUnread, snapshot.waiting.truncated, snapshot.waiting.rows.some((r) => r.jobId === waits)], [[{ queue: broken.name, error: "WRONGTYPE" }], true, false]);
+    const answer = await readOperationalTool("waiting", { paths, fleet: reader });
+    assert.deepEqual([answer.complete, answer.queueErrors?.[broken.name], answer.jobs.some((j) => j.jobId === later)], [false, "WRONGTYPE", true]);
+    assert.equal((await reader.triggerSkew(0, snapshot.waiting)).incomplete, true);
+    // The list put back, the same read lists the job and names no queue.
+    await v.redis.del(`bull:${broken.name}:wait`);
+    if (kept.length > 0) await v.redis.rpush(`bull:${broken.name}:wait`, ...kept);
+    const whole = await readWaiting(v.redis, { queues: [broken, sound] });
+    assert.deepEqual([Object.hasOwn(whole, "listsUnread"), whole.truncated, whole.rows.map((r) => r.jobId).sort()], [false, false, [waits, later, other].sort()]);
+  } finally {
+    await reader?.dispose().catch(() => {});
+    // A string left in place would fail the queue's own teardown: taken away first, whatever an assertion did.
+    if (broken !== null && (await v.redis.type(`bull:${broken.name}:wait`).catch(() => null)) === "string") await v.redis.del(`bull:${broken.name}:wait`).catch(() => {});
     await v.done();
   }
 });

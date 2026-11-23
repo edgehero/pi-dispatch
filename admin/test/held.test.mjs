@@ -94,6 +94,73 @@ test("readHeldJobs prunes stale index members as it reads them", async () => {
 	assert.deepEqual(redis.srems.sort(), ["counters-only", "ghost"], "both pruned: neither carries a hold clock");
 });
 
+// Issue #1036: the index was cut at 200 members BEFORE the stale ones were skipped, so a reader that prunes nothing
+// (`dispatch_waits`, the web console) answered no hold at all behind a crowd of stale members, on every read: nothing
+// but the panel and `/dispatch status` prunes this index.
+test("readHeldJobs walks on past stale members, a page at a time, to 2,000 members looked at: real holds before, between and after them are listed, and past the bound it says it is not whole (#1036)", async () => {
+	const { readHeldJobs, HELD_LOOK_MAX } = await import("../src/read-model.mjs");
+	assert.equal(HELD_LOOK_MAX, 2_000);
+	const hold = (ageMs) => ({ since: String(NOW - ageMs), target: "o/r#1", label: "ci" });
+	const stale = (n, tag) => Array.from({ length: n }, (_, i) => `gone-${tag}-${i}`);
+	// Exactly at the bound: 2,000 members, three real holds, one first, one in the middle and one last.
+	const atBound = ["first", ...stale(998, "a"), "middle", ...stale(999, "b"), "last"];
+	assert.equal(atBound.length, HELD_LOOK_MAX);
+	const hashes = { "wait:job:first": hold(3000), "wait:job:middle": hold(2000), "wait:job:last": hold(1000) };
+	const quiet = fakeRedis(hashes, { members: atBound });
+	const whole = await readHeldJobs({ url: "redis://x", redisFn: () => quiet, now: () => NOW, prune: false });
+	assert.deepEqual([whole.rows.map((r) => r.jobId), whole.more, whole.truncated], [["first", "middle", "last"], 0, false], "every member was looked at: the three holds, and the list is whole");
+	assert.deepEqual([quiet.srems, quiet.hgetallCalls.length], [[], 2_000], "nothing was removed, and each member was looked at once");
+	// One member past the bound: the hold there was not looked at, and the read says so.
+	const past = fakeRedis({ ...hashes, "wait:job:beyond": hold(9000) }, { members: [...atBound, "beyond"] });
+	const cut = await readHeldJobs({ url: "redis://x", redisFn: () => past, now: () => NOW, prune: false });
+	assert.deepEqual([cut.rows.map((r) => r.jobId), cut.truncated, past.hgetallCalls.length], [["first", "middle", "last"], true, 2_000], "members remain that nobody looked at, so a hold may be missing");
+	// The measured case: 2,000 stale members beside 4 real holds. The four are listed whatever stands before them.
+	const crowd = fakeRedis({ "wait:job:h1": hold(4000), "wait:job:h2": hold(3000), "wait:job:h3": hold(2000), "wait:job:h4": hold(1000) }, { members: [...stale(1996, "c"), "h1", "h2", "h3", "h4"] });
+	const found = await readHeldJobs({ url: "redis://x", redisFn: () => crowd, now: () => NOW, prune: false });
+	assert.deepEqual([found.rows.map((r) => r.jobId), found.truncated], [["h1", "h2", "h3", "h4"], false]);
+	// A reader that prunes walks the same way, and removes each stale member it looks at, as before.
+	const pruning = fakeRedis({ "wait:job:h1": hold(1000) }, { members: [...stale(300, "d"), "h1"] });
+	const pruned = await readHeldJobs({ url: "redis://x", redisFn: () => pruning, now: () => NOW });
+	assert.deepEqual([pruned.rows.map((r) => r.jobId), pruned.truncated, pruning.srems.length], [["h1"], false, 300]);
+	// No stale member: the one pass it always was. 250 real holds: 200 hydrated, the longest waits listed, and not whole.
+	const many = Object.fromEntries(Array.from({ length: 250 }, (_, i) => [`wait:job:r${i}`, hold(1000 + i)]));
+	const full = fakeRedis(many);
+	const first = await readHeldJobs({ url: "redis://x", redisFn: () => full, now: () => NOW, prune: false });
+	assert.deepEqual([first.rows.length, first.more, first.truncated, full.hgetallCalls.length], [20, 180, true, 200]);
+	// 50 stale members before 400 real holds: the walk stops once it holds 200, having looked at 250, and hydrates no more.
+	const capped = fakeRedis(Object.fromEntries(Array.from({ length: 400 }, (_, i) => [`wait:job:r${i}`, hold(1000 + i)])), { members: [...stale(50, "f"), ...Array.from({ length: 400 }, (_, i) => `r${i}`)] });
+	const top = await readHeldJobs({ url: "redis://x", redisFn: () => capped, now: () => NOW, prune: false });
+	assert.deepEqual([top.rows.length + top.more, top.truncated, capped.hgetallCalls.length], [200, true, 250]);
+	// 150 stale members among 250: every member is looked at, the 100 holds are all found, and the list is whole.
+	const mixed = fakeRedis(Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`wait:job:r${i}`, hold(1000 + i)])), { members: [...stale(150, "e"), ...Array.from({ length: 100 }, (_, i) => `r${i}`)] });
+	const all = await readHeldJobs({ url: "redis://x", redisFn: () => mixed, now: () => NOW, prune: false, limit: 500 });
+	assert.deepEqual([all.rows.length, all.more, all.truncated, mixed.hgetallCalls.length], [100, 0, false, 250]);
+});
+
+test("the fleet reader's held rows walk the same way: a read-only reader lists the real holds behind a crowd of stale members, and removes none (#1036)", async () => {
+	const { createFleetReader } = await import("../src/read-model.mjs");
+	const { tempDir } = await import("./helpers/temp-dir.mjs");
+	const { join } = await import("node:path");
+	const members = [...Array.from({ length: 1996 }, (_, i) => `gone-${i}`), "h1", "h2", "h3", "h4"];
+	const hashes = Object.fromEntries(["h1", "h2", "h3", "h4"].map((id, i) => [`wait:job:${id}`, { since: String(NOW - 1000 * (4 - i)), target: "o/r#1", label: "ci" }]));
+	const queue = (_c, opts) => ({ name: opts?.name ?? "pi-jobs", async isPaused() { return false; }, async getJobCounts() { return {}; }, async getWorkers() { return []; }, async getJobSchedulers() { return []; }, async getActive() { return []; }, async getFailed() { return []; }, async close() {} });
+	const snapshotOver = async (list, readOnly) => {
+		const redis = Object.assign(fakeRedis(hashes, { members: list }), { on() {}, async mget(...keys) { return keys.map(() => null); }, async zrevrangebyscore() { return []; }, async exists() { return 0; } });
+		const logsDir = tempDir("pd-1036-held-walk-");
+		const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 }, { makeQueueFn: queue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => [], nowFn: () => NOW, readOnly });
+		try {
+			const { held } = await reader.snapshot();
+			// The stale members removed (a reader that writes also clears other things of its own, which are not counted here).
+			return [held.rows.map((r) => r.jobId).sort(), held.truncated, redis.srems.filter((id) => String(id).startsWith("gone-")).length];
+		} finally {
+			await reader.dispose();
+		}
+	};
+	assert.deepEqual(await snapshotOver(members, true), [["h1", "h2", "h3", "h4"], false, 0], "the console's reader: the four holds, whole, nothing removed");
+	assert.deepEqual(await snapshotOver([...members, "one-more"], true), [["h1", "h2", "h3", "h4"], true, 0], "past the bound it is not whole");
+	assert.deepEqual(await snapshotOver(members, false), [["h1", "h2", "h3", "h4"], false, 1996], "the panel's reader removes each stale member it looks at, as before");
+});
+
 test("a counters-only hash is not a hold -- it has no clock, so it is neither listed nor cancellable", async () => {
 	const { readHeldJobs } = await import("../src/read-model.mjs");
 	// `noteCheck`/`noteThrottle` deliberately CREATE the hash before any hold is stamped, so a non-empty
@@ -683,7 +750,8 @@ test("the panel's held reader and the tool's cannot diverge on the four things t
 	for (const [what, needle] of [
 		["reads the index rather than scanning the keyspace", "smembers"],
 		["prunes a stale member as it reads", "srem"],
-		["bounds what it hydrates", "HELD_HYDRATE_MAX"],
+		// Since issue #1036 both take the bound and the walk past stale members from one function, so they cannot differ on it.
+		["bounds what it hydrates and what it looks at, by the one walk", "walkHeldIndex("],
 		["reports a truncated index rather than stating a total it cannot know", "truncated"],
 	]) {
 		assert.ok(panelFn.includes(needle), `the panel copy ${what}`);
