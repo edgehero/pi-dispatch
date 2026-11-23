@@ -64,6 +64,9 @@ const states = {
   // not "Nothing is running.", not 0 stalls. Then no snapshot at all.
   "fleet-registry-never-read.operator": () => draw("fleet", { snap: snapshot({ hostBudgets: [], queue: { ...snapshot().queue, counts: { ...snapshot().queueCounts[0].counts }, queues: 1, fleetDegraded: "registry" }, queueCounts: [snapshot().queueCounts[0]], hostsReadAt: null, doctor: { hosts: [], more: 0 }, active: [], activeUnreachable: true, waiting: waiting([], { byQueue: [{ queue: "pi-jobs", inLine: 0, scheduled: 0, truncated: false }] }), schedulerStalls: { "nightly-tidy": null, "pm-weekly": null } }) }),
   "fleet-no-snapshot.viewer": () => draw("fleet", { role: "viewer", fleet: noSnapshotFleet() }),
+  // Issue #1035: the same page for an operator, who gets the kill switch's two forms under the unread sentence, the one
+  // change a page that read nothing offers; the viewer's above has none.
+  "fleet-no-snapshot.operator": () => draw("fleet", { fleet: noSnapshotFleet({}, { pinned: false }) }),
   "fleet-truncated.operator": () => draw("fleet", { snap: snapshot({ waiting: waiting([wait()], { truncated: true }), held: { ...snapshot().held, more: 14 }, failed: { ...snapshot().failed, more: 8 } }) }),
   "fleet-all-reasons.operator": () => draw("fleet", { snap: snapshot({ waiting: waiting(Object.entries(DEFER_WHYS).map(([why, spec], i) => wait({ jobId: `gh-wait-${i}`, why, bucket: spec.bucket, budgetWhy: "memory" }))) }) }),
   "fleet-no-progress.operator": () => draw("fleet", { snap: snapshot({ active: snapshot().active.map((j) => ({ ...j, progress: { absent: true } })) }) }),

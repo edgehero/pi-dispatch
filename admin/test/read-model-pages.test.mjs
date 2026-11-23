@@ -6,7 +6,11 @@ import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { consumersPublished, emptyRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
+import { answeredWith, consumersPublished, discoveryRedis, emptyRedis, noAnswer, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
+import { fleetBar } from "../src/console/panels/fleet.mjs";
+import { overviewHosts, overviewNeeds } from "../src/console/panels/overview.mjs";
+import { killSwitchUnreadForms, pausedState, pausedStateUnknown } from "../src/console/panels/common.mjs";
+import { KILL_SWITCH_UNREAD_TEXT, queueErrorsLine, queueErrorsOf } from "../src/words.mjs";
 import { queueSwitchErrored, queueSwitchUnconfirmed } from "../src/read-model.mjs";
 import { LOOKUP_TOLD_MAX, REFUSALS_TOP, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUNS_WINDOW_PROJECTS_MAX, RUNS_WINDOW_VALUES_MAX, SWITCH_PREVIEW_QUEUES_MAX, SWITCH_SCAN_INCOMPLETE, UNREAD_HOSTS_MAX, WAITING_DISCOVERY_TTL_MS, WAITING_QUEUES_MAX, createFleetReader, fleetQueuesOn, listRunsMerged, readHeldJobs, readHosts, readQueueState, readSchedulers, replyCodeOf, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
 import { spawnSync } from "node:child_process";
@@ -1916,6 +1920,117 @@ function fleetOf1064(state) {
   };
 }
 
+/** The kill switch's forms in a panel's markup, in the order drawn: "fleet-pause", "fleet-resume". */
+const switchForms = (markup) => [...String(markup).matchAll(/data-action="(fleet-(?:pause|resume))"/g)].map((m) => m[1]);
+/** A view of `snapshot` for a panel: an operator's unless `over` says otherwise. */
+const panelView = (snapshot, over = {}) => ({ role: "operator", readOnly: false, now: AT, query: {}, data: { snapshot }, ...over });
+
+// Issue #1035: the bar read `queueCounts` alone, where an errored queue has no row, so over every READ queue paused it
+// said "The fleet is paused" and offered Resume with no Pause; and with no read queue paused, Pause with no Resume.
+test("the Fleet bar and the overview's Hosts head over the five paused states of a fleet with a queue Valkey answered with an error: never the fleet paused over a queue nobody read, the queue named, and both switches whenever a state is not known (#1035)", async () => {
+  const redis = { on() {}, async get() { return null; }, async mget(...keys) { return keys.map(() => null); }, async smembers() { return []; }, async hgetall() { return {}; }, async zrevrangebyscore() { return []; }, async exists() { return 0; }, disconnect() {} };
+  const logsDir = tempDir("pd-1035-bar-");
+  // A run on record, so the overview draws its cards and not the first run's checklist.
+  writeLocal(logsDir, rec("local-1035", AT - MIN));
+  const state = {};
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 }, { makeQueueFn: fleetOf1064(state).queue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts: [{ name: "hosta", routes: "true" }, { name: "hostb", routes: "true" }] }), discoverHostQueuesFn: async () => ({ names: [], incomplete: null }), nowFn: () => AT });
+  const drawn = async (next) => {
+    Object.assign(state, next);
+    const s = await reader.snapshot();
+    const bar = String(fleetBar(panelView(s)));
+    const hosts = String(overviewHosts(panelView(s)));
+    assert.ok(hosts.includes("<h2>Hosts</h2>"), "the Hosts card is drawn");
+    // No write control for a viewer, an agent's session or a read-only console, whatever the state.
+    for (const over of [{ role: "viewer" }, { role: "agent" }, { readOnly: true }]) assert.deepEqual([switchForms(fleetBar(panelView(s, over))), switchForms(overviewHosts(panelView(s, over)))], [[], []], JSON.stringify(over));
+    // A list of the queues that keep starting jobs is drawn only where one does.
+    assert.ok(!bar.includes("Keeps starting jobs: ."), bar);
+    const line = queueErrorsOf(s).length > 0 ? `<p class="muted">${queueErrorsLine(queueErrorsOf(s))}.</p>` : null;
+    assert.equal(line === null ? !bar.includes("Not read, so not in these counts") : bar.includes(line), true, bar);
+    return [/<h2>([^<]*)<\/h2>/.exec(bar)[1], switchForms(bar), switchForms(hosts), pausedStateUnknown(s), String(pausedState(s.queue, true, queueErrorsOf(s).length))];
+  };
+  const both = ["fleet-resume", "fleet-pause"];
+  const bothHosts = ["fleet-pause", "fleet-resume"];
+  try {
+    assert.deepEqual(await drawn({ "pi-jobs": true, "pi-jobs@hosta": true, "pi-jobs@hostb": "errored" }),
+      ["Part paused: 2 of 3 queues are paused, 1 not read", both, bothHosts, true, '<span class="warn">partly paused: a queue that was read is paused, and whether 1 queue that was not read is paused is not known</span>'],
+      "every queue that was read is paused: never the fleet paused, and a Pause for the queue nobody read");
+    assert.deepEqual(await drawn({ "pi-jobs": false, "pi-jobs@hosta": false, "pi-jobs@hostb": "uncounted" }),
+      ["No queue that was read is paused: 1 of 3 not read", both, bothHosts, true, '<span class="warn">no queue that was read is paused, and whether 1 queue that was not read is paused is not known</span>'],
+      "no queue that was read is paused: never the fleet running, and a Resume for the queue nobody read");
+    assert.deepEqual(await drawn({ "pi-jobs": true, "pi-jobs@hosta": false, "pi-jobs@hostb": "errored" }),
+      ["Part paused: 1 of 3 queues are paused, 1 not read", both, bothHosts, true, '<span class="warn">partly paused: a queue that was read is paused, and whether 1 queue that was not read is paused is not known</span>']);
+    assert.deepEqual(await drawn({ "pi-jobs": "errored", "pi-jobs@hosta": "errored", "pi-jobs@hostb": "uncounted" }),
+      ["Queue state not read", both, bothHosts, true, '<span class="warn">no queue that was read is paused, and whether 3 queues that were not read are paused is not known</span>'],
+      "no queue was read");
+    // The controls: read whole. All paused is the fleet paused with Resume alone; a part pause both; running Pause alone.
+    assert.deepEqual(await drawn({ "pi-jobs": true, "pi-jobs@hosta": true, "pi-jobs@hostb": true }),
+      ["The fleet is paused", ["fleet-resume"], ["fleet-resume"], false, '<span class="bad">paused (the kill switch is on)</span>']);
+    assert.deepEqual(await drawn({ "pi-jobs": true, "pi-jobs@hosta": false, "pi-jobs@hostb": false }),
+      ["Part paused: 1 of 3 queues are paused", both, bothHosts, false, `<span class="warn">partly paused: some hosts' queues are paused and others are not</span>`]);
+    assert.deepEqual(await drawn({ "pi-jobs": false, "pi-jobs@hosta": false, "pi-jobs@hostb": false }),
+      ["The fleet is running", ["fleet-pause"], ["fleet-pause"], false, '<span class="good">running</span>']);
+  } finally {
+    await reader.dispose();
+  }
+});
+
+// Issue #1035: a console that could not read the deployment drew no Pause on any page, since both pages that draw the
+// kill switch draw it from a snapshot; and over a registry not read whole the bar offered one switch of the two.
+test("without a snapshot Fleet and the overview's Hosts card offer Pause and Resume under their unread sentence to an operator alone, and over a registry read in part or not at all both switches stay (#1035)", async () => {
+  // No snapshot: the read failed, or the console started on a Valkey that does not answer.
+  for (const snapshot of [null, undefined]) {
+    const bar = String(fleetBar(panelView(snapshot)));
+    const hosts = String(overviewHosts(panelView(snapshot)));
+    assert.ok(bar.includes("<p>The deployment's Valkey could not be read. The next refresh tries again.</p>"), bar);
+    assert.ok(hosts.includes("<h2>Hosts</h2>") && hosts.includes(KILL_SWITCH_UNREAD_TEXT), hosts);
+    for (const out of [bar, hosts]) {
+      assert.deepEqual(switchForms(out), ["fleet-pause", "fleet-resume"], out);
+      assert.ok(out.includes(`<p class="banner__t">${KILL_SWITCH_UNREAD_TEXT}</p>`), out);
+      assert.match(out, /data-action="fleet-pause" autocomplete="off"><button class="btn btn--danger" type="submit">.*?Pause the fleet<\/button>/);
+      assert.match(out, /data-action="fleet-resume" autocomplete="off"><button class="btn btn--paid" type="submit">.*?Resume the fleet<\/button>/);
+    }
+    // The sentence leads; the forms come under it.
+    assert.ok(bar.indexOf("could not be read") < bar.indexOf("data-action"));
+    // Gated on who may act, and on nothing else: a viewer, an agent's session and a read-only console get the sentence alone.
+    for (const over of [{ role: "viewer" }, { role: "agent" }, { readOnly: true }, { role: "unknown" }]) {
+      const unreadBar = String(fleetBar(panelView(snapshot, over)));
+      const unreadHosts = String(overviewHosts(panelView(snapshot, over)));
+      assert.deepEqual([switchForms(unreadBar), switchForms(unreadHosts), unreadBar.includes(KILL_SWITCH_UNREAD_TEXT), unreadHosts.includes(KILL_SWITCH_UNREAD_TEXT), killSwitchUnreadForms(panelView(snapshot, over))], [[], [], false, false, null], JSON.stringify(over));
+      assert.ok(unreadBar.includes("could not be read") && unreadHosts.includes("<h2>Hosts</h2>"));
+    }
+    // The one exception: no other card of the overview offers a change with nothing read.
+    assert.deepEqual(switchForms(overviewNeeds(panelView(snapshot))), []);
+    assert.ok(!String(overviewNeeds(panelView(snapshot))).includes("data-action"));
+  }
+  assert.equal(pausedStateUnknown(null), true);
+  // The real reader over a registry Valkey answers in part, then not at all, with every queue it read running.
+  let how = {};
+  const logsDir = tempDir("pd-1035-registry-");
+  writeLocal(logsDir, rec("local-1035", AT - MIN));
+  let allPaused = false;
+  const make = quietQueue();
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") }, { makeQueueFn: (c, o) => ({ ...make(c, o), isPaused: async () => allPaused }), parseConnectionFn: () => ({}), redisFn: () => discoveryRedis(() => how, { beatAt: AT }), nowFn: () => AT, readOnly: true });
+  const forms = async (next) => {
+    how = next;
+    const s = await reader.snapshot();
+    for (const over of [{ role: "viewer" }, { role: "agent" }, { readOnly: true }]) assert.deepEqual([switchForms(fleetBar(panelView(s, over))), switchForms(overviewHosts(panelView(s, over)))], [[], []]);
+    return [Boolean(s.queue.fleetDegraded), s.queue.registryReadInPart === true, /<h2>([^<]*)<\/h2>/.exec(String(fleetBar(panelView(s))))[1], switchForms(fleetBar(panelView(s))), switchForms(overviewHosts(panelView(s)))];
+  };
+  try {
+    assert.deepEqual(await forms({}), [false, false, "The fleet is running", ["fleet-pause"], ["fleet-pause"]], "the control: a whole read of a running fleet offers Pause alone");
+    assert.deepEqual(await forms({ rows: { "host:h:hostw": answeredWith("WRONGTYPE") } }), [true, true, "The fleet is running", ["fleet-resume", "fleet-pause"], ["fleet-pause", "fleet-resume"]], "a registry read in part: hostw's queue may exist and be paused");
+    assert.deepEqual(await forms({ index: noAnswer }), [true, false, "The fleet is running", ["fleet-resume", "fleet-pause"], ["fleet-pause", "fleet-resume"]], "a registry not read at all");
+    // Every queue that was read is paused: Resume alone over a whole read, and Pause as well over a registry read in
+    // part, for the host's queue the read did not ask.
+    allPaused = true;
+    assert.deepEqual(await forms({}), [false, false, "The fleet is paused", ["fleet-resume"], ["fleet-resume"]]);
+    assert.deepEqual(await forms({ rows: { "host:h:hostw": answeredWith("WRONGTYPE") } }), [true, true, "The fleet is paused", ["fleet-resume", "fleet-pause"], ["fleet-pause", "fleet-resume"]]);
+  } finally {
+    how = {};
+    await reader.dispose();
+  }
+});
+
 // Issue #1064: with a queue left out, "every queue that was read is paused" read as a fleet wholly paused.
 test("createFleetReader: over a queue Valkey answered with an error the fleet is never wholly paused, and partly paused only when a queue that was read is (#1064)", async () => {
   const redis = { on() {}, async get() { return null; }, async mget(...keys) { return keys.map(() => null); }, async smembers() { return []; }, async hgetall() { return {}; }, async zrevrangebyscore() { return []; }, async exists() { return 0; }, disconnect() {} };
@@ -3059,6 +3174,8 @@ test("createFleetReader: a fleet pause reaches every held queue at once and answ
     unreachable: "no answer within 0.08 seconds",
     partial: { done: ["pi-jobs"], failed: "pi-jobs@hostb", error: "no answer within 0.08 seconds", unconfirmed: ["pi-jobs@hostb"], refused: [], notTried: [] },
     incomplete: SWITCH_SCAN_INCOMPLETE,
+    // Issue #1035: a discovery that outlived its bound read nothing, so the short set waits on Valkey.
+    shortCause: { waits: true, errors: [] },
   });
   assert.equal(built.length, 2, "through the held pool: no queue was built for the pause");
   assert.equal(built[1].closed, 0, "a pause that was not answered is left to land");
@@ -3086,10 +3203,10 @@ test("createFleetReader: a fleet pause and resume on a Valkey that does not answ
   await settle();
   assert.deepEqual(asked, ["pause pi-jobs", "pause pi-jobs@hosta"], "the own queue is in the first set a pause flips, sent before discovery could answer");
   const paused = await orHung(pending);
-  assert.deepEqual(paused.results[0].res, { ok: true, paused: true, queues: ["pi-jobs", "pi-jobs@hosta"], incomplete: SWITCH_SCAN_INCOMPLETE }, "and the set is said to be possibly short");
+  assert.deepEqual(paused.results[0].res, { ok: true, paused: true, queues: ["pi-jobs", "pi-jobs@hosta"], incomplete: SWITCH_SCAN_INCOMPLETE, shortCause: { waits: true, errors: [] } }, "and the set is said to be possibly short, for a cause that waits (issue #1035)");
   asked.length = 0;
   const resumed = await orHung(reader.resume());
-  assert.deepEqual(resumed.results[0].res, { ok: true, paused: false, queues: ["pi-jobs", "pi-jobs@hosta"], incomplete: SWITCH_SCAN_INCOMPLETE });
+  assert.deepEqual(resumed.results[0].res, { ok: true, paused: false, queues: ["pi-jobs", "pi-jobs@hosta"], incomplete: SWITCH_SCAN_INCOMPLETE, shortCause: { waits: true, errors: [] } });
   assert.deepEqual(asked, ["resume pi-jobs", "resume pi-jobs@hosta"]);
   await reader.dispose();
   // A resume first, on a console that never paused, whose discovery does not answer: the own queue is left alone, since a
@@ -3171,6 +3288,56 @@ test("createFleetReader: a fleet resume stops at the first queue that does not a
   await reader.dispose();
 });
 
+// Issue #1035: the switch said its set may be short and nothing of why, so every surface said "once Valkey answers",
+// also of `host:live` holding a string, which Valkey answers the same on every press.
+test("createFleetReader: a fleet pause and resume say why their set of queues may be short, from the discovery that named the queues: the key and the code of a read Valkey answered with an error, or that a read got no answer (#1035)", async () => {
+  const answered = answeredWith;
+  const dropped = noAnswer;
+  // The real registry read and the real look for queues, over a client whose reads answer as `how` says now.
+  let how = {};
+  const { mk } = switchQueues();
+  const reader = endingReader(mk, [], { redisFn: () => discoveryRedis(() => how, { beatAt: 1_800_000_000_000 }), readLiveHostsFn: undefined, discoverHostQueuesFn: undefined });
+  const switched = async (next, verb) => {
+    how = next;
+    const res = (await orHung(reader[verb]())).results[0].res;
+    return [Boolean(res.blind), Boolean(res.incomplete), res.shortCause ?? null];
+  };
+  try {
+    for (const verb of ["pause", "resume"]) {
+      assert.deepEqual(await switched({}, verb), [false, false, null], `${verb}: a whole discovery is not short and names no cause`);
+      assert.deepEqual(await switched({ index: answered("WRONGTYPE") }, verb), [true, false, { waits: false, errors: [{ key: "host:live", code: "WRONGTYPE" }] }], `${verb}: the index holds another kind of value`);
+      assert.deepEqual(await switched({ index: dropped }, verb), [true, false, { waits: true, errors: [] }], `${verb}: the index got no answer`);
+      assert.deepEqual(await switched({ rows: { "host:h:hostw": answered("NOPERM") } }, verb), [true, false, { waits: false, errors: [{ key: "host:h:hostw", code: "NOPERM" }] }], `${verb}: one row, by its own key`);
+      assert.deepEqual(await switched({ rows: { "host:h:hostw": answered("BUSY"), "host:h:hosta": answered("WRONGTYPE") } }, verb), [true, false, { waits: false, errors: [{ key: "host:h:hosta", code: "WRONGTYPE" }, { key: "host:h:hostw", code: "BUSY" }] }], `${verb}: the key of another type before the passing state`);
+      assert.deepEqual(await switched({ scan: answered("NOPERM") }, verb), [false, true, { waits: false, errors: [{ key: null, code: "NOPERM" }] }], `${verb}: the look for queues, which has no key of its own`);
+      assert.deepEqual(await switched({ scan: dropped }, verb), [false, true, { waits: true, errors: [] }], `${verb}: the look for queues got no answer`);
+      assert.deepEqual(await switched({ index: answered("LOADING"), scan: dropped }, verb), [true, true, { waits: true, errors: [{ key: "host:live", code: "LOADING" }] }], `${verb}: both, one answered and one not`);
+    }
+  } finally {
+    how = {};
+    await reader.dispose();
+  }
+  // A registry reader handed in that says its listing is in part and names no host: nothing says what those rows were
+  // answered, so that read waits, beside the look for queues Valkey answered with an error.
+  const unnamed = endingReader(mk, [], { redisFn: () => discoveryRedis(() => ({ scan: answered("NOPERM") }), { beatAt: 1_800_000_000_000 }), readLiveHostsFn: async () => ({ hosts: [{ name: "hosta", routes: "true" }], incomplete: "1 of 2 host rows not read" }), discoverHostQueuesFn: undefined });
+  try {
+    assert.deepEqual((await orHung(unnamed.pause())).results[0].res.shortCause, { waits: true, errors: [{ key: null, code: "NOPERM" }] });
+  } finally {
+    await unnamed.dispose();
+  }
+  // Twenty of twenty-three rows Valkey answers with an error are kept and the rest counted. The row that holds
+  // another kind of value is the last by name, and is kept first: the cut takes the passing ones, never the cause
+  // that stays.
+  const hosts = Array.from({ length: 23 }, (_, i) => `h${String(i).padStart(2, "0")}`);
+  const many = endingReader(mk, [], { redisFn: () => discoveryRedis(() => ({ rows: Object.fromEntries(hosts.map((h) => [`host:h:${h}`, answered(h === "h22" ? "WRONGTYPE" : "BUSY")])) }), { hosts, beatAt: 1_800_000_000_000 }), readLiveHostsFn: undefined, discoverHostQueuesFn: undefined });
+  try {
+    const cause = (await orHung(many.pause())).results[0].res.shortCause;
+    assert.deepEqual([cause.waits, cause.errors.length, cause.errors[0], cause.errors[1], cause.errors[19], cause.more], [false, 20, { key: "host:h:h22", code: "WRONGTYPE" }, { key: "host:h:h00", code: "BUSY" }, { key: "host:h:h18", code: "BUSY" }, 3]);
+  } finally {
+    await many.dispose();
+  }
+});
+
 test("createFleetReader: a fleet resume whose discovery does not answer names the queues it holds beyond the registry's as not tried (#842)", async () => {
   let frozen = false;
   const { asked, mk } = switchQueues(() => (frozen ? never() : Promise.resolve()));
@@ -3190,6 +3357,7 @@ test("createFleetReader: a fleet resume whose discovery does not answer names th
     unreachable: null,
     partial: { done: [], failed: "pi-jobs", error: "no answer within 0.08 seconds", unconfirmed: ["pi-jobs"], refused: [], notTried: ["pi-jobs@hostb", "pi-jobs@stopped"] },
     incomplete: SWITCH_SCAN_INCOMPLETE,
+    shortCause: { waits: true, errors: [] },
   });
   frozen = false;
   await reader.dispose();
@@ -3512,7 +3680,8 @@ test("createFleetReader: a fleet pause names a held queue discovery no longer fi
   asked.length = 0;
   registry = () => Promise.resolve({ unreachable: "registry down" });
   const resumed = (await reader.resume()).results[0].res;
-  assert.deepEqual(resumed, { ok: true, paused: false, queues: ["pi-jobs", "pi-jobs@hostb", "pi-jobs@stopped"], blind: "registry down" });
+  // A registry that says it could not be read and gives no code of a reply got no answer: it waits (issue #1035).
+  assert.deepEqual(resumed, { ok: true, paused: false, queues: ["pi-jobs", "pi-jobs@hostb", "pi-jobs@stopped"], blind: "registry down", shortCause: { waits: true, errors: [] } });
   assert.deepEqual(asked, ["resume pi-jobs", "resume pi-jobs@hostb", "resume pi-jobs@stopped"]);
   await reader.dispose();
 });

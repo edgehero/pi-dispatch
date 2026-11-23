@@ -848,7 +848,7 @@ readers ([Live updates](#live-updates)).
 | `/parked` | A card for each run waiting for an answer: who asked (the run, linked to its page), how long it has waited, its project, a link to where the question was asked, its forge and how many times the session was resumed, and where to read the question (on its issue or pull request, or on its run page while the live transcript is kept); the card never shows the question itself. Then how it can be answered: being answered by a run (linked), not known, an answer box, or why it cannot be answered here ([A parked run](#outcomes-and-reasons)). |
 | `/parked/rules` | Operators only: the answer rules, read only, as `triggers.json` declares them ([Answer rules](answer-rules.md)). |
 | `/insights?range=30d` | Spend's five linked views: Spend, Budget split (`/insights/budget-split`), Capacity (`/insights/capacity`), Breakdown (`/insights/breakdown`) and Flows map (`/insights/flows`, also `view=list`). All are viewer-readable, drawn once per load, with supported range/project/path choices preserved. Budget split actions and plan reasons are operator-only. See [Spend views](insights.md). |
-| `/fleet` | Pulse fleet state and queue switches, active and orphaned jobs, held conditions, failed jobs and bulk actions, all waiting jobs within the bounded read, schedules, hosts, doctor and a short venue comparison. Part paused names which queues still start jobs. Differing console and deployment Valkeys are disclosed on page load. |
+| `/fleet` | Pulse fleet state and queue switches, active and orphaned jobs, held conditions, failed jobs and bulk actions, all waiting jobs within the bounded read, schedules, hosts, doctor and a short venue comparison. Part paused names which queues still start jobs. The heading says the fleet is paused only when every queue was read and is paused: a queue Valkey answered with an error is counted as not read and named with what Valkey answered ("Part paused: 2 of 3 queues are paused, 1 not read", "No queue that was read is paused: 1 of 3 not read"), never taken as paused or as running. Pause the fleet is offered unless the whole fleet is known paused, Resume the fleet once any of it is, and both whenever some queue's state is not known: a queue answered with an error, no queue read, or a host registry not read whole. With nothing read at all the bar still offers an operator both ([The overview](#the-overview)). Differing console and deployment Valkeys are disclosed on page load. |
 | `/fleet/host?name=build3` | One host's heartbeat, running and waiting jobs, orphan cleanup guidance, retained workspaces, slots and budgets, seven-day capacity, registry and doctor. The host facts update live; capacity is read when the page opens. |
 | `/fleet/venue?name=podman` | One venue's capabilities, all fourteen isolation declarations and asserters, every published applicable floor, host observations, credential custody and four-venue comparison. Read once, with no runtime probes. |
 | `/triggers` | Every rule as "when this happens, run that", with filters, a week of schedules, spend by rule and tabs for Rules and Watch. |
@@ -1005,7 +1005,12 @@ answers is read as before: a page takes its longest chain of reads, and only a c
 6 seconds is cut. While Valkey stays down, a page says "not known" for what it could not read and still shows what the
 deployment's files hold: a host page says the hosts could not be read rather than that the host has gone, Set up counts
 the steps it could not judge as not known, Triggers lists the file's rules without their next fires, Configuration shows
-its files read-only, and Parked and Sandboxes show no count of what they did not read. The same holds for one read
+its files read-only, and Parked and Sandboxes show no count of what they did not read. A page that could not read the
+deployment offers no change, with one exception, the kill switch: Fleet and the overview's Hosts card still show an
+operator **Pause the fleet** and **Resume the fleet** under their sentence, with "The kill switch works without a read:
+a pause reaches every queue it finds, and its answer names them." A Valkey that stopped answering is when the fleet has
+to be stopped, and the switch needs no read of the page's: a console started during the outage had no Pause on any page.
+A viewer and an agent's session see no form there, and a read-only console draws none. The same holds for one read
 that failed beside others that worked: a Configuration tab shows no count for a file it could not read, Set up says
 Not known for the trigger and forge steps when the triggers file cannot be read, and Sandboxes offers no New sandbox
 button when its report was not read. And "could not be read" is said only of a read that failed: a pause-windows file
@@ -1050,7 +1055,7 @@ A change that timed out before it left the console is not made when Valkey retur
 stopped answering may or may not have been made, and the confirm and its audit row say so. Adopting or undoing a package and
 ending a sandbox shell say it too, and an End request that may still stand is taken back. With Valkey unreachable, Adopt and
 Undo say that, not that someone changed the package. On a Valkey that stopped answering, the kill switch answers within about 6 seconds for a pause and 12 for a
-resume (9 measured), and its preview waits at most 6 seconds for the fleet's counts before a pause and 10 before a resume. It names the
+resume (9 measured), and its preview waits at most 2 seconds for the fleet's counts before a pause and 10 before a resume, so a pause is previewed and answered in about 8 seconds (7 to 8 measured; 11 to 12 while the preview waited 6), and the `dispatch_pause` tool, which previews once, in about 8 as well (16 while it previewed twice). It names the
 queues it knows are paused (or resumed), those not confirmed, whose pause or resume was sent and may or may not have been made, and those it
 did not try, since a resume stops at the first queue that does not answer. A queue whose pause or resume Valkey answered with an
 error is read back and named with what it reads now ("answered with an error for pi-jobs (reads paused now)"): the error can come
@@ -1061,8 +1066,8 @@ applied; not confirmed is for a read that got no answer. The answer then starts 
 that whatever the Valkey's address. When the host registry or the look for queues could not be read whole, the list of queues it
 switched may be short. The answer then starts by saying so, beside a pause that was sent and may or may not have been made and a pause
 Valkey answered with an error, so the audit row keeps each of them, and ends with what to do: other queues may exist and were not
-paused, so pause the fleet again once Valkey answers. It says so even when every queue it found was paused, then in the banner after "Paused the fleet", and the
-audit log keeps it in a second row on the same ticket; the `/dispatch` panel and command, the agent tools and `pi-dispatch pause` say it
+paused. What to do depends on why the list is short. A read that got no answer, or host rows not read in time, wait on Valkey: pause the fleet again once Valkey answers. A read Valkey answered with an error does not: the answer names the key that was read (`host:live`, a host's row such as `host:h:hostw`, or the look for queues) and the code of the reply, and says what that code supports ([what an error reply's code means](service.md#what-an-error-replys-code-means)). For a key that holds another kind of value, or a permission this Valkey user lacks: "Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again" (or "fix this Valkey user's ACL"). For a Valkey that was busy or loading: "A later read may succeed: pause the fleet again". For any other code, to pause again once the list can be read whole, with no claim about waiting. When one read was answered with an error and another got no answer, it says both. The preview says the host registry could not be read whole on a line of its own, with what Valkey answered. It says so even when every queue it found was paused, then in the banner after "Paused the fleet", and the
+audit log keeps it in a second row on the same ticket (for an agent's session one closed word: `queues-may-be-short`, or `queues-may-be-short-key` and `queues-may-be-short-permission` where the cause is one waiting does not end); the `/dispatch` panel and command, the agent tools (whose answer then carries `queuesShortLasting`, "key" or "permission", beside `queuesMayBeShort`) and `pi-dispatch pause` say it
 too. A console started while Valkey does not answer knows only `pi-jobs`, so a pause also goes to this host's own queue,
 `pi-jobs@<name>`, when the deployment's `.env` sets `PI_WORKER_NAME`, the name the worker service runs. None is added when the `.env`
 names none or when the console's (or pi's) own environment sets another name, and the preview says why when the `.env` could not
@@ -1267,7 +1272,10 @@ Under them, the [timeline](#the-overviews-timeline) spans the page. Below it, th
   when it cannot say, and "as last seen" when the registry could not be read. Beside it, whether the fleet is paused
   (or, when only some of its queues are, how many: "Partly paused: 2 host queues", "Partly paused: the shared queue", or
   both; the Waitlists' Queues line and each host's row name them), and **Pause fleet** until the whole fleet is paused,
-  **Resume fleet** once any of it is (so a fleet partly paused offers both, as Fleet does). A worker is online when its
+  **Resume fleet** once any of it is (so a fleet partly paused offers both, as Fleet does), and both whenever some
+  queue's state is not known: a queue Valkey answered with an error, no queue read, or a host registry not read whole.
+  When the card could not read the deployment at all, it says so and still offers an operator Pause the fleet and
+  Resume the fleet under that sentence, the one change a page that read nothing offers. A worker is online when its
   host checked in within the last minute (every worker checks in every 15 seconds). When none has and the queue sees no
   worker connected either, the card starts with "No worker online: jobs queue but nothing runs them", with a link to
   Fleet. A host's check-in age is how long ago Valkey last refreshed the host's registry row, which every check-in does,

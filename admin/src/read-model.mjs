@@ -78,9 +78,9 @@ import { JOB_FIELD, META_FIELD, QUEUE_KEY, SCHEDULER_ID_MAX, SCHEDULER_ID_RE, SC
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
-import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, passwordDeclinedOf, refusedDatabaseOf, replyErrorCode, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_COMMAND_TIMEOUT_MS, VALKEY_CONTEXT_KEYS, REPLY_ERROR_CLASSES, replyErrorClass, REPLY_CODES_BY_CLASS } from "@edgehero/pi-dispatch/connection";
+import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, passwordDeclinedOf, refusedDatabaseOf, replyErrorCode, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_COMMAND_TIMEOUT_MS, VALKEY_CONTEXT_KEYS, replyErrorClass, REPLY_CODES_BY_CLASS } from "@edgehero/pi-dispatch/connection";
 import { pointerState } from "./deployment-pointer.mjs";
-import { UNREAD_HOSTS_MAX, hostErrorsShown, readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
+import { HOST_SET, UNREAD_HOSTS_MAX, hostErrorsShown, hostKey, readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { readDoctorResults } from "@edgehero/pi-dispatch/doctor-results";
 import { CAPACITY_WINDOWS, computeCapacity } from "@edgehero/pi-dispatch/capacity";
 import { readCapacityRecords } from "@edgehero/pi-dispatch/capacity-records";
@@ -128,7 +128,7 @@ import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT } from "@edg
 // Issue #710: what counts as a refusal on the overview is what both surfaces call one; issue #737: a failure too.
 // A record reason as every surface carries it (issue #737): `recordReason`, the worker's own token charset (its
 // import-free leaf), else null. The one door: no reader here hands out a record's reason another way.
-import { OUTCOME_KEYS, OUTCOME_WORDS, outcomeKey, outcomeWord, recordReason, rowNumber, SWITCH_READ_UNKNOWN } from "./words.mjs";
+import { erroredReadWords, OUTCOME_KEYS, OUTCOME_WORDS, outcomeKey, outcomeWord, recordReason, rowNumber, SWITCH_READ_UNKNOWN } from "./words.mjs";
 import { outcomeNote } from "./loaded-words.mjs";
 
 // Re-exported so the command layer reaches the key contract through the admin's single worker-coupling
@@ -541,16 +541,49 @@ async function flipQueues({ paused, names, queueOf, stepMs, steps = new Map(), l
  * a queue may be switched, or partly. `blind` (the registry could not be read)
  * and `incomplete` (the keyspace scan did not finish) ride both shapes: the set of queues itself may be short.
  */
-function switchOutcome({ paused, names, steps, blind = null, incomplete = null }) {
+function switchOutcome({ paused, names, steps, blind = null, incomplete = null, shortCause = null }) {
   const of = (state) => names.filter((n) => steps.get(n)?.state === state);
   const done = of("done");
-  const short = { ...(blind ? { blind } : {}), ...(incomplete ? { incomplete } : {}) };
+  // `shortCause` (issue #1035, `shortCauseOf`): what the discovery behind a short set did not read, and how.
+  const short = { ...(blind ? { blind } : {}), ...(incomplete ? { incomplete } : {}), ...((blind || incomplete) && shortCause ? { shortCause } : {}) };
   if (done.length === names.length) return { ok: true, paused, queues: done, ...short };
   const failed = names.find((n) => steps.get(n)?.state !== "done");
   const error = steps.get(failed)?.error ?? "not tried";
   const errored = names.filter((n) => steps.get(n)?.state === "errored").map((queue) => ({ queue, reads: steps.get(queue).reads }));
   return { unreachable: error, partial: { done, failed, error, unconfirmed: of("unconfirmed"), refused: of("refused"), notTried: names.filter((n) => !steps.has(n)), ...(errored.length > 0 ? { errored } : {}) }, ...short };
 }
+
+/**
+ * WHY a kill switch's set of queues may be short (issue #1035), as its outcome carries it (`shortCause`):
+ * `{ waits, errors, more }`. The three reads of its discovery each fail in one of two ways. No answer (the index, or
+ * the look for queues, did not answer; a host's row was not read in time) waits on Valkey: `waits`. An error reply is
+ * an answer, kept by the key that was read and the reply's code: `errors`, `{ key, code }`, `host:live` for the index,
+ * a host's row key, or null for the look for queues, which has no key of its own; a key of another type and a
+ * permission first (`replyErrorClass`), at most `UNREAD_HOSTS_MAX` with `more` counting the rest. Null when nothing
+ * is short. `rows` are the registry's hosts not read (`{ name, error }`), `rowsUnnamed` a registry read in part that
+ * does not say which (a registry reader handed to the fleet reader that lists no host: it waits, since nothing says
+ * what its rows were answered). Every answer said "once Valkey answers" before, also over `host:live` holding a
+ * string, which Valkey answers the same on every press.
+ */
+function shortCauseOf({ registryUnread = false, registryError = null, rows = [], rowsUnnamed = false, scanIncomplete = false, scanError = null } = {}) {
+  const errors = [];
+  let waits = rowsUnnamed === true;
+  const read = (key, error) => {
+    if (replyCodeOf(error) !== null) errors.push({ key, code: replyCodeOf(error) });
+    else waits = true;
+  };
+  if (registryUnread) read(HOST_SET, registryError);
+  // In the listing's order, which the registry read gives by name.
+  for (const row of rows) read(hostKey(row.name), row.error);
+  if (scanIncomplete) read(null, scanError);
+  if (errors.length === 0 && !waits) return null;
+  const order = ["key", "permission", "other", "passing"];
+  errors.sort((a, b) => order.indexOf(replyErrorClass(a.code)) - order.indexOf(replyErrorClass(b.code)));
+  return { waits, errors: errors.slice(0, UNREAD_HOSTS_MAX), ...(errors.length > UNREAD_HOSTS_MAX ? { more: errors.length - UNREAD_HOSTS_MAX } : {}) };
+}
+
+/** A switch whose discovery read nothing itself (it threw, or outlived its bound): it waits on Valkey. */
+const SHORT_CAUSE_WAITS = Object.freeze({ waits: true, errors: Object.freeze([]) });
 
 /**
  * This host's own queue (issue #964): `pi-jobs@<name>` when `env` DECLARES `PI_WORKER_NAME`, by the worker's own rule
@@ -729,27 +762,15 @@ export function replyCodeOf(value) {
 }
 
 /**
- * What a sentence may say of ONE read of `key` that Valkey answered with `code` (issue #1036), by the code's class and
- * nothing past it (`replyErrorClass`, whose table is in the worker's connection.mjs): `said`, the key and the code;
- * `first`, what has to be put right before anything else, for a class that lasts, else null (a key of another type is
- * removed or repaired; a permission is the Valkey user's ACL, never the key); `again`, whether "try again" is true,
- * which it is of a passing class alone; `lasting`, the class's own true, false or null; `waiting`, the clause the class
- * allows about waiting, or null. The words every admin surface that names a remedy builds its sentence from (the
- * trigger edit's gate, `dispatch_cancel`'s refusal, the `/dispatch` panel), so that an ACL user without HGETALL is
- * never told to remove a sound key, and a Valkey that was busy for a moment is never called a cause waiting does not end.
- */
-/**
  * What an error reply's code means, in one sentence for a text that cannot ask the table case by case (a tool's
  * description, which a model reads before it sees any code). Built from the worker's own lists
  * (`REPLY_CODES_BY_CLASS`), so a code that joins a class there is named here with it.
  */
 export const REPLY_CODE_MEANING = `What a code means: ${REPLY_CODES_BY_CLASS.key.join(", ")}, the key holds another kind of value and has to be removed or repaired; ${REPLY_CODES_BY_CLASS.permission.join(", ")}, this deployment's Valkey user lacks a permission (its ACL) and no key is at fault; ${REPLY_CODES_BY_CLASS.passing.join(", ")}, Valkey could not serve the read then and a later call may read it; any other code says no more than itself. Only the first two last until someone puts them right.`;
 
-export function erroredReadWords(key, code) {
-  const cls = replyErrorClass(code);
-  const { lasting, waiting } = REPLY_ERROR_CLASSES[cls];
-  return { class: cls, lasting, waiting, said: `Valkey answers ${key} with ${code}`, first: cls === "key" ? "Remove or repair that key first" : cls === "permission" ? "Fix this Valkey user's ACL first" : null, again: cls === "passing" };
-}
+// The words for one read Valkey answered with an error are the words module's (`erroredReadWords`), handed on here
+// for the callers that import this module.
+export { erroredReadWords };
 
 /**
  * The hosts of a registry listing read in part whose rows were not read (`readLiveHosts`' `unreadHosts`), each with
@@ -874,6 +895,13 @@ export async function setQueuePaused({ url, paused, alsoNames = [], makeQueueFn 
     // every surface over it can say the set may be short.
     const found = await readFleetQueues({ url, redisFn, timeoutMs });
     const { blind, incomplete } = found;
+    // Why the set may be short (issue #1035): the index, each row not read, and the look for queues, each as an error
+    // reply's code or as a read that got no answer.
+    const shortCause = shortCauseOf({
+      registryUnread: Boolean(blind) && found.blindPartial !== true, registryError: found.shortErrors?.registry,
+      rows: found.blindPartial === true ? (Array.isArray(found.unreadHosts) ? found.unreadHosts : []).map((name) => ({ name, error: found.hostErrors?.[name] ?? null })) : [],
+      scanIncomplete: Boolean(incomplete), scanError: found.shortErrors?.scan,
+    });
     // A resume takes none of them: a queue discovery did not find does not exist, has nothing to resume, and a queue built
     // to resume it would write its meta key.
     const names = paused ? unionQueueNames(found.names, (Array.isArray(alsoNames) ? alsoNames : []).filter((n) => typeof n === "string" && n !== "")) : found.names;
@@ -892,7 +920,7 @@ export async function setQueuePaused({ url, paused, alsoNames = [], makeQueueFn 
         return q;
       },
     });
-    return switchOutcome({ paused, names, steps, blind, incomplete });
+    return switchOutcome({ paused, names, steps, blind, incomplete, shortCause });
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
@@ -5317,7 +5345,8 @@ export function createFleetReader(
     const existing = Array.isArray(got) ? got : Array.isArray(got?.names) ? got.names : [];
     const whole = Array.isArray(got) || (Array.isArray(got?.names) && (got.incomplete === null || got.incomplete === undefined));
     const found = unionQueueNames(registryNames, existing);
-    return { names: unionQueueNames([...found, ...ownHere()], []), incomplete: whole ? null : SWITCH_SCAN_INCOMPLETE, found: new Set(found) };
+    // `scanError` (issue #1035): the code of the reply when Valkey answered the look for queues with an error.
+    return { names: unionQueueNames([...found, ...ownHere()], []), incomplete: whole ? null : SWITCH_SCAN_INCOMPLETE, found: new Set(found), scanError: whole ? null : replyCodeOf(got?.error) };
   };
 
   const queuesNamed = (names) => names.map(queueNamed);
@@ -5392,17 +5421,24 @@ export function createFleetReader(
     // flipped: read off the reader's variable after the flips, it was whatever a snapshot beside this switch had read
     // by then. A discovery that threw or outlived its bound read nothing itself, and the reader's last word stands.
     let blind;
+    // Why the set may be short (issue #1035), from the same discovery: its registry read's view and its scan.
+    const causeOf = (found) => (found.view
+      ? shortCauseOf({ registryUnread: found.view.degraded !== null && !found.view.partial, registryError: found.view.error, rows: found.view.partial ? found.view.unread : [], rowsUnnamed: found.view.partial && found.view.unread.length === 0, scanIncomplete: Boolean(found.incomplete), scanError: found.scanError })
+      : SHORT_CAUSE_WAITS);
+    let shortCause;
     if (paused) {
       const held = [...new Set([...lastNames, ...pool.keys(), ...own])];
       const first = flip(held);
       const found = await discover();
       blind = found.view ? found.view.degraded : fleetDegraded;
+      shortCause = causeOf(found);
       await Promise.all([first, flip(found.names.filter((n) => !held.includes(n)))]);
       names = [...found.names, ...held.filter((n) => !found.names.includes(n))];
       incomplete = found.incomplete;
     } else {
       const found = await discover();
       blind = found.view ? found.view.degraded : fleetDegraded;
+      shortCause = causeOf(found);
       const named = found.found instanceof Set ? found.names.filter((n) => found.found.has(n)) : found.names;
       // A discovery that was short (the registry or the scan unread) is filled from the queues this reader holds,
       // each named by an earlier discovery: they are resumed after the ones it did name, or named as not tried.
@@ -5410,7 +5446,7 @@ export function createFleetReader(
       incomplete = found.incomplete;
       await flip(names);
     }
-    return switchOutcome({ paused, names, steps, blind, incomplete });
+    return switchOutcome({ paused, names, steps, blind, incomplete, shortCause });
   };
   // This host's own queue goes with the plan's deployment Valkey alone (`killSwitchSet`'s `alsoNames`, issue #964): to the
   // pool when that is this reader's, else to the one-shot switch of the other.

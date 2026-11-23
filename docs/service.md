@@ -41,11 +41,16 @@ From any terminal:
   (no answer, or an error from Valkey), the report names the queue as not resumed and the command exits 1. When the shell sets another name, or sets one the
   `.env` does not, or the `.env` cannot be read, the line says so (`[this host's queue not added: ...]`) and leaves that queue out. When the registry or the look could not be read
   (`[registry unreadable: ...]`, `[queue scan incomplete]`), or some of the registry's host rows were not read in time
-  (`[registry incomplete: 2 of 3 host rows not read]`), a second line says the list of queues may be short and to pause (or resume)
-  again once Valkey answers; the exit code stays 0. A host row Valkey answered with an error (its key is not a hash) is one of
-  those rows, and the words name it with what Valkey answered: `[registry incomplete: 1 of 3 host rows not read, of which
-  Valkey answered with an error: hostw (WRONGTYPE)]`. What to do about such a row depends on the code
-  ([what an error reply's code means](#what-an-error-replys-code-means)), and `pi-dispatch doctor` says it row by row. The registry's rows are read side by side within one bound, so a
+  (`[registry incomplete: 2 of 3 host rows not read]`), a second line says the list of queues may be short and what to do,
+  by why it is short; the exit code stays 0. A read that got no answer, or rows not read in time, wait on Valkey: "Pause the
+  fleet again once Valkey answers". A read Valkey answered with an error does not wait on anything: the line names the key
+  (`host:live`, a host's row, or the look for queues) and the reply's code, and says what the code supports
+  ([what an error reply's code means](#what-an-error-replys-code-means)): "Valkey answers host:h:hostw with WRONGTYPE. Waiting
+  does not change that: remove or repair that key, then pause again", "fix this Valkey user's ACL" for a permission, "A
+  later read may succeed" for a Valkey that was busy or loading, and no claim for any other code. Both are said when one
+  read was answered with an error and another got no answer. A host row Valkey answered with an error (its key is not a hash) is one of
+  those rows, and the first line's words name it with what Valkey answered: `[registry incomplete: 1 of 3 host rows not read, of which
+  Valkey answered with an error: hostw (WRONGTYPE)]`. `pi-dispatch doctor` says it row by row. The registry's rows are read side by side within one bound, so a
   Valkey that holds them costs that bound once, however many hosts are registered, and leaves the rest of the five
   seconds for the writes.
   Both wait about five seconds on a Valkey, as `status` does. When a queue is not confirmed, the command exits 1
@@ -114,12 +119,14 @@ gets its own five seconds. `status --target` waits the same way; a queue that di
 `unavailableQueues` with `complete: false`, and its exit code stays 0.
 
 When the host registry or the look for queues could not be read whole, the list of queues may be short: a queue it did not
-find is in none of the sums. The line then has `queuesMayBeShort: true`, and a `warning:` line under it says so and to run
-`pi-dispatch status` again once Valkey answers. Registry rows that were not read in time count the same, and the line
+find is in none of the sums. The line then has `queuesMayBeShort: true`, and a `warning:` line under it says so and what
+to do, as `pause` does: to run `pi-dispatch status` again once Valkey answers where a read got no answer, and where Valkey
+answered a read with an error, the key, the reply's code and what the code supports ("Valkey answers host:live with
+WRONGTYPE. Waiting does not change that: remove or repair that key, then run pi-dispatch status again"). Registry rows that were not read in time count the same, and the line
 names them in `fleetIncomplete` ("2 of 3 host rows not read"), as `fleet` names a registry that could not be read. That alone does not change the exit code; a queue it found that did not
 answer still does. `status --target` says the same. A host row Valkey answered with an error is one of them: `fleetIncomplete`
 names it, and `hostErrors` gives each such host with the code of Valkey's reply (`{"hostw":"WRONGTYPE"}`), on both lines: at most
-20 hosts, in name order, with `hostErrorsMore` counting the rest. Whether the next run reads the row depends on the code.
+20 hosts, in name order, with `hostErrorsMore` counting the rest. Whether the next run reads the row depends on the code, and the `warning:` line says which.
 
 ### What an error reply's code means
 

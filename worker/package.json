@@ -200,6 +200,7 @@
     "./job-data-version": "./src/job-data-version.mjs",
     "./retention": "./src/retention.mjs",
     "./record-reason": "./src/record-reason.mjs",
+    "./reply-error-class": "./src/reply-error-class.mjs",
     "./watch-contract": "./src/watch-contract.mjs",
     "./watch-store": "./src/watch-store.mjs",
     "./watch-decision": "./src/watch-decision.mjs",

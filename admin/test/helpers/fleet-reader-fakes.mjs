@@ -159,3 +159,26 @@ export function registryKeys(rows) {
   for (const [name, row] of Object.entries(rows)) keys[hostKey(name)] = { name, ...consumersPublished(), ...row };
   return keys;
 }
+
+/** A read Valkey ANSWERS WITH AN ERROR, as its client rejects it: a reply whose first word is `code`. */
+export const answeredWith = (code) => () => Promise.reject(Object.assign(new Error(`${code} said by Valkey about the key`), { name: "ReplyError" }));
+
+/** A read that got NO ANSWER: the connection failed under it. */
+export const noAnswer = () => Promise.reject(new Error("Connection is closed."));
+
+/**
+ * `keyedRedis` over a registry of `hosts` (live, beating at `beatAt`) whose three discovery reads answer as `how()`
+ * says at each call (issue #1035), so one client serves a test that changes what Valkey answers: `index`, the
+ * registry's `host:live`; `rows`, a host's row by its key; `scan`, the look for queues. Each is a function giving the
+ * reply (`answeredWith`, `noAnswer`, or one that never settles); a read `how()` does not name answers well.
+ */
+export function discoveryRedis(how, { hosts = ["hosta", "hostw"], beatAt = Date.now() } = {}) {
+  const base = keyedRedis(registryKeys(Object.fromEntries(hosts.map((name) => [name, { routes: "true", beatAt: String(beatAt) }]))));
+  return {
+    ...base,
+    status: "ready",
+    smembers: (key) => (key === HOST_SET && how().index ? how().index() : base.smembers(key)),
+    hgetall: (key) => (how().rows?.[key] ? how().rows[key]() : base.hgetall(key)),
+    scan: (...args) => (how().scan ? how().scan() : base.scan(...args)),
+  };
+}

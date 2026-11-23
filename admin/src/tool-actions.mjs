@@ -6,7 +6,8 @@ import { hostname } from "node:os";
 import * as rm from "./read-model.mjs";
 import * as plans from "./write-plans.mjs";
 import { agentReadProjection } from "./agent-read.mjs";
-import { actionNamed, AGENT_QUEUES_SHORT } from "./console/actions.mjs";
+import { actionNamed, agentShortWord } from "./console/actions.mjs";
+import { switchShortCauseSentence } from "./words.mjs";
 import { authorizeTransition } from "./action-policy.mjs";
 import { agentActor, panelAudit, auditedWrite, AUDIT_REFUSAL } from "./audited-write.mjs";
 import { readJobsData } from "./console/job-data.mjs";
@@ -115,6 +116,8 @@ export function toolWriteResult(result, { action, out } = {}) {
   if (result?.warning || result?.touchWarning) value.warning = "tracking-incomplete";
   // Issue #964: a fleet pause or resume that switched every queue it knew over a set of queues that may be short.
   if (result?.queuesMayBeShort === true) value.queuesMayBeShort = true;
+  // Issue #1035: where the set is short for a cause that waiting does not end, the class of Valkey's error reply.
+  if (result?.queuesMayBeShort === true && ["key", "permission"].includes(result?.queuesShortLasting)) value.queuesShortLasting = result.queuesShortLasting;
   return value;
 }
 
@@ -125,11 +128,16 @@ export function toolWriteResult(result, { action, out } = {}) {
  * when it may. "Once Valkey answers" only where a switch was sent and not answered (`sent`): a queue a Valkey that
  * answers refused, or answered with an error, is a matter of looking at the fleet. Never the console's own sentence,
  * which names queues and a Valkey's address.
+ *
+ * `cause` (issue #1035, `switchShortCause`): where the list is short because Valkey answered a read with an error, a
+ * sentence says which key and with what code, and what that code's class supports: what to put right first for a key
+ * of another type or a permission, which waiting does not change; that a later read may succeed for a passing state;
+ * nothing more for any other code. A cause that only waits adds nothing: the closing words already say what waits.
  */
-export function switchPartialRefusal(paused, short, sent, errored = false) {
+export function switchPartialRefusal(paused, short, sent, errored = false, cause = null) {
   const verb = paused ? "paused" : "resumed";
   const noun = paused ? "pause" : "resume";
-  return `The fleet ${noun} did not reach every queue, so some queues may be ${verb} and others not${errored ? `, and Valkey answered a ${noun} with an error, which can come after the queue was ${verb}` : ""}${short ? `, and the list of queues may be short, so other queues may exist and were not ${verb}` : ""}. ${sent ? `An operator can look at the fleet in the console and ${noun} it again once Valkey answers.` : `An operator can look at the fleet in the console before trying the ${noun} again.`}`;
+  return `The fleet ${noun} did not reach every queue, so some queues may be ${verb} and others not${errored ? `, and Valkey answered a ${noun} with an error, which can come after the queue was ${verb}` : ""}${short ? `, and the list of queues may be short, so other queues may exist and were not ${verb}` : ""}.${short ? switchShortCauseSentence(paused, cause) : ""} ${sent ? `An operator can look at the fleet in the console and ${noun} it again once Valkey answers.` : `An operator can look at the fleet in the console before trying the ${noun} again.`}`;
 }
 
 /** The grant is captured at extension registration, never reconstructed from deployment configuration. */
@@ -196,7 +204,11 @@ export async function executeToolAction(name, params, rawCtx, { paths, env, gran
       const message = out.plan?.message ?? (out.summary ?? []).slice(1).join("\n");
       if (!(await toolCtx.ui.confirm(String(title), `${message}\nUndo: ${undoText}`))) return { applied: false, reason: "operator declined" };
     }
-    const fresh = await action.preview(request.body, ctx);
+    // What may have changed since the preview, read again before the write: the action's own `recheck` where it has
+    // one (issue #1035: the fleet's pause and resume reread the plan's refusal alone, where a second preview waited a
+    // snapshot's whole bound again on a Valkey that does not answer, before the kill switch was sent), else a second
+    // preview, compared with the first.
+    const fresh = typeof action.recheck === "function" ? await action.recheck(out, request.body, ctx) : await action.preview(request.body, ctx);
     if (fresh?.refusal || fresh?.unchanged || fingerprint(fresh) !== fingerprint(out)) throw publicToolRefusal("the action changed since its preview; preview and confirm it again");
     const rechecked = judge(fresh);
     if (!rechecked.ok) throw publicToolRefusal(rechecked.refusal);
@@ -228,11 +240,11 @@ export async function executeToolAction(name, params, rawCtx, { paths, env, gran
       };
     }
     // Issue #964: a switch that landed over a set of queues that may be short gets its second `ok` row, the closed word.
-    const note = (r) => (r?.queuesMayBeShort === true ? AGENT_QUEUES_SHORT : null);
+    const note = (r) => (r?.queuesMayBeShort === true ? agentShortWord(r) : null);
     const result = action.bulk ? await action.apply(out, ctx) : await auditedWrite({ audit, actor, kind: action.kind, target: fresh.target, beforeDigest: fresh.beforeDigest, afterDigest: fresh.afterDigest, reserve: fresh.reserve?.dollarsMicros ?? null, failure, note }, () => action.apply(out, ctx));
     if (bulkWarning) result.warning = "tracking-incomplete";
     if (result?.invalid === AUDIT_REFUSAL) throw publicToolRefusal(AUDIT_REFUSAL);
-    if (result?.partial === true && (action.name === "fleet-pause" || action.name === "fleet-resume")) throw publicToolRefusal(switchPartialRefusal(action.name === "fleet-pause", result.queuesMayBeShort === true, result.sentUnconfirmed === true, result.answeredWithError === true));
+    if (result?.partial === true && (action.name === "fleet-pause" || action.name === "fleet-resume")) throw publicToolRefusal(switchPartialRefusal(action.name === "fleet-pause", result.queuesMayBeShort === true, result.sentUnconfirmed === true, result.answeredWithError === true, result.shortCause ?? null));
     if (!result?.ok && !(action.name === "priorities-set" && result?.outcome === "refused")) throw new Error(result?.invalid ?? result?.refused ?? "the action could not be applied");
     return toolWriteResult(result, { action: action.name, out: fresh });
   } finally {

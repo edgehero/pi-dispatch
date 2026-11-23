@@ -18,8 +18,8 @@ const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const indexMod = await jiti.import(fileURLToPath(new URL("../src/index.ts", import.meta.url)));
 const { createDashboardDeps, makeDashboard, withAuditedWrites, switchCommandHalf, switchCommandLost, switchFailure, switchUnconfirmed } = await jiti.import(fileURLToPath(new URL("../src/dashboard.ts", import.meta.url)));
-const { keyedRedis, quietQueue } = await import("./helpers/fleet-reader-fakes.mjs");
-const { switchShortNote } = await import("../src/words.mjs");
+const { answeredWith, discoveryRedis, keyedRedis, noAnswer, quietQueue } = await import("./helpers/fleet-reader-fakes.mjs");
+const { switchShortLead, switchShortNote } = await import("../src/words.mjs");
 
 const ACTOR = { name: "rob", role: "panel", session: null };
 /** Every row in `logsDir`'s audit chain, oldest first (the month follows the wall clock here, so every file is read). */
@@ -342,6 +342,73 @@ test("auditedWrite's note: a second ok row with the reason on the same ticket, o
   const flaky = { append: (row) => { n += 1; if (n === 2) throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); return row; } };
   assert.deepEqual(auditedWrite({ audit: flaky, actor: ACTOR, kind: "fleet-pause", target: "fleet", note, log: (l) => logs.push(l) }, () => ({ ok: true, short: true })), { ok: true, short: true });
   assert.match(logs.join("\n"), /^panel: audit append failed \(ENOSPC\) for what a fleet-pause write that landed had to say; the log's rows for ticket [0-9a-f]{12} say ok without it$/);
+});
+
+// Issue #1035: the note and its row said "once Valkey answers" of every short list, also where Valkey had answered a
+// read with an error that stays until a key or the ACL is put right.
+test("the TUI's p and r over a list that is short because Valkey answered a read with an error say the key, the code and what its class supports, in the note, the second ok row and a part-way switch's lead (#1035)", async () => {
+  const CASES = [
+    ["a key of another type", { index: answeredWith("WRONGTYPE") }, "the list of queues may be short: Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused", "the list of queues may be short (Valkey answers host:live with WRONGTYPE: remove or repair that key first), so other queues may exist and were not switched; "],
+    ["a permission on one row", { rows: { "host:h:hostw": answeredWith("NOPERM") } }, "the list of queues may be short: Valkey answers host:h:hostw with NOPERM. Waiting does not change that: fix this Valkey user's ACL, then pause again; other queues may exist and were not paused", "the list of queues may be short (Valkey answers host:h:hostw with NOPERM: fix this Valkey user's ACL first), so other queues may exist and were not switched; "],
+    ["a passing state", { scan: answeredWith("LOADING") }, "the list of queues may be short: Valkey answers the look for queues with LOADING. A later read may succeed: pause the fleet again; other queues may exist and were not paused", "the list of queues may be short (Valkey answers the look for queues with LOADING: a later read may succeed), so other queues may exist and were not switched; "],
+    ["a code of no class", { index: answeredWith("READONLY") }, "the list of queues may be short: Valkey answers host:live with READONLY. Pause the fleet again once the list can be read whole; other queues may exist and were not paused", "the list of queues may be short (Valkey answers host:live with READONLY), so other queues may exist and were not switched; "],
+    ["no answer", { index: noAnswer }, switchShortNote(true), switchShortLead()],
+    ["an error reply and a read with no answer", { index: answeredWith("NOAUTH"), scan: noAnswer }, "the list of queues may be short: Valkey answers host:live with NOAUTH. Waiting does not change that: fix this Valkey user's ACL. Another read got no answer: pause the fleet again once Valkey answers and that is put right; other queues may exist and were not paused", "the list of queues may be short (Valkey answers host:live with NOAUTH: fix this Valkey user's ACL first; another read got no answer), so other queues may exist and were not switched; "],
+  ];
+  const kept = (text) => [...text].slice(0, 200).join("");
+  for (const [what, reads, note, lead] of CASES) {
+    const logsDir = tempDir("pd-1035-tui-");
+    const audit = makeConsoleAudit({ logsDir });
+    const make = quietQueue();
+    const paths = { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") };
+    let flip = () => Promise.resolve();
+    // The real reader through the panel's own factory, over a client whose discovery reads answer as `reads` says.
+    const real = createDashboardDeps(paths, { makeQueueFn: (c, o) => ({ ...make(c, o), pause: () => flip(o?.name ?? "pi-jobs"), resume: () => flip(o?.name ?? "pi-jobs") }), parseConnectionFn: () => ({}), redisFn: () => discoveryRedis(() => reads), readOnly: true, switchStepTimeoutMs: 80, closeTimeoutMs: 30 });
+    const deps = withAuditedWrites({ ...real, now: () => Date.UTC(2026, 10, 21) }, (opts, fn) => auditedWrite({ ...opts, audit, actor: ACTOR }, fn));
+    const comp = makeDashboard({ paths: {}, done() {}, tui: { requestRender() {} }, intervalMs: 100000, deps });
+    try {
+      await new Promise((r) => setImmediate(r));
+      const said = async (key, ms = 60) => {
+        comp.handleInput(key);
+        await new Promise((r) => setTimeout(r, ms));
+        return comp.render(600).map(stripAnsi).join("\n");
+      };
+      const resumeNote = note.replace("Pause the fleet again", "Resume the fleet again").replace("pause the fleet again", "resume the fleet again").replace("then pause again", "then resume again").replace("were not paused", "were not resumed");
+      assert.ok((await said("p")).includes(`paused the fleet, but ${note}`), `${what}: ${await said("")}`);
+      assert.ok((await said("r")).includes(`resumed the fleet, but ${resumeNote}`), what);
+      assert.deepEqual(rowsOf(logsDir).map((r) => [r.kind, r.outcome, r.reason ?? null]), [["fleet-pause", "ok", null], ["fleet-pause", "ok", kept(note)], ["fleet-resume", "ok", null], ["fleet-resume", "ok", kept(resumeNote)]], what);
+      // Part-way: the shared queue's pause is sent and never answered, so the note leads with the short list and why.
+      flip = (name) => (name === "pi-jobs" ? new Promise(() => {}) : Promise.resolve());
+      const lost = await said("p", 400);
+      assert.ok(lost.includes(`pause failed: ${lead}NOT CONFIRMED for pi-jobs: the switch may or may not have been made there; known switched: `), `${what}: ${lost}`);
+      assert.ok(rowsOf(logsDir).at(-1).reason.startsWith(kept(lead).trimEnd()), what);
+      assert.doesNotMatch(`${note} ${lead}`, /refus/i, what);
+    } finally {
+      await comp.dispose();
+    }
+  }
+});
+
+test("the /dispatch command's half-switch and lost-answer lines lead with why the list is short, from the real one-shot switch over a registry key Valkey answers with an error (#1035)", async () => {
+  const { setQueuePaused } = await import("../src/read-model.mjs");
+  const refusedBeforeTheScript = () => Promise.reject(Object.assign(new Error("NOPERM User op has no permissions to run the 'evalsha' command"), { name: "ReplyError" }));
+  const lead = "the list of queues may be short (Valkey answers host:live with WRONGTYPE: remove or repair that key first), so other queues may exist and were not switched; ";
+  const switched = (pause) => setQueuePaused({ url: "redis://unused", paused: true, alsoNames: ["pi-jobs@hosta"], makeQueueFn: (_c, o) => ({ client: Promise.resolve({ status: "ready", once() {} }), pause: () => pause(o?.name ?? "pi-jobs"), async resume() {}, async isPaused() { return false; }, async close() {}, disconnect() {} }), parseConnectionFn: () => ({}), redisFn: () => discoveryRedis(() => ({ index: answeredWith("WRONGTYPE") })), timeoutMs: 600, stepTimeoutMs: 80, closeTimeoutMs: 30 });
+  // The shared queue refuses its pause before the script runs: a half switch with no lost answer.
+  const half = await switched((name) => (name === "pi-jobs" ? refusedBeforeTheScript() : Promise.resolve()));
+  assert.deepEqual([half.partial.refused, half.partial.unconfirmed, half.shortCause], [["pi-jobs"], [], { waits: false, errors: [{ key: "host:live", code: "WRONGTYPE" }] }]);
+  assert.equal(switchUnconfirmed(half.partial, true, null), null, "no lost answer: the half-switch line says it");
+  assert.equal(switchCommandHalf(true, "", half), `${lead}paused pi-jobs@hosta but FAILED at pi-jobs: the deployment is half paused`);
+  assert.equal(switchFailure({ results: [{ shown: "redis://a:6379", res: half }] }), `${lead}FAILED at pi-jobs on redis://a:6379, so the deployment is half switched`);
+  // The shared queue's pause is sent and never answered: a lost answer.
+  let keep = setInterval(() => {}, 20);
+  try {
+    const lost = await switched((name) => (name === "pi-jobs" ? new Promise(() => {}) : Promise.resolve()));
+    assert.equal(switchCommandLost(true, "", lost), `pause: ${lead}NOT CONFIRMED for pi-jobs: the switch may or may not have been made there; known switched: pi-jobs@hosta`);
+    assert.equal(switchFailure({ results: [{ shown: "redis://a:6379", res: lost }] }), `${lead}NOT CONFIRMED for pi-jobs: the switch may or may not have been made there; known switched: pi-jobs@hosta on redis://a:6379`);
+  } finally {
+    clearInterval(keep);
+  }
 });
 
 test("the TUI's p and r over a real fleet reader whose registry does not answer: the note says the list of queues may be short, and so does a second ok row (#964)", async () => {

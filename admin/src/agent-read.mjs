@@ -49,6 +49,9 @@ export function agentReadProjection(value, key = "", depth = 0) {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value === "string") {
     if (key === "fleetError") return replyCode(value);
+    // Issue #1035: beside `queuesMayBeShort` in a fleet pause's or resume's answer, the class of the error reply that
+    // makes the list short for a cause waiting does not end. One of two closed words, anything else left out.
+    if (key === "queuesShortLasting") return value === "key" || value === "permission" ? value : undefined;
     if (key === "mirror") return value === "off" ? "off" : /unreachable/.test(value) ? "unreachable" : "bounded";
     if (key === "folder" || ["scope", "members"].includes(key) && /^(?:\/|[A-Za-z]:[\\/])/.test(value)) { const name = basename(value); return ID.test(name) ? name : null; }
     if (/Usd$/.test(key) || key === "cap") return /^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(value) ? value : null;

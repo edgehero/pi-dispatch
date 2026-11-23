@@ -10,7 +10,9 @@ import { gitDirty, localRepoProblem } from "./git-dirty.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 import { modelIdProblem, providerIdProblem } from "./model-ref.mjs";
 import { refusedBeforeScript } from "./bullmq-internals.mjs";
+import { REPLY_ERROR_CLASSES, replyErrorClass } from "./reply-error-class.mjs";
 import { cliDeploymentEnv, deploymentServiceEnv } from "./service-env.mjs";
+import { WORKER_NAME_RE } from "./worker-name.mjs";
 
 // Issue #804: `cliDeploymentEnv` lives in service-env.mjs, where `service restart --drain` reads it too (service.mjs
 // must not import this entry module). Re-exported so every caller that took it from here keeps working.
@@ -618,7 +620,7 @@ async function targetStatus(item, url, { env, write, label, urlShown, valkeyRefu
 	const { hostErrorsShown } = await import("./host-registry.mjs");
 	const refused = await valkeyRefusal(url, env, { deadlineAt: deadline.at });
 	if (refused) return fail(refused);
-	const { names, blind, registryShort, hostErrors, incomplete } = await deploymentQueueNames(url, controlClients, deadline.within);
+	const { names, blind, registryShort, hostErrors, incomplete, shortCause } = await deploymentQueueNames(url, controlClients, deadline.within);
 	const queues = [];
 	// Past the deadline no queue is built, as in `killSwitch`, which says why.
 	const spent = deadline.spent();
@@ -629,7 +631,7 @@ async function targetStatus(item, url, { env, write, label, urlShown, valkeyRefu
 		// `queuesMayBeShort` and the sentence as plain `status` has them (issue #1043): `complete` is false for a cut read
 		// too, so it alone does not say that a queue may be missing from the list.
 		write(`${JSON.stringify({ ...(label ? { valkey: urlShown(url) } : {}), ...read, ...(degraded ? { complete: false, discoveryIncomplete: true, queuesMayBeShort: true } : {}), ...(blind ? { fleet: blind } : {}), ...(registryShort ? { fleetIncomplete: registryShort } : {}), ...hostErrorsShown(hostErrors) })}\n`);
-		if (degraded) process.stderr.write(`warning: ${label}${statusShortNote(true)}\n`);
+		if (degraded) process.stderr.write(`warning: ${label}${statusShortNote(true, shortCause)}\n`);
 	} catch (error) {
 		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${urlShown(url)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${error.message}`);
 	} finally {
@@ -659,24 +661,90 @@ async function deploymentQueueNames(url, controlClients, within = (ms) => ms) {
 	probe.disconnect?.();
 	// `registryShort`: the registry's rows not read (issue #1062), which `killSwitch` names the same way; `hostErrors`,
 	// those of them Valkey answered with an error, each with its code (issue #1036, `registryHostErrors`).
-	return { names: unionQueueNames(fleetQueueNames(fleet?.hosts), existing.names), blind: fleet?.unreachable ?? null, registryShort: fleet?.unreachable ? null : fleet?.incomplete ?? null, hostErrors: registryHostErrors(fleet), incomplete: Boolean(existing?.incomplete), existing };
+	return { names: unionQueueNames(fleetQueueNames(fleet?.hosts), existing.names), blind: fleet?.unreachable ?? null, registryShort: fleet?.unreachable ? null : fleet?.incomplete ?? null, hostErrors: registryHostErrors(fleet), incomplete: Boolean(existing?.incomplete), existing, shortCause: killSwitchShortCause(fleet, existing) };
 }
 
 /**
- * The fleet's sentence for a pause or resume whose set of queues may be short (issue #964): the console's
- * `switchShortNote` (admin/src/words.mjs), held equal to it by a test, since the CLI does not import the admin.
+ * WHY the list of queues may be short (issue #1035), from the two reads behind it (`readLiveHosts`' answer and the look
+ * for queues'): null when both were whole, else `{ waits, errors, more, lasting }`, the console's `switchShortCause`
+ * (admin/src/words.mjs) for the same state. A read that got NO ANSWER, and host rows NOT READ IN TIME, wait on Valkey
+ * (`waits`). A read Valkey ANSWERED WITH AN ERROR is kept by the key that was read and the reply's code (`errors`:
+ * `host:live`, a host's row key, or null for the look for queues), by its code's class a key of another type first,
+ * then a permission, then any other code, then a passing state, at most twenty with `more` counting the rest;
+ * `lasting` is the first one's class when it lasts. Every short line said "once Valkey answers" before, also with
+ * `host:live` holding a string, which Valkey answers the same on every run.
  */
-export function killSwitchShortNote(paused) {
-	return `the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not ${paused ? "paused" : "resumed"}. ${paused ? "Pause" : "Resume"} the fleet again once Valkey answers`;
+export function killSwitchShortCause(fleet, existing) {
+	const errors = [];
+	let waits = false;
+	const read = (key, code) => {
+		if (typeof code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(code)) errors.push({ key, code, class: replyErrorClass(code) });
+		else waits = true;
+	};
+	if (fleet?.unreachable) read("host:live", fleet.error);
+	else if (fleet?.incomplete) {
+		const codes = fleet.hostErrors !== null && typeof fleet.hostErrors === "object" ? fleet.hostErrors : {};
+		// A worker's name only (the registry's own rule), so a member that is none never reaches a line as a key; a
+		// listing that says it is short and names no such host waits, since nothing says what it was answered. In the
+		// listing's order, which the registry read gives by name.
+		const names = (Array.isArray(fleet.unreadHosts) ? fleet.unreadHosts : []).filter((name) => typeof name === "string" && WORKER_NAME_RE.test(name));
+		if (names.length === 0) waits = true;
+		else for (const name of names) read(`host:h:${name}`, codes[name]);
+	}
+	if (existing?.incomplete) read(null, existing.error);
+	if (errors.length === 0 && !waits) return null;
+	const order = ["key", "permission", "other", "passing"];
+	errors.sort((a, b) => order.indexOf(a.class) - order.indexOf(b.class));
+	const first = errors[0] ?? null;
+	return { waits, errors: errors.slice(0, 20), more: Math.max(0, errors.length - 20), lasting: first !== null && REPLY_ERROR_CLASSES[first.class].lasting === true ? first.class : null };
+}
+
+/**
+ * The parts of a short list's sentence (issue #1035), the console's `switchShortParts` word for word: whether a read
+ * is named, why the list is short, what to do (`again`, the next step in the middle of a sentence; `thenAgain`, the
+ * same after a remedy, where the kill switch says it shorter), what it leaves (`rest`), and the count of the reads not
+ * named. With no read answered with an error the sentence waits on Valkey, as
+ * it always did. Over one that was, the key and the code, then what the code's class supports (`replyErrorClass`): for
+ * a key of another type or a permission, "Waiting does not change that" with its remedy; for a passing state, that a
+ * later read may succeed; for any other code, no claim.
+ */
+function shortParts(again, rest, cause, thenAgain = again) {
+	const Again = `${again.charAt(0).toUpperCase()}${again.slice(1)}`;
+	const named = Array.isArray(cause?.errors) && cause.errors.length > 0 ? cause.errors[0] : null;
+	if (named === null) return { named: false, why: "the host registry or the look for queues could not be read whole", advice: `${Again} once Valkey answers`, rest, tail: "" };
+	const cls = replyErrorClass(named.code);
+	const said = `Valkey answers ${named.key ?? "the look for queues"} with ${named.code}`;
+	const { waiting } = REPLY_ERROR_CLASSES[cls];
+	const others = cause.errors.length - 1 + (Number.isSafeInteger(cause.more) && cause.more > 0 ? cause.more : 0);
+	const tail = others > 0 ? ` (${others} more ${others === 1 ? "read was" : "reads were"} answered with an error)` : "";
+	const remedy = cls === "key" ? "remove or repair that key" : cls === "permission" ? "fix this Valkey user's ACL" : null;
+	if (remedy !== null) return { named: true, why: said, advice: cause.waits === true ? `${waiting}: ${remedy}. Another read got no answer: ${again} once Valkey answers and that is put right` : `${waiting}: ${remedy}, then ${thenAgain}`, rest, tail };
+	if (cause.waits === true) return { named: true, why: `${said}, and another read got no answer`, advice: `${Again} once Valkey answers`, rest, tail };
+	if (cls === "passing") return { named: true, why: said, advice: `${waiting}: ${again}`, rest, tail };
+	return { named: true, why: said, advice: `${Again} once the list can be read whole`, rest, tail };
+}
+
+/** A short list's sentence from its parts: the remedy before what it leaves, so a cut line keeps what to put right. */
+const shortSentence = (p) => (p.named ? `the list of queues may be short: ${p.why}. ${p.advice}; ${p.rest}${p.tail}` : `the list of queues may be short: ${p.why}, so ${p.rest}. ${p.advice}`);
+
+/**
+ * The fleet's sentence for a pause or resume whose set of queues may be short (issue #964), by its cause (issue #1035,
+ * `killSwitchShortCause`): the console's `switchShortNote` (admin/src/words.mjs), held equal to it by a test over every
+ * cause, since the CLI does not import the admin.
+ */
+export function killSwitchShortNote(paused, cause = null) {
+	// "then pause again" after a remedy, as the console says it: its audit row keeps 200 code points of this sentence.
+	return shortSentence(shortParts(`${paused ? "pause" : "resume"} the fleet again`, `other queues may exist and were not ${paused ? "paused" : "resumed"}`, cause, `${paused ? "pause" : "resume"} again`));
 }
 
 /**
  * `status`'s sentence for a line whose list of queues may be short (issue #1043), the fleet's (`killSwitchShortNote`,
  * issue #964) for a read: the queues it did not find are in none of its sums (`target`: `status --target`, none of its
- * jobs and windows), and what to do.
+ * jobs and windows), and what to do, by the cause (issue #1035): "once Valkey answers" for a read that got no answer,
+ * and for one Valkey answered with an error what its code's class supports.
  */
-export function statusShortNote(target) {
-	return `the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and ${target ? "the line above leaves out what they hold" : "the sums above leave them out"}. Run pi-dispatch status again once Valkey answers`;
+export function statusShortNote(target, cause = null) {
+	return shortSentence(shortParts("run pi-dispatch status again", `other queues may exist and ${target ? "the line above leaves out what they hold" : "the sums above leave them out"}`, cause));
 }
 
 /**
@@ -815,7 +883,9 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	const span = `${names.length > 1 ? ` [${names.length} queues]` : ""}${blind ? ` [registry unreadable: ${blind}]` : ""}${registryShort ? ` [registry incomplete: ${registryShort}]` : ""}${existing?.incomplete ? " [queue scan incomplete]" : ""}${ownNote}`;
 	// What a set that may be short means, and what to do (issue #964), under the line of a switch that confirmed every
 	// queue it found; the exit code stays 0, as the console answers that switch. `switchReport` says it otherwise.
-	const short = blind || registryShort || existing?.incomplete ? `\n${label}  but ${killSwitchShortNote(cmd === "pause")}` : "";
+	// Why it may be short (issue #1035): a read that got no answer waits on Valkey, one answered with an error does not.
+	const shortCause = killSwitchShortCause(fleet, existing);
+	const short = blind || registryShort || existing?.incomplete ? `\n${label}  but ${killSwitchShortNote(cmd === "pause", shortCause)}` : "";
 	const queues = [];
 	// Once the deadline is spent (a Valkey that answered nothing to the PING) no queue is built: a queue closed in
 	// the tick it was built is closed while its socket is still opening, and ioredis then prints the ready check that
@@ -837,7 +907,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 			// switch that confirmed every queue it found, is not: it is said (`short`, issue #964), as the console says it over
 			// its answer that the fleet was paused.
 			if (steps.some((step) => step.state !== "confirmed") || ownUnread.length > 0) {
-				return fail(switchReport({ cmd, shown: urlShown(url), names: [...names, ...ownUnread.map(({ name }) => name)], steps: [...steps, ...ownUnread.map(({ why, answered }) => ({ state: "not-sent", why, ...(answered ? { answered: true } : {}) }))], blind, registryShort, incomplete: Boolean(existing?.incomplete), ownNote }));
+				return fail(switchReport({ cmd, shown: urlShown(url), names: [...names, ...ownUnread.map(({ name }) => name)], steps: [...steps, ...ownUnread.map(({ why, answered }) => ({ state: "not-sent", why, ...(answered ? { answered: true } : {}) }))], blind, registryShort, incomplete: Boolean(existing?.incomplete), ownNote, shortCause }));
 			}
 			write(`${label}${cmd === "pause" ? `paused: worker will stop taking new jobs (jobs still enqueue)${span}` : `resumed${span}`}${short}\n`);
 		} else {
@@ -881,7 +951,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 			const errored = Object.keys(codes).length > 0 ? { queueErrors: codes } : {};
 			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i] === true) } : {}), ...counts, ...(unread.length > 0 ? { partial: true, unavailableQueues: unread, ...errored } : {}), ...(listMayBeShort ? { queuesMayBeShort: true } : {}), ...(blind ? { fleet: blind } : {}), ...(registryShort ? { fleetIncomplete: registryShort } : {}), ...hostErrorsShown(registryHostErrors(fleet)), waitingDetails: waiting, consumers, pollers };
 			write(`${JSON.stringify(out)}\n`);
-			if (listMayBeShort) process.stderr.write(`warning: ${label}${statusShortNote(false)}\n`);
+			if (listMayBeShort) process.stderr.write(`warning: ${label}${statusShortNote(false, shortCause)}\n`);
 			// The line is printed with what was read, and the exit code says status could not read what it exists to say, as
 			// it does for a Valkey that refuses the connection: a queue answered with an error is a queue it found and did
 			// not read, the same exit 1 (issue #1053). "Is it running?" only when nothing at all answered.
@@ -1008,7 +1078,7 @@ async function switchQueues(queues, cmd, left, seconds) {
  * `killSwitchShortNote`) under the reads named on the first line as a whole switch's line names them; and what to do
  * next. `ownNote` is this host's queue that could not be added, as the whole switch's line says it.
  */
-function switchReport({ cmd, shown, names, steps, blind = null, registryShort = null, incomplete = false, ownNote = "" }) {
+function switchReport({ cmd, shown, names, steps, blind = null, registryShort = null, incomplete = false, ownNote = "", shortCause = null }) {
 	const done = `${cmd}d`;
 	const lines = names.map((name, i) => {
 		const { state, why, reads } = steps[i];
@@ -1020,7 +1090,7 @@ function switchReport({ cmd, shown, names, steps, blind = null, registryShort = 
 	});
 	// A write that Valkey answered with an error may have applied, so it counts as sent here, as one never answered does.
 	if (!steps.some((step) => ["confirmed", "unconfirmed", "errored"].includes(step.state))) lines.push("nothing changed");
-	if (blind || registryShort || incomplete) lines.push(killSwitchShortNote(cmd === "pause"));
+	if (blind || registryShort || incomplete) lines.push(killSwitchShortNote(cmd === "pause", shortCause));
 	// "Once Valkey answers" only where something waits on it: a write not answered, a read back that did not answer, or a
 	// connection that did not come up. A refusal or an error is Valkey's answer, a read back it answered with an error
 	// included, and so is an error reply to the look for this host's queue (`answered`, issue #1042): the next step is

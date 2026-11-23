@@ -20,14 +20,14 @@ import { buildRecord, makeRecordWriter, sanitizeJobId } from "@edgehero/pi-dispa
 import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
 import { requestSandboxEnd } from "@edgehero/pi-dispatch/sandbox-sessions";
 import { ENVELOPE_EXPECTED_LINES, PACKAGE_MOVED_SENTENCE, PACKAGE_NOT_TAKEN_SENTENCE, UPDATES_UNREAD_SENTENCE } from "../src/console/actions.mjs";
-import { switchPartialWords, actionNamed, agentFailure, AGENT_QUEUES_SHORT, AGENT_REFUSED, AGENT_UNCONFIRMED, PAUSE_SNAPSHOT_TIMEOUT_MS, START_USED } from "../src/console/actions.mjs";
+import { switchPartialWords, actionNamed, agentFailure, AGENT_QUEUES_SHORT, AGENT_QUEUES_SHORT_LASTING, agentShortWord, AGENT_REFUSED, AGENT_UNCONFIRMED, PAUSE_SNAPSHOT_TIMEOUT_MS, START_USED } from "../src/console/actions.mjs";
 import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueErroredRefusal, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_ERRORED_LINE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, SWITCH_UNREAD_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { CONFIRM_SLOT_ID, doneBannerHtml, PARTIAL_NOTE } from "../src/console/confirm-view.mjs";
 import { html } from "../src/console/html.mjs";
-import { fieldNamed, QUEUE_ERRORS_NAMED, queueErrorsLead, queueErrorsLine, switchShortNote, UNNAMED_FIELD } from "../src/words.mjs";
-import { keyedRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
+import { fieldNamed, QUEUE_ERRORS_NAMED, queueErrorsLead, queueErrorsLine, switchShortCause, switchShortNote, switchShortThen, UNNAMED_FIELD } from "../src/words.mjs";
+import { answeredWith, discoveryRedis, keyedRedis, noAnswer, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
 import { FLASH_MAX_BYTES, makeSessionStore } from "../src/console/sessions.mjs";
 import { makeLoginLimiter } from "../src/console/guards.mjs";
 import { readJobsData } from "../src/console/job-data.mjs";
@@ -5775,8 +5775,8 @@ test("a priorities plan or a revert that Valkey stops answering while it has onl
   }
 });
 
-test("the pause preview waits six seconds for its snapshot, the resume ten (#961)", async () => {
-  assert.deepEqual([PAUSE_SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_MS], [6_000, 10_000]);
+test("the pause preview waits two seconds for its snapshot, the resume ten (#961, #1035)", async () => {
+  assert.deepEqual([PAUSE_SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_MS], [2_000, 10_000]);
   const { paths } = deployment();
   // A snapshot that never answers: the pause is previewed without it, at the bound this console was given.
   const fleet = { snapshot: () => new Promise(() => {}) };
@@ -5787,6 +5787,156 @@ test("the pause preview waits six seconds for its snapshot, the resume ten (#961
   assert.ok(Date.now() - t0 < 3000, `${Date.now() - t0} ms`);
   assert.ok(p.json().summary.includes(SWITCH_UNREAD_LINES.pause), p.text);
   assert.equal(SWITCH_UNREAD_LINES.pause, "The queues and running, delayed and held counts could not be read; a pause still reaches every queue the kill switch finds, and its answer says when the list of queues may be short");
+});
+
+// Issue #1035: the six seconds were waited in full on a Valkey that answers nothing, which is when the kill switch is
+// pressed, and through the tool they were waited twice.
+test("a pause on a Valkey that never answers is previewed at two seconds by the clock, without its snapshot, and a resume waits its ten (#1035)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const settled = async (promise) => {
+    let done = false;
+    promise.then(() => { done = true; }, () => { done = true; });
+    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    return done;
+  };
+  const ctx = () => ({ a: { fleet: { snapshot: () => new Promise(() => {}) }, paths: { valkeyUrl: "redis://h/0" }, urlShown: (u) => u } });
+  const pause = actionNamed("fleet-pause").preview({}, ctx());
+  t.mock.timers.tick(1_999);
+  assert.equal(await settled(pause), false, "not before the bound");
+  t.mock.timers.tick(1);
+  assert.equal(await settled(pause), true, "at two seconds");
+  const out = await pause;
+  assert.ok(out.summary.includes(SWITCH_UNREAD_LINES.pause), JSON.stringify(out.summary));
+  assert.equal(out.refusal, undefined, "previewed without its counts, never refused");
+  const resume = actionNamed("fleet-resume").preview({}, ctx());
+  t.mock.timers.tick(9_999);
+  assert.equal(await settled(resume), false, "a resume keeps the ten: what it starts is read from the snapshot");
+  t.mock.timers.tick(1);
+  assert.equal(await settled(resume), true);
+  assert.ok((await resume).summary.includes(RESUME_WAITING_UNKNOWN.timeout));
+});
+
+// Issue #1035: a preview without a snapshot said "Undo: Resume the fleet" twice, its own line and the confirm view's.
+test("a pause previewed without a snapshot says its Undo once, as one previewed with it does (#1035)", async () => {
+  const { paths } = deployment();
+  const undoLines = (res) => [res.json().summary.filter((line) => /^Undo:/.test(line)).length, (res.json().html.match(/Undo: /g) ?? []).length];
+  const unread = await start({ paths, a: { fleet: { snapshot: () => new Promise(() => {}) }, pauseSnapshotTimeoutMs: 40 } });
+  const without = await unread.act("fleet-pause", {});
+  assert.equal(without.status, 200, without.text);
+  assert.ok(without.json().summary.includes(SWITCH_UNREAD_LINES.pause));
+  assert.deepEqual(undoLines(without), [0, 1], "no line of its own: the confirm view says the action's Undo");
+  assert.ok(without.json().html.includes("Undo: <b>Resume the fleet</b>"), without.json().html);
+  const read = await start({ paths, a: { fleet: { snapshot: async () => ({ queueCounts: [{ queue: "pi-jobs", paused: false, counts: { active: 0, delayed: 0 } }], held: { rows: [] }, queue: {} }) } } });
+  assert.deepEqual(undoLines(await read.act("fleet-pause", {})), [0, 1]);
+});
+
+/**
+ * The real fleet reader over a Valkey client whose discovery reads answer as `how()` says now (issue #1035): `index`,
+ * the registry's `host:live`; `rows`, a host's row by its key; `scan`, the look for queues. The registry holds `hosta`
+ * and `hostw`; a queue's own reads answer, and `flip(name, verb)` answers its pause or resume.
+ */
+function shortFleet(paths, how, { flip = () => Promise.resolve(), ...seams } = {}) {
+  const make = quietQueue();
+  const makeQueueFn = (conn, opts) => {
+    const q = make(conn, opts);
+    return { ...q, client: Promise.resolve({ status: "ready", once() {} }), pause: () => flip(q.name, "pause"), resume: () => flip(q.name, "resume"), disconnect() {} };
+  };
+  return RM.createFleetReader({ valkeyUrl: "redis://unused", logsDir: paths.logsDir, triggersPath: paths.triggersPath }, { makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => discoveryRedis(how, { beatAt: T0 }), nowFn: () => T0, readOnly: true, ...seams });
+}
+
+// Issue #1035: every one of these answers ended "pause the fleet again once Valkey answers", also where Valkey had
+// answered, with an error that stays until the key or the ACL is put right.
+test("a fleet pause or resume over a list that may be short says why in its banner, its audit rows and its preview: the key and the code of a read Valkey answered with an error and what the code's class supports, and to wait only for a read that got no answer (#1035)", async () => {
+  const { paths } = deployment();
+  let how = {};
+  const fleet = shortFleet(paths, () => how);
+  const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: ["redis://unused"], disagreement: null, context: null }) } });
+  const agent = await c.cookieFor(AGENT_TOKEN);
+  const rowsOf = async (act) => {
+    const before = c.audit.rows.length;
+    const res = await act();
+    return { res, rows: c.audit.rows.slice(before).filter((r) => r.action !== "refused" && r.kind?.startsWith("fleet-")).map((r) => [r.action, r.outcome, r.reason ?? null]) };
+  };
+  // An audit row keeps 200 code points of a reason.
+  const kept = (text) => [...text].slice(0, 200).join("");
+  const CASES = [
+    // what, the reads, the note a pause says, the registry's preview line (null: the registry was read), the agent's word and the answer's class
+    ["the index holds another kind of value", { index: answeredWith("WRONGTYPE") }, "the list of queues may be short: Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:live with WRONGTYPE), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short-key", "key"],
+    ["this Valkey user may not read the index", { index: answeredWith("NOPERM") }, "the list of queues may be short: Valkey answers host:live with NOPERM. Waiting does not change that: fix this Valkey user's ACL, then pause again; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:live with NOPERM), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short-permission", "permission"],
+    ["Valkey is busy for a moment", { index: answeredWith("BUSY") }, "the list of queues may be short: Valkey answers host:live with BUSY. A later read may succeed: pause the fleet again; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:live with BUSY), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short", undefined],
+    ["a code of no class", { index: answeredWith("READONLY") }, "the list of queues may be short: Valkey answers host:live with READONLY. Pause the fleet again once the list can be read whole; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:live with READONLY), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short", undefined],
+    ["the index got no answer", { index: noAnswer }, "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers", "The host registry could not be read whole, so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short", undefined],
+    ["one host's row holds another kind of value", { rows: { "host:h:hostw": answeredWith("WRONGTYPE") } }, "the list of queues may be short: Valkey answers host:h:hostw with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:h:hostw with WRONGTYPE), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short-key", "key"],
+    ["this Valkey user may not look for queues", { scan: answeredWith("NOPERM") }, "the list of queues may be short: Valkey answers the look for queues with NOPERM. Waiting does not change that: fix this Valkey user's ACL, then pause again; other queues may exist and were not paused", null, "queues-may-be-short-permission", "permission"],
+    ["the look for queues got no answer", { scan: noAnswer }, "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers", null, "queues-may-be-short", undefined],
+    ["a row answered with an error and the look for queues unanswered", { rows: { "host:h:hostw": answeredWith("NOAUTH") }, scan: noAnswer }, "the list of queues may be short: Valkey answers host:h:hostw with NOAUTH. Waiting does not change that: fix this Valkey user's ACL. Another read got no answer: pause the fleet again once Valkey answers and that is put right; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:h:hostw with NOAUTH), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short-permission", "permission"],
+  ];
+  try {
+    for (const [what, reads, note, registryLine, word, lasting] of CASES) {
+      how = reads;
+      const resumeNote = note.replace("Pause the fleet again", "Resume the fleet again").replace("pause the fleet again", "resume the fleet again").replace("then pause again", "then resume again").replace("were not paused", "were not resumed");
+      // A person: the banner says it after "Paused the fleet", and the second row keeps the sentence.
+      const paused = await rowsOf(() => c.both("fleet-pause", {}));
+      assert.equal(paused.res.confirm.status, 200, `${what}: ${paused.res.confirm.text}`);
+      assert.equal(paused.res.confirm.json().change.summary, `Paused the fleet, but ${note}`, what);
+      assert.deepEqual(paused.rows, [["write", "ok", null], ["write", "ok", kept(note)]], what);
+      assert.deepEqual([paused.res.confirm.json().queuesMayBeShort, paused.res.confirm.json().queuesShortLasting], [true, lasting], what);
+      // The preview's own line for the registry (the look for queues has had its line since issue #964).
+      assert.equal(paused.res.preview.summary.find((line) => line.startsWith("The host registry")) ?? null, registryLine, `${what}: ${JSON.stringify(paused.res.preview.summary)}`);
+      const resumed = await rowsOf(() => c.both("fleet-resume", {}));
+      assert.equal(resumed.res.confirm.json().change.summary, `Resumed the fleet, but ${resumeNote}`, what);
+      assert.deepEqual(resumed.rows, [["write", "ok", null], ["write", "ok", kept(resumeNote)]], what);
+      // What to put right is inside what the row keeps, whatever follows it.
+      if (lasting !== undefined) assert.match(kept(resumeNote), /Waiting does not change that: (?:remove or repair that key|fix this Valkey user's ACL)[,.]/, what);
+      assert.equal(resumed.res.preview.summary.find((line) => line.startsWith("The host registry")) ?? null, registryLine, what);
+      // An agent's session: a closed word in its row, by the class where the cause stays, and the class in its answer.
+      const byAgent = await rowsOf(async () => c.confirm("fleet-pause", (await c.act("fleet-pause", {}, agent)).json().ticket, agent));
+      assert.equal(byAgent.res.status, 200, `${what}: ${byAgent.res.text}`);
+      assert.deepEqual(byAgent.rows, [["write", "ok", null], ["write", "ok", word], ["write-applied", "ok", null]], what);
+      assert.deepEqual([byAgent.res.json().queuesMayBeShort, byAgent.res.json().queuesShortLasting, byAgent.res.json().note], [true, lasting, undefined], `${what}: the class as a closed word, never the sentence`);
+      assert.doesNotMatch(`${note} ${registryLine ?? ""} ${word}`, /refus/i, what);
+    }
+    // A whole discovery is the flat success it always was, with one row and no line of the registry.
+    how = {};
+    const whole = await rowsOf(() => c.both("fleet-pause", {}));
+    assert.equal(whole.res.confirm.json().change.summary, "Paused the fleet");
+    assert.deepEqual([whole.rows, whole.res.preview.summary.some((line) => line.startsWith("The host registry")), whole.res.confirm.json().queuesShortLasting], [[["write", "ok", null]], false, undefined]);
+  } finally {
+    await fleet.dispose();
+  }
+  assert.deepEqual(AGENT_QUEUES_SHORT_LASTING, { key: "queues-may-be-short-key", permission: "queues-may-be-short-permission" });
+  assert.deepEqual([agentShortWord({ queuesShortLasting: "key" }), agentShortWord({ queuesShortLasting: "toString" }), agentShortWord({}), agentShortWord(null)], ["queues-may-be-short-key", AGENT_QUEUES_SHORT, AGENT_QUEUES_SHORT, AGENT_QUEUES_SHORT]);
+});
+
+test("a part-way fleet pause over a list that is short for a cause that stays says so in its lead, and closes with the key, the code and what to put right (#1035)", async () => {
+  const { paths } = deployment();
+  let how = {};
+  const never = () => new Promise(() => {});
+  // The shared queue's pause is sent and never answered; this host's queue pauses.
+  const fleet = shortFleet(paths, () => how, { flip: (name) => (name === "pi-jobs" ? never() : Promise.resolve()), ownQueueNamesFn: () => ["pi-jobs@hosta"], switchStepTimeoutMs: 80, closeTimeoutMs: 30 });
+  const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: ["redis://unused"], disagreement: null, context: null }) } });
+  const said = async (reads) => {
+    how = reads;
+    const res = await c.both("fleet-pause", {});
+    assert.equal(res.confirm.status, 409, res.confirm.text);
+    return res.confirm.json().error;
+  };
+  try {
+    const lasting = await said({ index: answeredWith("WRONGTYPE") });
+    assert.ok(lasting.startsWith("the kill switch did not reach every queue, a pause was sent that may or may not have been made, and the list of queues may be short for a cause waiting does not end: "), lasting);
+    assert.ok(lasting.endsWith(". Other queues may exist and were not paused: Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again"), lasting);
+    assert.doesNotMatch(lasting, /once Valkey answers|refus/i);
+    assert.equal(c.audit.rows.at(-1).reason, [...lasting].slice(0, 200).join(""), "the row keeps the start of the sentence");
+    assert.ok(c.audit.rows.at(-1).reason.includes("for a cause waiting does not end"));
+    const passing = await said({ index: answeredWith("LOADING") });
+    assert.ok(passing.startsWith("the kill switch did not reach every queue, a pause was sent that may or may not have been made, and the list of queues may be short: "), passing);
+    assert.ok(passing.endsWith(". Other queues may exist and were not paused: Valkey answers host:live with LOADING. A later read may succeed: pause the fleet again"), passing);
+    const waits = await said({ index: noAnswer });
+    assert.ok(waits.endsWith(". Other queues may exist and were not paused: pause the fleet again once Valkey answers"), waits);
+    assert.equal(switchShortThen(true, switchShortCause({ blind: "x" })), "Other queues may exist and were not paused: pause the fleet again once Valkey answers");
+  } finally {
+    await fleet.dispose();
+  }
 });
 
 test("a paid preview says in its own text that a run like it is already queued or running, or that it could not look, and nothing when none is (#961)", async () => {
