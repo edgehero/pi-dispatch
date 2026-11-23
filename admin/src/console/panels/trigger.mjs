@@ -252,7 +252,7 @@ export function triggerRun(v) {
       )}
       <h3>By hand</h3>
       ${facts(HAND_FIELDS.filter((k) => (k !== "secretFiles" || t.secretFiles > 0) && (k !== "mayMerge" || t.mayMerge === true) && (k !== "worker" || t.worker) && (k !== "privateEndpoints" || Array.isArray(t.privateEndpoints)) && (k !== "auxiliaryModels" || Array.isArray(t.auxiliaryModels))).map((k) => fieldRow(v, t, k)))}
-      <h3>Its runs' sandbox</h3>
+      <h3>Its runs' sandbox</h3>${t.retainSandbox === false ? facts([["Sandbox", "not kept after a run"]]) : null}
       ${hostRows.length ? facts(hostRows.map((h) => [h.name, `${h.backend ?? "venue not published"}${h.deploymentDefault ? " (that host's deployment default)" : " (trigger override)"}; ${h.blessed === null ? "blessing not published" : h.blessed ? "blessed" : "not blessed"}${h.capabilityUnknown ? "; required profile capabilities not published" : ""}${h.backend && BACKENDS[h.backend] ? `; ${Object.entries(BACKENDS[h.backend].serves).map(([key, value]) => `${key}: ${value === "image" ? "with the image" : value}`).join(", ")}` : ""}`])) : html`<p>No live host blessing facts are available.</p>`}
       <p>These live host declarations show published venue choices; a host that does not bless the selected venue refuses it before spend. ${t.runKind === "local" ? "Only the worker named by run.worker may run this local command. Its source forge supplies a wake-up, not a cloned workspace." : t.type === "cron" ? "The schedule's owning host runs a cron trigger's local folder; the registry alone does not prove which host has that folder." : isAgent(v) ? null : "Hosts missing its required secret or wait profile are excluded where their capability list is published."}</p>
       ${isAgent(v) && !t.backend
@@ -270,11 +270,13 @@ export function triggerRun(v) {
         ]),
       )}
       <p>
-        ${venue?.serves?.sandboxShell === "yes"
+        ${t.retainSandbox === false
+          ? "This trigger's runs keep no workspace, on any outcome, so there is none to reopen: run.retainSandbox is false, set by hand in the triggers file."
+          : html`${venue?.serves?.sandboxShell === "yes"
           ? "Reopen a retained workspace with pi-dispatch sandbox <job id>."
           : "This venue has no sandbox shell for reopening a workspace."}
         Workspaces are kept for ${detail(v).sandbox?.retentionHours ?? 24} hours; 0
-        keeps none.
+        keeps none.`}
       </p>`}
       ${v.role === "operator" && t.runKind !== "local" ? html`<p><a class="link" href="${`/runs/sandboxes?${new URLSearchParams({ index: String(v.query.index) })}`}">Prepare a sandbox as this trigger</a></p>` : null}
       ${backend.startsWith("openshell")

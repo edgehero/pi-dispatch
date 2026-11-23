@@ -447,6 +447,14 @@ Release numbers come from the git tags.
 
 See [the quota reserve](subscription-auth.md#quota-reserve).
 
+### Unreleased: a local command trigger that keeps no sandbox (#1023)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| `triggers.json` | `run.retainSandbox` is new and needs no `version`. Only a local command trigger takes it; a watch rule and every other kind refuse it when the file loads. A worker or a receiver from before this release loads a file that has it on a local command trigger and drops the key (measured on 5.4.2). The receiver never needs it. An older worker keeps the sandbox, as it always did, so upgrade the worker on the host that runs the command for the flag to take effect. Nothing stored needs moving: a run that kept no sandbox simply has no directory under `PI_SANDBOX_DIR`. |
+
+See [keeping no sandbox](triggers.md#keeping-no-sandbox-for-a-local-command).
+
 ### Unreleased: poller heartbeat (#970)
 
 | Stored state | What changes and how to move it |

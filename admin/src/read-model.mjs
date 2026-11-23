@@ -3755,6 +3755,9 @@ export function normalizeTriggerForDisplay(entry) {
     // project's bundle, so the row and the drill-in say so beside the secrets they do bind. Spread only when false, so
     // every other trigger keeps exactly its keys; `true` is the default and says nothing.
     ...(run.secretBundle === false && { secretBundle: false }),
+    // Issue #1023: this trigger's runs keep no sandbox (`run.retainSandbox: false`, a local command trigger's, set by
+    // hand in the file). Spread only when false, the bundle opt-out's rule: `true` is the default and says nothing.
+    ...(run.retainSandbox === false && { retainSandbox: false }),
     ...(run.mayMerge === true && { mayMerge: true }),
     // The private endpoints the jobs may reach (issue #918, REQ-PRIVATE-ENDPOINTS), by id: the operator's own names for
     // devices declared in private-endpoints.json, never a host or port. Shown for `mcp`'s reason: what a job can reach is

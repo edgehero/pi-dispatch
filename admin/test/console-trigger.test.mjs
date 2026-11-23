@@ -85,6 +85,49 @@ test("merge permission is visible as a hand-written field and never as an input"
   assert.doesNotMatch(String(triggerRun(base)), /run.mayMerge/);
 });
 
+test("a trigger whose runs keep no sandbox says so on its page, in one line and with no control (#1023)", async () => {
+  const { triggerRun } = await import("../src/console/panels/trigger.mjs");
+  const { normalizeTriggerForDisplay } = await import("../src/read-model.mjs");
+  const { agentReadProjection } = await import("../src/agent-read.mjs");
+  const entry = (run = {}) => ({ on: { type: "cron", id: "sync", pattern: "*/5 * * * *" }, run: { kind: "local", folder: "/srv/app", command: "sync now", ...run } });
+  // The display record carries the flag only where the file says false: true is the default and says nothing.
+  const flagged = normalizeTriggerForDisplay(entry({ retainSandbox: false }));
+  assert.equal(flagged.retainSandbox, false);
+  for (const value of [undefined, true, "false", 0, null]) assert.equal(Object.hasOwn(normalizeTriggerForDisplay(entry(value === undefined ? {} : { retainSandbox: value })), "retainSandbox"), false, JSON.stringify(value));
+  assert.equal(agentReadProjection(flagged).retainSandbox, false, "an agent's read of the trigger holds it too: a yes or no, no name");
+  const view = (trigger, role = "operator") => ({ role, query: { index: 0 }, data: { triggerEditor: { defaults: {} }, triggerDetail: { trigger, sandbox: { retentionHours: 24 } } } });
+  for (const role of ["operator", "viewer"]) {
+    const shown = String(triggerRun(view(flagged, role)));
+    assert.match(shown, /Sandbox<\/dt>\s*<dd[^>]*>not kept after a run<\/dd>/, `${role}: the fact line`);
+    assert.match(shown, /keep no workspace, on any outcome, so there is none to reopen: run\.retainSandbox is false, set by hand in the triggers file\./);
+    assert.doesNotMatch(shown, /Workspaces are kept for 24 hours|Reopen a retained workspace/, "and the page does not also say they are kept");
+    assert.doesNotMatch(shown, /name="retainSandbox"/, "no control: it is set by hand");
+  }
+  assert.match(String(triggerRun(view(agentReadProjection(flagged), "agent"))), /not kept after a run/, "an agent's page says it as well");
+  const kept = String(triggerRun(view(normalizeTriggerForDisplay(entry()))));
+  assert.doesNotMatch(kept, /not kept after a run|retainSandbox/);
+  assert.match(kept, /Reopen a retained workspace with pi-dispatch sandbox &lt;job id&gt;\.\s+Workspaces are kept for 24 hours; 0\s+keeps none\./, "every other trigger's page reads as it did");
+});
+
+test("no tool sets or clears run.retainSandbox, and an edit of another field keeps what the file says (#1023)", async () => {
+  const { planTriggerAdd, planTriggerEdit } = await import("../src/write-plans.mjs");
+  const { writeTriggers } = await import("../src/read-model.mjs");
+  const dir = tempDir("retain-sandbox-edit-");
+  const triggersPath = join(dir, "triggers.json");
+  writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "sync", pattern: "*/5 * * * *" }, run: { kind: "local", folder: dir, command: "sync now", retainSandbox: false } }] }));
+  const runAfter = (params) => {
+    const edit = planTriggerEdit({ params, paths: { triggersPath }, env: {} });
+    assert.ok(edit.plan, edit.refusal);
+    assert.equal(writeTriggers({ triggersPath, mutate: edit.plan.mutate }).ok, true);
+    return JSON.parse(readFileSync(triggersPath, "utf8")).triggers[0].run;
+  };
+  assert.deepEqual(runAfter({ index: 0, maxTurns: 3 }), { kind: "local", folder: dir, command: "sync now", retainSandbox: false, maxTurns: 3 }, "an edit spreads the entry's own run");
+  assert.equal(runAfter({ index: 0, maxTurns: 4, retainSandbox: true }).retainSandbox, false, "an edit that carries the key changes the other field only");
+  assert.ok(planTriggerEdit({ params: { index: 0, retainSandbox: true }, paths: { triggersPath }, env: {} }).refusal, "and the key alone is no edit at all");
+  const add = planTriggerAdd({ params: { kind: "cron", id: "other", pattern: "0 3 * * *", folder: dir, flow: "fix", task: "Fix", retainSandbox: false }, paths: { triggersPath }, env: {} });
+  assert.match(add.refusal, /does not take retainSandbox for a cron trigger/);
+});
+
 test("auxiliary billing is visible only when authored and remains a hand-written grant", async () => {
   const { triggerRun } = await import("../src/console/panels/trigger.mjs");
   const base = { role: "operator", query: { index: 0 }, data: { triggerEditor: { defaults: { auxiliaryModels: "none" } }, triggerDetail: { trigger: { type: "label", forge: "github", flow: "fix", auxiliaryModels: ["openrouter/google/gemini-4-neon"] } } } };
