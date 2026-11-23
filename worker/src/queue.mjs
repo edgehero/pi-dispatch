@@ -9,7 +9,7 @@ export { defaultRepeatStrategy } from "bullmq";
 import { metaKeyPattern, queueNameOfMetaKey, readSemanticWindowOwner, releaseCompletedSemanticWindow } from "./bullmq-internals.mjs";
 import { semanticWindowDisposition } from "./semantic-window-policy.mjs";
 import { DUPLICATE_NOTICE_SUFFIX, duplicateNoticeData } from "./duplicate-notice.mjs";
-import { VALKEY_COMMAND_TIMEOUT_MS, assertJudgedConnection, givesUp, onValkeyError, parseConnection } from "./connection.mjs";
+import { VALKEY_COMMAND_TIMEOUT_MS, assertJudgedConnection, givesUp, onValkeyError, parseConnection, replyErrorCode } from "./connection.mjs";
 import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualCanaryJobId, manualTriggerJobId } from "./job-id.mjs";
 import { semanticItemOf } from "./forges.mjs";
 import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
@@ -981,6 +981,10 @@ export async function discoverHostQueues(redis, opts = {}) {
  * `names` the part it read). For a reader for which a queue it did not ask is not an answer: the console's run page
  * asks whether a job's data is still held, and "no queue holds it" off a scan that never finished is a false refusal.
  * The CLI also reads this result so status can name an incomplete scan; pause/resume still act on the names it read.
+ *
+ * A scan Valkey answered with an error carries the reply's code beside the words, `{ names: [], incomplete, error }`
+ * (issue #1036; `replyErrorCode`: an ACL user without SCAN is `NOPERM`), so a caller can tell a scan that waiting will
+ * not finish from one that ran out of time or lost its connection, which have no `error`.
  */
 export async function discoverHostQueuesReporting(redis, { timeoutMs = 2_000, count = 500 } = {}) {
 	const prefix = `${QUEUE}@`;
@@ -1017,7 +1021,8 @@ export async function discoverHostQueuesReporting(redis, { timeoutMs = 2_000, co
 		} while (cursor !== "0" && Date.now() < deadline);
 	} catch (err) {
 		// Fail open: the registry's answer alone is still better than refusing to pause. Nothing read is kept, as before.
-		return { names: [], incomplete: err?.message ?? String(err) };
+		const error = replyErrorCode(err);
+		return { names: [], incomplete: err?.message ?? String(err), ...(error !== null ? { error } : {}) };
 	}
 	return { names: [...names].sort().map(hostQueueName), incomplete: String(cursor) === "0" ? null : "the queue scan ran out of time" };
 }

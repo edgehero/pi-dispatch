@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { emptyRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
 import { queueSwitchErrored, queueSwitchUnconfirmed } from "../src/read-model.mjs";
-import { LOOKUP_TOLD_MAX, REFUSALS_TOP, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUNS_WINDOW_PROJECTS_MAX, RUNS_WINDOW_VALUES_MAX, SWITCH_PREVIEW_QUEUES_MAX, SWITCH_SCAN_INCOMPLETE, WAITING_DISCOVERY_TTL_MS, WAITING_QUEUES_MAX, createFleetReader, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
+import { LOOKUP_TOLD_MAX, REFUSALS_TOP, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUNS_WINDOW_PROJECTS_MAX, RUNS_WINDOW_VALUES_MAX, SWITCH_PREVIEW_QUEUES_MAX, SWITCH_SCAN_INCOMPLETE, UNREAD_HOSTS_MAX, WAITING_DISCOVERY_TTL_MS, WAITING_QUEUES_MAX, createFleetReader, fleetQueuesOn, readHosts, readQueueState, replyCodeOf, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
 import { spawnSync } from "node:child_process";
 import { parseRunFilter, runMatches, RUN_FILTER_FIELDS, RUN_OUTCOME_VALUES, runVenueOf, triggerValueOf } from "../src/run-filter.mjs";
 import { OUTCOME_KEYS } from "../src/words.mjs";
@@ -732,6 +732,147 @@ test("createFleetReader: a logs dir it cannot read makes the parked list unknown
     assert.match(snap.parkedUnreachable, /logs dir unreadable \(EACCES\)/);
   } finally {
     await redis.cleanup();
+  }
+});
+
+// --- a host row Valkey answers with an error (issue #1036) -------------------------------------------------------------
+
+/** A queue that answers every read with nothing and records, by queue name, who was asked for its active jobs. */
+const askedQueue = (asked) => (_c, opts) => {
+  const name = opts?.name ?? "pi-jobs";
+  return { name, async isPaused() { return false; }, async getJobCounts() { return { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }; }, async getWorkers() { return []; }, async getJobSchedulers() { return []; }, async getActive() { asked.push(name); return []; }, async getFailed() { return []; }, async close() {} };
+};
+/** A registered host's row under the client's prefix, as the beat of a worker that runs nothing writes it. */
+const seedHost = async (redis, name) => {
+  await redis.sadd("host:live", name);
+  await redis.hset(`host:h:${name}`, { name, routes: "true", beatAt: String(AT), jobs: "[]" });
+};
+/** The index lists `name` and its key is a string: Valkey answers the row's read with WRONGTYPE. */
+const breakHost = async (redis, name) => {
+  await redis.sadd("host:live", name);
+  await redis.del(`host:h:${name}`);
+  await redis.set(`host:h:${name}`, "not a hash");
+};
+const ROW_WORDS = "1 of 2 host rows not read, of which Valkey answered with an error: hostw (WRONGTYPE)";
+
+test("createFleetReader on a real Valkey: a host whose row is not a hash is named in queue.unreadHosts with WRONGTYPE, the other hosts are read, and its queue's lists are floors until its row was read once (#1036, VALKEY_TEST_URL)", { skip: live, timeout: 30_000 }, async () => {
+  const { stateOf } = await import("../src/console/live.mjs");
+  const { hostsForAgent } = await import("../src/tool-reads.mjs");
+  const redis = await prefixed("row1036");
+  const logsDir = tempDir("pd-1036-row-");
+  const asked = [];
+  try {
+    await seedHost(redis, "hosta");
+    await breakHost(redis, "hostw");
+    // The real registry read, through the reader's own client; the queues are stand-ins that say who was asked.
+    const reader = createFleetReader({ valkeyUrl: URL_, logsDir, triggersPath: join(logsDir, "none.json") }, { makeQueueFn: askedQueue(asked), parseConnectionFn: () => ({}), redisFn: () => redis, discoverHostQueuesFn: async () => ({ names: [] }), nowFn: () => AT });
+    const snap = await reader.snapshot();
+    assert.deepEqual(snap.queue.unreadHosts, [{ name: "hostw", error: "WRONGTYPE" }]);
+    assert.deepEqual([snap.queue.registryReadInPart, snap.queue.fleetError, snap.queue.fleetDegraded], [true, null, ROW_WORDS]);
+    assert.deepEqual(snap.hostBudgets.map((h) => [h.name, h.notRead === true]), [["hosta", false]], "the row that answered is this read's; no row is made up for the other");
+    assert.equal(snap.hostsReadAt, AT);
+    // hostw was never read here, so its queue is in no set: what is read queue by queue is a floor.
+    assert.deepEqual([asked.sort(), snap.schedulersReadInPart, snap.activeUnreachable], [["pi-jobs", "pi-jobs@hosta"], true, true]);
+    assert.equal(await redis.sismember("host:live", "hostw"), 1, "never pruned, by a reader that prunes");
+    assert.ok(!JSON.stringify(snap.queue).includes("Operation against"), "the reply's code alone");
+    // The state API and `dispatch_hosts` over that snapshot.
+    const state = stateOf(snap, "viewer", { now: AT });
+    assert.deepEqual([state.fleetDegraded, state.registryReadInPart, state.fleetError, state.unreadHosts, state.unreadHostsMore, state.hosts.map((h) => h.name)], [true, true, null, [{ name: "hostw", error: "WRONGTYPE" }], 0, ["hosta"]]);
+    const hosts = hostsForAgent(snap);
+    assert.deepEqual([hosts.unavailable, hosts.readInPart, hosts.unreadHosts, hosts.hostErrors, hosts.hosts.map((h) => h.name)], [false, true, ["hostw"], { hostw: "WRONGTYPE" }, ["hosta"]]);
+
+    // Its key repaired: read whole, nothing named, the lists whole.
+    await redis.del("host:h:hostw");
+    await seedHost(redis, "hostw");
+    const whole = await reader.snapshot();
+    assert.deepEqual([whole.queue.unreadHosts, whole.queue.registryReadInPart, whole.queue.fleetDegraded, whole.schedulersReadInPart, whole.activeUnreachable], [[], undefined, null, false, false]);
+    assert.deepEqual(Object.keys(hostsForAgent(whole)).sort(), ["hosts", "readAt", "unavailable"], "a whole read has none of the part read's keys");
+
+    // Broken again after it was read once: its last row is kept, so its queue is still asked and the lists are whole.
+    await breakHost(redis, "hostw");
+    asked.length = 0;
+    const kept = await reader.snapshot();
+    assert.deepEqual(kept.queue.unreadHosts, [{ name: "hostw", error: "WRONGTYPE" }]);
+    assert.deepEqual(kept.hostBudgets.map((h) => [h.name, h.notRead === true]), [["hosta", false], ["hostw", true]]);
+    assert.deepEqual([asked.includes("pi-jobs@hostw"), kept.schedulersReadInPart, kept.activeUnreachable], [true, false, false]);
+
+    // The index itself a string: the registry could not be read, and the code says Valkey answered that with an error.
+    await redis.del("host:live");
+    await redis.set("host:live", "not a set");
+    const index = await reader.snapshot();
+    assert.deepEqual([index.queue.fleetError, index.queue.unreadHosts, index.queue.registryReadInPart, Boolean(index.queue.fleetDegraded)], ["WRONGTYPE", [], undefined, true]);
+    assert.deepEqual([stateOf(index, "viewer", { now: AT }).fleetError, hostsForAgent(index).unavailable], ["WRONGTYPE", true]);
+  } finally {
+    await redis.cleanup();
+  }
+});
+
+test("on a real Valkey: the held money over a host row answered with an error is unknown, never $0 held, and readQueueState and readHosts name the row (#1036, VALKEY_TEST_URL)", { skip: live, timeout: 30_000 }, async () => {
+  const { readHeldForAgent } = await import("../src/tool-reads.mjs");
+  const redis = await prefixed("held1036");
+  const logsDir = tempDir("pd-1036-held-");
+  try {
+    await seedHost(redis, "hosta");
+    await breakHost(redis, "hostw");
+    // Each read builds and ends a client of its own: a duplicate of the prefixed one, so every key is this test's.
+    const reads = { fleet: (paths, seams) => createFleetReader(paths, { ...seams, makeQueueFn: askedQueue([]), parseConnectionFn: () => ({}), redisFn: () => redis.duplicate(), discoverHostQueuesFn: async () => ({ names: [] }) }) };
+    assert.deepEqual(await readHeldForAgent({ paths: { valkeyUrl: URL_, logsDir, triggersPath: join(logsDir, "none.json") }, nowMs: AT, reads }), { heldMicros: null, heldJobs: null, unknown: true });
+
+    const hosts = await readHosts({ url: URL_, redisFn: () => redis.duplicate() });
+    assert.deepEqual([hosts.hosts.map((h) => h.name), hosts.incomplete, hosts.unreadHosts, hosts.hostErrors], [["hosta"], ROW_WORDS, ["hostw"], { hostw: "WRONGTYPE" }]);
+
+    // The status read: the rows that were read still count the workers, and the three keys say what is missing.
+    const state = await readQueueState({ url: URL_, makeQueueFn: askedQueue([]), parseConnectionFn: () => ({}), redisFn: () => redis.duplicate() });
+    assert.deepEqual([state.queuesMayBeShort, state.registryReadInPart, state.hostErrors, state.workers, state.workerNames], [true, true, { hostw: "WRONGTYPE" }, 1, ["hosta"]]);
+    // Read whole, none of the three keys is there.
+    await redis.del("host:h:hostw");
+    await seedHost(redis, "hostw");
+    const whole = await readQueueState({ url: URL_, makeQueueFn: askedQueue([]), parseConnectionFn: () => ({}), redisFn: () => redis.duplicate() });
+    assert.deepEqual([Object.hasOwn(whole, "queuesMayBeShort"), Object.hasOwn(whole, "registryReadInPart"), Object.hasOwn(whole, "hostErrors"), whole.workers], [false, false, false, 2]);
+    assert.deepEqual(await readHeldForAgent({ paths: { valkeyUrl: URL_, logsDir, triggersPath: join(logsDir, "none.json") }, nowMs: AT, reads }), { heldMicros: 0, heldJobs: 0, unknownHosts: [] }, "and the true empty answer survives");
+  } finally {
+    await redis.cleanup();
+  }
+});
+
+test("fleetQueuesOn: the registry's index or the look for queues answered with an error carries the reply's code, and a read that got no answer carries none (#1036)", async () => {
+  const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+  // The real registry read and the real scan, over a client that answers each with an error reply.
+  const refused = { smembers: () => Promise.reject(reply("WRONGTYPE Operation against a key holding the wrong kind of value")), scan: () => Promise.reject(reply("NOPERM this user has no permissions to run the 'scan' command")) };
+  const got = await fleetQueuesOn(refused, { timeoutMs: 400 });
+  assert.deepEqual([got.names, got.shortErrors, got.blindPartial, got.hosts], [["pi-jobs"], { registry: "WRONGTYPE", scan: "NOPERM" }, undefined, []]);
+  assert.match(got.blind, /^WRONGTYPE /);
+  // No answer at all (a connection that failed, a scan that never answers): the same degraded read, and no code.
+  const silent = { smembers: () => Promise.reject(new Error("Connection is closed.")), scan: () => new Promise(() => {}) };
+  const late = await fleetQueuesOn(silent, { timeoutMs: 200 });
+  assert.deepEqual([late.blind, Object.hasOwn(late, "shortErrors"), Boolean(late.incomplete)], ["Connection is closed.", false, true]);
+  // A row answered with an error beside a row that got no answer: both named, one coded.
+  const rows = { smembers: async () => ["hosta", "hostv", "hostw"], hgetall: (key) => (key === "host:h:hostw" ? Promise.reject(reply("WRONGTYPE x")) : key === "host:h:hostv" ? new Promise(() => {}) : Promise.resolve({ name: "hosta", routes: "true", beatAt: String(AT) })), scan: async () => ["0", []] };
+  const part = await fleetQueuesOn(rows, { timeoutMs: 400, prune: false });
+  assert.deepEqual([part.names, part.blindPartial, part.unreadHosts, part.hostErrors, Object.hasOwn(part, "shortErrors")], [["pi-jobs", "pi-jobs@hosta"], true, ["hostv", "hostw"], { hostw: "WRONGTYPE" }, false]);
+  // A code is one word of Valkey's; anything else a seam hands in is no code.
+  assert.deepEqual(["WRONGTYPE", "error", "ERR", "two words", "<b>", "", null, 7, "A".repeat(33)].map(replyCodeOf), ["WRONGTYPE", "error", "ERR", null, null, null, null, null, null]);
+});
+
+test("createFleetReader: a registry read in part names every host it did not read up to the bound and counts the rest, and one with no last row makes the lists floors (#1036)", async () => {
+  const logsDir = tempDir("pd-1036-many-");
+  const names = Array.from({ length: UNREAD_HOSTS_MAX + 3 }, (_, i) => `late${String(i).padStart(2, "0")}`);
+  let registry = async () => ({ hosts: [{ name: "hosta", routes: true }], incomplete: `${names.length} of ${names.length + 1} host rows not read`, unreadHosts: names, hostErrors: { late01: "WRONGTYPE", late02: "<script>" } });
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") }, { makeQueueFn: quietQueue(), parseConnectionFn: () => ({}), redisFn: () => emptyRedis(), readLiveHostsFn: () => registry(), discoverHostQueuesFn: async () => [], nowFn: () => AT });
+  try {
+    const snap = await reader.snapshot();
+    assert.deepEqual([snap.queue.unreadHosts.length, snap.queue.unreadHostsMore, snap.queue.unreadHosts.slice(0, 3)], [UNREAD_HOSTS_MAX, 3, [{ name: "late00", error: null }, { name: "late01", error: "WRONGTYPE" }, { name: "late02", error: null }]], "a row not read in time has no code, and neither has one whose code is no code");
+    assert.deepEqual([snap.schedulersReadInPart, snap.activeUnreachable], [true, true]);
+    // A listing that says it is not whole without naming the rows: nothing to name, and the lists are floors all the same.
+    registry = async () => ({ hosts: [{ name: "hosta", routes: true }], incomplete: "1 of 2 host rows not read" });
+    const unnamed = await reader.snapshot();
+    assert.deepEqual([unnamed.queue.unreadHosts, Object.hasOwn(unnamed.queue, "unreadHostsMore"), unnamed.schedulersReadInPart, unnamed.activeUnreachable], [[], false, true, true]);
+    // Read whole again: nothing named, the lists whole.
+    registry = async () => ({ hosts: [{ name: "hosta", routes: true }] });
+    const whole = await reader.snapshot();
+    assert.deepEqual([whole.queue.unreadHosts, whole.queue.fleetError, whole.schedulersReadInPart, whole.activeUnreachable], [[], null, false, false]);
+  } finally {
+    await reader.dispose();
   }
 });
 

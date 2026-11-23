@@ -611,7 +611,7 @@ function registerTools(pi: ExtensionAPI): void {
     name: "dispatch_status",
     label: "pi-dispatch status",
     description:
-      "Read-only. Reports pi-dispatch queue/worker state: paused flag, job counts, connected workers, today's budget use, schedulers, runtime settings overlay. schedulersReadInPart true means the host registry was read in part, so the schedulers of a host whose row did not answer may be missing from the list.",
+      "Read-only. Reports pi-dispatch queue/worker state: paused flag, job counts, connected workers, today's budget use, schedulers, runtime settings overlay. schedulersReadInPart true means the host registry was read in part, so the schedulers of a host whose row did not answer may be missing from the list. In queue: queuesMayBeShort true means the host registry or the look for queues was not read whole, so other queues may exist and the counts leave them out; registryReadInPart true means the registry answered and some hosts' rows were not read; hostErrors names each host whose row Valkey answered with an error, with that reply's code (such a row is not read on a later call either: its key has to be repaired).",
     parameters: Type.Object({}),
     async execute() {
       const paths = resolvePaths(deploymentEnv());
@@ -1320,7 +1320,7 @@ function registerTools(pi: ExtensionAPI): void {
   const unreadWords: Record<string, string> = {
     failed: " `jobs` is null when the failed jobs could not be read; `complete` is true only when every queue was read and no failed job is past the list.",
     waiting: " `jobs` is null when the waiting jobs could not be read; `complete` is true only when every queue was read and none was cut.",
-    hosts: " `hosts` is null and `unavailable` true when the host registry could not be read; `readAt` is when the rows were read. `readInPart` true when some hosts' rows did not answer: those rows are marked `notRead`, their last row, with no beat.",
+    hosts: " `hosts` is null and `unavailable` true when the host registry could not be read; `readAt` is when the rows were read. `readInPart` true when some hosts' rows were not read: `unreadHosts` names them (`unreadHostsMore` counts those past the ones named), a kept row is marked `notRead`, its last row, with no beat, and a host this read never read has no row. `hostErrors` gives the code of Valkey's error reply for each host whose row was answered with one: that row is not read on a later call either, its key has to be repaired.",
   };
   for (const [name, kind] of [["dispatch_failed", "failed"], ["dispatch_waiting", "waiting"], ["dispatch_setup", "setup"], ["dispatch_hosts", "hosts"]]) {
     registerTool({ name, label: `pi-dispatch ${kind}`, description: `Read-only machine facts. Never raw failure, operator or job text.${unreadWords[kind] ?? ""}`, parameters: Type.Object({}),

@@ -1433,6 +1433,24 @@ test("status and status --target say registry rows not read in time as fleetInco
 	assert.deepEqual([target.code, target.status.fleetIncomplete, target.status.queuesMayBeShort, target.status.complete], [0, "2 of 2 host rows not read", true, false]);
 });
 
+test("status and status --target name a host whose row Valkey answered with an error, with the reply's code, in hostErrors and in fleetIncomplete's words (#1036)", { timeout: 15_000 }, async () => {
+	const wrongtype = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+	const row = { name: "hosta", beatAt: String(Date.now()) };
+	const probe = { on() {}, disconnect() {}, async smembers() { return ["hosta", "hostw"]; }, hgetall: (key) => (key === "host:h:hostw" ? wrongtype() : Promise.resolve(row)), async scan() { return ["0", []]; } };
+	const words = "1 of 2 host rows not read, of which Valkey answered with an error: hostw (WRONGTYPE)";
+	const status = await silentStatus({ queues: { "pi-jobs": false }, probe, deadlineMs: 3_000 });
+	assert.deepEqual([status.code, status.status.fleetIncomplete, status.status.hostErrors, status.status.queuesMayBeShort], [0, words, { hostw: "WRONGTYPE" }, true]);
+	assert.doesNotMatch(JSON.stringify(status.status), /Operation against/);
+	const target = await silentStatus({ argv: ["status", "--target", "owner/repo#12"], queues: { "pi-jobs": false }, probe, deadlineMs: 3_000 });
+	assert.deepEqual([target.code, target.status.fleetIncomplete, target.status.hostErrors, target.status.complete], [0, words, { hostw: "WRONGTYPE" }, false]);
+	// A row that got no answer has no code: no `hostErrors` key on either line.
+	probe.hgetall = (key) => (key === "host:h:hostw" ? never() : Promise.resolve(row));
+	const late = await silentStatus({ queues: { "pi-jobs": false }, probe, deadlineMs: 3_000 });
+	assert.deepEqual([late.status.fleetIncomplete, Object.hasOwn(late.status, "hostErrors")], ["1 of 2 host rows not read", false]);
+	const lateTarget = await silentStatus({ argv: ["status", "--target", "owner/repo#12"], queues: { "pi-jobs": false }, probe, deadlineMs: 3_000 });
+	assert.equal(Object.hasOwn(lateTarget.status, "hostErrors"), false);
+});
+
 test("a resume through a real Valkey whose scan stalls, with three registry hosts, ends within its deadline and resumes what it found (#1062, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
 	const { makeQueue } = await import("../src/queue.mjs");
 	const { makeRedisClient, parseConnection } = await import("../src/connection.mjs");

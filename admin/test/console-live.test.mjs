@@ -1613,6 +1613,18 @@ test("stateOf: an active list a queue did not answer for is activeUnknown, so an
   assert.deepEqual([lost.activeUnknown, lost.active], [true, []]);
 });
 
+test("stateOf: the hosts a registry read did not read, each with the code of Valkey's error reply or null, for both roles; a snapshot without the keys reads as a whole read (#1036)", () => {
+  const whole = stateOf(SNAPSHOT, "viewer", { now: T0 });
+  assert.deepEqual([whole.registryReadInPart, whole.fleetError, whole.unreadHosts, whole.unreadHostsMore], [false, null, [], 0], "a snapshot from before the keys");
+  const part = { ...SNAPSHOT, queue: { ...SNAPSHOT.queue, fleetDegraded: "2 of 3 host rows not read", registryReadInPart: true, fleetError: null, unreadHosts: [{ name: "hostv", error: null }, { name: "hostw", error: "WRONGTYPE" }, { name: "hostx", error: "WRONGTYPE Operation against a key" }], unreadHostsMore: 4 } };
+  for (const role of ["operator", "viewer"]) {
+    const st = stateOf(part, role, { now: T0 });
+    assert.deepEqual([st.fleetDegraded, st.registryReadInPart, st.unreadHosts, st.unreadHostsMore], [true, true, [{ name: "hostv", error: null }, { name: "hostw", error: "WRONGTYPE" }, { name: "hostx", error: null }], 4], "a code is one word, never a reply's words");
+  }
+  assert.equal(stateOf({ ...SNAPSHOT, queue: { ...SNAPSHOT.queue, fleetDegraded: "WRONGTYPE Operation against a key", fleetError: "WRONGTYPE" } }, "viewer", { now: T0 }).fleetError, "WRONGTYPE");
+  assert.ok(!JSON.stringify(stateOf({ ...SNAPSHOT, queue: { ...SNAPSHOT.queue, fleetDegraded: "WRONGTYPE Operation against a key", fleetError: "WRONGTYPE" } }, "viewer", { now: T0 })).includes("Operation against"), "the registry read's words stay in the console");
+});
+
 test("stateOf: a schedule list that is not whole is schedulersReadInPart, a boolean for both roles, and false for a snapshot without the mark (#986)", () => {
   assert.equal(stateOf(SNAPSHOT, "viewer", { now: T0 }).schedulersReadInPart, false, "a snapshot from before the mark, or a read every queue answered");
   for (const role of ["operator", "viewer"]) {
@@ -1711,7 +1723,7 @@ test("stateOf: the day's refusals beside its failures, each listed reason held t
 test("stateOf: the named fields only, numbers as numbers, no error text, no host path, and failedReason for an operator alone", () => {
   const op = stateOf(SNAPSHOT, "operator", { now: T0 });
   const viewer = stateOf(SNAPSHOT, "viewer", { now: T0 });
-  assert.deepEqual(Object.keys(op).sort(), ["active", "activeUnknown", "at", "budget", "counts", "dollars", "failed", "failures24h", "failures24hFloor", "fleetDegraded", "hosts", "parked", "parkedUnknown", "paused", "queues", "refusals24h", "role", "schedulerStallMax", "schedulers", "schedulersReadInPart", "version", "workers"]);
+  assert.deepEqual(Object.keys(op).sort(), ["active", "activeUnknown", "at", "budget", "counts", "dollars", "failed", "failures24h", "failures24hFloor", "fleetDegraded", "fleetError", "hosts", "parked", "parkedUnknown", "paused", "queues", "refusals24h", "registryReadInPart", "role", "schedulerStallMax", "schedulers", "schedulersReadInPart", "unreadHosts", "unreadHostsMore", "version", "workers"]);
   assert.equal(op.version, 1, "the scripts' interface carries its version");
   assert.deepEqual(op.paused, { state: false, partial: true });
   assert.deepEqual(op.counts, { waiting: 3, active: 1, paused: 0, delayed: 2, failed: 4 });

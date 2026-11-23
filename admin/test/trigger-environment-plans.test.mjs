@@ -20,7 +20,7 @@ import { modelOnList } from "@edgehero/pi-dispatch/model-ref";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { createCostGuard } from "../../image/runner/src/usage-meter.mjs";
 import { DEFAULT_ON_TOOL_NAMES, EXCLUDABLE_TOOL_NAMES, TRIGGERS_FILE_VERSION, parseTriggers } from "@edgehero/pi-dispatch/triggers";
-import { createFleetReader, readTriggerSkew } from "../src/read-model.mjs";
+import { createFleetReader, readHosts, readTriggerSkew } from "../src/read-model.mjs";
 import { readHostLoadsView } from "../src/host-loads-view.mjs";
 import { TRIGGER_GETS_WORDS } from "../src/trigger-gets-view.mjs";
 import { CARD_FIELDS, triggerEntryDigest } from "../src/trigger-edit-core.mjs";
@@ -2399,6 +2399,18 @@ test("an unreadable registry refuses, since unknown is not every host", async ()
   const partial = fixture({ deps: { versionTables: tables, readHosts: async () => ({ hosts: [host("a", "2")], incomplete: "1 of 2 host rows not read" }) } });
   const cut = await partial.service.preview(ask(partial, { packages: false }), operator);
   assert.deepEqual([cut.refusal, cut.status], ["Not every live host could be read (1 of 2 host rows not read), so nothing says each reads what this change needs. Nothing was written; try again.", 503]);
+  // Issue #1036: a row Valkey answers with an error (its key is not a hash) is not read on the next try either. The
+  // refusal names the row with what Valkey answered, says what to put right, and does not say to try again. Through the
+  // real registry read, over a client that answers that row's read with WRONGTYPE.
+  const client = { on() {}, disconnect() {}, smembers: async () => ["a", "hostw"], hgetall: (key) => (key === "host:h:hostw" ? Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" })) : Promise.resolve({ name: "a", triggersVersion: "2", jobDataVersion: "1" })) };
+  const errored = fixture({ deps: { versionTables: tables, readHosts: () => readHosts({ url: "redis://127.0.0.1:1", redisFn: () => client }) } });
+  const lasting = await errored.service.preview(ask(errored, { packages: false }), operator);
+  assert.deepEqual([lasting.refusal, lasting.status], ["Not every live host could be read (1 of 2 host rows not read, of which Valkey answered with an error: hostw (WRONGTYPE)), so nothing says each reads what this change needs. Nothing was written. A row Valkey answers with an error reads the same on the next try: remove or repair its key first (pi-dispatch doctor on a worker host names it).", 409]);
+  // The same row answering nothing in time is a read to repeat, as before.
+  client.hgetall = (key) => (key === "host:h:hostw" ? new Promise(() => {}) : Promise.resolve({ name: "a", triggersVersion: "2", jobDataVersion: "1" }));
+  const waiting = fixture({ deps: { versionTables: tables, readHosts: () => readHosts({ url: "redis://127.0.0.1:1", redisFn: () => client, timeoutMs: 300 }) } });
+  const again = await waiting.service.preview(ask(waiting, { packages: false }), operator);
+  assert.deepEqual([again.refusal, again.status], ["Not every live host could be read (1 of 2 host rows not read), so nothing says each reads what this change needs. Nothing was written; try again.", 503]);
 });
 
 test("every host at or above the need passes, with the stamp said out loud and written", async () => {

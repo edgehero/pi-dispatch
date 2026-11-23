@@ -162,9 +162,10 @@ export const rowLastSeen = (snapshot, h) => Boolean(snapshot?.queue?.fleetDegrad
 /**
  * What a panel says over a registry read in part (issue #1062), where it says "could not be read" of one that did not
  * answer at all: the rows that answered are this read's, and a host whose row did not (`notRead` on its row) is as it
- * was last seen.
+ * was last seen. "Were not read", not "did not answer in time" (issue #1036): a row Valkey answered with an error did
+ * answer, and is not read on the next try either, so the sentence promises nothing about waiting.
  */
-export const REGISTRY_PART_TEXT = "The host registry was read in part: some hosts' rows did not answer in time, so those hosts are as they were last seen.";
+export const REGISTRY_PART_TEXT = "The host registry was read in part: some hosts' rows were not read, so those hosts are as they were last seen.";
 
 /**
  * A read that answered that it could not reach what it reads (`unreachable`, a word or true), which is how the

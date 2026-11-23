@@ -3150,7 +3150,8 @@ export async function startWorker(
 		// The registry's live rows (host-registry.mjs heartbeats, HOST_TTL_MS): a recovery whose host is still beating is
 		// delayed (a pause window, a full host), not lost. Names in the run checkpointer's spelling, as the pointer has them;
 		// null when the registry could not be read, or was read in part (issue #1062, `liveHostNamesOf`): a row not read in
-		// time may be the recovery's host, still beating, and null extends rather than fails.
+		// time may be the recovery's host, still beating, and null extends rather than fails. A row Valkey answered with an
+		// error is not such a read (issue #1036): its host is named as live, and the listing still says who is gone.
 		liveHosts: async () => liveHostNamesOf(await readLiveHosts(redis, { now, prune: false }), normalizeHost),
 		onLost: async (job) => {
 			const at = new Date(now()).toISOString();

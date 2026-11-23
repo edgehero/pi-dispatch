@@ -117,6 +117,7 @@ import { SUGGEST_WINDOW_DAYS, cpusText, hostCap, refusalWords, sizeRefusal, sugg
 import { SIZING_RECORD_MAX_BYTES, readSizingRecords } from "./size-records.mjs";
 import { CAPACITY_WINDOWS, computeCapacity } from "./capacity.mjs";
 import { JOBS_ONLY, durationText, milliText, notSharedWhy, percentText, shareText } from "./capacity-cli.mjs";
+import { HOST_SET, hostKey } from "./host-registry.mjs";
 import { CGROUP_PARENT, DOCTOR_HELPER_NAME_RE, DOCTOR_HELPER_PREFIX, HELPER_LABEL_KEY, RESERVE_STEP_TIMEOUT_MS, cgroupParentFor, guardHelperRun, helperName as cpuReserveHelperName, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
@@ -3588,6 +3589,18 @@ export async function collectChecks(shellVars, seams) {
 	// Issue #1062: a registry read in part. The hosts whose rows were not read in time are in none of the fleet's checks,
 	// which is said, as a registry that could not be read at all is.
 	if (!fleet.unreachable && fleet.incomplete) checks.push({ ok: true, label: `Fleet: the host registry was read in part (${printable(fleet.incomplete)}); the fleet's checks leave those hosts out` });
+	// Issue #1036: a row Valkey answered with an error is one of them, and waiting will not read it: the index lists the
+	// host and its key is not a hash. Named with the key to act on, since every reader leaves that host out until then.
+	if (!fleet.unreachable && fleet.hostErrors !== null && typeof fleet.hostErrors === "object") {
+		for (const [name, code] of Object.entries(fleet.hostErrors)) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `Fleet: ${HOST_SET} lists ${printable(name)}, and Valkey answered the read of its row with an error (${printable(code)}): that key is not a host's row`,
+				fix: `remove or repair the key ${printable(hostKey(name))}; until then that host is in none of the fleet's checks, and every read of the fleet says it is not whole`,
+			});
+		}
+	}
 	// Issue #761: the pi-dispatch versions the live workers report, and this doctor's own against this host's running
 	// worker, after the peers block so the second is said on a single host too. Workers only: a receiver's status row is
 	// never a doctor input (INT-RECEIVER-STATUS-KEY).

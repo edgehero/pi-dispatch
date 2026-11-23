@@ -320,8 +320,16 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
  * resume's five-second deadline was gone before its write, so it sent nothing and blamed the connection. A row that did
  * not answer in time, or whose connection failed, may be a live host's, so the listing then carries `incomplete` ("2 of
  * 3 host rows not read") and `unreadHosts` (those members' names), and every caller that says its list of hosts or
- * queues may be short says that too; such a row is never pruned. A row Valkey answered with an error (a key that is
- * not a hash) is no host's self-description: it degrades that row alone, as before, and is not pruned either.
+ * queues may be short says that too; such a row is never pruned.
+ *
+ * A ROW VALKEY ANSWERED WITH AN ERROR IS A ROW NOT READ TOO (issue #1036). `host:live` lists the member and its key is
+ * not a hash (`SET host:h:<name> x`), so nothing here says the host is gone: dropped as no host's, as it was, every
+ * reader stated "no such host" and "$0 held" of a host the registry lists. It counts in `incomplete`, is named in
+ * `unreadHosts`, and its reply's code is kept in `hostErrors` (`{ <member>: "WRONGTYPE" }`, present only when not
+ * empty), which `incomplete`'s words name as well, so a caller that prints them says which row and what Valkey
+ * answered. It is not pruned. What sets it apart from a row that got no answer is that waiting does not help: the key
+ * has to be removed or repaired. The index itself answered with an error is `{ unreachable, error }`, the code beside
+ * the words.
  */
 export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs = REGISTRY_OP_TIMEOUT_MS, prune = true, ttlMs = HOST_TTL_MS } = {}) {
 	// On the monotonic clock: a wall clock stepped mid-read must not widen or cut the bound.
@@ -334,7 +342,8 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 		// throw straight out of a function whose contract is that every method fails open.
 		if (names !== null && names !== undefined && !Array.isArray(names)) throw new Error("smembers did not return a list");
 	} catch (err) {
-		return { unreachable: err?.message ?? "registry unreadable" };
+		const error = replyCode(err);
+		return { unreachable: err?.message ?? "registry unreadable", ...(error !== null ? { error } : {}) };
 	}
 	const withTtl = typeof redis?.pttl === "function";
 	// A name outside the worker name charset (`WORKER_NAME_RE`: a letter or a digit, then letters, digits, `.`, `_` and
@@ -344,7 +353,9 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 	// Skipped before its row is even read, and never pruned: removing what someone else wrote is not a reader's call,
 	// and the member costs only its place in the set.
 	const members = (names ?? []).filter((member) => typeof member === "string" && WORKER_NAME_RE.test(member));
+	// A row not read is `{ [unread]: code }`: the code of Valkey's error reply, or null for a row that got no answer.
 	const unread = Symbol("row not read");
+	const notRead = (row) => row !== null && Object.hasOwn(row, unread);
 	const rowMs = left();
 	// Every row's bounds, cleared once the read ends: a row whose HGETALL failed at once stops waiting on its PTTL, whose
 	// bound would otherwise hold the process for the rest of it.
@@ -389,30 +400,61 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 				...expiryFields(pttl, { ttlMs, beatAt, nowMs }),
 			};
 		} catch (err) {
-			// Valkey's error reply about the key degrades that row, never the listing. No answer in time (the bound's own
-			// error) or a failed connection says nothing about the host, so the listing is not whole.
-			return err?.name === "ReplyError" ? null : unread;
+			// No answer in time (the bound's own error) or a failed connection says nothing about the host, and neither does
+			// Valkey's error reply about the key (issue #1036): the member is listed and its row was not read, so the listing
+			// is not whole. The reply's code is kept; nothing else of it is.
+			return { [unread]: replyCode(err) };
 		}
 	})).finally(() => {
 		for (const t of armed) clearTimeout(t);
 	});
-	const hosts = read.filter((row) => row !== null && row !== unread);
+	const hosts = read.filter((row) => row !== null && !notRead(row));
 	hosts.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-	// The members whose rows did not answer (`unreadHosts`), so a reader that keeps rows across reads keeps only theirs:
+	// The members whose rows were not read (`unreadHosts`), so a reader that keeps rows across reads keeps only theirs:
 	// a row that answered empty was pruned and its host is gone, as a whole read says.
-	const unreadHosts = members.filter((_, i) => read[i] === unread).sort();
-	return unreadHosts.length > 0 ? { hosts, incomplete: `${unreadHosts.length} of ${members.length} host rows not read`, unreadHosts } : { hosts };
+	const codes = new Map(members.flatMap((member, i) => (notRead(read[i]) ? [[member, read[i][unread]]] : [])));
+	const unreadHosts = [...codes.keys()].sort();
+	if (unreadHosts.length === 0) return { hosts };
+	const errored = unreadHosts.filter((member) => codes.get(member) !== null);
+	const hostErrors = Object.fromEntries(errored.map((member) => [member, codes.get(member)]));
+	// The words name the rows Valkey answered with an error, at most `HOST_ERRORS_NAMED` of them: a member is a worker
+	// name and a code is one word of Valkey's, so neither is a client's free text.
+	const named = errored.slice(0, HOST_ERRORS_NAMED).map((member) => `${member} (${codes.get(member)})`).join(", ");
+	const answered = errored.length === 0 ? "" : `, of which Valkey answered with an error: ${named}${errored.length > HOST_ERRORS_NAMED ? ` and ${errored.length - HOST_ERRORS_NAMED} more` : ""}`;
+	return { hosts, incomplete: `${unreadHosts.length} of ${members.length} host rows not read${answered}`, unreadHosts, ...(errored.length > 0 ? { hostErrors } : {}) };
+}
+
+/** How many rows answered with an error `readLiveHosts`' `incomplete` words name; `hostErrors` holds every one. */
+const HOST_ERRORS_NAMED = 5;
+
+/**
+ * The code of Valkey's error reply, or null for an error that is no reply: `replyErrorCode`'s rule (connection.mjs),
+ * word for word. A copy, because this module imports two leaves and nothing else: `capacity.mjs` imports it, and that
+ * module's graph holds no filesystem, no os and no config, all of which connection.mjs reaches. A test holds the two
+ * equal over `readLiveHosts`' own answers.
+ */
+function replyCode(err) {
+	if (err?.name !== "ReplyError") return null;
+	return /^([A-Z][A-Z0-9_]{0,31})(?=\s|$)/.exec(String(err.message ?? ""))?.[1] ?? "error";
 }
 
 /**
  * The names in a `readLiveHosts` listing, each through `normalize`, as a Set, or null when the listing cannot vouch for
- * every live host: unreachable, not a list, or `incomplete` (issue #1062). For a caller that acts on a host being
- * ABSENT (the host-lost sweep fails a recovery whose host is gone): a row that was not read in time may be a live
- * host's, so a listing that is not whole is "not known", never a fleet without that host.
+ * every live host: unreachable, not a list, or `incomplete` with a row that got no answer (issue #1062). For a caller
+ * that acts on a host being ABSENT (the host-lost sweep fails a recovery whose host is gone): a row that was not read
+ * in time may be a live host's, so such a listing is "not known", never a fleet without that host.
+ *
+ * A row Valkey answered with an error (`hostErrors`, issue #1036) is different: the read finished, and it will answer
+ * the same on the next. Its member is listed and nothing says its host is gone, so the name is in the set, as a live
+ * host's. Null for it instead would let one key of the wrong type, which anyone with the Valkey's URL can write, turn
+ * every read into "not known": the sweep would extend every recovery for as long as that key exists, and a host that
+ * is really gone would never be found lost.
  */
 export function liveHostNamesOf(read, normalize = (name) => name) {
-	if (read?.unreachable || read?.incomplete || !Array.isArray(read?.hosts)) return null;
-	return new Set(read.hosts.map((h) => normalize(h.name)));
+	if (read?.unreachable || !Array.isArray(read?.hosts)) return null;
+	const errored = read.hostErrors !== null && typeof read.hostErrors === "object" ? Object.keys(read.hostErrors) : [];
+	if (read.incomplete && !(Array.isArray(read.unreadHosts) && read.unreadHosts.every((name) => errored.includes(name)))) return null;
+	return new Set([...read.hosts.map((h) => h.name), ...errored].map(normalize));
 }
 
 /** `readLiveHosts`'s three PTTL fields (see there). `pttl` is the reply, or null where none was read. */
