@@ -149,7 +149,12 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
   const io = { projects: readProjects, limits: readScopedLimits, triggers: readTriggers, settings: readSettingsView, subscriptions: readSubscriptions, scan: scanRunRecords, allocation: assembleAllocationView, sizing: readSizeSuggestions, edit: planProjectEdit, delete: planProjectDelete, fleetRuns: (opts) => readProjectFleetRuns(fleet, { ...opts, within }), ...reads };
   let pv;
   try { pv = await io.projects({ projectsPath: paths.projectsFile, fs }); } catch { pv = null; }
-  if (!pv || pv.invalid || pv.unreadable || !Array.isArray(pv.projects)) return { id, state: "unreadable", problem: "The projects file could not be read. Run pi-dispatch doctor for the reason." };
+  // One word per case (issue #988). A projects file that does not exist, or is not configured, holds no project: the
+  // page for one is then the page of a project that is not there, as for an id the file does not hold. One that was
+  // read and is refused "does not load"; "could not be read" is said of a file nobody could read, and of no answer.
+  if (pv?.missing === true || pv?.unset === true) return { id, state: "missing" };
+  if (pv?.invalid) return { id, state: "unreadable", problem: "The projects file does not load. Run pi-dispatch doctor for the reason." };
+  if (!pv || pv.unreadable || !Array.isArray(pv.projects)) return { id, state: "unreadable", problem: "The projects file could not be read. Run pi-dispatch doctor for the reason." };
   const current = pv.projects?.find((p) => p.id === id);
   if (!current) return { id, state: "missing" };
   let sizeMetadata = null;

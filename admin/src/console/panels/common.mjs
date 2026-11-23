@@ -6,7 +6,7 @@
  * action controls and the PATHS rule) are stated once, in `../panels.mjs`'s header. The names exported at the end of
  * this module are shared between the screens' modules only; `../panels.mjs` does not re-export them.
  */
-import { CHAT_REFUSALS } from "@edgehero/pi-dispatch/chat-mode";
+import { CHAT_REFUSALS, parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
 import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { classifiedRows, refusedBeforeSpend } from "../../costs.mjs";
@@ -193,22 +193,51 @@ export const hostHistoryUnread = (history) =>
   history === null || (history !== undefined && !history.records?.length && typeof history.mirror === "string" && !["ok", "off"].includes(history.mirror));
 
 /**
- * What each of four pages reads beside its snapshot, and when one of those reads failed in a way a panel of that page
- * words as "could not be read" (issue #988): the marks are the readers' own, held to the real readers over a Valkey
- * that fails a read, and no sentence is new. A key the data lacks is a read the page did not make, never a mark: the
- * loader sets each key a page reads. A page that is not here is judged by its primary read and by the three parts of
- * its snapshot alone (below).
+ * What the hosts last published about their doctor runs, for Sandboxes' cards that say what a host could load: the
+ * page's read, or the reader's own answer for an outage where the page's read threw or was cut (`hostLoadsUnread`,
+ * issue #988). Null alone is a console that wires no such read; a card drawn from a read that failed as if it were
+ * null said "it has published no doctor run" of hosts nobody could ask.
+ */
+export const hostLoadsOf = (data) => data?.hostLoads ?? (data?.hostLoadsUnread === true ? { unreachable: true, hosts: [], more: 0 } : null);
+
+/** A snapshot read with one of `parts` unread (`{ unreachable }`, each part's reader's own answer in an outage). */
+const partUnread = (s, parts) => s !== null && typeof s === "object" && parts.some((part) => unreached(s[part]));
+
+/**
+ * A settings overlay the snapshot holds and could not use: a file that could not be read or does not load (`invalid`,
+ * the reader's one word for both), which the overview's Caps card says could not be read. A file that does not exist
+ * is an empty overlay, read.
+ */
+const overlayUnread = (s) => {
+  const read = s !== null && typeof s === "object" ? s.settings : undefined;
+  if (read === undefined) return false;
+  return !(read !== null && typeof read === "object" && !read.invalid && read.overlay !== null && typeof read.overlay === "object" && !Array.isArray(read.overlay));
+};
+
+/**
+ * What each live page reads beside the three parts of a snapshot the rule holds for every page, and when one of those
+ * reads failed in a way a panel of that page words as "could not be read" (issue #988): the marks are the readers'
+ * own, held to the real readers over a Valkey that fails a read, and no sentence is new. A key the data lacks is a
+ * read the page did not make, never a mark: the loader sets each key a page reads.
  *
+ *   - overview, fleet: the waiting jobs, the failed jobs and the doctor results, which their cards draw; on the
+ *     overview the settings overlay too, which its Caps card draws. The overview's other unread sentences (the day's
+ *     failures, the run history, the spend per hour) come from the fold the parked runs come from, and are marked
+ *     with them.
+ *   - setup: the doctor results, which four of its steps are told from, and a triggers file that could not be read
+ *     (one that does not load, or does not exist, is read and says so).
+ *   - parked: the answer rules' results (any state but "ok", drawn as one banner where the parked runs were read), the
+ *     planner's check of a question, and a question whose pending answer could not be told.
  *   - runs: the page of runs (a side of the history unread) and the 24 hours' window.
  *   - run: the record (`unreadable`: the mirror did not answer, or the host that holds it); the transcript's state,
  *     the progress, the inbox, the chat facts and the planner's check of a reply (`unreachable`); an inbox whose
  *     messages or whose open flag could not be read; a chat that cannot tell whether its question still waits
  *     (`CHAT_REFUSALS.parkedUnknown`); a search for child runs that was incomplete; the open shells and browser
- *     sessions behind an operator's Workspace row, and the hosts' doctor runs behind what the run loaded; and for a run
- *     refused before it started, the snapshot, its doctor results and the window its two cards are drawn from.
+ *     sessions behind an operator's Workspace row; and for a run refused before it started, which draws no
+ *     transcript, progress or chat, the snapshot, its doctor results and the window its two cards are drawn from.
  *   - sandboxes: the open shells and the cleanup notices of a report that did arrive; the record of the run a kept
- *     workspace came from; the hosts' doctor runs behind what a fresh sandbox would load; and the browser terminals
- *     where their read failed.
+ *     workspace came from; the hosts' doctor runs behind what a fresh sandbox would load; the browser terminals where
+ *     their read failed; and the deployment's configuration where the report could not read it.
  *   - host: the run records of a host that has no row, the waiting jobs and the doctor results.
  *
  * NOT MARKS, each because it would hold the pill at Not live for good, or is not the console's read: where a run was
@@ -218,35 +247,48 @@ export const hostHistoryUnread = (history) =>
  * says.
  */
 const PAGE_UNREAD = Object.freeze({
+  overview: (d) => partUnread(d.snapshot, ["waiting", "failed", "doctor"]) || overlayUnread(d.snapshot),
+  fleet: (d) => partUnread(d.snapshot, ["waiting", "failed", "doctor"]),
+  setup: (d) => partUnread(d.snapshot, ["doctor"]) || Boolean(d.snapshot?.triggers?.unreadable),
+  parked: (d) => {
+    const answerer = d.answerer;
+    if (answerer !== null && typeof answerer === "object" && typeof answerer.state === "string" && answerer.state !== "ok") return true;
+    if (d.parkedChecks !== null && typeof d.parkedChecks === "object" && Object.values(d.parkedChecks).some(unreached)) return true;
+    const rows = Array.isArray(d.snapshot?.parked) ? d.snapshot.parked : [];
+    return rows.some((row) => row !== null && typeof row === "object" && Object.hasOwn(row, "pendingScan") && parkedVerdictOf(row.pendingScan).says === CHAT_REFUSALS.parkedUnknown);
+  },
   runs: (d) => historyPartUnread(d.runsPage) || windowUnread(d.runsWindow),
   run: (d) => {
-    const record = d.run?.record ?? null;
-    if (Boolean(d.run?.unreadable) || [d.transcript, d.inbox, d.chat, d.chatAnswer, d.hostLoads].some(unreached)) return true;
-    // The progress key is the page's only source of progress while there is no record; with one, the card draws the
-    // record's.
-    if (record === null && unreached(d.progress)) return true;
-    if (d.childrenIncomplete === true || d.hostLoadsUnread === true || d.chat?.says === CHAT_REFUSALS.parkedUnknown) return true;
+    const record = d.run?.record !== null && typeof d.run?.record === "object" ? d.run.record : null;
+    // A run refused before it started (run.mjs `refusedBeforeStart`): nothing ran, so its page draws no transcript,
+    // progress, chat or loaded parts, and two cards more, the host with its doctor result and its queue from a
+    // snapshot, and how often the same reason refused from the day's window.
+    const refused = record !== null && record.outcome === "policy" && refusedBeforeSpend(record);
+    if (Boolean(d.run?.unreadable) || unreached(d.inbox)) return true;
     // An inbox that was found and is a steer-armed run's: its messages, or whether it takes one now, not read.
     if (d.inbox?.found === true && d.inbox.steer === true && (d.inbox.entries === null || d.inbox.open === null)) return true;
-    if (d.workspace?.sessionsUnknown === true || d.browserGateways?.partial === true) return true;
-    // A run refused before it started (run.mjs `refusedBeforeStart`) draws two cards more: the host, its doctor result
-    // and its queue from a snapshot, and how often the same reason refused from the day's window.
-    if (record === null || typeof record !== "object" || record.outcome !== "policy" || !refusedBeforeSpend(record)) return false;
-    return d.snapshot === null || unreached(d.snapshot?.doctor) || windowUnread(d.runsWindow);
+    if (d.childrenIncomplete === true || d.workspace?.sessionsUnknown === true || d.browserGateways?.partial === true) return true;
+    if (refused) return d.snapshot === null || unreached(d.snapshot?.doctor) || windowUnread(d.runsWindow);
+    if ([d.transcript, d.chat, d.chatAnswer].some(unreached) || d.chat?.says === CHAT_REFUSALS.parkedUnknown) return true;
+    // The progress key is the page's only source of progress while there is no record; with one, the card draws the
+    // record's. The hosts' doctor runs are no mark here: the card that holds a run against them says which other
+    // hosts lack what it loaded, and says nothing of hosts it could not ask.
+    return record === null && unreached(d.progress);
   },
   sandboxes: (d) => {
     // A report that did not arrive is the page's primary read failing (`readFailed`), which the rule knows on any page.
     if (Boolean(d.sandboxes?.sessionsUnavailable) || Boolean(d.sandboxes?.noticesUnavailable)) return true;
-    if (d.sandboxRunUnread === true || unreached(d.hostLoads) || d.hostLoadsUnread === true) return true;
-    // The gateway's own word where its read failed (`pages.mjs`); a registry it refuses says something else.
-    return /could not be read/.test(String(d.browserGateways?.problem ?? ""));
+    if (d.sandboxRunUnread === true || unreached(hostLoadsOf(d))) return true;
+    // Two reads that answer in words: the gateway's where its read failed (`pages.mjs`; a registry it refuses says
+    // something else), and the report's where the deployment's configuration could not be read (`sandbox-data.mjs`;
+    // a triggers file that does not exist, or a host that published no settings, says something else).
+    return [d.browserGateways?.problem, d.sandboxes?.refusal].some((words) => /could not be read/.test(String(words ?? "")));
   },
   host: (d) => {
     // The host panel's own rule, which it draws for a host with no row alone: there the run records are all that can
     // say when the host was last seen.
     if ((d.host === null || d.host === undefined) && hostHistoryUnread(d.hostHistory)) return true;
-    const s = d.snapshot;
-    return s !== null && typeof s === "object" && (unreached(s.waiting) || unreached(s.doctor));
+    return partUnread(d.snapshot, ["waiting", "doctor"]);
   },
 });
 
@@ -537,19 +579,6 @@ export function progressText(p, now) {
   return parts.length > 0 ? parts.join(", ") : "-";
 }
 
-/** The active jobs, newest start first, as the overview and the fleet screen list them; `act` adds a cancel per row. */
-function activeTable(s, now, act = false) {
-  const rows = (Array.isArray(s.active) ? [...s.active] : []).sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
-  const cancel = (j) => (act && typeof j.jobId === "string" && RUN_ID_RE.test(j.jobId) ? html`<td>${actForm("cancel-active", { hidden: [["jobId", j.jobId]], label: "Cancel" })}</td>` : act ? html`<td>-</td>` : null);
-  return table(
-    "Active jobs",
-    ["Job", "Queue", "Host", "Started", "Running for", "Progress", ...(act ? ["Action"] : [])],
-    // The job id keeps to one line (`keep`): first on the overview, it was broken a character a line on a phone.
-    rows.map((j) => html`<tr><td class="keep">${runLink(j.jobId)}</td><td>${cell(j.queue)}</td><td>${cell(j.host)}</td><td>${j.startedAt ? timeHtml(j.startedAt) : "-"}</td><td>${j.startedAt ? ageText(now - j.startedAt) : "-"}</td><td>${progressText(j.progress, now)}</td>${cancel(j)}</tr>`),
-    "Nothing is running.",
-  );
-}
-
 // ---- a run's outcome in a row (the runs list's and the run page's) ---------------------------------------------------
 
 /**
@@ -639,6 +668,6 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 export {
   plural, SEC, MIN, cell, msOf, count, runLink, targetLink, titled, actForm, field, area, indexField, editor, table, facts,
-  fromSnapshot, costText, capMicrosOf, beatCell, blessedText, activeTable, outcomeText, bannerCut,
+  fromSnapshot, costText, capMicrosOf, beatCell, blessedText, outcomeText, bannerCut,
   parkedAnswerForm
 };

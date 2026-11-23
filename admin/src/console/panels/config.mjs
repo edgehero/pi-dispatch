@@ -43,6 +43,16 @@ function doctorReason(s, what) {
   return `The ${what} does not load. pi-dispatch doctor ${where} says: ${q.label}${q.fix ? `. Fix: ${q.fix}` : ""}`;
 }
 
+/**
+ * A settings overlay nobody could read, as its own sentence (issue #988): the settings reader folds a file it could not
+ * read into `invalid`, and "does not load" is the word for a file that was read and is refused. Null for any other
+ * view.
+ */
+const settingsUnreadable = (v) => {
+  const code = /^settings file unreadable(?: \((E[A-Z0-9]{1,20})\))?/.exec(String(v?.unreadable ?? v?.invalid ?? ""));
+  return code === null ? null : `The settings overlay cannot be read${code[1] ? ` (${code[1]})` : ""}.`;
+};
+
 /** A file view's trouble as one sentence (no parser message: it names the host's path), or null when it loaded. */
 export function fileTrouble(v, what, s = null) {
   if (!v) return `The ${what} could not be read.`;
@@ -246,7 +256,7 @@ function settingsEditor(view) {
 export const configSettings = fromSnapshot("Settings overlay", (s, view) => {
   const v = s.settings;
   if (!v || v.invalid)
-    return html`<p class="warn">${doctorReason(s, "settings overlay")}</p>
+    return html`<p class="warn">${settingsUnreadable(v) ?? doctorReason(s, "settings overlay")}</p>
       ${settingsEditor(view)}`;
   const overlay = v.overlay ?? {};
   const shown = KNOWN_KEYS;

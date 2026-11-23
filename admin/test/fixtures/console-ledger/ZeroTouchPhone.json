@@ -172,8 +172,8 @@
       "el": "Unavailable draft-answer history is unknown rather than zero",
       "kind": "state",
       "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchHandled",
-      "panel": "p-zt-handled",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchRate",
+      "panel": "p-zt-rate",
       "golden": [
         "panels/zero-touch-unavailable.operator"
       ],

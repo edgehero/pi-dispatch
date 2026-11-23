@@ -2217,6 +2217,9 @@ test("integration: every real page renders through the server, and a real live s
     for (const id of (await realPages.pagePanels(name, { query: name === "run" ? { id: "job-1" } : {}, session: { name: "alice", role: "operator" }, data: await realPages.loadPageData(name, name === "run" ? { id: "job-1" } : {}, pageDeps), readOnly: false })).map((p) => p.id)) {
       // A screen's panels are sections; the frame's (issue #737: the Parked count inside its navigation pill, the
       // overview's headline under its title) are spans.
+      // The Zero touch page draws its rate card alone while its report is not ready, as it is on this console, which
+      // wires no such read (issue #988).
+      if (name === "zero-touch" && id.startsWith("p-zt-") && id !== "p-zt-rate") continue;
       assert.match(res.text, new RegExp(`<${SHELL_PANEL_IDS.includes(id) ? "span" : "section"} id="${id}" data-panel>`), `${path}: panel ${id} is a live region`);
     }
   }

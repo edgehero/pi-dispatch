@@ -24,6 +24,13 @@ export const SANDBOX_END_UNCONFIRMED = "The End request was written, but the ter
  * sent nothing).
  */
 export const SANDBOX_REQUEST_UNCONFIRMED = unconfirmedWrite({ what: "The sandbox request", done: "made", asked: "it", next: "Reload the Sandboxes page once Valkey answers before asking again." });
+/**
+ * What Sandboxes and the prepare preview say of a deployment's configuration they could not use (issue #988): a
+ * triggers file that does not exist is not one that could not be read, and it leaves no trigger to prepare as.
+ */
+export const SANDBOX_CONFIG_UNREAD = "The triggers, projects or scoped limits could not be read. Fix the deployment configuration before preparing a sandbox.";
+export const SANDBOX_NO_TRIGGERS_FILE = "The triggers file does not exist, so there is no trigger to prepare a sandbox as.";
+const configRefusal = (error) => (error?.noTriggersFile === true ? SANDBOX_NO_TRIGGERS_FILE : SANDBOX_CONFIG_UNREAD);
 const refusalOf = (out) => out?.refusal ?? out?.message ?? out?.refused ?? "The sandbox request was refused.";
 
 export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs = nodeFs, now = Date.now, random = randomBytes, planFn = planSandboxPreparation } = {}) {
@@ -43,7 +50,11 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
     return { hosts: kept?.hosts ?? [], sessions: open?.sessions ?? [], sessionsUnavailable: Boolean(open?.unreachable), sessionsMore: open?.more ?? 0, sessionsUnreadable: open?.unreadable ?? 0, notices: open?.notices ?? [], noticesUnavailable: Boolean(open?.noticesUnavailable), more: kept?.more ?? 0 };
   }
   function configuration() {
-    const triggersText = fs.readFileSync(paths.triggersPath, "utf8");
+    let triggersText;
+    try { triggersText = fs.readFileSync(paths.triggersPath, "utf8"); } catch (error) {
+      if (error?.code === "ENOENT") throw Object.assign(new Error("no triggers file"), { noTriggersFile: true });
+      throw error;
+    }
     const parsed = parseTriggersDocument(triggersText, paths.triggersPath);
     const optional = (path, parse, required) => {
       if (path === null || path === undefined) return [];
@@ -94,7 +105,7 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
       const inv = await inventory();
       if (query.gatewaySelect) return { ...inv, selected: { host: query.host }, options: [], eligibleHosts: [], selectionHost: query.host };
       let cfg;
-      try { cfg = configuration(); } catch { return { ...inv, options: [], selected: query, refusal: "The triggers, projects or scoped limits could not be read. Fix the deployment configuration before preparing a sandbox." }; }
+      try { cfg = configuration(); } catch (error) { return { ...inv, options: [], selected: query, refusal: configRefusal(error) }; }
       const options = optionsOf(cfg);
       let sourceRun = null;
       if (query.fromRun) {
@@ -131,7 +142,7 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
       const inv = await inventory();
       if (name === "sandbox-prepare") {
         let cfg;
-        try { cfg = configuration(); } catch { return { refusal: "The triggers, projects or scoped limits could not be read. Fix the deployment configuration before preparing a sandbox." }; }
+        try { cfg = configuration(); } catch (error) { return { refusal: configRefusal(error) }; }
         if (!optionsOf(cfg).some((o) => o.index === params.index)) return { refusal: "The repository and trigger do not match. Review the settings again." };
         const out = preparation(params, inv, cfg);
         if (!out.plan) return out;

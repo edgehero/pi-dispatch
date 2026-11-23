@@ -1,18 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { makeLiveHub } from "../src/console/live.mjs";
-import { loadPageData, PAGES, pagePanels, parsePageQuery, renderPage } from "../src/console/pages.mjs";
-import { dataUnread } from "../src/console/panels/common.mjs";
-import { makeAnswererService } from "../src/answerer-data.mjs";
-import { readHostLoadsView } from "../src/host-loads-view.mjs";
-import { assembleHostCapacity } from "../src/insights-assembly.mjs";
-import { createFleetReader, readCapacity, readSubscriptions } from "../src/read-model.mjs";
-import { makeSandboxService } from "../src/sandbox-data.mjs";
-import { RUNS_INDEX, runRecordKey } from "@edgehero/pi-dispatch/run-mirror";
-import { downQueue, downRedis, keyedRedis, quietQueue, registryKeys } from "./helpers/fleet-reader-fakes.mjs";
-import { tempDir } from "./helpers/temp-dir.mjs";
+import { loadPageData, PAGES, pagePanels, parsePageQuery } from "../src/console/pages.mjs";
+import { downQueue, downRedis } from "./helpers/fleet-reader-fakes.mjs";
+import { consoleOn, drawn, failing, failingQueue, FAR, healthy, HOST, mirroring, NOW, pillOf, REFUSED, rolesOf, RUN, saysUnread, saysWhatIsMissing, unanswered, wordsOf } from "./helpers/real-console.mjs";
 
 /**
  * The live pill agrees with the page (issue #988): it says Not live wherever a panel of the page says "could not be
@@ -21,126 +15,11 @@ import { tempDir } from "./helpers/temp-dir.mjs";
  * host's history, so the pill said Live over cards that said the history, the transcript or the queue could not be
  * read.
  *
- * Every state here is the REAL loader over the real fleet reader, answer rules, sandbox report and host loads, on a
- * client and queues that answer, hold nothing, or fail one command, and over real files in a temp folder: a mark is
- * tested in the shape its reader gives it, and a sentence is the one the page's own panels draw.
+ * Every state here is the REAL loader over the real fleet reader, answer rules, sandbox report and host loads
+ * (helpers/real-console.mjs), on a client and queues that answer, hold nothing, or fail one command, and over real
+ * files in a temp folder: a mark is tested in the shape its reader gives it, and a sentence is the one the page's own
+ * panels draw.
  */
-
-const NOW = Date.UTC(2026, 10, 23, 12, 0, 0);
-const iso = (ago) => new Date(NOW - ago).toISOString();
-
-function deployment(records = [], { logs = "folder" } = {}) {
-  const dir = join(tempDir("pd-988-pill-"), "deployment");
-  mkdirSync(logs === "folder" ? join(dir, "logs") : dir, { recursive: true });
-  // `logs: "file"`: the run history's folder is not one, so this host's run files cannot be listed.
-  if (logs === "file") writeFileSync(join(dir, "logs"), "not a folder");
-  const paths = { valkeyUrl: "redis://unused", logsDir: join(dir, "logs"), globalPiDir: join(dir, "pi"), schedulerStallMax: 2, triggersPath: join(dir, "triggers.json"), projectsFile: join(dir, "projects.json"), settingsFile: join(dir, "settings.json"), subscriptionsPath: join(dir, "subscriptions.json") };
-  writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [{ on: { type: "label", any: ["go"] }, run: { kind: "github", flow: "fix" } }] }));
-  writeFileSync(paths.projectsFile, JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }] }));
-  writeFileSync(paths.settingsFile, JSON.stringify({ maxTurns: 30 }));
-  if (logs === "folder") for (const record of records) writeFileSync(join(paths.logsDir, `${record.jobId}.json`), JSON.stringify(record));
-  return { dir, paths, env: { PI_WORKER_NAME: "build3" } };
-}
-
-/**
- * A console's page dependencies as `cli.mjs` wires them for these four pages, on `redis` and `queue` and over a
- * deployment folder that holds `records`.
- */
-function consoleOn({ redis, queue = quietQueue(), records = [], logs = "folder", gateway = async () => ({ enabledHosts: [], sessions: [] }) }) {
-  const { dir, paths, env } = deployment(records, { logs });
-  const fleet = createFleetReader(paths, { redisFn: () => redis, makeQueueFn: queue, parseConnectionFn: () => ({}), nowFn: () => NOW, readOnly: true, dollarEnvFn: () => env });
-  const services = { paths, env, now: () => NOW, redisFn: () => redis };
-  return {
-    now: () => NOW, env, fleet, paths,
-    answerer: makeAnswererService(services),
-    sandboxes: makeSandboxService({ ...services, deploymentDir: dir, fleet }),
-    hostLoads: () => readHostLoadsView(redis, { now: () => NOW }),
-    // The console's own wiring of the browser terminals, with no gateway file: nothing is asked of Valkey for it.
-    gatewayView: gateway,
-    hostCapacity: (host) => assembleHostCapacity(paths, host, NOW, { envFn: () => env, readCapacityFn: (opts) => readCapacity({ ...opts, redisFn: () => redis }) }),
-    subscriptions: () => readSubscriptions({ subscriptionsPath: paths.subscriptionsPath }),
-    selfHost: () => "build3",
-    setupGranted: () => false,
-  };
-}
-
-const wordsOf = (markup) => String(markup).replace(/<(script|style|template)\b[^]*?<\/\1>/g, " ").replace(/<[^>]+>/g, " ").replace(/&#39;/g, "'").replace(/\s+/g, " ");
-
-/**
- * A page as a console draws it for `role`: its data; every place a panel says "could not be read", as `said` (the
- * panel and the words around it, a sentence or a cell of a table) and counted per panel as `times`; what the rule
- * says of that data (`pill`); and whether the page the server draws carries the pill's mark.
- */
-async function drawn(page, qs, deps, role) {
-  const query = parsePageQuery(page, new URLSearchParams(qs)).query;
-  const data = await loadPageData(page, query, deps, { role });
-  const ctx = { query, session: { name: "ada", role }, data, readOnly: false };
-  const said = [];
-  const times = {};
-  for (const panel of await pagePanels(page, ctx)) {
-    const words = wordsOf(panel.html);
-    const found = words.match(/[^.]{0,120}could not be read[^.]{0,80}/g) ?? [];
-    if (found.length > 0) times[panel.id] = words.split("could not be read").length - 1;
-    for (const place of found) said.push(`${panel.id}: ${place.trim()}`);
-  }
-  const whole = String((await renderPage(page, ctx)).html);
-  return { data, said, times, pill: dataUnread(data), marked: /<span id="live-status"[^>]* data-unread>/.test(whole) };
-}
-
-const RUN = { v: 1, jobId: "gh-1", attempt: 1, kind: "github", target: "acme/web#12", project: "web", host: "build3", backend: "local", flow: "fix", outcome: "completed", reason: null, startedAt: iso(120_000), endedAt: iso(60_000) };
-const REFUSED = { ...RUN, jobId: "gh-2", outcome: "policy", reason: "job-image-missing", tokens: null, exitCode: null, budgetReserved: false };
-/** A run of another host, which this host's files do not hold: the fleet's mirror alone does. */
-const FAR = { ...RUN, jobId: "gh-9", host: "build7", target: "acme/web#13", startedAt: iso(300_000), endedAt: iso(240_000) };
-const HOST = registryKeys({ build3: { version: "5.4.2", image: "pi-job:latest", concurrency: "2", pid: "1", beat: String(NOW - 2_000), startedAt: String(NOW - 3_600_000), jobs: "[]", jobsMore: "0" } });
-
-/**
- * A Valkey that answers every command these pages send and holds `keys`: `keyedRedis`, with the server's clock, an
- * empty transcript stream, no open shell, and the run mirror's window script over an index that holds nothing.
- */
-const healthy = (keys = {}) => ({
-  ...keyedRedis(keys),
-  async time() { return [String(Math.floor(NOW / 1000)), "0"]; },
-  async xlen() { return 0; },
-  async xrange() { return []; },
-  async xrevrange() { return []; },
-  async zrangebyscore() { return []; },
-  async eval() { return [0]; },
-});
-/**
- * That Valkey on a fleet whose run mirror is on and holds `records`: the index, read by score from the newest as the
- * mirror's readers ask, and each record's body.
- */
-function mirroring(records, keys = HOST) {
-  const members = records.map((record) => [record.jobId, Date.parse(record.endedAt)]).sort((a, b) => b[1] - a[1]);
-  const edge = (text) => (text === "+inf" ? [Infinity, true] : text === "-inf" ? [-Infinity, true] : String(text).startsWith("(") ? [Number(String(text).slice(1)), false] : [Number(text), true]);
-  return {
-    ...healthy({ ...keys, [RUNS_INDEX]: { zset: members }, ...Object.fromEntries(records.map((record) => [runRecordKey(record.jobId), JSON.stringify(record)])) }),
-    async zrevrangebyscore(key, max, min, ...rest) {
-      if (key !== RUNS_INDEX) return [];
-      const [top, topIn] = edge(max);
-      const [low, lowIn] = edge(min);
-      const inside = members.filter(([, score]) => (topIn ? score <= top : score < top) && (lowIn ? score >= low : score > low));
-      const at = rest.indexOf("LIMIT");
-      const page = at < 0 ? inside : inside.slice(Number(rest[at + 1]), Number(rest[at + 1]) + Number(rest[at + 2]));
-      return rest.includes("WITHSCORES") ? page.flatMap(([id, score]) => [id, String(score)]) : page.map(([id]) => id);
-    },
-  };
-}
-/** The roles a page is drawn for: an operator's alone, or both. */
-const rolesOf = (page) => (PAGES[page].auth === "operator" ? ["operator"] : ["operator", "viewer"]);
-/** That Valkey with `commands` taken and never answered inside their bound, as a client ends one. */
-const failing = (client, commands) => new Proxy(client, { get: (target, key) => (commands.includes(key) ? () => Promise.reject(new Error("Command timed out")) : target[key]) });
-/** A pipeline whose commands are taken and whose `exec` is never answered inside its bound. */
-const unanswered = new Proxy({}, { get: (_, key) => (typeof key === "symbol" || key === "then" ? undefined : key === "exec" ? () => Promise.reject(new Error("Command timed out")) : () => unanswered) });
-/** A queue that answers, but for `calls`. */
-const failingQueue = (calls) => (connection, opts) => ({ ...quietQueue()(connection, opts), ...Object.fromEntries(calls.map((call) => [call, () => Promise.reject(new Error("Command timed out"))])) });
-
-/**
- * What a refused run's two cards say of a host that has no row, or one that published no doctor result: "could not be
- * read", of reads that answered. Another bullet of the same issue words those; on a page whose reads all answered
- * they are left out of what the page "says", since nothing was unread, and the pill there is Live.
- */
-const ABSENT_SAID_AS_UNREAD = /^(p-why|p-host): /;
 
 test("a page whose reads all answered: the pill is Live and no panel says could not be read, on a deployment that holds nothing, one with runs, a mirror that is off and a host with no history", async () => {
   const states = [
@@ -155,8 +34,9 @@ test("a page whose reads all answered: the pill is Live and no panel says could 
       for (const role of rolesOf(page)) {
         const got = await drawn(page, qs, consoleOn(make()), role);
         const what = `${label}: /${page}?${qs} for ${role}`;
-        assert.deepEqual(got.said.filter((line) => !(qs === "id=gh-2" && ABSENT_SAID_AS_UNREAD.test(line))), [], what);
-        assert.deepEqual([got.pill, got.marked], [false, false], `${what}: Live`);
+        assert.deepEqual([got.said, saysUnread(got.words)], [[], false], what);
+        // A page that is not found draws no pill at all.
+        assert.deepEqual([got.pill, got.marked ?? false], [false, false], `${what}: Live`);
         for (const mark of ["readFailed", "deadlineSpent"]) assert.ok(!Object.hasOwn(got.data, mark), `${what}: no ${mark}`);
       }
     }
@@ -173,14 +53,11 @@ test("a page whose reads all answered: the pill is Live and no panel says could 
   assert.deepEqual([far.data.run.record?.host, far.data.childrenIncomplete, far.pill], ["build7", false, false]);
   const gone = await drawn("host", "name=build7", fleet(), "viewer");
   assert.deepEqual([gone.data.host, gone.data.hostHistory.records.length, gone.pill], [null, 1, false]);
-  // A refused run on a deployment with no host row: its two cards say "could not be read" of what is absent, which is
-  // not the pill's to repeat.
+  // A refused run on a deployment with no host row: its two cards say that the host has none, which is not a read that
+  // failed (they said "could not be read" five times of what was absent).
   const lone = await drawn("run", "id=gh-2", consoleOn({ redis: healthy(), records: [REFUSED] }), "operator");
-  assert.ok(lone.said.length > 0 && lone.said.every((line) => ABSENT_SAID_AS_UNREAD.test(line)), JSON.stringify(lone.said));
-  assert.deepEqual([lone.pill, lone.marked], [false, false]);
-  // A finished run: its record, no live transcript, no inbox, a chat that only forks, and nothing unread.
-  const finished = await drawn("run", "id=gh-1", consoleOn({ redis: healthy(HOST), records: [RUN] }), "operator");
-  assert.deepEqual([finished.data.run.record.jobId, finished.data.transcript.exists, finished.data.childrenIncomplete, finished.data.workspace.sessionsUnknown, finished.pill], ["gh-1", false, false, false, false]);
+  for (const absent of ["Heartbeat no live registry row for build3", "Newest doctor result no doctor result published", "Newest failing doctor check no doctor result published", "Venue floor (PI_BACKEND_FLOOR) not known: no live registry row for build3", "Same reason in the last 24 hours 1"]) assert.ok(lone.words.includes(absent), `${absent}: ${lone.words.slice(lone.words.indexOf("Why it was refused"), lone.words.indexOf("Open Fleet"))}`);
+  assert.deepEqual([saysUnread(lone.words), lone.pill, lone.marked], [false, false, false]);
 });
 
 test("each read of these pages that fails is said by a panel and by the pill, in the shape the real reader gives it", async () => {
@@ -228,38 +105,105 @@ test("each read of these pages that fails is said by a panel and by the pill, in
   }
 });
 
-test("whatever one command or one queue call fails, a page that says could not be read never has a Live pill", { timeout: 120_000 }, async () => {
-  const pages = [["runs", ""], ["run", "id=gh-1"], ["run", "id=gh-2"], ["run", "id=gh-none"], ["sandboxes", ""], ["sandboxes", "id=gh-1"], ["host", "name=build3"]];
-  const states = [
-    ...["smembers", "hgetall", "hmget", "hget", "get", "mget", "lrange", "zrange", "zrevrangebyscore", "scan", "exists", "zscore", "pttl", "time", "xlen", "xrange", "xrevrange", "zrangebyscore", "eval"].map((command) => [`${command} is not answered`, () => ({ redis: failing(healthy(HOST), [command]), records: [RUN, REFUSED] })]),
-    ...["getJob", "getJobCounts", "getActive", "getFailed", "getJobSchedulers", "getWorkers", "isPaused", "getJobState"].map((call) => [`the queue's ${call} is not answered`, () => ({ redis: healthy(HOST), queue: failingQueue([call]), records: [RUN, REFUSED] })]),
-    ["no pipeline is answered", () => ({ redis: { ...healthy(HOST), pipeline: () => unanswered }, records: [RUN, REFUSED] })],
-    ["nothing is answered", () => ({ redis: downRedis(), queue: downQueue(), records: [RUN, REFUSED] })],
-  ];
-  // What each page says with every read answered: nothing, but for a refused run's two cards (see above). A page says
-  // a read failed where a panel says "could not be read" more often than that.
-  const calm = new Map();
-  for (const [page, qs] of pages) for (const role of rolesOf(page)) calm.set(`${page}?${qs} ${role}`, (await drawn(page, qs, consoleOn({ redis: healthy(HOST), records: [RUN, REFUSED] }), role)).times);
-  let said = 0;
-  for (const [label, make] of states) {
-    for (const [page, qs] of pages) {
+/** Every live page, as the real loader draws it here: `[page, query]`. */
+const LIVE_PAGES = [["overview", ""], ["overview", "rows=host"], ["fleet", ""], ["setup", ""], ["parked", ""], ["runs", ""], ["run", "id=gh-1"], ["run", "id=gh-2"], ["sandboxes", ""], ["sandboxes", "id=gh-1"], ["host", "name=build3"], ["host", "name=build9"]];
+/** The states the rule is held to: every read answering, each command and each queue call failing alone, and all. */
+const STATES = [
+  ["every read answers", () => ({ redis: healthy(HOST), records: [RUN, REFUSED] })],
+  ["a Valkey that holds nothing", () => ({ redis: healthy(), records: [RUN, REFUSED] })],
+  ["a fleet whose mirror is on", () => ({ redis: mirroring([FAR]), records: [RUN, REFUSED] })],
+  ...["smembers", "hgetall", "hmget", "hget", "get", "mget", "lrange", "zrange", "zrevrangebyscore", "scan", "exists", "zscore", "pttl", "time", "xlen", "xrange", "xrevrange", "zrangebyscore", "eval"].map((command) => [`${command} is not answered`, () => ({ redis: failing(healthy(HOST), [command]), records: [RUN, REFUSED] })]),
+  ["no pipeline is answered", () => ({ redis: { ...healthy(HOST), pipeline: () => unanswered }, records: [RUN, REFUSED] })],
+  ...["getJob", "getJobCounts", "getActive", "getFailed", "getJobSchedulers", "getWorkers", "isPaused", "getJobState"].map((call) => [`the queue's ${call} is not answered`, () => ({ redis: healthy(HOST), queue: failingQueue([call]), records: [RUN, REFUSED] })]),
+  ["this host's run files cannot be listed", () => ({ redis: healthy(HOST), logs: "file" })],
+  ...["triggers", "projects", "settings"].flatMap((file) => [["absent", "does not exist"], ["invalid", "is not JSON"], ["unreadable", "may not be read"]].map(([state, words]) => [`the ${file} file ${words}`, () => ({ redis: healthy(HOST), records: [RUN, REFUSED], files: { [file]: state } })])),
+  ["nothing is answered", () => ({ redis: downRedis(), queue: downQueue(), records: [RUN, REFUSED] })],
+];
+
+/**
+ * Where the rule does not hold yet on the real reader, each with why and what ends it. An entry is `state | page for
+ * role`. The list only shrinks: the test fails for a line that is not here, and for one that is here and holds.
+ */
+const SAYS_UNDER_A_LIVE_PILL = new Map([]);
+const EVERY_PAGES_PARTS = "one of the three parts of a snapshot every page is judged by (issue #962), on a page that draws nothing of that part: goes when those three are held page by page, as the reads beside them are";
+const AN_OPERATORS_CARDS = "a read only an operator's cards are drawn from (the chain, a refused run's two cards), on a viewer's page: goes when the rule knows who looks, or when the loader makes no such read for a viewer";
+const NOT_LIVE_AND_SILENT = new Map([
+  ["smembers is not answered | /parked for operator", EVERY_PAGES_PARTS],
+  ["smembers is not answered | /parked for viewer", EVERY_PAGES_PARTS],
+  ["hgetall is not answered | /parked for operator", EVERY_PAGES_PARTS],
+  ["hgetall is not answered | /parked for viewer", EVERY_PAGES_PARTS],
+  ...["/setup", "/fleet"].flatMap((page) => ["operator", "viewer"].map((role) => [`zrevrangebyscore is not answered | ${page} for ${role}`, EVERY_PAGES_PARTS])),
+  ["zrevrangebyscore is not answered | /run?id=gh-1 for viewer", AN_OPERATORS_CARDS],
+  ["smembers is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
+  ["hgetall is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
+  ["get is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
+  ["mget is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
+  ["zrevrangebyscore is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
+  ...["getJobCounts", "getJobSchedulers", "isPaused"].map((call) => [`the queue's ${call} is not answered | /run?id=gh-2 for viewer`, AN_OPERATORS_CARDS]),
+  ...["/setup", "/parked", "/run?id=gh-2"].flatMap((page) => ["operator", "viewer"].map((role) => [`the queue's getActive is not answered | ${page} for ${role}`, EVERY_PAGES_PARTS])),
+  ...["/setup", "/fleet"].flatMap((page) => ["operator", "viewer"].map((role) => [`this host's run files cannot be listed | ${page} for ${role}`, EVERY_PAGES_PARTS])),
+  ...["operator", "viewer"].map((role) => [`this host's run files cannot be listed | /host?name=build9 for ${role}`, "a host with no row whose page says no retained run record names it, of run files that could not be listed: goes when that page says its run records could not be read"]),
+  ["zrevrangebyscore is not answered | /run?id=gh-2 for operator", "a refused run's count of its reason is drawn as a fact from a day's window that was read in part: goes when that count says it is a floor"],
+]);
+
+test("the pill agrees with the page on the real reader: a page that says could not be read is Not live, and a page that is Not live says what it lacks", { timeout: 240_000 }, async () => {
+  const said = [], silent = [];
+  let pages = 0;
+  for (const [label, make] of STATES) {
+    for (const [page, qs] of LIVE_PAGES) {
       for (const role of rolesOf(page)) {
         const got = await drawn(page, qs, consoleOn(make()), role);
-        const before = calm.get(`${page}?${qs} ${role}`);
-        // The host's capacity card is read when the page is drawn and never by the stream, as it says: not the pill's.
-        const panels = Object.keys(got.times).filter((id) => id !== "p-hostcap" && got.times[id] > (before[id] ?? 0));
-        if (panels.length === 0) continue;
-        said += 1;
-        assert.ok(got.pill && got.marked, `${label}: /${page}?${qs} for ${role} says so in ${panels.join(", ")} under a Live pill: ${JSON.stringify(got.said)}`);
+        if (got.marked === null) continue;
+        pages += 1;
+        const key = `${label} | /${page}${qs ? `?${qs}` : ""} for ${role}`;
+        assert.equal(got.marked, got.pill, `${key}: the page the server draws carries the rule's answer`);
+        if (saysUnread(got.words) && !got.pill) said.push(key);
+        if (got.pill && !saysWhatIsMissing(got.words)) silent.push(key);
       }
     }
   }
-  assert.ok(said >= 60, `${said} pages said so: the states here do fail reads`);
-  // With nothing answered, every one of these pages says so and is marked.
-  for (const [page, qs] of pages) {
-    const got = await drawn(page, qs, consoleOn({ redis: downRedis(), queue: downQueue(), records: [RUN, REFUSED] }), "operator");
-    assert.ok(got.said.length > 0 && got.pill && got.marked, `/${page}?${qs}`);
+  assert.ok(pages > 500, `${pages} pages were drawn`);
+  const held = (found, listed) => ({ new: found.filter((key) => !listed.has(key)), gone: [...listed.keys()].filter((key) => !found.includes(key)) });
+  assert.deepEqual(held(said, SAYS_UNDER_A_LIVE_PILL), { new: [], gone: [] }, "says could not be read under a Live pill (new: not listed; gone: listed and now right, so take it off the list)");
+  assert.deepEqual(held(silent, NOT_LIVE_AND_SILENT), { new: [], gone: [] }, "Not live and says nowhere what it lacks (new: not listed; gone: listed and now right, so take it off the list)");
+});
+
+const FIXTURES = fileURLToPath(new URL("./fixtures/console/", import.meta.url));
+/**
+ * The goldens the rule does not hold for yet, each with why and what ends it: `file without .html` to the reason. The
+ * list only shrinks, as the one above.
+ */
+const BY_HAND = (lacks) => `drawn from data put together by hand, which lacks ${lacks}: goes when this golden is drawn through the loader, which sets it`;
+const GOLDEN_SAYS_UNDER_A_LIVE_PILL = new Map([
+  ...["sandboxes.operator", "panels/sandboxes-unavailable.operator"].map((name) => [name, BY_HAND("a Sandboxes report and the mark of the read that failed")]),
+  ["panels/setup-unreadable.viewer", BY_HAND("a snapshot and the mark of the read that failed")],
+  ...["run-refused", "run-cancelled-before-start", "run-loaded-refused", "run-workspace-refused"].map((name) => [`panels/${name}.operator`, BY_HAND("the doctor results, the queues' counts and the day's window of a refused run's snapshot")]),
+  ...["run-loaded-running", "run-recovering", "run-workspace-recovery", "run-workspace-running"].map((name) => [`panels/${name}.operator`, BY_HAND("the inbox of a run at work")]),
+  ...["agent-writes-partial", "agent-writes-populated", "agent-writes-unavailable", "confirm-preview-many-queues"].map((name) => [`panels/${name}.operator`, BY_HAND("the run history, the spend per hour and the waiting jobs of the overview's snapshot")]),
+  ...[
+    "confirm-bulk-preview.operator", "confirm-bulk-results.operator", "confirm-done-no-undo.operator", "confirm-done-rerun.operator", "confirm-done.operator", "confirm-preview-cancel-queued.operator",
+    "confirm-preview-danger.operator", "confirm-preview-paid.operator", "confirm-previewing.operator", "confirm-refused-confirm.operator", "confirm-refused-partial.operator", "confirm-refused-person.operator",
+    "confirm-refused-started.operator", "confirm-refused-timeout.operator", "live-kept-still.operator", "live-not-live.operator", "live-reconnecting.operator", "live-signed-out.operator", "live-stale.operator",
+    "read-only.operator", "read-only.viewer", "restart-needed.operator", "restart-needed.viewer",
+  ].map((name) => [`panels/${name}`, BY_HAND("the waiting jobs of Fleet's snapshot")]),
+]);
+
+test("the pill agrees with the page in every console golden: one that says could not be read is drawn Not live, and one drawn Not live says what it lacks", () => {
+  const files = [...readdirSync(FIXTURES).filter((name) => name.endsWith(".html")), ...readdirSync(join(FIXTURES, "panels")).filter((name) => name.endsWith(".html")).map((name) => `panels/${name}`)];
+  const said = [], silent = [];
+  let live = 0;
+  for (const file of files) {
+    const page = readFileSync(join(FIXTURES, file), "utf8");
+    const pill = pillOf(page);
+    if (pill === null) continue;
+    live += 1;
+    const words = wordsOf(page), key = file.replace(/\.html$/, "");
+    if (saysUnread(words) && !pill) said.push(key);
+    if (pill && !saysWhatIsMissing(words)) silent.push(key);
   }
+  assert.ok(files.length > 600 && live > 250, `${files.length} goldens, ${live} of a live page`);
+  assert.deepEqual(silent, [], "drawn Not live, and says nowhere what it lacks");
+  assert.deepEqual({ new: said.filter((key) => !GOLDEN_SAYS_UNDER_A_LIVE_PILL.has(key)), gone: [...GOLDEN_SAYS_UNDER_A_LIVE_PILL.keys()].filter((key) => !said.includes(key)) }, { new: [], gone: [] }, "says could not be read under a Live pill (new: not listed; gone: listed and now right, so take it off the list)");
 });
 
 /** The names of a stream's events, in order, and the stream emptied. */

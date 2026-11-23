@@ -11,6 +11,7 @@ import { cronRunOf } from "@edgehero/pi-dispatch/bullmq-internals";
 import { foldTriggerCosts, meteredRunMicros, refusedBeforeSpend } from "./costs.mjs";
 import { recordReason } from "./words.mjs";
 import { newerSkippedSentence, readableRecords } from "./newer-release.mjs";
+import { fileUnreadWord } from "./secrets-view.mjs";
 
 const DAY = 86400_000;
 const MINUTE = 60_000;
@@ -130,13 +131,18 @@ export function quietIntervals(window, { start, end, formatters = new Map() } = 
   } catch { return { intervals: [], incomplete: true, problem: "This quiet window cannot be projected." }; }
 }
 
-function statsOf(records, weekStart, now, incomplete, subscriptions, pricing) {
-  if (records === null) return { runs30d: null, weekRuns: null, weekCostMicros: null, weekCost: null, incomplete: true, costIncomplete: true };
+/**
+ * A rule's counts and spend from the records read. `short` (issue #988) says how they can be short: `unread`, a side of
+ * the run history was not read, so a zero is not known; `incomplete`, that or a history cut at a bound, so a count is a
+ * floor. A zero from a history that was read is 0.
+ */
+function statsOf(records, weekStart, now, { unread, incomplete }, subscriptions, pricing) {
+  if (records === null) return { runs30d: null, weekRuns: null, weekCostMicros: null, weekCost: null, incomplete: true, unread: true, costIncomplete: true };
   const week = records.filter((r) => atOf(r) >= weekStart && atOf(r) <= now);
   const costs = week.map((r) => refusedBeforeSpend(r) ? 0 : meteredRunMicros(r, { subscriptions, pricing }));
   const joined = { byJobId: Object.fromEntries(week.map((r) => [r.jobId, { key: "trigger:sum" }])) };
   const cost = foldTriggerCosts({ records: week, subscriptions, pricing, triggerJoin: joined })["trigger:sum"]?.cost ?? { usd: 0, class: "metered", floor: false };
-  return { runs30d: records.length, weekRuns: week.length, weekCostMicros: costs.reduce((sum, n) => sum + (n ?? 0), 0), weekCost: cost, incomplete, costIncomplete: costs.some((n) => n === null) };
+  return { runs30d: records.length, weekRuns: week.length, weekCostMicros: costs.reduce((sum, n) => sum + (n ?? 0), 0), weekCost: cost, incomplete, unread, costIncomplete: costs.some((n) => n === null) };
 }
 
 /** Said once on the page where the fleet's Valkey was not read: the rules below are the files', the schedule facts unknown. */
@@ -164,9 +170,11 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
   const problems = ["History uses saved row, type and forge, or a cron id. Editing or renumbering rules can associate runs from an older configuration; these are not stable rule identities."];
   const schedulersUnread = snapshot?.schedulersUnread === true;
   // Issue #962: a triggers file that does not exist holds no rule. That is a read's answer, counted as 0 and said in
-  // its own sentence; "not available" stays for a file that was not read, cannot be read or does not load.
+  // its own sentence. Of a file that is there, one word per case (issue #988, `fileUnreadWord`): it "could not be
+  // read" where nobody could read it or the page holds no view of it, and it "does not load" where it was read and is
+  // refused. One sentence, "is not available", said both.
   const fileRules = Array.isArray(view?.triggers) ? view.triggers : view?.missing === true ? [] : null;
-  if (fileRules === null) problems.push("The triggers file is not available; rule facts are unknown.");
+  if (fileRules === null) problems.push(`The triggers file ${fileUnreadWord("triggers", view) ?? "could not be read"}; rule facts are unknown.`);
   else if (view?.missing === true) problems.push(TRIGGERS_FILE_ABSENT_TEXT);
   if (schedulersUnread) problems.push(Array.isArray(view?.triggers) ? SCHEDULERS_UNREAD_TEXT : SCHEDULERS_UNREAD_NO_RULES_TEXT);
   const raw = (fileRules ?? []).filter((t) => TYPES.has(t?.type) && Number.isSafeInteger(t?.index) && t.index >= 0);
@@ -181,7 +189,17 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
   for (const r of valid ?? []) if (typeof r.jobId === "string" && r.jobId !== "" && !unique.has(r.jobId)) unique.set(r.jobId, r);
   const dedup = valid === undefined ? null : [...unique.values()];
   const kept = dedup?.slice(0, TRIGGER_LIST_LIMITS.records) ?? null;
-  const incomplete = source === null || coverage.complete !== true || coverage.partial === true || coverage.truncated === true || (dedup?.length ?? 0) > TRIGGER_LIST_LIMITS.records;
+  // Two ways the counts can be short, told apart (issue #988). UNREAD: a side of the run history was not read, which
+  // is no records at all, this host's scan failing (`coverage.partial`), a snapshot of the files alone, or a fleet
+  // mirror that did not answer; a rule's zero is then not known. CUT: what was read holds more than is kept (the
+  // caller's `coverage.truncated`, a mirror past its bound, or more than the record limit); a count is then a floor,
+  // and a zero is still zero. `coverage.complete` promised a whole fleet's history, which no reader can, and it made
+  // every count "at least" and every zero "unknown" on reads that answered: it is not asked any more.
+  const mirror = typeof snapshot?.runMirror === "string" ? snapshot.runMirror : "";
+  const unread = source === null || coverage.partial === true || snapshot?.schedulersUnread === true || mirror.startsWith("unreachable");
+  const cutShort = coverage.truncated === true || mirror === "truncated" || (dedup?.length ?? 0) > TRIGGER_LIST_LIMITS.records;
+  const incomplete = unread || cutShort;
+  const short = { unread, incomplete };
   if (kept === null) problems.push("Run history could not be read; counts and spend are unknown.");
   else if (incomplete) problems.push("Counts and spend cover retained history only and may be lower bounds.");
   const rows = rules.map((trigger) => {
@@ -197,7 +215,7 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
     const spec = scheduleZones instanceof Map ? scheduleZones.get(trigger.id) : scheduleZones[trigger.id];
     const zone = typeof spec === "string" ? spec : typeof spec?.zone === "string" ? spec.zone : null;
     const hosts = Array.isArray(spec?.hosts) ? spec.hosts.filter(h => typeof h === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(h)).slice(0, 64) : [];
-    return { trigger, index: trigger.index, group: trigger.type === "cron" ? "schedule" : trigger.forge ?? "unknown", stats: statsOf(own, weekStart, now, incomplete, subscriptions, pricing), lastRun: own?.[0] ? recordOf(own[0]) : null,
+    return { trigger, index: trigger.index, group: trigger.type === "cron" ? "schedule" : trigger.forge ?? "unknown", stats: statsOf(own, weekStart, now, short, subscriptions, pricing), lastRun: own?.[0] ? recordOf(own[0]) : null,
       nextFire: trigger.type === "cron" && schedulersUnread ? { at: null, health: "unknown", stalls: null, stallLimit, hosts: [], zone: null, problem: null, unread: true } : trigger.type === "cron" ? { at, health: stalls !== null && stalls >= stallLimit ? "stalled" : at === null ? "unknown" : at < now ? "overdue" : "on-time", stalls, stallLimit, hosts: scheduleConflict || schedulers.length === 0 ? [] : hosts, zone: scheduleConflict || schedulers.length === 0 ? null : zone, problem: schedulerProblem } : null,
       chips: chipsOf(trigger, (snapshot?.stagedPackages?.packages?.length ?? 0) > 0), unknown: [...(trigger.displayCut ? ["Some selector or option names are omitted from this bounded display."] : []), ...(own === null ? ["History unavailable"] : []), ...(trigger.type === "cron" && at === null && !schedulersUnread ? [schedulerProblem ?? "Scheduler next fire unavailable"] : [])] };
   });
@@ -228,5 +246,5 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
   if ((windows?.length ?? 0) > TRIGGER_LIST_LIMITS.quietWindows) problems.push("Only the first quiet windows are projected.");
   if (scheduled.length > TRIGGER_LIST_LIMITS.lanes) problems.push("Only the first schedule lanes are projected.");
   const attributed = fileRules !== null ? kept?.filter((r) => rules.some((t) => recordMatchesTrigger(r, t))) ?? null : null;
-  return { now, rows, groups, counts, next, weekStart, stats: statsOf(attributed, weekStart, now, incomplete, subscriptions, pricing), week: { start: dayStart, end, zone: "UTC", label: "Next 7 days, UTC", lanes, quiet, quietUnknown: windows === null, quietCut: Math.max(0, (windows?.length ?? 0) - TRIGGER_LIST_LIMITS.quietWindows), lanesCut: Math.max(0, scheduled.length - TRIGGER_LIST_LIMITS.lanes) }, coverage: { complete: !incomplete, records: kept?.length ?? null }, problems, schedulersUnread };
+  return { now, rows, groups, counts, next, weekStart, stats: statsOf(attributed, weekStart, now, short, subscriptions, pricing), week: { start: dayStart, end, zone: "UTC", label: "Next 7 days, UTC", lanes, quiet, quietUnknown: windows === null, quietCut: Math.max(0, (windows?.length ?? 0) - TRIGGER_LIST_LIMITS.quietWindows), lanesCut: Math.max(0, scheduled.length - TRIGGER_LIST_LIMITS.lanes) }, coverage: { complete: !incomplete, records: kept?.length ?? null }, problems, schedulersUnread };
 }

@@ -284,9 +284,13 @@ test("the Parked count: from the snapshot or the reader's count, drawn only when
     const panels = await pagePanels(name, ctx);
     assert.deepEqual(panels.map((p) => p.id), ids, `${name}: pagePanels lists panelIds`);
     const page = String((await renderPage(name, ctx)).html);
+    // The Zero touch page draws its rate card alone while its report is not ready, here one that was not read (issue
+    // #988; tracking that has not started, issue #962): the other seven would hold the same sentence, or nothing.
+    const left = name === "zero-touch" ? panels.filter((p) => p.id.startsWith("p-zt-") && p.id !== "p-zt-rate") : [];
+    assert.equal(left.length, name === "zero-touch" ? 7 : 0, name);
     for (const p of panels) {
       const tag = SHELL_PANEL_IDS.includes(p.id) ? "span" : "section";
-      assert.ok(page.includes(`<${tag} id="${p.id}" data-panel>${p.html}</${tag}>`), `${name}: ${p.id} is the page's own`);
+      assert.equal(page.includes(`<${tag} id="${p.id}" data-panel>${p.html}</${tag}>`), !left.includes(p), `${name}: ${p.id} is the page's own`);
     }
   }
   assert.throws(() => shellHtml("nope", {}, null), /no such page/);

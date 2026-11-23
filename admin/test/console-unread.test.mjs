@@ -123,7 +123,7 @@ test("loadPageData keeps the file views only where the snapshot failed, and a re
   // File views the list cannot take at all (a shape no reader gives) still end in a page, with no rule facts.
   const broken = await loadPageData("triggers", { kind: "all" }, { now: () => NOW, fleet: noSnapshotFleet({ fileViews: () => ({ triggers: { triggers: {} } }) }), triggerList: () => { throw new Error("history"); } });
   assert.deepEqual(broken.triggerList.rows, []);
-  assert.ok(broken.triggerList.problems.includes("The triggers file is not available; rule facts are unknown."));
+  assert.ok(broken.triggerList.problems.includes("The triggers file could not be read; rule facts are unknown."));
 });
 
 test("nothing read about the hosts: no snapshot, or a registry that was never read; a degraded read after a good one is not that", () => {
@@ -213,7 +213,7 @@ test("the trigger list marks what only Valkey says of a schedule as unread, and 
   assert.ok(read.rows.find((r) => r.trigger.type === "cron").unknown.includes("Scheduler next fire unavailable"));
   assert.ok(!read.problems.includes(SCHEDULERS_UNREAD_TEXT));
   // No files either: the sentence a missing, unreadable or invalid file has always had.
-  assert.ok(triggerListOf({ snapshot: null, now: NOW }).problems.includes("The triggers file is not available; rule facts are unknown."));
+  assert.ok(triggerListOf({ snapshot: null, now: NOW }).problems.includes("The triggers file could not be read; rule facts are unknown."));
 });
 
 test("/config with no snapshot: counts and read-only cards from the files, no number above a card that could not be read", async () => {
@@ -385,7 +385,7 @@ test("/triggers with neither a snapshot nor file views: the schedulers are unrea
   assert.ok(words.includes(SCHEDULERS_UNREAD_NO_RULES_TEXT));
   assert.match(words, /Not known: Valkey could not be read, so no next fire can be shown\./);
   assert.match(words, /Not known: the next fires could not be read\./);
-  assert.match(words, /The triggers file is not available; rule facts are unknown\./);
+  assert.match(words, /The triggers file could not be read; rule facts are unknown\./);
   for (const said of ["No next fire is published", "The rules shown are the triggers file's"]) assert.ok(!words.includes(said), said);
   // The same without a list reader, and with file views that throw.
   for (const fleet of [{ snapshot: down }, { snapshot: down, fileViews: () => { throw new Error("EACCES"); } }]) assert.equal((await loadPageData("triggers", { kind: "all" }, { now: () => NOW, fleet })).triggerList.schedulersUnread, true);
@@ -397,27 +397,30 @@ test("/triggers with neither a snapshot nor file views: the schedulers are unrea
   assert.ok(!readWords.includes("Not known: Valkey could not be read"));
 });
 
-test("/triggers: a triggers file that does not exist holds no rules, counted 0; one that cannot be read or does not load is not available", async () => {
-  const NOT_AVAILABLE = "The triggers file is not available; rule facts are unknown.";
+test("/triggers: a triggers file that does not exist holds no rules, counted 0; one that nobody could read could not be read, and one that was read and is refused does not load", async () => {
+  // One word per case (issue #988): a single sentence, "is not available", said both of a file there.
+  const COULD_NOT = "The triggers file could not be read; rule facts are unknown.";
+  const DOES_NOT_LOAD = "The triggers file does not load; rule facts are unknown.";
+  const NOT_AVAILABLE = "The triggers file is not available";
   const list = (triggers) => triggerListOf({ snapshot: { ...fileViewsFixture(), schedulers: [], triggers }, now: NOW });
   const page = async (triggers) => wordsOf((await renderPage("triggers", { data: { now: NOW, triggerList: list(triggers) }, query: { kind: "all" }, session: { name: "ops", role: "operator" } })).html);
   const absent = list({ missing: true });
   assert.deepEqual(absent.counts, { all: 0, schedule: 0, label: 0, comment: 0, pull_request: 0, issue: 0, watch: 0, spent: 0 });
-  assert.ok(absent.problems.includes(TRIGGERS_FILE_ABSENT_TEXT) && !absent.problems.includes(NOT_AVAILABLE));
+  assert.ok(absent.problems.includes(TRIGGERS_FILE_ABSENT_TEXT) && !absent.problems.some((line) => [COULD_NOT, DOES_NOT_LOAD].includes(line)));
   assert.notEqual(absent.stats, null);
   const absentWords = await page({ missing: true });
-  assert.ok(absentWords.includes(TRIGGERS_FILE_ABSENT_TEXT) && !absentWords.includes(NOT_AVAILABLE));
+  assert.ok(absentWords.includes(TRIGGERS_FILE_ABSENT_TEXT) && ![COULD_NOT, DOES_NOT_LOAD, NOT_AVAILABLE].some((line) => absentWords.includes(line)));
   assert.match(absentWords, /All 0 /);
-  for (const unread of [{ unreadable: "EACCES" }, { unreadable: true }, { invalid: "not JSON" }, undefined, null]) {
+  for (const [unread, said, other] of [[{ unreadable: "EACCES" }, COULD_NOT, DOES_NOT_LOAD], [{ unreadable: true }, COULD_NOT, DOES_NOT_LOAD], [undefined, COULD_NOT, DOES_NOT_LOAD], [null, COULD_NOT, DOES_NOT_LOAD], [{ invalid: "not JSON" }, DOES_NOT_LOAD, COULD_NOT]]) {
     const model = list(unread);
-    assert.ok(model.problems.includes(NOT_AVAILABLE) && !model.problems.includes(TRIGGERS_FILE_ABSENT_TEXT), JSON.stringify(unread));
+    assert.ok(model.problems.includes(said) && !model.problems.includes(other) && !model.problems.includes(TRIGGERS_FILE_ABSENT_TEXT), JSON.stringify(unread));
     assert.equal(model.counts.all, null, JSON.stringify(unread));
     const words = await page(unread);
-    assert.ok(words.includes(NOT_AVAILABLE) && !words.includes(TRIGGERS_FILE_ABSENT_TEXT) && !/All 0 /.test(words), JSON.stringify(unread));
+    assert.ok(words.includes(said) && !words.includes(other) && !words.includes(NOT_AVAILABLE) && !words.includes(TRIGGERS_FILE_ABSENT_TEXT) && !/All 0 /.test(words), JSON.stringify(unread));
   }
   // A file that is there and holds none says neither.
   const empty = list({ triggers: [] });
-  assert.ok(!empty.problems.includes(TRIGGERS_FILE_ABSENT_TEXT) && !empty.problems.includes(NOT_AVAILABLE));
+  assert.ok(!empty.problems.includes(TRIGGERS_FILE_ABSENT_TEXT) && !empty.problems.some((line) => [COULD_NOT, DOES_NOT_LOAD].includes(line)));
   assert.equal(empty.counts.all, 0);
 });
 

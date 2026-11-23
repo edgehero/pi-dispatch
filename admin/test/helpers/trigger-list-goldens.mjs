@@ -26,7 +26,7 @@ function checked(input) {
   }
   return checkTriggerEvent({ triggersPath: checkerPath, input });
 }
-export async function triggerListGolden({ role = "operator", state = "history-cut", readOnly = false, check = null, kind = "all", extraTriggers = [], recordsOverride = undefined, complete = false } = {}) {
+export async function triggerListGolden({ role = "operator", state = "history-cut", readOnly = false, check = null, kind = "all", extraTriggers = [], recordsOverride = undefined, complete = false, coverage = complete ? {} : { truncated: true } } = {}) {
   const triggers = entries.map((entry, index) => ({ ...normalizeTriggerForDisplay(entry), index }));
   triggers.push(...extraTriggers);
   if (state === "spent") triggers.push({ index: 4, type: "issue", forge: "github", flow: "close", action: ["closed"], number: 42, once: true, disarmed: { jobId: "gh-spent", at: new Date(NOW - 3600000).toISOString() } });
@@ -43,7 +43,7 @@ export async function triggerListGolden({ role = "operator", state = "history-cu
     now: () => NOW,
     // `no-snapshot` (issue #844): Valkey does not answer, so the list is built over the reader's file views alone.
     fleet: state === "no-snapshot" ? noSnapshotFleet() : { snapshot: async () => snapshot, parkedCount: async () => 0 },
-    triggerList: snap => triggerListOf({ snapshot: snap, now: NOW, records, coverage: { complete }, scheduleZones: state === "zone-unknown" ? {} : { nightly: "UTC" } }),
+    triggerList: snap => triggerListOf({ snapshot: snap, now: NOW, records, coverage, scheduleZones: state === "zone-unknown" ? {} : { nightly: "UTC" } }),
   }, { role });
   const rendered = await renderPage(name, { query: name === "triggers" ? { kind } : {}, session: { name: role === "operator" ? "ops" : "watcher", role }, data, readOnly });
   assert.equal(rendered.status, 200);

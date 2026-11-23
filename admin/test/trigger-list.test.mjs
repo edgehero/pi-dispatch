@@ -38,18 +38,38 @@ test("statistics use the 30-day range and separate UTC Monday spend from the rol
   assert.equal(got.week.end - got.week.start, 7 * DAY);
 });
 
-test("missing history stays unknown, a retained or cut view is a lower bound, and missing configuration is not zero rules", () => {
+test("missing history stays unknown, an unread or cut view is a lower bound, a read one is whole, and missing configuration is not zero rules", () => {
   const missing = build({ records: null });
   assert.equal(missing.rows[0].stats.runs30d, null);
   assert.equal(missing.stats.weekCostMicros, null);
   assert.equal(missing.coverage.complete, false);
-  const retained = build({ records: [record()], coverage: {} });
-  assert.equal(retained.rows[0].stats.incomplete, true);
-  assert.match(retained.problems.join(" "), /retained history/);
+  assert.deepEqual([missing.rows[0].stats.unread, missing.rows[0].stats.incomplete, missing.stats.unread], [true, true, true]);
+  // Issue #988: a history that was read is whole, whatever the caller says of a whole fleet's (`coverage.complete`,
+  // which no caller can promise and which made every count a floor and every zero unknown).
+  for (const coverage of [{}, { complete: false }, { complete: true }, { partial: false, truncated: false }]) {
+    const read = build({ records: [record()], coverage });
+    assert.deepEqual([read.rows[0].stats.unread, read.rows[0].stats.incomplete, read.stats.unread, read.stats.incomplete], [false, false, false, false], JSON.stringify(coverage));
+    assert.ok(!/retained history/.test(read.problems.join(" ")), JSON.stringify(coverage));
+  }
+  // UNREAD, each way a side of the history is not read: this host's scan failed, the snapshot is the files' alone, the
+  // fleet's mirror did not answer. A zero is then not known.
+  const snapshotOf = (over) => ({ ...snapshot(), ...over });
+  for (const [what, args] of [["the local scan failed", { coverage: { partial: true } }], ["a snapshot of the files alone", { snapshot: snapshotOf({ schedulersUnread: true }) }], ["a mirror that did not answer", { snapshot: snapshotOf({ runMirror: "unreachable (Command timed out)" }) }]]) {
+    const unread = build({ records: [record()], ...args });
+    assert.deepEqual([unread.stats.unread, unread.stats.incomplete], [true, true], what);
+    assert.match(unread.problems.join(" "), /retained history/, what);
+  }
+  // CUT: read, and holding more than is kept. A count is a floor; nothing is unread.
+  for (const [what, args] of [["the caller's cut", { coverage: { truncated: true } }], ["a mirror past its bound", { snapshot: snapshotOf({ runMirror: "truncated" }) }]]) {
+    const short = build({ records: [record()], ...args });
+    assert.deepEqual([short.stats.unread, short.stats.incomplete], [false, true], what);
+    assert.match(short.problems.join(" "), /retained history/, what);
+  }
+  for (const mirror of ["ok", "off"]) assert.deepEqual([build({ records: [record()], snapshot: snapshotOf({ runMirror: mirror }) }).stats.incomplete], [false], mirror);
   const many = Array.from({ length: TRIGGER_LIST_LIMITS.records + 1 }, (_, i) => record({ jobId: `gh-${i}`, endedAt: new Date(NOW - i * 1000).toISOString() }));
   const cut = build({ records: many });
   assert.equal(cut.rows[0].stats.runs30d, TRIGGER_LIST_LIMITS.records);
-  assert.equal(cut.rows[0].stats.incomplete, true);
+  assert.deepEqual([cut.rows[0].stats.incomplete, cut.rows[0].stats.unread], [true, false]);
   const unavailable = build({ snapshot: { triggers: { invalid: "unreadable" } }, records: null });
   assert.equal(unavailable.counts.all, null);
   assert.equal(unavailable.counts.schedule, null);

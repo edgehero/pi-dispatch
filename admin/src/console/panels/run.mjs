@@ -38,7 +38,7 @@ import { ARTIFACT_DROP_REASONS, ARTIFACT_DROP_TEXT, artifactSizeText } from "@ed
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { STEER_MAX_MESSAGES, STEER_TOTAL_MAX_BYTES } from "@edgehero/pi-dispatch/steer-inbox";
-import { SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread, registryReadInPart } from "./common.mjs";
+import { plural, SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread, registryReadInPart } from "./common.mjs";
 
 const titled = (title, body) => ui.card({ title, body });
 const facts = (pairs) => ui.facts(pairs.filter(([, value]) => value !== null && value !== undefined));
@@ -246,8 +246,8 @@ export function runOutcome(view) {
  */
 export function queuedText(data) {
   const n = Array.isArray(data?.children) ? data.children.length : 0;
-  if (!data?.childrenIncomplete) return `It queued ${n} runs from /outbox`;
-  return n > 0 ? `It queued at least ${n} runs from /outbox (the search for them was incomplete)` : "How many runs it queued from /outbox is not known (the search for them was incomplete)";
+  if (!data?.childrenIncomplete) return `It queued ${plural(n, "run")} from /outbox`;
+  return n > 0 ? `It queued at least ${plural(n, "run")} from /outbox (the search for them was incomplete)` : "How many runs it queued from /outbox is not known (the search for them was incomplete)";
 }
 
 /**
@@ -646,7 +646,7 @@ export function runWorkspaceState(view) {
   const until = Number.isSafeInteger(evidence.until) ? evidence.until : msOf(evidence.until);
   const venue = r.backend ?? UNATTRIBUTED_BACKEND;
   const noVenue = sandboxShellRefusal(venue);
-  if (!shell && (noVenue || evidence.retained === false || Number.isFinite(until) && until <= view.now)) return { kind: "prepare", id, host: r.host, title: noVenue ? "Cannot reopen." : evidence.why === "retention-off" ? "Not kept." : "Workspace gone.", text: noVenue ? `Its ${venue} venue cannot reopen a sandbox.` : evidence.why === "retention-off" ? "Workspace retention is off on its host." : "It was swept, or is past its opening window.", until };
+  if (!shell && (noVenue || evidence.retained === false || Number.isFinite(until) && until <= view.now)) return { kind: "prepare", id, host: r.host, title: noVenue ? "Cannot reopen." : evidence.why === "retention-off" ? "Not kept." : "Workspace gone.", text: noVenue ? `Its ${venue} venue cannot reopen a sandbox.` : evidence.why === "retention-off" ? "Workspace retention is off on its host." : "It was swept or never kept, or it is past its opening window.", until };
   const purpose = ["awaiting-input", "awaiting-approval"].includes(recordReason(r)) ? { title: "Look before you answer.", text: "Your answer starts a new job, so put what you find in it; shell edits do not reach it." } : outcomeWord(r.outcome, recordReason(r)).word === "failed" ? { title: "Reproduce it.", text: "The kept sandbox uses the run's recorded limits." } : { title: "Try it before you merge.", text: "The native terminal checks the workspace again before opening." };
   return { kind: shell ? "open" : evidence.retained === true ? "kept" : "unknown", id, host: r.host, shell, until, ...purpose, ...(shell || evidence.retained === true ? {} : { text: "The workspace's current retention could not be verified. The native command checks again; missing tracking does not prove it was swept." }) };
 }
@@ -982,7 +982,7 @@ export const runSession = withRun("Session and plan", (r) => {
  */
 export function childSearchText(data, { found = 0 } = {}) {
   const searched = count(data?.childrenSearched ?? 0);
-  if (data?.childrenIncomplete) return found > 0 ? `The search for child runs was incomplete: part of the run history could not be read, so there may be more than these. ${searched} runs were searched.` : `The search for child runs was incomplete: part of the run history could not be read, so whether this run has child runs is not known. ${searched} runs were searched.`;
+  if (data?.childrenIncomplete) return found > 0 ? `The search for child runs was incomplete: part of the run history could not be read, so there may be more than these. ${searched} ${data.childrenSearched === 1 ? "run was" : "runs were"} searched.` : `The search for child runs was incomplete: part of the run history could not be read, so whether this run has child runs is not known. ${searched} ${data.childrenSearched === 1 ? "run was" : "runs were"} searched.`;
   return found > 0 ? null : `No child run among the ${searched} newest runs.`;
 }
 
@@ -1093,7 +1093,7 @@ export function runSandbox(view) {
   const serves = servesOf(venue), custody = venueCustody(venue);
   const check = view.data?.sandboxCheck;
   const o = recordOpenshell(r);
-  const workspace = refusedBeforeStart(r) ? "No workspace was made: the run was refused before it started." : sandboxShellRefusal(venue) ? `Its workspace is ${sandboxShellRefusal(venue)}.` : check?.retained === true && Number.isFinite(check.until) ? html`Kept on ${r.host} until ${timeHtml(check.until)}. PI_SANDBOX_RETENTION_HOURS controls this window (24 hours by default; 0 keeps none).` : check?.retained === false ? check.why === "past-window" ? "Past its retention window: the sandbox command needs --pin." : SANDBOX_KEPT_TEXT[check.why] ?? check.reason ?? "Its workspace cannot be reopened." : "Kept on its host for PI_SANDBOX_RETENTION_HOURS after the run (24 hours by default, when retention is on there). This console cannot read another host's retention setting; the CLI on that host decides.";
+  const workspace = refusedBeforeStart(r) ? "No workspace was made: the run was refused before it started." : sandboxShellRefusal(venue) ? `Its workspace is ${sandboxShellRefusal(venue)}.` : check?.retained === true && Number.isFinite(check.until) ? html`Kept on ${r.host} until ${timeHtml(check.until)}. PI_SANDBOX_RETENTION_HOURS controls this window (24 hours by default; 0 keeps none).` : check?.retained === false ? check.why === "past-window" ? "Past its retention window: the sandbox command needs --pin." : SANDBOX_KEPT_TEXT[check.why] ?? check.reason ?? "Its workspace cannot be reopened." : "Its host keeps a run's workspace for PI_SANDBOX_RETENTION_HOURS after the run (24 hours by default), unless retention is off there or the run's trigger keeps no sandbox. This console cannot read another host's workspaces; the CLI on that host decides.";
   const siblings = Array.isArray(view.data?.siblings) ? view.data.siblings : [];
   return titled(`Sandbox: ${venue}${r.host ? ` on ${r.host}` : ""}`, html`${r.backend ? null : html`<p>A local run from before venues were recorded.</p>`}${factsOne([...(serves ? SERVES.map((key) => [key === "liveTranscript" ? "Live transcript" : key === "sandboxShell" ? "Sandbox shell" : capitalised(key), SERVES_TEXT[key]?.[serves[key]]]) : [[VENUE_LABEL, "This console does not know this venue yet."]]), [VENUE_LABEL, BACKENDS[venue]?.describe ?? "This console does not know this venue yet."], ["Who holds the credentials", custody ? CUSTODY_TEXT[custody] : "unknown"], ["Sandbox policy", o ? openshellCountsText(o) : null], ["Rule hosts", o ? o.ruleHostCount === 0 ? openshellHostsText(o) : html`${o.ruleHostCount} rule hosts: ${o.ruleHosts.map((name) => ui.chip(name))}${o.ruleHostCount > o.ruleHosts.length ? ` and ${o.ruleHostCount - o.ruleHosts.length} more` : ""}` : null], ["Private endpoints", (() => { const p = recordPrivateEndpoints(r); return p ? privateEndpointsText(p) : null; })()], ["Workspace", workspace], ["Replica", Number.isInteger(r.replica) ? `replica ${r.replica} of ${r.replicas}: each replica is its own sandbox, racing the others on the same event` : null]])}${siblings.length ? html`<p>Sibling replicas: ${siblings.map((s) => html`${runLink(s.jobId)} ${ui.outcomeBadge(s.outcome, recordReason(s))} `)}</p>` : null}`);
 }
@@ -1143,32 +1143,67 @@ export function runRecovery(view) {
   return titled(`Recovery${Number.isInteger(r.triggerIndex) ? `: run.recover is armed on trigger row ${r.triggerIndex + 1}` : ""}`, html`${continuation || rec?.checkpoints ? recoveryTrack(r, continuation, view) : null}${facts(recoveryRows(r))}${!rec && !continuation ? html`<p>None needed: this run finished on its first attempt.</p>` : null}${continuation ? html`<p>${ui.badge(view.data.chat.activeJobId === continuation ? "running" : "idle", view.data.chat.activeJobId === continuation ? "Recovery running" : "Recovery queued")} ${runLink(continuation)}.</p>` : null}${recovered ? facts([["Restored from", `${recovered.from} checkpoint ${recovered.checkpointSeq ?? "(sequence not recorded)"}`], ["Recovery", `${recovered.n} of at most ${RECOVERY_CAP}`], ["Calls replayed", recovered.replayed], ["Calls interrupted (may or may not have happened)", recovered.interrupted], ["Calls not started", recovered.notStarted]]) : null}${recovered?.checkpointSeq ? html`<p>The agent was told it restarts from checkpoint ${recovered.checkpointSeq}. Its workspace was restored, with .pi/, .agents/ and the root context files reset to the base commit. It checks before repeating anything with outside effects.</p>` : null}${Number.isFinite(queuedAt) ? html`<p>Wait for a slot: ${ageText((Number.isFinite(startedAt) ? startedAt : view.now) - queuedAt)} on ${view.data.recoveryLive.host ?? r.host}.</p>` : null}${earlier.map((a) => html`<p>Retried: an earlier attempt ran on ${a.host}, ${timeHtml(msOf(a.startedAt))} to ${timeHtml(msOf(a.endedAt))}.</p>`)}${r.stalledRepick ? html`<p>Re-picked: its worker stopped answering and this pickup ran it again.</p>` : null}${view.role === "operator" ? html`<div data-recovery-tools></div>` : null}<p class="card__sub">Recovery queued waits for the checkpoint's host: ${RECOVERY_TTL_MS / 3_600_000} hours, longer while that host is alive, at most ${RECOVERY_MAX_WAIT_MS / 86_400_000} days.</p>`);
 }
 
-/** The run's host row and its newest doctor result, from the snapshot the refused run's page reads; both null where nothing was read. */
+/**
+ * What the refused run's two cards say of a fact its host did not give (issue #988), told apart by what the snapshot
+ * says of the read. "could not be read" is said of a read that failed and of nothing else: there is no snapshot, or the
+ * part of it the fact comes from was not read. Where the hosts were not read the cards say that (`HOSTS_UNREAD`, or
+ * the registry's own "read in part"). And where everything was read and the host has no row, no doctor result or no
+ * queue, they say that it has none: a host that left, or one that never published, is not a read that failed.
+ */
+const REFUSED_WORDS = Object.freeze({
+  unread: "could not be read",
+  inPart: "not read this time: the host registry was read in part",
+  noRow: (host) => `no live registry row for ${cell(host)}`,
+  noDoctor: "no doctor result published",
+  doctorRefused: "its newest result does not load",
+  noQueue: "no queue of this host is listed",
+});
+
+/**
+ * The run's host row and its newest doctor result, from the snapshot the refused run's page reads, and for each what
+ * is known where there is none: `hostGap` (the words for a missing row's beat), `floorGap` (the same for its floor,
+ * which says "not known" with the reason), `doctorGap` and `queueGap` (for a queue of the host's that is not in the
+ * snapshot's list), each null where the fact is there.
+ */
 function hostFacts(view, name) {
   const s = view.data?.snapshot;
-  return { host: (Array.isArray(s?.hostBudgets) ? s.hostBudgets : []).find((h) => h.name === name) ?? null,
-    doctor: doctorHostsOf(s).filter((d) => d.name === name).sort((a, b) => (a.ageMs ?? Infinity) - (b.ageMs ?? Infinity))[0] ?? null };
+  const read = s !== null && typeof s === "object";
+  const host = (Array.isArray(s?.hostBudgets) ? s.hostBudgets : []).find((h) => h.name === name) ?? null;
+  const doctor = doctorHostsOf(s).filter((d) => d.name === name).sort((a, b) => (a.ageMs ?? Infinity) - (b.ageMs ?? Infinity))[0] ?? null;
+  const kind = !read ? "unread" : registryReadInPart(s) && (!host || host.notRead === true) ? "part" : hostsUnread(s) ? "hosts" : host ? null : "none";
+  const hostGap = { unread: REFUSED_WORDS.unread, part: REFUSED_WORDS.inPart, hosts: HOSTS_UNREAD, none: REFUSED_WORDS.noRow(name) }[kind] ?? null;
+  const floorGap = { unread: HOSTS_UNREAD, part: REFUSED_WORDS.inPart, hosts: HOSTS_UNREAD, none: `not known: ${REFUSED_WORDS.noRow(name)}` }[kind] ?? null;
+  const doctorRead = read && s.doctor !== null && typeof s.doctor === "object" && !s.doctor.unreachable;
+  const doctorGap = !doctorRead ? REFUSED_WORDS.unread : doctor === null ? REFUSED_WORDS.noDoctor : doctor.unreadable ? REFUSED_WORDS.doctorRefused : null;
+  // The host's own queue is found through the hosts: where they were not read, a queue that is not listed is theirs to
+  // explain, and "no queue is listed" is said only over a list that was read whole.
+  const queuesRead = read && Array.isArray(s.queueCounts);
+  const queueGap = !queuesRead ? REFUSED_WORDS.unread : kind === "hosts" || kind === "part" ? hostGap : REFUSED_WORDS.noQueue;
+  return { host, doctor, hostGap, floorGap, doctorGap, queueGap };
 }
 
 export function runWhy(view) {
   const r = recordOf(view);
   if (!refusedBeforeStart(r)) return html``;
-  const token = recordReason(r), n = view.data?.runsWindow?.byReason?.[token];
-  const { host, doctor } = hostFacts(view, r.host);
+  const token = recordReason(r), window = view.data?.runsWindow;
+  // The day's window, read: a reason it does not count had no run in it, which is 0 and not a read that failed.
+  const windowRead = window !== null && typeof window === "object";
+  const n = windowRead && token ? window.byReason?.[token] ?? 0 : null;
+  const { host, doctor, floorGap, doctorGap } = hostFacts(view, r.host);
   const floor = host?.backends?.floor;
   const properties = floor && typeof floor === "object" ? Object.entries(floor) : [];
   const said = token ? explainReason(token, { why: r.why }) : null;
-  return titled("Why it was refused", html`${facts([["Rule", said?.known ? ui.withCode(said.sentence) : "No explanation is recorded for this rule yet."], ["Venue floor (PI_BACKEND_FLOOR)", properties.length ? properties.map(([name, want]) => html`<span>${PROPERTY_LABEL[name] ?? name}: ${want}; ${r.backend ?? UNATTRIBUTED_BACKEND} declares ${DECLARATION_TEXT[declarationOf(r.backend ?? UNATTRIBUTED_BACKEND, name)?.word] ?? "unknown"}. </span>`) : hostsUnread(view.data?.snapshot) ? HOSTS_UNREAD : "This host has not published a floor."], ["Same reason in the last 24 hours", Number.isFinite(n) ? html`<a href="/runs?reason=${encodeURIComponent(token)}">${count(n)}</a>` : "could not be read"], ["Newest doctor result", doctor && !doctor.unreadable ? `${doctorCountsText(doctor)}, ${ageText(doctor.ageMs)} ago` : "not published or could not be read"]])}${said?.known && docsHref(said.anchor) ? ui.outLink({ href: docsHref(said.anchor), label: "Read the rule in the reasons docs" }) : null}${view.role === "operator" ? ui.cmd(["pi-dispatch", "doctor"], { host: `Run it on ${r.host ?? "the worker host"}; the console runs nothing on a host.` }) : html`<p>Ask an operator to run the host's doctor checks.</p>`}`);
+  return titled("Why it was refused", html`${facts([["Rule", said?.known ? ui.withCode(said.sentence) : "No explanation is recorded for this rule yet."], ["Venue floor (PI_BACKEND_FLOOR)", properties.length ? properties.map(([name, want]) => html`<span>${PROPERTY_LABEL[name] ?? name}: ${want}; ${r.backend ?? UNATTRIBUTED_BACKEND} declares ${DECLARATION_TEXT[declarationOf(r.backend ?? UNATTRIBUTED_BACKEND, name)?.word] ?? "unknown"}. </span>`) : floorGap ?? "This host has not published a floor."], ["Same reason in the last 24 hours", Number.isFinite(n) && n > 0 ? html`<a href="/runs?reason=${encodeURIComponent(token)}">${count(n)}</a>` : Number.isFinite(n) ? count(n) : REFUSED_WORDS.unread], ["Newest doctor result", doctorGap === null ? `${doctorCountsText(doctor)}, ${ageText(doctor.ageMs)} ago` : doctorGap]])}${said?.known && docsHref(said.anchor) ? ui.outLink({ href: docsHref(said.anchor), label: "Read the rule in the reasons docs" }) : null}${view.role === "operator" ? ui.cmd(["pi-dispatch", "doctor"], { host: `Run it on ${r.host ?? "the worker host"}; the console runs nothing on a host.` }) : html`<p>Ask an operator to run the host's doctor checks.</p>`}`);
 }
 
 export function runHost(view) {
   const r = recordOf(view);
   if (!refusedBeforeStart(r)) return html``;
-  const { host, doctor } = hostFacts(view, r.host);
-  const age = beatAgeOf(host), fail = doctorProblems(doctor).find((p) => p.level === "fail");
+  const { host, doctor, hostGap, doctorGap, queueGap } = hostFacts(view, r.host);
+  const age = beatAgeOf(host), fail = doctorGap === null ? doctorProblems(doctor).find((p) => p.level === "fail") : null;
   const queues = Array.isArray(view.data?.snapshot?.queueCounts) ? view.data.snapshot.queueCounts : [];
   const queue = queues.find((q) => q.queue === host?.queue || q.queue === `pi-jobs@${r.host}`);
-  return titled("The host", html`${facts([["Host", r.host], [VENUE_LABEL, r.backend ?? UNATTRIBUTED_BACKEND], ["Heartbeat", Number.isFinite(age) ? `${ageText(age)} ago` : registryReadInPart(view.data?.snapshot) && (!host || host.notRead === true) ? "not read this time: the host registry was read in part" : "could not be read"], ["Newest failing doctor check", fail ? fail.label : doctor && !doctor.unreadable ? "none in its newest result" : "could not be read"], ["Queue waiting", queue ? count(queue.counts?.waiting) : "could not be read"], ["Queue running", queue ? count(queue.counts?.active) : "could not be read"]])}<a href="/fleet">Open Fleet for this host's queues and doctor checks</a>`);
+  return titled("The host", html`${facts([["Host", r.host], [VENUE_LABEL, r.backend ?? UNATTRIBUTED_BACKEND], ["Heartbeat", Number.isFinite(age) ? `${ageText(age)} ago` : hostGap ?? "not published"], ["Newest failing doctor check", fail ? fail.label : doctorGap ?? "none in its newest result"], ["Queue waiting", queue ? count(queue.counts?.waiting) : queueGap], ["Queue running", queue ? count(queue.counts?.active) : queueGap]])}<a href="/fleet">Open Fleet for this host's queues and doctor checks</a>`);
 }
 
 export function runViewer(view) {

@@ -9,6 +9,12 @@ const viewOf = (ctx) => ctx.data?.secrets ?? null;
 const cell = (body) => html`<span class="secret-cell">${body}</span>`;
 const code = (v) => html`<span class="code">${v}</span>`;
 const state = (text, failed = false, ok = false) => html`<span class="secret-state ${failed ? "tone-failed" : ok ? "tone-ok" : "tone-idle"}">${ui.icon(failed ? "failed" : ok ? "done" : "info", { size: "sm" })}<span>${text}</span></span>`;
+/**
+ * Under a bundle's project that could not be looked up (issue #988), one word per case: the projects file "could not
+ * be read" or "does not load" (the view's own word for it), or there is none, which is not a read that failed. Nothing
+ * where the bundle names no project: that is said beside it.
+ */
+const projectsNote = (v, b) => (v.unread?.projects ? html`<small>projects.json ${v.unread.projects}</small>` : b.project ? html`<small>there is no projects file</small>` : null);
 const unread = () => html`<p class="muted">The deployment could not be read. Reload to try again; secret declarations and their state are unknown.</p>`;
 /**
  * Over a view drawn from the files and the `.env` alone (issue #962): the declarations are there, and what only Valkey
@@ -85,7 +91,7 @@ export function secretsBundles(ctx) {
   const resolvers = v.bundleResolvers.length ? html`<ul class="secret-resolvers">${v.bundleResolvers.map((r) => html`<li>${code(r.name)} <span class="muted">(${r.format ?? "format unknown"}, ${r.source === "env" ? "PI_SECRET_BUNDLES" : r.source === "ambiguous" ? "both sources, ambiguous" : "settings overlay"})</span>${r.roots ? html`<small>${PROFILE_ROOTS_TEXT[r.roots]}</small>` : null}${r.inOverlay ? remove("bundle", r.name, ctx) : html`<span class="faint">in the .env</span>`}</li>`)}</ul>` : html`<p class="secret-note">No bundle resolver is declared in the sources this console can read.</p>`;
   const rows = v.bundles.map((b) => ({ mark: b.refused ? "failed" : b.projectKnown === false ? "attention" : null, cells: [
     { html: code(b.id), id: true },
-    cell(html`${b.project ? html`<a class="link" href="${`/config/project?id=${encodeURIComponent(b.project)}`}">${b.project}</a>` : "project unknown"}${b.projectKnown === false ? html`<small>not in projects.json</small>` : b.projectKnown === null ? html`<small>projects.json could not be read</small>` : null}`),
+    cell(html`${b.project ? html`<a class="link" href="${`/config/project?id=${encodeURIComponent(b.project)}`}">${b.project}</a>` : "project unknown"}${b.projectKnown === false ? html`<small>not in projects.json</small>` : b.projectKnown === null ? projectsNote(v, b) : null}`),
     { html: cell(html`${code(b.profile ?? "unknown")}${state(b.roots === "unresolved" ? "declared in the settings overlay; its real path cannot be resolved on this host, so only the worker can judge the roots" : b.roots === "unseen" ? "declared in the settings overlay; the roots are not visible here" : bundleDeclaredText(b), b.refused, !b.refused && (b.declared === "env" || b.declared === "overlay" && b.roots === "inside"))}`), wide: true },
     b.forkReviews ? "yes" : "no",
     { html: bundleEndpointsText(b) || "none", wide: true },

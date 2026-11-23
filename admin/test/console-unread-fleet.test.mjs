@@ -313,7 +313,12 @@ test("dataUnread: a failed read, or a snapshot read with the registry, the activ
  * The pill's marks by page (issue #988), each in the shape its reader gives it (console-pill.test.mjs holds every one
  * to the real readers and to the sentence a panel then draws): `[what, the mark over a page that is otherwise read]`.
  */
+const SNAP = Object.freeze({ queue: { fleetDegraded: null }, waiting: { rows: [] }, failed: { rows: [], more: 0 }, doctor: { hosts: [], more: 0 }, settings: { path: "settings.json", overlay: {} }, triggers: { triggers: [] }, parked: [] });
 const READ = Object.freeze({
+  overview: { snapshot: SNAP },
+  fleet: { snapshot: SNAP },
+  setup: { snapshot: SNAP },
+  parked: { snapshot: SNAP, answerer: { state: "ok", partial: false, rows: [] }, parkedChecks: {} },
   runs: { runsPage: { runs: [], next: null, mirror: "ok", truncated: false, examined: 0 }, runsWindow: { partial: false, floor: false } },
   run: { run: { record: { jobId: "gh-1", outcome: "completed" }, source: "local" }, transcript: { exists: false }, progress: { missing: true }, inbox: { found: false }, chat: { mode: "fork", says: null }, children: [], childrenIncomplete: false, hostLoads: { hosts: [], more: 0 }, workspace: { shell: null, sessionsUnknown: false, unknown: true } },
   sandboxes: { sandboxes: { hosts: [], sessions: [], sessionsUnavailable: false, noticesUnavailable: false }, browserGateways: { enabledHosts: [], sessions: [] }, hostLoads: { hosts: [], more: 0 } },
@@ -321,7 +326,34 @@ const READ = Object.freeze({
 });
 const REFUSED_RECORD = { jobId: "gh-2", outcome: "policy", reason: "job-image-missing", tokens: null, exitCode: null, budgetReserved: false };
 const PARKED_UNKNOWN = "This run asked a question, but whether it still waits for an answer cannot be told right now (the run history or the queue could not be read); try again.";
+/** A run that reported what it loaded, which its page holds against the hosts' doctor runs. */
+const LOADED_RECORD = { jobId: "gh-1", outcome: "completed", loaded: { runner: "reported", at: "end", sources: [] } };
+const PARKED_ROW = { jobId: "gh-3", kind: "github", target: "acme/web#14" };
 const MARKS = Object.freeze({
+  overview: [
+    ["the waiting jobs", { snapshot: { ...SNAP, waiting: { unreachable: true } } }],
+    ["the failed jobs", { snapshot: { ...SNAP, failed: { unreachable: "Command timed out" } } }],
+    ["the doctor results", { snapshot: { ...SNAP, doctor: { unreachable: "the doctor results could not be read" } } }],
+    ["a settings overlay nobody could read", { snapshot: { ...SNAP, settings: { path: "settings.json", invalid: "settings file unreadable (EACCES)" } } }],
+    ["a settings overlay that does not load, which the Caps card words the same", { snapshot: { ...SNAP, settings: { path: "settings.json", invalid: "settings file is not valid JSON" } } }],
+    ["no view of the settings overlay", { snapshot: { ...SNAP, settings: null } }],
+  ],
+  fleet: [
+    ["the waiting jobs", { snapshot: { ...SNAP, waiting: { unreachable: true } } }],
+    ["the failed jobs", { snapshot: { ...SNAP, failed: { unreachable: "Command timed out" } } }],
+    ["the doctor results", { snapshot: { ...SNAP, doctor: { unreachable: "the doctor results could not be read" } } }],
+  ],
+  setup: [
+    ["the doctor results", { snapshot: { ...SNAP, doctor: { unreachable: "the doctor results could not be read" } } }],
+    ["a triggers file nobody could read", { snapshot: { ...SNAP, triggers: { unreadable: "EACCES" } } }],
+  ],
+  parked: [
+    ["the answer rules' results", { answerer: { state: "unavailable", partial: true, rows: [] } }],
+    ["a triggers file the answer rules could not take", { answerer: { state: "configuration-unavailable", partial: true, rows: [], rules: [] } }],
+    ["the planner's check of a question", { parkedChecks: { "gh-3": { unreachable: true } } }],
+    ["a question whose pending answer the scan could not reach", { snapshot: { ...SNAP, parked: [{ ...PARKED_ROW, pendingScan: { unreachable: true } }] } }],
+    ["a question whose pending answer a partial scan did not find", { snapshot: { ...SNAP, parked: [{ ...PARKED_ROW, pendingScan: { unknown: true, tooMany: false } }] } }],
+  ],
   runs: [
     ["this host's run files unread", { runsPage: { ...READ.runs.runsPage, unreachable: "EACCES", mirror: "off" } }],
     ["a mirror that is on and did not answer", { runsPage: { ...READ.runs.runsPage, mirror: "unreachable (Command timed out)" } }],
@@ -341,8 +373,7 @@ const MARKS = Object.freeze({
     ["the search for child runs", { childrenIncomplete: true }],
     ["the open shells behind the Workspace row", { workspace: { shell: null, sessionsUnknown: true, unknown: true } }],
     ["the browser sessions behind the Workspace row", { browserGateways: { enabledHosts: ["build3"], sessions: [], partial: true } }],
-    ["the hosts' doctor runs, as their reader answers", { hostLoads: { unreachable: true, hosts: [], more: 0 } }],
-    ["the hosts' doctor runs, as the page's catch keeps them", { hostLoads: null, hostLoadsUnread: true }],
+    ["a refused run's inbox", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: SNAP, runsWindow: { partial: false }, inbox: { unreachable: true } }],
     ["a refused run's snapshot", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: null, runsWindow: { partial: false } }],
     ["a refused run's window", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: { queue: { fleetDegraded: null } }, runsWindow: null }],
     ["a refused run's window, folded without a side of the history", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: { queue: { fleetDegraded: null } }, runsWindow: { partial: true } }],
@@ -354,6 +385,7 @@ const MARKS = Object.freeze({
     ["the record of the run a kept workspace came from", { sandboxRunUnread: true }],
     ["the hosts' doctor runs", { hostLoads: { unreachable: true, hosts: [], more: 0 } }],
     ["the hosts' doctor runs, as the page's catch keeps them", { hostLoads: null, hostLoadsUnread: true }],
+    ["the deployment's configuration", { sandboxes: { ...READ.sandboxes.sandboxes, options: [], refusal: "The triggers, projects or scoped limits could not be read. Fix the deployment configuration before preparing a sandbox." } }],
     ["the browser terminals", { browserGateways: { enabledHosts: [], sessions: [], problem: "Browser-terminal information could not be read. Use the native terminal route." } }],
   ],
   host: [
@@ -376,6 +408,20 @@ test("dataUnread, by page: each read a page makes beside its snapshot marks the 
   }
   // What answered and is not unread, where a careless rule would say so.
   const live = [
+    ["overview", { snapshot: { ...SNAP, settings: { path: "settings.json", overlay: {} } } }, "a settings file that does not exist: an empty overlay, read"],
+    ["overview", { snapshot: { queue: { fleetDegraded: null } } }, "a snapshot that was asked for none of these parts"],
+    ["overview", { snapshot: { ...SNAP, runsDay: null, spendByHour: null, failures24h: null } }, "a day's fold that failed marks the parked runs with it, which every page is judged by"],
+    ["fleet", { snapshot: { ...SNAP, settings: { path: "settings.json", invalid: "settings file is not valid JSON" } } }, "a settings overlay Fleet does not draw"],
+    ["setup", { snapshot: { ...SNAP, triggers: { invalid: "triggers file is not valid JSON" } } }, "a triggers file that does not load: read, and said so"],
+    ["setup", { snapshot: { ...SNAP, triggers: { missing: true } } }, "a triggers file that does not exist"],
+    ["setup", { snapshot: { ...SNAP, waiting: { unreachable: true }, failed: { unreachable: true } } }, "the waiting and the failed jobs, which the setup page does not draw"],
+    ["parked", { snapshot: { ...SNAP, parked: [{ ...PARKED_ROW, pendingScan: { jobId: null } }, { ...PARKED_ROW, pendingScan: { jobId: "gh-4" } }, { ...PARKED_ROW, pendingScan: { unknown: true, tooMany: true } }] } }, "questions that wait, that are being answered, and one behind a queue too deep to scan, which says that"],
+    ["parked", { snapshot: { ...SNAP, parked: [PARKED_ROW] } }, "a row that holds no scan at all"],
+    ["parked", { parkedChecks: { "gh-3": { ok: true }, "gh-4": { refusal: "not a question" } } }, "checks that answered"],
+    ["sandboxes", { sandboxes: { ...READ.sandboxes.sandboxes, refusal: "The triggers file does not exist, so there is no trigger to prepare a sandbox as." } }, "a triggers file that does not exist"],
+    ["sandboxes", { sandboxes: { ...READ.sandboxes.sandboxes, refusal: "The host's current sandbox settings were not published. Choose a fresh host or inspect it in Fleet." } }, "a host that published no settings"],
+    ["run", { run: { record: LOADED_RECORD, source: "local" }, hostLoads: { unreachable: true, hosts: [], more: 0 }, hostLoadsUnread: true }, "the hosts' doctor runs: a run's card says which other hosts lack what it loaded, and nothing of hosts it could not ask"],
+    ["run", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: SNAP, runsWindow: { partial: false }, transcript: { unreachable: "x" }, chat: { unreachable: true }, chatAnswer: { unreachable: true }, progress: { unreachable: true }, hostLoads: { unreachable: true } }, "what a run refused before it started draws none of: a transcript, a chat, progress, loaded parts"],
     ["runs", { runsPage: { ...READ.runs.runsPage, mirror: "off" } }, "a mirror that is off"],
     ["runs", { runsWindow: { partial: false, floor: true } }, "a window that ended inside the day: a floor, read whole"],
     ["runs", { runsPage: { ...READ.runs.runsPage, truncated: true, examined: 2000 } }, "a page that stopped at its cap"],
@@ -403,13 +449,15 @@ test("dataUnread, by page: each read a page makes beside its snapshot marks the 
 });
 
 test("dataUnread: a load the deadline cut is unread on any page, and no page outside the table takes a mark of another's", () => {
-  const every = { ...READ.runs, ...READ.sandboxes, ...READ.host, ...READ.run, ...Object.assign({}, ...Object.values(MARKS).flat().map(([, mark]) => mark)), snapshot: { queue: { fleetDegraded: null } } };
+  // Every mark of every page at once, but for the three parts of a snapshot every page is judged by.
+  const every = { ...Object.assign({}, ...Object.values(MARKS).flat().map(([, mark]) => mark)), snapshot: { ...SNAP, waiting: { unreachable: true }, failed: { unreachable: true }, doctor: { unreachable: true }, settings: null, triggers: { unreadable: "EACCES" }, parked: [{ ...PARKED_ROW, pendingScan: { unreachable: true } }] } };
   for (const page of Object.keys(PAGES)) {
     assert.equal(dataUnread({ page, deadlineSpent: true }), true, `${page}: cut by its deadline`);
     if (!Object.hasOwn(MARKS, page)) assert.equal(dataUnread({ page, ...every }), false, `${page}: reads none of these, and none of them changes its pill`);
   }
-  assert.deepEqual(Object.keys(MARKS).sort(), ["host", "run", "runs", "sandboxes"]);
-  for (const page of Object.keys(MARKS)) assert.equal(PAGES[page].live, true, `${page} is a live page`);
+  // The table holds every live page, and no other: a page that is drawn once has no pill.
+  assert.deepEqual(Object.keys(MARKS).sort(), Object.keys(PAGES).filter((page) => PAGES[page].live).sort());
+  assert.deepEqual(Object.keys(MARKS).sort(), ["fleet", "host", "overview", "parked", "run", "runs", "sandboxes", "setup"]);
 });
 
 test("the host page says when the running jobs could not be read, beside what it did read; a read list says nothing of it", async () => {

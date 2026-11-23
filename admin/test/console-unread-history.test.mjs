@@ -303,12 +303,15 @@ test("the run banner counts the runs it queued as a floor over an incomplete chi
   const kid = { jobId: "gh-kid", outcome: "completed", reason: null, startedAt: null };
   assert.equal(queuedText({ children: [kid, kid] }), "It queued 2 runs from /outbox");
   assert.equal(queuedText({ children: [] }), "It queued 0 runs from /outbox");
-  assert.equal(queuedText({ children: [kid], childrenIncomplete: true }), "It queued at least 1 runs from /outbox (the search for them was incomplete)");
+  // A count and its noun agree (issue #988): "at least 1 run", where it said "1 runs".
+  assert.equal(queuedText({ children: [kid], childrenIncomplete: true }), "It queued at least 1 run from /outbox (the search for them was incomplete)");
+  assert.equal(queuedText({ children: [kid] }), "It queued 1 run from /outbox");
+  assert.equal(queuedText({ children: [kid, kid], childrenIncomplete: true }), "It queued at least 2 runs from /outbox (the search for them was incomplete)");
   assert.equal(queuedText({ children: [], childrenIncomplete: true }), "How many runs it queued from /outbox is not known (the search for them was incomplete)");
   const finished = { chat: { state: "finished", mode: "none" }, transcript: { exists: false } };
   const page = (rec, data) => runPage({ ...finished, run: { record: record(rec), source: "local" }, ...data });
   const partly = await page({}, { children: [kid], childrenSearched: 100, childrenIncomplete: true });
-  assert.match(partly, /It queued at least 1 runs from \/outbox \(the search for them was incomplete\)\. gh-kid/);
+  assert.match(partly, /It queued at least 1 run from \/outbox \(the search for them was incomplete\)\. gh-kid/);
   const none = await page({ chainRefused: 2 }, { children: [], childrenSearched: 0, childrenIncomplete: true });
   assert.match(none, /How many runs it queued from \/outbox is not known \(the search for them was incomplete\), and 2 more requests were refused/);
   assert.ok(!none.includes("It queued 0 runs"));
