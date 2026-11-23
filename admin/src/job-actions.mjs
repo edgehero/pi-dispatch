@@ -896,16 +896,16 @@ export function boundedClient(redisFn, url) {
 export const refusedByValkey = (err) => err?.name === "ReplyError" || err?.valkeyRefused === true;
 
 /**
- * What a confirm answers for a write that was asked for and that Valkey did not answer (issue #987): `partial`, never
- * "nothing was changed" and never done. One shape for every write the console makes through a store or a helper that
- * ends a command by a timer of its own (the answer drafts, the fix accounting, the sandbox requests): such a timer
- * fires before the client's bound, with an error that cannot say whether the command was sent, so the command may land
- * when Valkey answers again. `what` is the thing as a sentence starts ("The draft"), `done` what may have become of it
- * ("dropped"), `asked` what was asked for ("the drop"), and `next` what to do, a whole sentence. The rule beside it:
- * while only reads had left, Valkey unreachable and nothing changed (`writeTracking` says which); Valkey's own reply is
- * an answer and is handed on as it is.
+ * The sentence of a write that was asked for and that Valkey did not answer (issue #987), which a confirm answers as
+ * `{ invalid: <the sentence>, partial: true }`: never "nothing was changed" and never done. One shape for every write
+ * the console makes through a store or a helper that ends a command by a timer of its own (the answer drafts, the fix
+ * accounting, the sandbox requests): such a timer fires before the client's bound, with an error that cannot say
+ * whether the command was sent, so the command may land when Valkey answers again. `what` is the thing as a sentence
+ * starts ("The draft"), `done` what may have become of it ("dropped"), `asked` what was asked for ("the drop"), and
+ * `next` what to do, a whole sentence. The rule beside it: while only reads had left, Valkey unreachable and nothing
+ * changed (`writeTracking` says which); Valkey's own reply is an answer and is handed on as it is.
  */
-export const unconfirmedWrite = ({ what, done, asked, next }) => ({ invalid: `${what} may or may not have been ${done}: ${asked} was asked for and Valkey did not answer. ${next}`, partial: true });
+export const unconfirmedWrite = ({ what, done, asked, next }) => `${what} may or may not have been ${done}: ${asked} was asked for and Valkey did not answer. ${next}`;
 
 /**
  * The one word each store's own timer rejects with (the worker's question groups, fixes and answer drafts). Such a

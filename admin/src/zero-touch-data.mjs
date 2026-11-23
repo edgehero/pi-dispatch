@@ -39,15 +39,31 @@ const ACCOUNTING_UNPREPARED = "Fix accounting could not be prepared. Nothing was
  * its write: a row that lands when Valkey answers again stays `pending` (no change ever proves it applied), and the
  * Zero touch page then reads its fixes as partial until that row expires. "Nothing was changed" was said of that.
  */
-export const FIX_STAGE_UNCONFIRMED = unconfirmedWrite({ what: "The fix's accounting row", done: "staged", asked: "it", next: "The configuration was not changed; preview the change again once Valkey answers." }).invalid;
-/** A stage that threw: Valkey's own answer (an error reply, a transaction it answered with errors) staged nothing it will add to later; anything else may land. */
-const stageRefusal = (err) => (refusedByValkey(err) || err?.message === "fix metadata unavailable" ? { invalid: ACCOUNTING_UNPREPARED } : { invalid: FIX_STAGE_UNCONFIRMED, partial: true });
+export const FIX_STAGE_UNCONFIRMED = unconfirmedWrite({ what: "The fix's accounting row", done: "staged", asked: "it", next: "The configuration was not changed; preview the change again once Valkey answers." });
 /**
- * The warning of an Undo whose instruction was taken out of the triggers file and whose fix could not then be marked
- * undone (issue #987). The file is changed by then, whatever became of the mark: thrown on, the store's timer made the
- * confirm say the change could not be made and that nothing was changed.
+ * What it says when Valkey ANSWERED the staging's transaction and one of its commands with an error (the store's
+ * "fix metadata unavailable"): a transaction is not rolled back, so the commands that did not fail were made. The row
+ * can be there with no entry in the list of fixes, which no page then reads, or be listed with a part missing, which
+ * the page reads as fixes that are partial. It said "Nothing was changed" of that as well.
  */
-export const UNDO_UNMARKED = "The instruction was removed; its fix could not be marked undone. Do not repeat the Undo.";
+export const FIX_STAGE_IN_PART = "The fix's accounting row may have been staged in part: Valkey answered its staging with an error. The configuration was not changed; preview the change again once Valkey is well.";
+/**
+ * A stage that threw. Valkey's own refusal of the whole transaction staged nothing; a transaction it answered with one
+ * command's error staged the rest; anything else (the store's timer, a lost answer) may land when Valkey answers again.
+ */
+const stageRefusal = (err) => {
+  if (refusedByValkey(err)) return { invalid: ACCOUNTING_UNPREPARED };
+  return { invalid: err?.message === "fix metadata unavailable" ? FIX_STAGE_IN_PART : FIX_STAGE_UNCONFIRMED, partial: true };
+};
+/**
+ * What an Undo says when its instruction was put back in the triggers file and its fix could not then be marked undone
+ * (issue #987): a change that landed in part, said as one, in the bar and in the audit row. The file is changed by
+ * then, whatever became of the mark: thrown on, the store's timer made the confirm say the change could not be made
+ * and that nothing was changed. Nothing repairs the mark, so the sentence says what stays so: the fix is still shown
+ * as applied until its row expires, and a second Undo finds the instructions already as it would write them
+ * (`planZeroTouchInstructionUndo` says that).
+ */
+export const UNDO_UNMARKED = "The instruction was put back as it was before this fix, but the fix could not be marked undone: Zero touch still shows it as applied until its row expires. Do not undo it again.";
 
 /** What a grouping confirm says of an add that was started and not confirmed, and of a status write that was not answered. */
 export const GROUP_UNCONFIRMED = "The grouping job may or may not have been queued: the queue did not confirm it. Preview it again first: the preview says when a grouping is pending. A second one is paid again.";
@@ -106,6 +122,21 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
   // The two store reads that throw when Valkey does not answer are asked through `valkeyRead` (issue #987): the store's
   // own timer ends each after 2 seconds, before the client's bound, with an error that names no Valkey, and the preview
   // then said it had failed. The confirm's re-plan catches whatever this throws as nothing sent, as before.
+  /**
+   * Take back the accounting of a change that was not made (issue #987): the staged row is refused and the touch
+   * intent aborted. NEVER throws and never answers, so the change's own answer goes on as it is: a failure here is
+   * logged. The abort is reached whether or not the refusal could be written, and it comes last, since the intent's
+   * file is what a later read of the page would begin again. `landed` is for a change whose answer says it may have
+   * been made: its row is left pending, which the page's repair settles by the file's digest, never refused.
+   */
+  async function untrack({ fixes, outbox }, fixId, intent, landed) {
+    if (!landed) {
+      try { await fixes.reject(fixId); }
+      catch { log("zero_touch_fix_reject_pending", {}); }
+    }
+    try { await outbox.abort(intent); }
+    catch { log("zero_touch_touch_abort_pending", {}); }
+  }
   async function plan(name, params, stores) {
     if (name === "zero-touch-group") return planZeroTouchGroup({ params, config: config(), meta: await valkeyRead(stores.groups.readMeta(params.runId)), surface: "console" });
     if (name === "zero-touch-name") {
@@ -192,12 +223,15 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         try { staged = await fixes.stage({ ...cause, kind: "config" }, { identity: entry.ticketDigest ?? entry.afterDigest, privateUndo: entry.target && entry.afterDigest ? { file: entry.target, afterDigest: entry.afterDigest } : null }); }
         catch (err) { await outbox.abort(intent).catch(() => {}); return stageRefusal(err); }
         if (!staged.ok) { await outbox.abort(intent); return { invalid: staged.invalid ?? "The source refusal is not available; nothing was changed." }; }
+        // The change itself. Its own answer is the answer, whatever the tracking does after it (issue #987): the
+        // staged row's refusal went through the fix store, whose timer threw in place of an answer that said what had
+        // happened, and the intent's abort behind it was then never reached.
         let result;
         try { result = await apply(); }
-        catch (error) { await fixes.reject(staged.fix.id); await outbox.abort(intent); throw error; }
-        if (!result?.ok) { await fixes.reject(staged.fix.id); await outbox.abort(intent); return result; }
+        catch (error) { await untrack({ fixes, outbox }, staged.fix.id, intent, error?.valkeyMayStillRun === true); throw error; }
+        if (!result?.ok) { await untrack({ fixes, outbox }, staged.fix.id, intent, result?.partial === true); return result; }
         let pending = false;
-        try { pending = !await fixes.commit(staged.fix.id); } catch { pending = true; }
+        try { pending = !await fixes.commit(staged.fix.id); } catch { pending = true; log("zero_touch_fix_pending", {}); }
         const tracked = await outbox.applied(intent);
         return { ...result, ...(pending || !tracked.ok ? { warning: "The configuration was changed; accounting is pending repair. Do not repeat the change." } : {}) };
       });
@@ -265,7 +299,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
           if (!staged.ok) { await stores.outbox.abort(intent); return { invalid: staged.invalid ?? "The fix could not be recorded; nothing was changed." }; }
         }
         const result = applyZeroTouchFilePlan({ plan: { ...p, expect: entry.expect }, paths, fs });
-        if (result.invalid || result.ok === false) { if (intent) { await stores.outbox.abort(intent); await stores.fixes.reject(staged.fix.id); } return result; }
+        if (result.invalid || result.ok === false) { if (intent) await untrack(stores, staged.fix.id, intent, false); return result; }
         if (name === "zero-touch-instruction") {
           let fixPending = false;
           try { fixPending = !await stores.fixes.commit(staged.fix.id); }
@@ -274,11 +308,11 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
           return { ok: true, fixId: staged.fix.id, ...(tracked.ok && !fixPending ? {} : { warning: "The instruction was saved; accounting is pending repair. Do not repeat the edit." }) };
         }
         // The Undo's file is written by now. Its mark goes through the fix store, whose read and write each end by the
-        // store's own timer: whatever it throws, the instruction is gone from the file, so the answer is the change
-        // with a warning, never a throw (issue #987).
+        // store's own timer: whatever it throws, the instruction is put back in the file, so the answer is a change
+        // that landed in part, with what did and what did not, never a throw (issue #987).
         if (name === "zero-touch-undo") {
           try { await stores.fixes.markUndone(params.fixId); }
-          catch { return { ok: true, warning: UNDO_UNMARKED }; }
+          catch { return { invalid: UNDO_UNMARKED, partial: true }; }
         }
         return { ok: true };
       });

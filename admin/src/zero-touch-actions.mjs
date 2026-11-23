@@ -73,11 +73,17 @@ export function planZeroTouchInstruction({ params, paths, sourceRecord, group = 
   try { parseTriggersDocument(afterText, paths.triggersPath, versions); } catch { return refusal("The amended trigger would not pass the loader's validation."); }
   return { plan: { kind: "instructions", ...cause, index: params.index, triggerIndex: params.index, before, after, sentence, sourceDigest: digest(JSON.stringify(entry)), target: paths.triggersPath, expect: doc.expect, beforeText: doc.text, afterText, mutate, title: `Add instructions to trigger ${params.index + 1}?`, summary: [`Append the sentence to trigger ${params.index + 1}'s instructions.`, "The exact file diff is below. Undo removes this change only while the instructions still match."], privateUndo: { index: params.index, before: before ?? null, after, triggerDigest: digest(JSON.stringify(next[params.index])) } } };
 }
+/** What an Undo says of a fix whose instruction is no longer in its trigger: there is nothing left for it to put back. */
+export const UNDO_ALREADY_WRITTEN = "This trigger's instructions are already what Undo would write: the instruction of this fix is not in them. Nothing was changed.";
 export function planZeroTouchInstructionUndo({ params, paths, fix, fs = nodeFs, surface = "console", versions = {} } = {}) {
   const denied = consoleOnly(surface); if (denied) return denied;
   if (!fix || fix.id !== params?.fixId || fix.kind !== "instructions" || fix.undoneAt || !fix.undo) return refusal("This instruction fix has expired or cannot be undone here.");
   let doc; try { doc = readDocument(paths, fs, versions); } catch { return refusal("The triggers file could not be read and validated."); }
   const index = fix.undo.index, entry = doc.raw.triggers[index];
+  // The instructions are already what this Undo would write (issue #987): an earlier Undo put them back and its mark
+  // was not written, or a person took the sentence out by hand. It said the instructions had changed after the fix and
+  // sent the operator to the trigger, for a change nobody made.
+  if (entry && (entry.run?.instructions ?? null) === fix.undo.before) return refusal(UNDO_ALREADY_WRITTEN);
   if (!entry || entry.run?.instructions !== fix.undo.after || digest(JSON.stringify(entry)) !== fix.undo.triggerDigest) return refusal("The instructions changed after this fix. Review the current trigger; Undo will not overwrite that change.");
   const mutate = entries => { const next = structuredClone(entries); if (next[index]?.run?.instructions !== fix.undo.after) throw new Error("instructions changed"); if (fix.undo.before === null) delete next[index].run.instructions; else next[index].run.instructions = fix.undo.before; return next; };
   return { plan: { kind: "instruction-undo", fixId: fix.id, index, target: paths.triggersPath, expect: doc.expect, beforeText: doc.text, afterText: triggersFileText(mutate(doc.raw.triggers), doc.raw, versions), mutate, title: "Remove the instruction sentence?", summary: [`Restore trigger ${index + 1}'s instructions to their value before this fix.`] } };

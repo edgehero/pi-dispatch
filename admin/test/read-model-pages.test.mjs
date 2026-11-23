@@ -2981,6 +2981,25 @@ test("the fleet reader says of a sandbox request that was not confirmed whether 
   const adding = queueWriteTracking({ add: async () => "added" });
   assert.equal(await adding.queue.add("n", {}), "added");
   assert.equal(adding.wrote, true);
+  // It fails closed: only the named lookups change nothing. A call it does not know counts as a write, on the queue and
+  // on a job a lookup handed back, so "only looked up", which is what lets a confirm say nothing was changed, is never
+  // said of a remove, a pause, a bulk add, a job's update or a method BullMQ adds later.
+  const job = () => ({ id: "j1", data: { a: 1 }, getState: async () => "waiting", update: async () => "updated", remove: async () => "removed" });
+  const whole = () => ({ name: "q", getJob: async () => job(), getJobCounts: async () => ({ waiting: 1 }), isPaused: async () => false, remove: async () => 1, pause: async () => {}, addBulk: async () => [], upsertJobScheduler: async () => ({}), somethingNew: () => "sync" });
+  const looked = queueWriteTracking(whole());
+  const found = await looked.queue.getJob("j1");
+  assert.deepEqual([found.id, found.data, await found.getState(), await looked.queue.getJobCounts(), await looked.queue.isPaused()], ["j1", { a: 1 }, "waiting", { waiting: 1 }, false]);
+  assert.equal(looked.wrote, false, "the lookups, and a job's own");
+  for (const method of ["remove", "pause", "addBulk", "upsertJobScheduler", "somethingNew"]) {
+    const t = queueWriteTracking(whole());
+    await t.queue[method]("x");
+    assert.equal(t.wrote, true, `the queue's ${method}`);
+  }
+  for (const method of ["update", "remove"]) {
+    const t = queueWriteTracking(whole());
+    assert.equal(await (await t.queue.getJob("j1"))[method]({}), method === "update" ? "updated" : "removed");
+    assert.equal(t.wrote, true, `a job's ${method}`);
+  }
 });
 
 test("createFleetReader builds every queue it holds on the console's bounded connection: the shared one, a host's, a sandbox request's (#842)", async () => {
