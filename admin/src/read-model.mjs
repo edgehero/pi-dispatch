@@ -2691,27 +2691,23 @@ export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, que
   // The clients' release, STARTED and never awaited: BullMQ's close QUITs its connection and waits for the answer, which
   // a Valkey that stopped answering on an open socket never sends, and this answer is owed within `timeoutMs`. Each call
   // closes the queues opened since the last, so a lookup still in flight when the bound fired is closed when it settles.
+  // Through `closeWithin` (issue #987): a close that is not answered left its socket open for as long as Valkey stayed
+  // silent, so past `QUEUE_CLOSE_TIMEOUT_MS` the queue's connection is dropped.
   const release = () => {
     try {
       redis?.disconnect?.();
     } catch {
       // already closed
     }
-    for (const queue of queues.splice(0)) {
-      try {
-        // A bullmq Queue has BOTH `disconnect` and `close`; `close` is the one that releases its blocking
-        // connections, so it is named explicitly rather than reached through a `??` that short-circuits.
-        Promise.resolve(queue?.close?.()).catch(() => {});
-      } catch {
-        // already closed
-      }
-    }
+    for (const queue of queues.splice(0)) void closeWithin(queue, QUEUE_CLOSE_TIMEOUT_MS);
   };
   let settled = null;
   try {
     parseConnection(url, { failFast: true });
-    redis = redisFn(url);
-    redis.on?.("error", () => {}); // Issue #846: a down Valkey is this call's answer; without a listener ioredis also prints a stack trace per reconnect attempt.
+    // The console's bounded client (issue #987): the removal's reads and deletes each end at the command bound, and the
+    // socket is dropped at once on release. It carries the error listener a raw client was given here (issue #846: a
+    // down Valkey is this call's answer; without a listener ioredis also prints a stack trace per reconnect attempt).
+    redis = boundedClient(redisFn, url);
     // EVERY fleet queue (issue #642), as `pi-dispatch cancel` searches them (cancel-cli.mjs): a held job lives on the queue
     // it was enqueued onto, and a named host's cron, chained children and routed forge jobs live on `pi-jobs@<name>`.
     // Looking only in the shared queue refused every held job on a host queue as "no longer in the queue", for a job
@@ -2722,7 +2718,9 @@ export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, que
       const { names } = await readFleetQueues({ url, redisFn, timeoutMs: Math.max(250, Math.floor(timeoutMs / 2)) });
       let owner = null;
       for (const name of names) {
-        const q = queueFn(parseConnection(url, { failFast: true }), { name });
+        // The console's bounded kind (issue #987, `consoleQueueConnection`): a lookup or a removal a Valkey took and
+        // never answered ends at the command bound, where a plain fail-fast queue's waited for as long as Valkey did.
+        const q = queueFn(consoleQueueConnection(url), { name });
         queues.push(q);
         if (owner === null && (await q.getJob(jobId))) owner = q;
         if (owner !== null) break;

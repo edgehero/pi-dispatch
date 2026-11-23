@@ -3546,6 +3546,40 @@ test("panelValkeyContext: an openshell venue on Podman in the pointer's .env ref
   assert.equal(panelValkeyContext({ env: {}, pointerDir: dir, platform: "linux" }).rootRefused, false, "on docker, docker-proxy's root is the queue");
 });
 
+test("a held job's cancel uses the console's bounded client and queues, and a queue whose close is never answered is dropped at the close bound, with no wait for it (#987)", async () => {
+  const rm = await import("../src/read-model.mjs");
+  const never = () => new Promise(() => {});
+  const made = [];
+  const conns = [];
+  const queues = [];
+  // A held job on the shared queue, removed; the queue's close never answers, as a QUIT to a Valkey that stopped answering.
+  const redisFn = (_url, options) => {
+    made.push(options ?? null);
+    return { on() {}, smembers: async () => [], scan: async () => ["0", []], hgetall: async () => ({ since: "1" }), get: async () => null, del: async () => 1, srem: async () => 1, disconnect() {} };
+  };
+  const queueFn = (connection, { name }) => {
+    conns.push({ failFast: connection.enableOfflineQueue === false, commandTimeout: connection.commandTimeout ?? null, resend: connection.autoResendUnfulfilledCommands ?? null });
+    const queue = { name, closes: 0, drops: 0, getJob: async () => ({ getState: async () => "delayed", remove: async () => {} }), close: () => ((queue.closes += 1), never()), disconnect() { queue.drops += 1; } };
+    queues.push(queue);
+    return queue;
+  };
+  const t0 = Date.now();
+  const res = await rm.cancelHeldJob({ url: "redis://x", jobId: "gh-1", redisFn, queueFn, touchStore: null, timeoutMs: 300 });
+  const ms = Date.now() - t0;
+  assert.deepEqual(res, { ok: true, jobId: "gh-1", attemptsMade: 0 });
+  assert.ok(ms < rm.QUEUE_CLOSE_TIMEOUT_MS / 2, `the answer did not wait for the queue's close (${ms} ms)`);
+  // The cancel's own client first: each command bound, its socket dropped at once. Then the queue discovery's, a read
+  // on a client of its own under its own timer. The cancel's was a raw client too.
+  assert.deepEqual(made, [{ commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }, null]);
+  // Its queue is the console's bounded kind: fail fast, each command bound, nothing sent again on a later connection.
+  // It was fail fast with no bound, so a lookup or a removal on it waited for as long as Valkey stayed silent.
+  assert.deepEqual(conns, [{ failFast: true, commandTimeout: 5000, resend: false }]);
+  assert.deepEqual(queues.map((q) => [q.closes, q.drops]), [[1, 0]], "the close was started, and has its bound still");
+  await new Promise((resolve) => setTimeout(resolve, rm.QUEUE_CLOSE_TIMEOUT_MS + 250));
+  // A bare close left the socket of a Valkey that never answers its QUIT open for as long as that lasted.
+  assert.deepEqual(queues.map((q) => [q.closes, q.drops]), [[1, 1]], "past the close bound the queue's connection is dropped");
+});
+
 test("the panel's Valkey reads fail open on a VALKEY_URL whose path names no database (#477 follow-up)", async () => {
   // PR #478's gate: the client refuses such a URL where it is made; every panel read says it rather than throwing.
   const rm = await import("../src/read-model.mjs");

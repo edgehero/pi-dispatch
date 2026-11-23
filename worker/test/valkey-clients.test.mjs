@@ -119,7 +119,8 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 
 // Issue #867: a command bound on a BullMQ connection (`parseConnection`'s `commandTimeoutMs`) is for `cancel`'s one-shot
 // queues and, since issue #842, for the operator console's queues behind the kill switch, the failed-job and steer
-// actions, its fleet reader and the status read, all through `consoleQueueConnection`. A Worker's blocking reads wait
+// actions, its fleet reader and the status read, and since issue #987 for the queues of a held job's cancel in the
+// console, all through `consoleQueueConnection`. A Worker's blocking reads wait
 // longer than any bound by design, so it may not get one by accident: `parseConnection` refuses it without `failFast`
 // (connection.test.mjs), and no other file passes it. A caller that should adds its line here, with its reason.
 /**

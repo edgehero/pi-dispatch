@@ -1134,8 +1134,9 @@ export async function planCancelQueued({ url, jobId, queue = null, projects = nu
     fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
     const found = await fleet.find(jobId, queue);
     if (!found) return { refusal: `${notInFleet(jobId, fleet)}; nothing was changed`, status: 404 };
-    redis = redisFn(url);
-    redis.on?.("error", () => {});
+    // The console's bounded client (issue #987): no read of this preview waits past its bound for a Valkey that stopped
+    // answering, and its socket is dropped at once when the preview's own timer fires first.
+    redis = boundedClient(redisFn, url);
     const state = await found.job.getState().catch(() => "unknown");
     if (!WAITING_STATES.includes(state)) return { refusal: cancelQueuedRefusal("notQueued", { jobId, state }), status: 409 };
     const q = fleet.queueOf(found.queue);
@@ -1306,8 +1307,9 @@ export async function cancelQueuedJob({ url, jobId, expect, redisFn = makeRedisC
     const state = await found.job.getState().catch(() => "unknown");
     const moved = movedSince(jobId, expect, found.job, state);
     if (moved !== null) return { invalid: moved };
-    redis = redisFn(url);
-    redis.on?.("error", () => {});
+    // The console's bounded client (issue #987): the removal writes through it (the hold's keys, the defer record), so a
+    // command a Valkey took and never answered ends at the bound, and one that was not sent by then is never sent later.
+    redis = boundedClient(redisFn, url);
     const q = fleet.queueOf(found.queue);
     const refusal = await neverStartedRefusal(found.job, jobId, { redis, q });
     if (refusal !== null) return { invalid: refusal };

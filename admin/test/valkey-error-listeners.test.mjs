@@ -61,8 +61,9 @@ test("every Valkey client the console and the extension build has an error liste
   assert.deepEqual(missing, [], "a client built here without an `error` listener prints a stack trace per reconnect attempt in an outage");
   // The scan sees the constructions it is meant to: the reads #846 named, among the rest.
   const all = files.flatMap((f) => readFileSync(f, "utf8").split("\n").filter((l) => CONSTRUCTION.test(l)));
-  // Fewer than before issue #961: the console's bounded clients are built in one place (`boundedClient`), listener included.
-  assert.ok(all.length >= 19, `the scan still finds the constructions (${all.length})`);
+  // Fewer than before issue #961: the console's bounded clients are built in one place (`boundedClient`), listener
+  // included. Three fewer again since issue #987, when the three cancels took that client too.
+  assert.ok(all.length >= 16, `the scan still finds the constructions (${all.length})`);
   // Each exemption matches exactly one line.
   for (const [re, why] of EXEMPT) assert.equal(files.flatMap((f) => readFileSync(f, "utf8").split("\n").filter((l) => re.test(l))).length, 1, why);
   // Planted, so the scan is not vacuous: a construction with no listener, and one whose listener is too far below.
