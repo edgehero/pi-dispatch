@@ -111,7 +111,7 @@ import {
   enqueueParkedAnswer,
   deploymentOwnQueues,
 } from "./read-model.mjs";
-import { switchListShort, switchShortNote } from "./words.mjs";
+import { switchListShort, switchShortCause, switchShortNote } from "./words.mjs";
 import { sandboxRetentionOf } from "./sandbox-verdict.mjs";
 import { readConfigTool } from "./config-tools.mjs";
 export { setConfigToolReadsForTest } from "./config-tools.mjs";
@@ -561,6 +561,22 @@ function toolText(text: string): { content: { type: "text"; text: string }[]; de
  * one on the dashboard would not be. A control, write, or enqueue that cannot reach the queue/file THROWs,
  * which pi reports to the model as an error rather than a false success.
  */
+/**
+ * What `queuesMayBeShort` in a fleet pause's or resume's answer tells a model (issue #964), and `queuesShortLasting`
+ * beside it (issue #1035), in the descriptions of both tools. The list is short for one of two kinds of cause, and the
+ * description said "pause again once Valkey answers" of both: a read that got no answer, or one Valkey was busy for,
+ * may be whole on a later try; a read Valkey answers with an error that waiting does not change (a key holding
+ * another kind of value, a permission its user lacks, `replyErrorClass`'s two lasting classes) gives the same answer
+ * on every try until that is put right, which is what `queuesShortLasting` names. A resume is never the model's own to
+ * repeat, so its description says what a later one may read and no more.
+ */
+function shortListMeaning(paused: boolean): string {
+  const verb = paused ? "paused" : "resumed";
+  const again = paused ? "pause again: a later try may read the list whole" : "a later resume may read the list whole";
+  const alone = paused ? "pausing again alone" : "resuming again alone";
+  return `queuesMayBeShort true in the answer means the host registry or the look for queues could not be read whole, so other queues may exist and were not ${verb}. With no queuesShortLasting beside it, ${again}. queuesShortLasting beside it means Valkey answered a read with an error that waiting does not change, so ${alone} gives the same answer: "key" is a key that holds another kind of value and has to be removed or repaired first, "permission" is a permission this deployment's Valkey user lacks (its ACL).`;
+}
+
 function registerTools(pi: ExtensionAPI): void {
   // Capture process grants once per pi session; the deployment pointer and .env never grant writes.
   // env-internal PI_DISPATCH_AGENT_WRITES: host process/session grant, deliberately never a deployment .env setting.
@@ -724,7 +740,7 @@ function registerTools(pi: ExtensionAPI): void {
     label: "pi-dispatch pause",
     description:
       "Durably pauses pi-dispatch job processing: NEW jobs stop starting; running containers finish; jobs still enqueue. Survives worker restart. Reversible via dispatch_resume. " +
-      "queuesMayBeShort true in the answer means the host registry or the look for queues could not be read whole, so other queues may exist and were not paused: pause again once Valkey answers.",
+      shortListMeaning(true),
     executionMode: "sequential",
     parameters: Type.Object({ queue: Type.Optional(Type.String()) }),
   });
@@ -734,7 +750,7 @@ function registerTools(pi: ExtensionAPI): void {
     label: "pi-dispatch resume",
     description:
       "Re-enables PAID job processing after a pause. Only call when the user explicitly asks to resume. " +
-      "queuesMayBeShort true in the answer means the host registry or the look for queues could not be read whole, so other queues may exist and were not resumed.",
+      shortListMeaning(false),
     executionMode: "sequential",
     parameters: Type.Object({ queue: Type.Optional(Type.String()) }),
   });
@@ -1795,7 +1811,8 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
         // Issue #964: a set that may be short is said with what it means and what to do. It said "only pi-jobs" on an
         // unread registry, which was not so when the keyspace scan had named more, and nothing on a scan that did not finish.
         const span = res.queues.length > 1 ? ` (${res.queues.length} queues)` : "";
-        const short = switchListShort(res) ? `, but ${switchShortNote(paused)}` : "";
+        // By its cause (issue #1035): "once Valkey answers" only for a read that got no answer.
+        const short = switchListShort(res) ? `, but ${switchShortNote(paused, switchShortCause(res))}` : "";
         notify?.(
           paused
             ? `paused${at}: worker will stop taking new jobs (jobs still enqueue; durable, survives restart)${span}${short}`

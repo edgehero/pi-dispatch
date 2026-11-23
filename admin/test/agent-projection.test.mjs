@@ -117,6 +117,12 @@ test("an agent's copy keeps the queues and hosts Valkey answered with an error, 
   assert.deepEqual(agentReadProjection({ queue: { hostErrors: { hostw: "WRONGTYPE" } } }).queue.hostErrors, { hostw: "WRONGTYPE" });
   assert.deepEqual(agentReadProjection({ queueErrors: { a: "WRONGTYPE Operation against a key", "two words": "ERR", b: 7, c: { d: "ERR" }, e: "NOPERM" } }).queueErrors, { e: "NOPERM" });
   assert.deepEqual(agentReadProjection({ queueErrors: {} }), { queueErrors: {} });
+  // Issue #1035: beside `queuesMayBeShort`, the class of a cause waiting does not end passes as one of its two closed
+  // words, and nothing else does: a string under a key the projection does not know was dropped, the class with it.
+  assert.deepEqual(agentReadProjection({ queuesMayBeShort: true, queuesShortLasting: "key" }), { queuesMayBeShort: true, queuesShortLasting: "key" });
+  assert.equal(agentReadProjection({ queuesShortLasting: "permission" }).queuesShortLasting, "permission");
+  assert.deepEqual(agentReadProjection({ queuesMayBeShort: true, queuesShortLasting: "passing" }), { queuesMayBeShort: true });
+  assert.deepEqual(agentReadProjection({ queuesShortLasting: "Valkey answers host:live with WRONGTYPE" }), {});
   // Only under those two keys: any other map of names stays withheld.
   assert.deepEqual(agentReadProjection({ otherErrors: { hostw: "WRONGTYPE" } }), { otherErrors: {} });
   // The state API's copy for an agent session carries the same map.

@@ -6,7 +6,7 @@ import {
   DEFER_WHYS,
 } from "@edgehero/pi-dispatch/defer-reasons";
 import { GATEWAY_TEXT, venuesView } from "../../read-model.mjs";
-import { VENUE_LABEL, reasonWords } from "../../words.mjs";
+import { VENUE_LABEL, queueErrorsLine, queueErrorsOf, reasonWords } from "../../words.mjs";
 import {
   DOCTOR_CHECKS_SHOWN,
   doctorByText,
@@ -28,6 +28,7 @@ import {
   progressText,
   workersOnline, plural,
   hostsUnread, HOSTS_UNREAD, HOSTS_UNREAD_TEXT,
+  killSwitchUnreadForms, pausedStateUnknown,
   NO_BEAT_READ, REGISTRY_PART_TEXT, registryReadInPart, rowLastSeen } from "./common.mjs";
 import {
   waitingSentence,
@@ -133,18 +134,39 @@ const orphanRows = (s) =>
       .map((job) => ({ ...job, host })),
   );
 
+/**
+ * The Fleet page's bar: whether the fleet is paused, what beats, the counts, and the kill switch.
+ *
+ * WITHOUT A SNAPSHOT (issue #1035) the unread sentence, and under it the kill switch's two forms for a view that may
+ * act (`killSwitchUnreadForms`, which says why this is the one change a page that read nothing still offers).
+ *
+ * WITH ONE, the heading follows the snapshot's own paused marks (`queue.pausedState`, `queue.pausedPartial`) and the
+ * queues Valkey answered with an error (`queueErrorsOf`), never `queueCounts` alone (issue #1035): an errored queue is
+ * in no row of `queueCounts`, so with every queue that WAS read paused the bar said "The fleet is paused" of a fleet
+ * one of whose queues nobody read. The fleet is paused only where every queue was read and is paused; over an errored
+ * queue the heading counts it as not read and the line under it names it with what Valkey answered. The buttons
+ * follow the same marks, and BOTH are drawn whenever some queue's state is not known (`pausedStateUnknown`: an
+ * errored queue, no queue read, a registry not read whole): over an errored queue with every read queue paused the
+ * bar offered Resume and no Pause, and with none paused Pause and no Resume.
+ */
 export const fleetBar = (v) => {
   const s = v.data?.snapshot;
   if (!s)
     return ui.card({
       title: "Fleet",
-      body: html`<p>The deployment's Valkey could not be read. The next refresh tries again.</p>`,
+      body: html`<p>The deployment's Valkey could not be read. The next refresh tries again.</p>${killSwitchUnreadForms(v)}`,
     });
   const queues = list(s.queueCounts);
   const paused = queues.filter((q) => q.paused);
   const running = queues.filter((q) => !q.paused);
-  const partial = paused.length > 0 && running.length > 0;
-  const allPaused = queues.length > 0 && paused.length === queues.length;
+  const errored = queueErrorsOf(s);
+  const total = queues.length + errored.length;
+  // Wholly paused is the snapshot's own word (`queue.pausedState`: every queue read and paused, and false while a
+  // queue was left unread for an error reply, issue #1064). Part paused is a paused queue among those read without
+  // that, which is what the snapshot's `queue.pausedPartial` says and what the heading counts.
+  const allPaused = queues.length > 0 && s.queue?.pausedState === true;
+  const partial = !allPaused && paused.length > 0;
+  const unknown = pausedStateUnknown(s);
   const online = workersOnline(s);
   const mismatch = v.data?.killSwitch;
   const sum = (key) =>
@@ -159,10 +181,17 @@ export const fleetBar = (v) => {
   const title = !queues.length
     ? "Queue state not read"
     : partial
-      ? `Part paused: ${paused.length} of ${queues.length} queues are paused`
+      ? `Part paused: ${paused.length} of ${total} queues are paused${errored.length > 0 ? `, ${errored.length} not read` : ""}`
       : allPaused
         ? "The fleet is paused"
-        : "The fleet is running";
+        : errored.length > 0
+          ? `No queue that was read is paused: ${errored.length} of ${total} not read`
+          : "The fleet is running";
+  const resume = () => act(v, "fleet-resume", "Resume the fleet", [], { small: false });
+  const pause = () => act(v, "fleet-pause", "Pause the fleet", [], { small: false });
+  // Resume alone over a fleet known wholly paused, Pause alone over one known wholly running, and both for a part
+  // pause and whenever a queue's state is not known.
+  const buttons = html`${partial || allPaused || unknown ? resume() : null}${!allPaused || unknown ? pause() : null}`;
   const statistic = (value, label, tone = null) =>
     html`<span${tone ? html` class="tinted tone-${tone}"` : null}><b>${value}</b> ${label}</span>`;
   const held =
@@ -170,8 +199,8 @@ export const fleetBar = (v) => {
       ? "unreadable"
       : list(s.held.rows).length + Number(s.held.more ?? 0);
   return ui.card({
-    ring: partial ? "attention" : null,
-    body: html`<div class="fl-bar"><div class="fl-bar__row">${ui.tile(partial || allPaused ? "attention" : "ok", { icon: partial || allPaused ? "pause" : "fleet" })}<div class="fl-bar__t"><h2>${title}</h2><p class="muted">${online.atLeast && online.online === 0 ? NO_BEAT_READ : `${online.atLeast ? `at least ${online.online}` : online.online ?? "unknown"} ${online.online === 1 ? "host beats" : "hosts beat"}`}, ${plural(running.length, "queue")} ${running.length === 1 ? "accepts" : "accept"} jobs. ${v.role === "operator" ? html`Valkey <span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "Valkey answers."}</p>${partial ? html`<p class="muted">Starts nothing new: ${paused.map((q) => q.queue).join(", ")}. Keeps starting jobs: ${running.map((q) => q.queue).join(", ")}.</p>` : null}</div><div class="fl-bar__stats">${statistic(count("waiting"), "waiting")}${
+    ring: partial || errored.length > 0 ? "attention" : null,
+    body: html`<div class="fl-bar"><div class="fl-bar__row">${ui.tile(partial || allPaused || errored.length > 0 ? "attention" : "ok", { icon: partial || allPaused ? "pause" : "fleet" })}<div class="fl-bar__t"><h2>${title}</h2><p class="muted">${online.atLeast && online.online === 0 ? NO_BEAT_READ : `${online.atLeast ? `at least ${online.online}` : online.online ?? "unknown"} ${online.online === 1 ? "host beats" : "hosts beat"}`}, ${plural(running.length, "queue")} ${running.length === 1 ? "accepts" : "accept"} jobs. ${v.role === "operator" ? html`Valkey <span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "Valkey answers."}</p>${partial ? html`<p class="muted">Starts nothing new: ${paused.map((q) => q.queue).join(", ")}.${running.length > 0 ? ` Keeps starting jobs: ${running.map((q) => q.queue).join(", ")}.` : ""}</p>` : null}${errored.length > 0 ? html`<p class="muted">${queueErrorsLine(errored)}.</p>` : null}</div><div class="fl-bar__stats">${statistic(count("waiting"), "waiting")}${
       partial
         ? statistic(
             paused.reduce(
@@ -185,7 +214,7 @@ export const fleetBar = (v) => {
             "attention",
           )
         : null
-    }${statistic(count("active"), "active")}${statistic(count("delayed"), "delayed")}${statistic(held, "held")}${statistic(count("failed"), "awaiting retry", "failed")}</div><div class="fl-bar__btns">${partial ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}${running.length || !queues.length ? act(v, "fleet-pause", "Pause the fleet", [], { small: false }) : null}${allPaused ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}</div></div>${s.queue?.fleetDegraded ? ui.banner({ status: "attention", title: registryReadInPart(s) ? "Registry read in part" : "Registry not read", body: hostsUnread(s) ? HOSTS_UNREAD_TEXT : html`${registryReadInPart(s) ? REGISTRY_PART_TEXT : REGISTRY_UNREAD_TEXT} Registry rows last read ${s.hostsReadAt ? timeHtml(s.hostsReadAt) : "at an unknown time"}.`, sm: true }) : null}${!paused.length && online.none ? ui.banner({ status: "attention", title: NO_WORKER_TEXT, sm: true }) : online.staleBeats ? html`<p class="muted">${STALE_BEATS_TEXT}</p>` : null}${mismatch?.disagreement ? ui.banner({ status: "attention", title: "Two Valkeys: this console and the service disagree",
+    }${statistic(count("active"), "active")}${statistic(count("delayed"), "delayed")}${statistic(held, "held")}${statistic(count("failed"), "awaiting retry", "failed")}</div><div class="fl-bar__btns">${buttons}</div></div>${s.queue?.fleetDegraded ? ui.banner({ status: "attention", title: registryReadInPart(s) ? "Registry read in part" : "Registry not read", body: hostsUnread(s) ? HOSTS_UNREAD_TEXT : html`${registryReadInPart(s) ? REGISTRY_PART_TEXT : REGISTRY_UNREAD_TEXT} Registry rows last read ${s.hostsReadAt ? timeHtml(s.hostsReadAt) : "at an unknown time"}.`, sm: true }) : null}${!paused.length && online.none ? ui.banner({ status: "attention", title: NO_WORKER_TEXT, sm: true }) : online.staleBeats ? html`<p class="muted">${STALE_BEATS_TEXT}</p>` : null}${mismatch?.disagreement ? ui.banner({ status: "attention", title: "Two Valkeys: this console and the service disagree",
           block: true, body: html`<p>${mismatch.disagreement}</p><p>A pause reaches both; a resume neither until they agree.</p>`, sm: true }) : null}${mismatch?.refused ? html`<div class="pp-refusal tone-refused" role="region" aria-label="Resume refused"><p class="pp-refusal__h">${ui.icon("refused")}Refused: Resume the fleet</p><p>${mismatch.refused}</p>${v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p><b>Nothing was changed.</b> One queue can still be resumed on the Valkey this console read it from.</p></div>` : mismatch?.disagreement && v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p class="pp-src">${ui.icon("beat", { size: "sm" })}<span>Read ${ageText(Math.max(0, v.now - Number(s.at ?? s.readAt ?? v.now)))} ago from ${v.role === "operator" ? html`<span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "the deployment's Valkey"} and ${hostsUnread(s) ? html`no host's registry row: the hosts could not be read` : html`${list(s.hostBudgets).length} hosts' registry rows`}. Live: this panel redraws when the fleet changes.</span></p></div>`,
   });
 };

@@ -16,7 +16,7 @@ import { resolveWorkerCount, forgeLinkOf, progressStaleFor } from "../../read-mo
 import { parseRunFilter } from "../../run-filter.mjs";
 import { outcomeNote } from "../../loaded-words.mjs";
 // The one vocabulary the panel reads too (issue #710): outcome words and tones, the venue label, the Spend and Held titles.
-import { NO_EXPLANATION, NO_REASON_FAILED, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence } from "../../words.mjs";
+import { KILL_SWITCH_UNREAD_TEXT, NO_EXPLANATION, NO_REASON_FAILED, outcomeKey, outcomeWord, queueErrorsOf, reasonWords, recordReason, shortSentence } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 
@@ -274,6 +274,45 @@ export function dataUnread(data, page = data?.page) {
 /** Whether this view draws write controls: an operator, on a console that is not read-only. */
 export const canAct = (view) => view?.role === "operator" && !view?.readOnly;
 
+/**
+ * The kill switch's two forms for a page that could NOT read the deployment (issue #1035), under its unread sentence:
+ * Pause the fleet and Resume the fleet, with the sentence that says why they are there with nothing read, or null for
+ * a view that draws no write control (`canAct`: a viewer, an agent's session, a read-only console).
+ *
+ * THE ONE EXCEPTION to the rule that a page which could not read the deployment offers no change. Every other form is
+ * drawn from what a read showed (a row, a digest, a count), so with no read there is nothing to draw it from, and the
+ * rule holds for them all. The kill switch is the control for exactly this state: a Valkey that stopped answering is
+ * when someone needs to stop the fleet, and a console started during the outage had no Pause on any page, since both
+ * pages that draw it draw it from a snapshot. The switch itself needs no snapshot: a pause is sent to every queue it
+ * finds by its own discovery, and its answer names them. Gated on `canAct` alone, never on what was read. BOTH forms,
+ * since which one applies is the thing that is not known; a resume previews with what it would start and is refused
+ * where that cannot be read.
+ */
+export function killSwitchUnreadForms(view) {
+  if (!canAct(view)) return null;
+  return ui.banner({
+    status: "attention",
+    icon: "pause",
+    sm: true,
+    title: KILL_SWITCH_UNREAD_TEXT,
+    actions: html`${ui.actForm({ action: "fleet-pause", label: "Pause the fleet", kind: ["danger"], icon: "pause" })}${ui.actForm({ action: "fleet-resume", label: "Resume the fleet", kind: ["paid"], icon: "play" })}`,
+  });
+}
+
+/**
+ * Whether the paused state of some queue of this snapshot is NOT KNOWN (issue #1035), which is when both of the kill
+ * switch's forms are offered whatever the queues that were read say: a queue Valkey answered with an error (issue
+ * #1064, `queueErrorsOf`: it is in none of the counts, and a snapshot none of whose queues was read is one where each
+ * was answered so), or a host registry not read whole (`queue.fleetDegraded`: a host's own queue may exist that this
+ * read did not ask). No snapshot at all is the same, for a caller that asks. A pause reaches every queue it finds and
+ * its answer names them, so offering it over a fleet that reads paused costs nothing, and a resume is what an unread
+ * queue that is in fact paused needs.
+ */
+export function pausedStateUnknown(s) {
+  if (s === null || typeof s !== "object") return true;
+  return queueErrorsOf(s).length > 0 || Boolean(s.queue?.fleetDegraded);
+}
+
 /** The sentence that sends an operator to /setup's doctor on this console's own host (issue #849). */
 export const DOCTOR_FROM_SETUP = "here in the browser, without its container probes; the command below also runs those.";
 
@@ -395,10 +434,18 @@ function capMicrosOf(record) {
 /**
  * Paused, partly paused or running, as words and a class. A queue no worker drains (`online === false`) is never green
  * (issue #710): "running" there means only that nothing paused it, and jobs pile up behind it.
+ *
+ * `unread` (issue #1035) is how many queues were not read because Valkey answered their read with an error (the
+ * snapshot's `queueErrors`, counted by `queueErrorsOf`). Over those the words claim nothing about a queue that was not
+ * read: "partly paused" said "others are not" where every queue that WAS read is paused and the rest are not known
+ * (`pausedPartial` is true there, issue #1064), and "running" was green over a queue nobody read.
  */
-function pausedState(q, online = true) {
+function pausedState(q, online = true, unread = 0) {
   if (q?.pausedState) return html`<span class="bad">paused (the kill switch is on)</span>`;
+  const notKnown = `whether ${unread === 1 ? "1 queue that was not read is" : `${unread} queues that were not read are`} paused is not known`;
+  if (q?.pausedPartial && unread > 0) return html`<span class="warn">partly paused: a queue that was read is paused, and ${notKnown}</span>`;
   if (q?.pausedPartial) return html`<span class="warn">partly paused: some hosts' queues are paused and others are not</span>`;
+  if (unread > 0) return html`<span class="warn">no queue that was read is paused, and ${notKnown}</span>`;
   if (online === false) return html`<span class="warn">not paused, but no worker is online</span>`;
   return html`<span class="good">running</span>`;
 }

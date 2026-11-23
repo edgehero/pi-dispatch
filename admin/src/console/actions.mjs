@@ -71,7 +71,8 @@ import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { PAUSE_WINDOW_FIELDS, heldPauseWindows, parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
 import { AGENT_REFUSED, AGENT_UNCONFIRMED, auditedWrite } from "../audited-write.mjs";
 import { pauseWindowsNewerRefusal } from "../newer-release.mjs";
-import { fieldNamed, NO_EXPLANATION, queueErrorsLead, queueErrorsOf, SWITCH_ERRORED_READS, switchErroredQueue, switchShortNote, UNNAMED_FIELD } from "../words.mjs";
+import { erroredReadWords, fieldNamed, NO_EXPLANATION, queueErrorsLead, queueErrorsOf, SWITCH_ERRORED_READS, switchErroredQueue, switchShortCause, switchShortNote, switchShortThen, UNNAMED_FIELD } from "../words.mjs";
+import { HOST_SET, hostKey } from "@edgehero/pi-dispatch/host-registry";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
 import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, REFUSAL_STATES, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
 import { bindingFailure } from "./device-trust.mjs";
@@ -509,8 +510,14 @@ export const SNAPSHOT_TIMEOUT_MS = 10_000;
  * the counts could not be read, and the switch still reaches every queue), so on a Valkey that stopped answering the
  * kill switch must not wait the full ten seconds for numbers before it can be confirmed. A resume keeps the ten: its
  * Undo and its count of what starts spending are read from the snapshot.
+ *
+ * Two seconds since issue #1035 (six before). The six were waited in full on exactly the Valkey a kill switch is for,
+ * one that takes the connection and answers nothing, and then the confirm's own switch waits for its queues: twelve
+ * seconds on the console and, through the tool, which previewed twice, sixteen before anything was paused. What the
+ * shorter bound costs is the preview's counts on a deployment whose first snapshot takes longer than two seconds, and
+ * never the pause: the preview then says the counts could not be read and the switch still reaches every queue.
  */
-export const PAUSE_SNAPSHOT_TIMEOUT_MS = 6_000;
+export const PAUSE_SNAPSHOT_TIMEOUT_MS = 2_000;
 
 /** The refusal when the snapshot did not answer within `SNAPSHOT_TIMEOUT_MS`: what happened, nothing more. */
 export const SNAPSHOT_TIMEOUT_SENTENCE = "the fleet did not answer within 10 seconds, so this could not be previewed; nothing was changed";
@@ -1744,6 +1751,9 @@ function queuesNamed(names) {
  * line names both numbers (`switchReadLine`).
  */
 export const SWITCH_SHORT_LINES = Object.freeze({
+  // Issue #1035: the registry, which names each live host's queue. Only the confirm said so; the preview listed the
+  // queues it found as if they were all of them.
+  registry: "The host registry could not be read whole, so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds",
   incomplete: "The look for the fleet's queues did not finish, so a queue may be missing here and these counts are floors; the switch flips every queue it finds",
   truncated: "The fleet holds more queues than one preview reads, so these counts are of the queues it read, and floors; the switch itself flips every queue",
 });
@@ -1757,16 +1767,33 @@ export function switchReadLine(read, total) {
   return `This preview read ${read} of the ${total} queues the switch flips, so these counts are of those it read, and floors; the switch itself flips every queue`;
 }
 
-/** The keys of `SWITCH_SHORT_LINES` that hold for this switch snapshot, in that order; empty for a whole read. */
+/**
+ * The keys of `SWITCH_SHORT_LINES` that hold for this switch snapshot, in that order; empty for a whole read.
+ * `registry` (issue #1035): the snapshot's own registry read was not whole (`queue.fleetDegraded`, which since issue
+ * #1036 is the view of the read that named this snapshot's queues, never the reader's last word).
+ */
 function switchShortOf(snapshot) {
   const truncated = snapshot?.switchTruncated === true || (Number.isSafeInteger(snapshot?.switchTruncated) && snapshot.switchTruncated > 0);
-  return [...(typeof snapshot?.switchIncomplete === "string" && snapshot.switchIncomplete !== "" ? ["incomplete"] : []), ...(truncated ? ["truncated"] : [])];
+  const registry = typeof snapshot?.queue?.fleetDegraded === "string" && snapshot.queue.fleetDegraded !== "";
+  return [...(registry ? ["registry"] : []), ...(typeof snapshot?.switchIncomplete === "string" && snapshot.switchIncomplete !== "" ? ["incomplete"] : []), ...(truncated ? ["truncated"] : [])];
 }
 
-/** The summary line of each `switchShortOf` key for this snapshot: the truncated one with its numbers. */
+/**
+ * The registry's line with what Valkey answered, where it answered the registry's read with an error (issue #1035):
+ * the key and the reply's code in a parenthesis (`erroredReadWords`), the index's own first, else the first host row's
+ * by its code's class. The confirm's answer says what to do about it; a registry that got no answer has no parenthesis.
+ */
+function switchRegistryLine(snapshot) {
+  const code = (value) => (typeof value === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(value) ? value : null);
+  const rows = (Array.isArray(snapshot?.queue?.unreadHosts) ? snapshot.queue.unreadHosts : []).filter((u) => typeof u?.name === "string" && code(u?.error) !== null).map((u) => erroredReadWords(hostKey(u.name), u.error));
+  const said = code(snapshot?.queue?.fleetError) !== null ? erroredReadWords(HOST_SET, snapshot.queue.fleetError).said : ["key", "permission", "other", "passing"].flatMap((cls) => rows.filter((w) => w.class === cls))[0]?.said ?? null;
+  return said === null ? SWITCH_SHORT_LINES.registry : SWITCH_SHORT_LINES.registry.replace("could not be read whole,", `could not be read whole (${said}),`);
+}
+
+/** The summary line of each `switchShortOf` key for this snapshot: the truncated one with its numbers, the registry's with what Valkey answered. */
 function switchShortLines(snapshot, keys) {
   const read = Array.isArray(snapshot?.queueCounts) ? snapshot.queueCounts.length : null;
-  return keys.map((k) => (k === "truncated" ? switchReadLine(read, snapshot?.switchTotal) : SWITCH_SHORT_LINES[k]));
+  return keys.map((k) => (k === "truncated" ? switchReadLine(read, snapshot?.switchTotal) : k === "registry" ? switchRegistryLine(snapshot) : SWITCH_SHORT_LINES[k]));
 }
 
 /**
@@ -1862,7 +1889,9 @@ function fleetSwitch({ name, kind, paused }) {
           const errored = queueErrorsOf(s.snapshot);
           const listed = [...all.map((row) => String(row.queue)), ...unread, ...errored.map((e) => e.queue)];
           switchLines = [...Array.from({ length: Math.ceil(listed.length / 20) }, (_, i) => `Queues: ${listed.slice(i * 20, (i + 1) * 20).join(", ")}`), ...(unread.length > 0 ? [SWITCH_OWN_UNREAD(unread)] : []), ...(errored.length > 0 ? [SWITCH_ERRORED_LINE(errored)] : []), `${plural(sum("active"), "running job")} ${sum("active") === 1 ? "keeps" : "keep"} running`, `${plural(sum("delayed"), "delayed job")} and ${s.snapshot.held?.unreachable || !Array.isArray(s.snapshot.held?.rows) ? "an unknown number of" : `${s.snapshot.held.truncated ? "at least " : ""}${s.snapshot.held.rows.length + (Number.isSafeInteger(s.snapshot.held.more) ? s.snapshot.held.more : 0)}`} held ${s.snapshot.held?.rows?.length === 1 && !s.snapshot.held?.truncated && !s.snapshot.held?.more ? "job waits" : "jobs wait"} until a resume`, "Audited as fleet-pause"];
-        } else switchLines = [SWITCH_UNREAD_LINES.pause, "Audited as fleet-pause", "Undo: Resume the fleet"];
+        // No "Undo" line here (issue #1035): the confirm view and the tool's dialog add the action's own, and with this
+        // one a preview without a snapshot said "Undo: Resume the fleet" twice.
+        } else switchLines = [SWITCH_UNREAD_LINES.pause, "Audited as fleet-pause"];
       }
       if (!paused) {
         const s = await snapshotOf(ctx, SWITCH_READ);
@@ -1889,6 +1918,18 @@ function fleetSwitch({ name, kind, paused }) {
         ...(waiting ? { count: waiting.count } : {}),
         summary: [paused ? "Pause every queue of the fleet (the kill switch): nothing new starts, running jobs finish" : "Resume every queue of the fleet: queued jobs start spending again", `Valkey: ${shown.join(", ") || "the deployment's"}`, ...(plan?.disagreement ? [`${plan.disagreement}: a pause reaches both`] : []), ...(waiting ? [waiting.line] : []), ...switchLines, ...shortLines, ...ownQueueProblemLines(ctx)],
       };
+    },
+    /**
+     * What a caller that asks twice rereads before the switch (issue #1035; the tools, between their dialog and the
+     * write): the plan's refusal alone, which is the one thing about a fleet switch that can change in between (the
+     * two Valkeys coming to disagree, which refuses a resume). The preview's snapshot is for its words, and a second
+     * one cost a pause on a Valkey that does not answer the whole bound again before anything was paused. The plan as
+     * previewed, or the refusal.
+     */
+    recheck(out, _body, ctx) {
+      const decide = ctx.a.killSwitchPlanFn;
+      const plan = typeof decide === "function" ? decide({ paused }) : null;
+      return plan?.refused ? { refusal: String(plan.refused) } : out;
     },
     async apply(_entry, ctx) {
       let res;
@@ -1918,7 +1959,11 @@ function fleetSwitch({ name, kind, paused }) {
       // never as a flat "Paused the fleet": `note` goes after the banner's past tense (`changeOf`) and into a second `ok`
       // row of its own (`auditedWrite`'s `note`), and `queuesMayBeShort` is the machine fact an agent reads.
       const short = results.some((r) => r.short);
-      const shortFacts = short ? { queuesMayBeShort: true, note: switchShortNote(paused) } : {};
+      // WHY it may be short (issue #1035, `switchShortCause`): a read that got no answer waits on Valkey, a read Valkey
+      // answered with an error is said with its key and code and what the code's class supports, and
+      // `queuesShortLasting` is that class where it lasts ("key", "permission"), for the audit's word and an agent.
+      const cause = switchShortCause((res?.results ?? []).map((r) => r.res));
+      const shortFacts = short ? { queuesMayBeShort: true, ...(cause?.lasting ? { queuesShortLasting: cause.lasting } : {}), note: switchShortNote(paused, cause) } : {};
       if (results.length > 0 && results.every((r) => r.ok)) return { ok: true, results, ...shortFacts };
       // Issue #737: a Valkey that took the switch, or a loop that stopped part-way (the queue it failed at may have
       // flipped too: the error came back, not the state), means part of the fleet DID change, so the refusal is
@@ -1933,14 +1978,15 @@ function fleetSwitch({ name, kind, paused }) {
       // clauses lead, so the row keeps both however long the Valkey's address or the list of queues; what to do closes the
       // sentence. One that is not short keeps its sentence. A queue Valkey answered with an error (issue #1014, which the
       // per-Valkey words name with what it reads now) leads beside them for the same reason, and leads a sentence that is
-      // not short too, before the Valkey's address, which the row's cut would otherwise take it with.
+      // not short too, before the Valkey's address, which the row's cut would otherwise take it with. And where the
+      // list is short for a cause that waiting does not end (issue #1035), the lead says that much too, so the row
+      // keeps it; which key, with what code, and what to put right close the sentence (`switchShortThen`).
       const sent = results.some((r) => Array.isArray(r.partial?.unconfirmed) && r.partial.unconfirmed.length > 0);
       const errored = results.some((r) => Array.isArray(r.partial?.errored) && r.partial.errored.length > 0);
-      const verb = paused ? "paused" : "resumed";
       const noun = paused ? "pause" : "resume";
-      const lead = !short ? `the kill switch did not reach every queue${errored ? `, Valkey answered a ${noun} with an error` : ""}` : `the kill switch did not reach every queue, ${sent ? `a ${noun} was sent that may or may not have been made, ` : ""}${errored ? `Valkey answered a ${noun} with an error, ` : ""}and the list of queues may be short`;
-      const then = short ? `Other queues may exist and were not ${verb}: ${noun} the fleet again once Valkey answers` : "Look at the fleet and try again";
-      return { invalid: `${lead}: ${results.map((r) => `${r.valkey} ${r.ok ? "done" : r.partial ? switchPartialWords(r.partial, paused) : "unreachable"}`).join("; ") || "no Valkey answered"}. ${then}`, ...(partial ? { partial: true } : {}), ...(short ? { queuesMayBeShort: true } : {}), ...(sent ? { sentUnconfirmed: true } : {}), ...(errored ? { answeredWithError: true } : {}) };
+      const lead = !short ? `the kill switch did not reach every queue${errored ? `, Valkey answered a ${noun} with an error` : ""}` : `the kill switch did not reach every queue, ${sent ? `a ${noun} was sent that may or may not have been made, ` : ""}${errored ? `Valkey answered a ${noun} with an error, ` : ""}and the list of queues may be short${cause?.lasting ? " for a cause waiting does not end" : ""}`;
+      const then = short ? switchShortThen(paused, cause) : "Look at the fleet and try again";
+      return { invalid: `${lead}: ${results.map((r) => `${r.valkey} ${r.ok ? "done" : r.partial ? switchPartialWords(r.partial, paused) : "unreachable"}`).join("; ") || "no Valkey answered"}. ${then}`, ...(partial ? { partial: true } : {}), ...(short ? { queuesMayBeShort: true, ...(cause?.lasting ? { queuesShortLasting: cause.lasting } : {}), shortCause: cause } : {}), ...(sent ? { sentUnconfirmed: true } : {}), ...(errored ? { answeredWithError: true } : {}) };
     },
   };
 }
@@ -2871,6 +2917,16 @@ export { AGENT_REFUSED, AGENT_UNCONFIRMED };
  * may be short (issue #964, `auditedWrite`'s `note`), where a person's row carries the sentence.
  */
 export const AGENT_QUEUES_SHORT = "queues-may-be-short";
+
+/**
+ * The same row's word where the set is short for a cause that waiting does not end (issue #1035), by the class of
+ * Valkey's error reply (`replyErrorClass`): a key of another type, or a permission. A closed word each, so a row says
+ * which kind of thing has to be put right without a key's name or a client's words.
+ */
+export const AGENT_QUEUES_SHORT_LASTING = Object.freeze({ key: "queues-may-be-short-key", permission: "queues-may-be-short-permission" });
+
+/** The agent's word for a switch that landed over a set that may be short: the lasting class's, else the plain one. */
+export const agentShortWord = (result) => (typeof result?.queuesShortLasting === "string" && Object.hasOwn(AGENT_QUEUES_SHORT_LASTING, result.queuesShortLasting) ? AGENT_QUEUES_SHORT_LASTING[result.queuesShortLasting] : AGENT_QUEUES_SHORT);
 export const agentFailure = (result) => (result?.partial === true ? AGENT_UNCONFIRMED : AGENT_REFUSED);
 
 /**
@@ -2878,7 +2934,7 @@ export const agentFailure = (result) => (result?.partial === true ? AGENT_UNCONF
  * `note`): today the kill switch over a set of queues that may be short. The sentence for a person, the closed word for
  * an agent; null for any other write.
  */
-const auditNoteOf = (result, role) => (result?.queuesMayBeShort === true && typeof result.note === "string" && result.note !== "" ? (role === "agent" ? AGENT_QUEUES_SHORT : result.note) : null);
+const auditNoteOf = (result, role) => (result?.queuesMayBeShort === true && typeof result.note === "string" && result.note !== "" ? (role === "agent" ? agentShortWord(result) : result.note) : null);
 
 /** A funnel result's failure for its audit row: the refusal, a fixed word for Valkey, or null when it landed. */
 function failureOf(result) {

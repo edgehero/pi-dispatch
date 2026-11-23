@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { refusedBeforeScript } from "../src/bullmq-internals.mjs";
-import { entryExitCode, killSwitchShortNote, main, statusShortNote } from "../src/cli.mjs";
+import { entryExitCode, killSwitchShortCause, killSwitchShortNote, main, statusShortNote } from "../src/cli.mjs";
 import { POLLER_GRACE_MS, parsePollerStatus, pollerKey, triggersDigest } from "../src/poller-status.mjs";
 import { readPollerFacts } from "../src/poller-facts.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -1449,6 +1449,151 @@ test("status and status --target name a host whose row Valkey answered with an e
 	assert.deepEqual([late.status.fleetIncomplete, Object.hasOwn(late.status, "hostErrors")], ["1 of 2 host rows not read", false]);
 	const lateTarget = await silentStatus({ argv: ["status", "--target", "owner/repo#12"], queues: { "pi-jobs": false }, probe, deadlineMs: 3_000 });
 	assert.equal(Object.hasOwn(lateTarget.status, "hostErrors"), false);
+});
+
+/**
+ * A probe whose three discovery reads answer as `how` says (issue #1035): `index`, the registry's `host:live`; `rows`,
+ * a host's row by its key; `scan`, the look for queues. A read not named answers well, with `hosta` and `hostw` live.
+ */
+function shortProbe({ index = null, rows = {}, scan = null } = {}) {
+	return {
+		on() {}, disconnect() {},
+		smembers: () => (index ? index() : Promise.resolve(["hosta", "hostw"])),
+		hgetall: (key) => (rows[key] ? rows[key]() : Promise.resolve({ name: key.slice("host:h:".length), routes: "true", beatAt: String(Date.now()) })),
+		async pttl() { return 60_000; },
+		async srem() { return 0; },
+		scan: () => (scan ? scan() : Promise.resolve(["0", []])),
+	};
+}
+const answeredWith = (code) => () => Promise.reject(Object.assign(new Error(`${code} said by Valkey about the key`), { name: "ReplyError" }));
+const noAnswer = () => Promise.reject(new Error("Connection is closed."));
+
+// Issue #1035: `pause` ended "Pause the fleet again once Valkey answers" and `status` "Run pi-dispatch status again
+// once Valkey answers" with a host's row holding a string, which Valkey answers the same on every run.
+test("pause, resume, status and status --target over a list that is short because Valkey answered a read with an error name the key and the code and say what its class supports, and to wait only for a read that got no answer (#1035)", { timeout: 30_000 }, async () => {
+	const CASES = [
+		// what, the reads, the cause, what a pause says under its line
+		["a key of another type", { index: answeredWith("WRONGTYPE") }, { waits: false, errors: [{ key: "host:live", code: "WRONGTYPE", class: "key" }], more: 0, lasting: "key" },
+			"the list of queues may be short: Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused"],
+		["a host's row of another type", { rows: { "host:h:hostw": answeredWith("WRONGTYPE") } }, { waits: false, errors: [{ key: "host:h:hostw", code: "WRONGTYPE", class: "key" }], more: 0, lasting: "key" },
+			"the list of queues may be short: Valkey answers host:h:hostw with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused"],
+		["a permission", { scan: answeredWith("NOPERM") }, { waits: false, errors: [{ key: null, code: "NOPERM", class: "permission" }], more: 0, lasting: "permission" },
+			"the list of queues may be short: Valkey answers the look for queues with NOPERM. Waiting does not change that: fix this Valkey user's ACL, then pause again; other queues may exist and were not paused"],
+		["a passing state", { index: answeredWith("BUSY") }, { waits: false, errors: [{ key: "host:live", code: "BUSY", class: "passing" }], more: 0, lasting: null },
+			"the list of queues may be short: Valkey answers host:live with BUSY. A later read may succeed: pause the fleet again; other queues may exist and were not paused"],
+		["a code of no class", { index: answeredWith("READONLY") }, { waits: false, errors: [{ key: "host:live", code: "READONLY", class: "other" }], more: 0, lasting: null },
+			"the list of queues may be short: Valkey answers host:live with READONLY. Pause the fleet again once the list can be read whole; other queues may exist and were not paused"],
+		["no answer", { index: noAnswer }, { waits: true, errors: [], more: 0, lasting: null },
+			"the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers"],
+		["an error reply and a read with no answer", { rows: { "host:h:hostw": answeredWith("NOAUTH") }, scan: noAnswer }, { waits: true, errors: [{ key: "host:h:hostw", code: "NOAUTH", class: "permission" }], more: 0, lasting: "permission" },
+			"the list of queues may be short: Valkey answers host:h:hostw with NOAUTH. Waiting does not change that: fix this Valkey user's ACL. Another read got no answer: pause the fleet again once Valkey answers and that is put right; other queues may exist and were not paused"],
+	];
+	for (const [what, reads, cause, note] of CASES) {
+		const probe = () => shortProbe(reads);
+		// Every queue a discovery can name here answers its switch.
+		const queues = { "pi-jobs": "ok", "pi-jobs@hosta": "ok", "pi-jobs@hostw": "ok" };
+		assert.equal(killSwitchShortNote(true, cause), note, what);
+		const paused = await silentSwitch("pause", { queues, probe: probe(), deadlineMs: 3_000 });
+		assert.deepEqual([paused.code, paused.err], [0, ""], what);
+		assert.ok(paused.out.startsWith("paused: worker will stop taking new jobs (jobs still enqueue)") && paused.out.endsWith(`\n  but ${note}\n`), `${what}: ${paused.out}`);
+		const resumed = await silentSwitch("resume", { queues, probe: probe(), deadlineMs: 3_000 });
+		assert.ok(resumed.out.startsWith("resumed") && resumed.out.endsWith(`\n  but ${killSwitchShortNote(false, cause)}\n`), `${what}: ${resumed.out}`);
+		// A pause that also left a found queue unconfirmed: the same sentence, in the report.
+		const doubt = await silentSwitch("pause", { queues: { ...queues, "pi-jobs": "silent write" }, probe: probe(), deadlineMs: 600 });
+		assert.equal(doubt.code, 1, what);
+		assert.ok(doubt.err.includes(`\n  ${note}\n`), `${what}: ${doubt.err}`);
+		// `status` and `status --target`: the warning under the line, with their own next step.
+		const read = { "pi-jobs": false, "pi-jobs@hosta": false, "pi-jobs@hostw": false };
+		const status = await silentStatus({ queues: read, probe: probe(), deadlineMs: 3_000 });
+		assert.deepEqual([status.code, status.status.queuesMayBeShort, status.err], [0, true, `warning: ${statusShortNote(false, cause)}\n`], what);
+		const target = await silentStatus({ argv: ["status", "--target", "owner/repo#12"], queues: read, probe: probe(), deadlineMs: 3_000 });
+		assert.deepEqual([target.code, target.err], [0, `warning: ${statusShortNote(true, cause)}\n`], what);
+		for (const said of [paused.out, resumed.out, doubt.err.split("\n").find((line) => line.includes("may be short")), status.err, target.err]) {
+			assert.equal(/once Valkey answers/.test(said), cause.waits, `${what}: waiting is said exactly where a read waits: ${said}`);
+			assert.doesNotMatch(said, /refus/i, what);
+		}
+	}
+	assert.equal(statusShortNote(false, CASES[1][2]), "the list of queues may be short: Valkey answers host:h:hostw with WRONGTYPE. Waiting does not change that: remove or repair that key, then run pi-dispatch status again; other queues may exist and the sums above leave them out");
+	// The cause from the two reads' own answers: nothing short gives none; a name that is no worker's never becomes a key.
+	assert.equal(killSwitchShortCause({ hosts: [] }, { names: [], incomplete: false }), null);
+	assert.deepEqual(killSwitchShortCause({ hosts: [], incomplete: "1 of 1 host rows not read", unreadHosts: ["bad name\n"], hostErrors: { "bad name\n": "WRONGTYPE" } }, { names: [] }), { waits: true, errors: [], more: 0, lasting: null });
+	assert.deepEqual(killSwitchShortCause({ unreachable: "x", error: "WRONGTYPE Operation against a key" }, { names: [] }), { waits: true, errors: [], more: 0, lasting: null }, "a code is one word, never a client's sentence");
+	const many = killSwitchShortCause({ hosts: [], incomplete: "x", unreadHosts: Array.from({ length: 23 }, (_, i) => `h${String(i).padStart(2, "0")}`), hostErrors: Object.fromEntries(Array.from({ length: 23 }, (_, i) => [`h${String(i).padStart(2, "0")}`, "WRONGTYPE"])) }, { names: [] });
+	assert.deepEqual([many.errors.length, many.more, many.errors[0].key], [20, 3, "host:h:h00"]);
+});
+
+test("pause, resume and status through a real Valkey whose registry key holds a string, and one where a host's row does, name that key with WRONGTYPE and say to repair it, never to wait for Valkey (#1035, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 60_000 }, async () => {
+	const { Redis } = await import("ioredis");
+	const { makeQueue } = await import("../src/queue.mjs");
+	const { parseConnection } = await import("../src/connection.mjs");
+	const url = process.env.VALKEY_TEST_URL;
+	// The registry's keys under a prefix of this test's own, and every queue under a name of its own, so no other test's
+	// registry row or queue is read as this deployment's or switched.
+	const tag = `pd1035-${process.pid}-${Date.now()}`;
+	const prefix = `${tag}:`;
+	const own = new Redis({ ...parseConnection(url), keyPrefix: prefix });
+	const plain = new Redis(parseConnection(url));
+	for (const client of [own, plain]) client.on("error", () => {});
+	const cwd = tempDir("pd-1035-live-");
+	const run = async (argv) => {
+		let out = "";
+		const errs = [];
+		const origErr = process.stderr.write.bind(process.stderr);
+		process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+		try {
+			const code = await main([...argv, "--valkey-url", url], { VALKEY_URL: url }, {
+				cwd, valkeyRefusal: async () => null, write: (text) => { out += text; },
+				controlClients: {
+					makeRedisClient: (target) => new Redis({ ...parseConnection(target), keyPrefix: prefix }),
+					makeQueue: (connection, { name }) => makeQueue(connection, { name: `${tag}-${name}` }),
+				},
+			});
+			return { code, out, err: errs.join("") };
+		} finally {
+			process.stderr.write = origErr;
+		}
+	};
+	const sentences = (key) => ({
+		pause: `the list of queues may be short: Valkey answers ${key} with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused`,
+		resume: `the list of queues may be short: Valkey answers ${key} with WRONGTYPE. Waiting does not change that: remove or repair that key, then resume again; other queues may exist and were not resumed`,
+		status: `the list of queues may be short: Valkey answers ${key} with WRONGTYPE. Waiting does not change that: remove or repair that key, then run pi-dispatch status again; other queues may exist and the sums above leave them out`,
+	});
+	const over = async (key) => {
+		const said = sentences(key);
+		const paused = await run(["pause"]);
+		assert.equal(paused.code, 0, paused.err);
+		assert.ok(paused.out.endsWith(`\n  but ${said.pause}\n`), paused.out);
+		assert.equal(await plain.hexists(`bull:${tag}-pi-jobs:meta`, "paused"), 1, "the shared queue was paused all the same");
+		const resumed = await run(["resume"]);
+		assert.equal(resumed.code, 0, resumed.err);
+		assert.ok(resumed.out.endsWith(`\n  but ${said.resume}\n`), resumed.out);
+		assert.equal(await plain.hexists(`bull:${tag}-pi-jobs:meta`, "paused"), 0);
+		const status = await run(["status"]);
+		assert.equal(status.code, 0, status.err);
+		assert.equal(JSON.parse(status.out).queuesMayBeShort, true);
+		assert.ok(status.err.includes(`warning: ${said.status}\n`), status.err);
+		for (const text of [paused.out, resumed.out, status.err]) assert.doesNotMatch(text, /once Valkey answers|refus/i);
+	};
+	try {
+		// The registry's index holds a string: Valkey answers its read with WRONGTYPE on every run.
+		await own.set("host:live", "not a set");
+		await over("host:live");
+		// The index is a set again and one host's row holds a string.
+		await own.del("host:live");
+		await own.sadd("host:live", "hostw");
+		await own.set("host:h:hostw", "not a hash");
+		await over("host:h:hostw");
+		// Repaired: read whole, and nothing is said of a short list.
+		await own.del("host:h:hostw", "host:live");
+		const whole = await run(["pause"]);
+		assert.deepEqual([whole.code, /may be short/.test(whole.out)], [0, false], whole.out);
+	} finally {
+		await own.del("host:live", "host:h:hostw").catch(() => {});
+		await dropKeys(plain, `bull:${tag}-*`).catch(() => {});
+		await dropKeys(plain, `${prefix}*`).catch(() => {});
+		own.disconnect();
+		plain.disconnect();
+	}
 });
 
 // Issue #1036: one hostErrors entry per broken row, with no bound: 23 rows gave 23.

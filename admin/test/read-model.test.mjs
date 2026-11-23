@@ -3268,7 +3268,8 @@ test("setQueuePaused flips alsoNames beside what discovery names, and keeps a sc
   // A registry that answers and a keyspace scan that rejects: the set the switch acted on may be short.
   const redisFn = () => ({ ...fakeFleetRedis(["mini1"])(), async scan() { throw new Error("ETIMEDOUT"); } });
   const res = await setQueuePaused({ url: "redis://x", paused: true, alsoNames: ["pi-jobs@hosta"], makeQueueFn, parseConnectionFn: () => ({}), redisFn });
-  assert.deepEqual({ ...res, incomplete: typeof res.incomplete }, { ok: true, paused: true, queues: ["pi-jobs", "pi-jobs@hosta", "pi-jobs@mini1"], incomplete: "string" });
+  // Issue #1035: with why, a scan that failed without a reply of Valkey's waits on it.
+  assert.deepEqual({ ...res, incomplete: typeof res.incomplete }, { ok: true, paused: true, queues: ["pi-jobs", "pi-jobs@hosta", "pi-jobs@mini1"], incomplete: "string", shortCause: { waits: true, errors: [] } });
   assert.deepEqual(paused.sort(), ["pi-jobs", "pi-jobs@hosta", "pi-jobs@mini1"]);
 });
 

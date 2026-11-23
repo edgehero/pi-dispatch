@@ -14,8 +14,9 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { fakeAllocRedis } from "./helpers/fake-alloc-redis.mjs";
 import { CONSOLE_AUDIT_FIELD_MAX } from "@edgehero/pi-dispatch/console-audit";
 import { escapeControls } from "@edgehero/pi-dispatch/projects";
-import { HOST_SET } from "@edgehero/pi-dispatch/host-registry";
-import { queueErrorsLine, switchShortNote } from "../src/words.mjs";
+import { HOST_SET, hostKey } from "@edgehero/pi-dispatch/host-registry";
+import { REPLY_ERROR_CLASSES } from "@edgehero/pi-dispatch/reply-error-class";
+import { queueErrorsLine, switchShortCause, switchShortNote } from "../src/words.mjs";
 
 // Issue #642's review: EVERY panel write surface, driven through the real extension the way pi drives it, appends its
 // audit row (actor role `panel`) before its write lands, and a `failed` row after one that did not land. One table row
@@ -552,24 +553,64 @@ test("/dispatch pause on a Valkey that answers nothing says the pause is not con
 });
 
 // Issue #964: `/dispatch pause` and `resume` on a Valkey that answers, with a host registry it cannot read (the registry
-// key holds a string, so SMEMBERS is refused): every queue it found is switched, this host's own among them, and the line
-// and a second audit row say the list may be short. The line said "only pi-jobs" here, which the scan had made untrue.
-test("/dispatch pause and resume over an unreadable registry switch this host's queue too and say the list of queues may be short (#964)", { timeout: 30_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+// key holds a string, so Valkey answers SMEMBERS with WRONGTYPE): every queue it found is switched, this host's own
+// among them, and the line and a second audit row say the list may be short. The line said "only pi-jobs" here, which
+// the scan had made untrue.
+// Issue #1035: and they say WHY, since this is a cause that waiting does not end. Both said "once Valkey answers" of a
+// Valkey that had answered, and answers the same on every try until the key is repaired.
+test("/dispatch pause and resume over a registry key that holds a string switch this host's queue too, and say the list of queues may be short for a cause waiting does not end: the key, the code and to repair it (#964, #1035)", { timeout: 30_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
   const fx = deployment({ valkey: LIVE });
   const { default: IORedis } = await import("ioredis");
   const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  const pausedNote = "the list of queues may be short: Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused";
+  const resumedNote = "the list of queues may be short: Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then resume again; other queues may exist and were not resumed";
   try {
     writeFileSync(ENV_FILE, "PI_WORKER_NAME=mini1\n");
     await r.set(HOST_SET, "not a set");
     const paused = await command("pause");
-    assert.ok(paused.includes(`paused: worker will stop taking new jobs (jobs still enqueue; durable, survives restart) (2 queues), but ${switchShortNote(true)}`), JSON.stringify(paused));
+    assert.ok(paused.includes(`paused: worker will stop taking new jobs (jobs still enqueue; durable, survives restart) (2 queues), but ${pausedNote}`), JSON.stringify(paused));
     assert.equal(await r.hget("bull:pi-jobs@mini1:meta", "paused"), "1", "this host's own queue (the .env's PI_WORKER_NAME, mini1) was paused");
     const resumed = await command("resume");
-    assert.ok(resumed.includes(`resumed (2 queues), but ${switchShortNote(false)}`), JSON.stringify(resumed));
+    assert.ok(resumed.includes(`resumed (2 queues), but ${resumedNote}`), JSON.stringify(resumed));
     const rows = rowsOf(fx.files.logs).filter((row) => row.kind?.startsWith("fleet-")).map((row) => [row.kind, row.outcome, row.reason ?? null]);
-    assert.deepEqual(rows, [["fleet-pause", "ok", null], ["fleet-pause", "ok", switchShortNote(true)], ["fleet-resume", "ok", null], ["fleet-resume", "ok", switchShortNote(false)]]);
+    assert.deepEqual(rows, [["fleet-pause", "ok", null], ["fleet-pause", "ok", pausedNote], ["fleet-resume", "ok", null], ["fleet-resume", "ok", resumedNote]]);
+    assert.ok([...resumedNote].length <= CONSOLE_AUDIT_FIELD_MAX, "the row holds the whole sentence");
+    assert.equal(pausedNote, switchShortNote(true, switchShortCause({ blind: "x", shortCause: { waits: false, errors: [{ key: HOST_SET, code: "WRONGTYPE" }] } })));
+    for (const said of [...paused, ...resumed]) assert.doesNotMatch(said, /once Valkey answers|refus/i);
   } finally {
     await r.del(HOST_SET, "bull:pi-jobs@mini1:meta", "bull:pi-jobs@mini1:events").catch(() => {});
+    r.disconnect();
+    fx.restore();
+  }
+});
+
+// Issue #1035: one host's row that holds a string, beside a registry index that answers. The registry is read in part,
+// the list may be short by that host's queue, and no wait reads the row.
+test("/dispatch pause over one host row that holds a string names that row's key and says to repair it, never to wait for Valkey (#1035)", { timeout: 30_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  const fx = deployment({ valkey: LIVE });
+  const { default: IORedis } = await import("ioredis");
+  const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  // A host name of this test's own, so no other test's registry row is read or written.
+  const host = `pd1035w${process.pid}`;
+  const note = `the list of queues may be short: Valkey answers host:h:${host} with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused`;
+  try {
+    writeFileSync(ENV_FILE, "PI_WORKER_NAME=mini1\n");
+    await r.sadd(HOST_SET, host);
+    await r.set(hostKey(host), "not a hash");
+    const paused = await command("pause");
+    assert.ok(paused.some((line) => line.endsWith(`, but ${note}`)), JSON.stringify(paused));
+    const rows = rowsOf(fx.files.logs).filter((row) => row.kind === "fleet-pause").map((row) => [row.outcome, row.reason ?? null]);
+    assert.deepEqual(rows, [["ok", null], ["ok", [...note].slice(0, CONSOLE_AUDIT_FIELD_MAX).join("")]]);
+    assert.ok(rows[1][1].includes("Waiting does not change that: remove or repair that key"), "what to put right is in what the row keeps");
+    // Repaired: the same command reads the registry whole and says nothing of a short list.
+    await r.del(hostKey(host));
+    await r.srem(HOST_SET, host);
+    const whole = await command("pause");
+    assert.ok(!whole.some((line) => line.includes("may be short")), JSON.stringify(whole));
+  } finally {
+    await r.del(hostKey(host), "bull:pi-jobs@mini1:meta", "bull:pi-jobs@mini1:events").catch(() => {});
+    await r.srem(HOST_SET, host).catch(() => {});
+    await r.hdel("bull:pi-jobs:meta", "paused").catch(() => {});
     r.disconnect();
     fx.restore();
   }
@@ -681,7 +722,8 @@ test("/dispatch pause answered part-way with an error over an unreadable registr
     await r.set(HOST_SET, "not a set");
     await r.set("bull:pi-jobs@mini1:events", "not a stream");
     const notes = await command("pause");
-    assert.ok(notes.includes("pause: the list of queues may be short, so other queues may exist and were not switched; ANSWERED WITH AN ERROR for pi-jobs@mini1 (reads paused now); known switched: pi-jobs"), JSON.stringify(notes));
+    // Issue #1035: the lead says why the list is short, the registry key answered with WRONGTYPE, and what to put right.
+    assert.ok(notes.includes("pause: the list of queues may be short (Valkey answers host:live with WRONGTYPE: remove or repair that key first), so other queues may exist and were not switched; ANSWERED WITH AN ERROR for pi-jobs@mini1 (reads paused now); known switched: pi-jobs"), JSON.stringify(notes));
     assert.equal(await r.hexists("bull:pi-jobs@mini1:meta", "paused"), 1, "paused, as said");
   } finally {
     await r.del(HOST_SET, "bull:pi-jobs@mini1:meta", "bull:pi-jobs@mini1:events").catch(() => {});
@@ -691,10 +733,17 @@ test("/dispatch pause answered part-way with an error over an unreadable registr
   }
 });
 
-test("the pause and resume tools tell a model what queuesMayBeShort means in the words the surfaces say (#964)", () => {
+test("the pause and resume tools tell a model what queuesMayBeShort means in the words the surfaces say, and what queuesShortLasting beside it means (#964, #1035)", () => {
   const t = tools();
-  assert.match(t.dispatch_pause.description, /queuesMayBeShort true in the answer means the host registry or the look for queues could not be read whole, so other queues may exist and were not paused: pause again once Valkey answers\./);
+  assert.match(t.dispatch_pause.description, /queuesMayBeShort true in the answer means the host registry or the look for queues could not be read whole, so other queues may exist and were not paused\./);
   assert.match(t.dispatch_resume.description, /queuesMayBeShort true in the answer means the host registry or the look for queues could not be read whole, so other queues may exist and were not resumed\./);
+  // Issue #1035: "pause again once Valkey answers" was said of every short list, also of one that is short because
+  // Valkey answers a read with an error which no wait ends.
+  assert.ok(t.dispatch_pause.description.includes('With no queuesShortLasting beside it, pause again: a later try may read the list whole. queuesShortLasting beside it means Valkey answered a read with an error that waiting does not change, so pausing again alone gives the same answer: "key" is a key that holds another kind of value and has to be removed or repaired first, "permission" is a permission this deployment\'s Valkey user lacks (its ACL).'), t.dispatch_pause.description);
+  assert.ok(t.dispatch_resume.description.includes('With no queuesShortLasting beside it, a later resume may read the list whole. queuesShortLasting beside it means Valkey answered a read with an error that waiting does not change, so resuming again alone gives the same answer: "key" is a key that holds another kind of value and has to be removed or repaired first, "permission" is a permission this deployment\'s Valkey user lacks (its ACL).'), t.dispatch_resume.description);
+  for (const d of [t.dispatch_pause.description, t.dispatch_resume.description]) assert.doesNotMatch(d, /once Valkey answers|refus/i);
+  // The two words are the classifier's two classes that last, and the ones an answer and an audit row carry.
+  assert.deepEqual(Object.entries(REPLY_ERROR_CLASSES).filter(([, c]) => c.lasting === true).map(([name]) => name), ["key", "permission"]);
 });
 
 test("the table has exactly one row per audited call site in index.ts, secrets-command.ts and dashboard.ts", () => {

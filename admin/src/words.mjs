@@ -17,6 +17,7 @@
 
 import { explainReason } from "@edgehero/pi-dispatch/reason-catalog";
 import { RECORD_REASON_RE } from "@edgehero/pi-dispatch/record-reason";
+import { REPLY_ERROR_CLASSES, replyErrorClass } from "@edgehero/pi-dispatch/reply-error-class";
 
 export { RECORD_REASON_RE };
 
@@ -136,13 +137,141 @@ export function switchListShort(res) {
 }
 
 /**
+ * What a sentence may say of ONE read of `key` that Valkey answered with `code` (issue #1036), by the code's class and
+ * nothing past it (`replyErrorClass`, the worker's table): `said`, the key and the code; `first`, what has to be put
+ * right before anything else, for a class that lasts, else null (a key of another type is removed or repaired; a
+ * permission is the Valkey user's ACL, never the key); `again`, whether "try again" is true, which it is of a passing
+ * class alone; `lasting`, the class's own true, false or null; `waiting`, the clause the class allows about waiting, or
+ * null. The words every admin surface that names a remedy builds its sentence from (the trigger edit's gate,
+ * `dispatch_cancel`'s refusal, the kill switch's short note), so that an ACL user without HGETALL is never told to
+ * remove a sound key, and a Valkey that was busy for a moment is never called a cause waiting does not end.
+ */
+export function erroredReadWords(key, code) {
+  const cls = replyErrorClass(code);
+  const { lasting, waiting } = REPLY_ERROR_CLASSES[cls];
+  return { class: cls, lasting, waiting, said: `Valkey answers ${key} with ${code}`, first: cls === "key" ? "Remove or repair that key first" : cls === "permission" ? "Fix this Valkey user's ACL first" : null, again: cls === "passing" };
+}
+
+/**
+ * What a page that could not read the deployment says under its unread sentence where it still draws the kill
+ * switch's two forms (issue #1035): why a form is there with nothing read, and what its answer will say.
+ */
+export const KILL_SWITCH_UNREAD_TEXT = "The kill switch works without a read: a pause reaches every queue it finds, and its answer names them.";
+
+/** How a kill switch's short note names the look for queues, a read with no key of its own. */
+const LOOK_FOR_QUEUES = "the look for queues";
+
+/** The classes of a reply's code in the order a sentence names one read of several: what most needs a hand first. */
+const SHORT_CAUSE_ORDER = Object.freeze(["key", "permission", "other", "passing"]);
+
+/** How many errored reads a kill switch's cause keeps (the lists of hosts not read have the same bound). */
+const SHORT_CAUSE_ERRORS_MAX = 20;
+
+/**
+ * WHY a kill switch's set of queues may be short (issue #1035), from one Valkey's answer or from several (the read
+ * model's `switchOutcome` shape, whose `shortCause` says what its own discovery did not read): null for an answer that
+ * is not short, else `{ waits, errors, more, lasting }`. Three causes, told apart because they ask different things of
+ * a person. A read that got NO ANSWER, and host rows NOT READ IN TIME, wait on Valkey (`waits`). A read Valkey ANSWERED
+ * WITH AN ERROR does not wait on anything by itself: what it asks is its code's class's (`erroredReadWords`), and
+ * `errors` lists them, `{ key, code, class }`, a key of another type first, then a permission, then any other code,
+ * then a passing state, at most twenty with `more` counting the rest. `key` is the key that was read (`host:live`, a
+ * host's row) or null for the look for queues. `lasting` is the class of the first when it lasts ("key" or
+ * "permission"), else null: the audit's word and a tool's answer carry it. An answer that says it is short without
+ * saying why (an older shape, a discovery that threw) waits, which is what every short answer said before.
+ */
+export function switchShortCause(res) {
+  const answers = (Array.isArray(res) ? res : [res]).filter((r) => switchListShort(r));
+  if (answers.length === 0) return null;
+  const keyOk = (key) => key === null || (typeof key === "string" && /^host:(?:live|h:[A-Za-z0-9][A-Za-z0-9._-]{0,63})$/.test(key));
+  const errors = answers
+    .flatMap((r) => (Array.isArray(r.shortCause?.errors) ? r.shortCause.errors : []))
+    .filter((e) => keyOk(e?.key ?? null) && typeof e?.code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(e.code))
+    .map((e) => ({ key: e.key ?? null, code: e.code, class: replyErrorClass(e.code) }));
+  errors.sort((a, b) => SHORT_CAUSE_ORDER.indexOf(a.class) - SHORT_CAUSE_ORDER.indexOf(b.class));
+  const more = answers.reduce((n, r) => n + (Number.isSafeInteger(r.shortCause?.more) && r.shortCause.more > 0 ? r.shortCause.more : 0), 0) + Math.max(0, errors.length - SHORT_CAUSE_ERRORS_MAX);
+  const waits = errors.length === 0 || answers.some((r) => r.shortCause === null || typeof r.shortCause !== "object" || r.shortCause.waits !== false);
+  const first = errors[0] ?? null;
+  return { waits, errors: errors.slice(0, SHORT_CAUSE_ERRORS_MAX), more, lasting: first !== null && REPLY_ERROR_CLASSES[first.class].lasting === true ? first.class : null };
+}
+
+/**
  * What a fleet pause or resume whose set of queues may be short says (issue #964), on every surface that switches the
  * fleet: that other queues may exist and were not switched, and what to do. "Once Valkey answers", never once a page
- * reads it: a page can stay unread while the switch works (issue #986). Fixed words with no queue name, so an audit
- * row, the pi extension and the CLI (`worker/src/cli.mjs`, held equal by a test) carry the same sentence.
+ * reads it: a page can stay unread while the switch works (issue #986). Queue names never, so an audit row, the pi
+ * extension and the CLI (`worker/src/cli.mjs`, held equal by a test over every cause) carry the same sentence.
+ *
+ * WHAT TO DO DEPENDS ON THE CAUSE (issue #1035, `switchShortCause`). With no cause given, or one that only waits, the
+ * sentence is the one it always was: pause again once Valkey answers. That was said of every short list, also where
+ * Valkey DID answer and the list is short for a reason that waiting does not end (`host:live` holding a string), so
+ * each press gave the same advice again. Over a read answered with an error the sentence names the key and the reply's
+ * code, then what the code's class supports: for a key of another type or a permission, "Waiting does not change
+ * that" with the class's remedy before the switch is tried again; for a passing state, that a later read may succeed;
+ * for any other code, no claim at all. Where one read was answered with an error and another got no answer, both are
+ * said, the lasting one with its remedy. The remedy stands before the consequence on purpose: an audit row keeps 200
+ * code points of a reason, and with the longest host name they still hold what to put right; with `host:live` or a
+ * host name of ordinary length they hold the whole sentence.
  */
-export function switchShortNote(paused) {
-  return `the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not ${paused ? "paused" : "resumed"}. ${paused ? "Pause" : "Resume"} the fleet again once Valkey answers`;
+export function switchShortNote(paused, cause = null) {
+  const p = switchShortParts(paused, cause);
+  return p.named ? `the list of queues may be short: ${p.why}. ${p.advice}; ${p.rest}${p.tail}` : `the list of queues may be short: ${p.why}, so ${p.rest}. ${p.advice}`;
+}
+
+/**
+ * How a part-way kill switch's answer closes when its set of queues may be short as well (issue #1035): that other
+ * queues may exist, and what to do by the cause, the same parts as `switchShortNote`. Last in its sentence, since what
+ * the switch reached leads there.
+ */
+export function switchShortThen(paused, cause = null) {
+  const p = switchShortParts(paused, cause);
+  const rest = `Other queues may exist and were not ${paused ? "paused" : "resumed"}`;
+  return p.named ? `${rest}: ${p.why}. ${p.advice}${p.tail}` : `${rest}: ${p.advice.charAt(0).toLowerCase()}${p.advice.slice(1)}`;
+}
+
+/**
+ * What a model is handed of the cause when a fleet pause or resume did not reach every queue and its set may be short
+ * (issue #1035): the key and the code of the read Valkey answered with an error and what its class supports, as a
+ * sentence, or "" where the cause only waits (the refusal's own closing words say that). Keys and a code, never a
+ * queue's name or a Valkey's address.
+ */
+export function switchShortCauseSentence(paused, cause = null) {
+  const p = switchShortParts(paused, cause);
+  return p.named ? ` ${p.why.charAt(0).toUpperCase()}${p.why.slice(1)}. ${p.advice}${p.tail}.` : "";
+}
+
+/**
+ * What a part-way switch whose set of queues may be short says FIRST on the `/dispatch` panel and its command (issue
+ * #964): an audit row keeps the start of a sentence (200 code points), and at the end this was cut, or read past. With
+ * its cause in a parenthesis where Valkey answered a read with an error (issue #1035): the key and the code, then for
+ * a class that lasts what to put right first, for a passing state that a later read may succeed, and that another
+ * read got no answer where one did not. A cause that only waits adds nothing, as before.
+ */
+export function switchShortLead(cause = null) {
+  const named = Array.isArray(cause?.errors) && cause.errors.length > 0 ? cause.errors[0] : null;
+  if (named === null) return "the list of queues may be short, so other queues may exist and were not switched; ";
+  const w = erroredReadWords(named.key ?? LOOK_FOR_QUEUES, named.code);
+  const then = w.first !== null ? `: ${w.first.charAt(0).toLowerCase()}${w.first.slice(1)}` : w.again ? `: ${w.waiting.charAt(0).toLowerCase()}${w.waiting.slice(1)}` : "";
+  return `the list of queues may be short (${w.said}${then}${cause.waits === true ? "; another read got no answer" : ""}), so other queues may exist and were not switched; `;
+}
+
+/** The parts those sentences share: whether a read is named, why the list is short, what to do, what it leaves, and the count of the reads not named. */
+function switchShortParts(paused, cause) {
+  const again = `${paused ? "pause" : "resume"} the fleet again`;
+  const Again = `${paused ? "Pause" : "Resume"} the fleet again`;
+  const rest = `other queues may exist and were not ${paused ? "paused" : "resumed"}`;
+  const named = Array.isArray(cause?.errors) && cause.errors.length > 0 ? cause.errors[0] : null;
+  if (named === null) return { named: false, why: "the host registry or the look for queues could not be read whole", advice: `${Again} once Valkey answers`, rest, tail: "" };
+  const w = erroredReadWords(named.key ?? LOOK_FOR_QUEUES, named.code);
+  const others = cause.errors.length - 1 + (Number.isSafeInteger(cause.more) && cause.more > 0 ? cause.more : 0);
+  // Last, after what to do: one read is named, the rest are counted.
+  const tail = others > 0 ? ` (${others} more ${others === 1 ? "read was" : "reads were"} answered with an error)` : "";
+  // "Remove or repair that key first" as the middle of a sentence: "remove or repair that key".
+  const remedy = w.first === null ? null : `${w.first.charAt(0).toLowerCase()}${w.first.slice(1).replace(/ first$/, "")}`;
+  // "then pause again", the fleet left unsaid: with it the commonest of these sentences (`host:live` holding a string)
+  // was one code point past what an audit row keeps, and the row ended "were not pause".
+  if (remedy !== null) return { named: true, why: w.said, advice: cause.waits === true ? `${w.waiting}: ${remedy}. Another read got no answer: ${again} once Valkey answers and that is put right` : `${w.waiting}: ${remedy}, then ${paused ? "pause" : "resume"} again`, rest, tail };
+  if (cause.waits === true) return { named: true, why: `${w.said}, and another read got no answer`, advice: `${Again} once Valkey answers`, rest, tail };
+  if (w.again) return { named: true, why: w.said, advice: `${w.waiting}: ${again}`, rest, tail };
+  return { named: true, why: w.said, advice: `${Again} once the list can be read whole`, rest, tail };
 }
 
 /**

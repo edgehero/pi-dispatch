@@ -7,7 +7,7 @@ import { executeToolAction, switchPartialRefusal, toolActionRequest } from "../s
 import { modelToolRefusal } from "../src/tool-refusals.mjs";
 import { failedForAgent, waitingForAgent, readOperationalTool } from "../src/tool-reads.mjs";
 import { createFleetReader, readHeldJobs } from "../src/read-model.mjs";
-import { keyedRedis, quietQueue, registryKeys } from "./helpers/fleet-reader-fakes.mjs";
+import { answeredWith, discoveryRedis, keyedRedis, noAnswer, quietQueue, registryKeys } from "./helpers/fleet-reader-fakes.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { DOCTOR_HOSTS, assignCheckIds, buildDoctorRecord, doctorKey } from "@edgehero/pi-dispatch/doctor-results";
 import { DELAYED_SCORE_SHIFT, deferHsetArgs, deferKey } from "@edgehero/pi-dispatch/defer-reasons";
@@ -193,6 +193,113 @@ test("dispatch_pause over a set of queues that may be short answers queuesMayBeS
   } finally {
     clearInterval(keep);
     await reader.dispose();
+  }
+});
+
+/**
+ * The real fleet reader for a tool call over a Valkey client whose discovery reads answer as `how()` says now (issue
+ * #1035, `discoveryRedis`), with queues whose pause and resume answer as `flip(name)` gives. `snapshots` counts the
+ * reader's snapshot reads, one per preview of a fleet switch.
+ */
+function shortToolFleet(f, how, { flip = () => Promise.resolve() } = {}) {
+  const make = quietQueue();
+  const reader = createFleetReader(f.paths, { makeQueueFn: (c, o) => ({ ...make(c, o), pause: () => flip(o?.name ?? "pi-jobs"), resume: () => flip(o?.name ?? "pi-jobs") }), parseConnectionFn: () => ({}), redisFn: () => discoveryRedis(how, { beatAt: NOW }), nowFn: () => NOW, readOnly: true, switchStepTimeoutMs: 80, closeTimeoutMs: 30 });
+  const counted = { snapshots: 0 };
+  const fleet = { snapshot: (opts) => { counted.snapshots += 1; return reader.snapshot(opts); }, pause: () => reader.pause(), resume: () => reader.resume(), pauseQueue: (args) => reader.pauseQueue(args), dispose: () => reader.dispose() };
+  return { reader, fleet, counted };
+}
+
+// Issue #1035: the tools said "pause again once Valkey answers" of every short list, also where Valkey had answered
+// with an error that stays until a key or the ACL is put right.
+test("dispatch_pause and dispatch_resume over a list that may be short answer the class of a cause that stays, audit it under that class's word, and refuse a part-way switch with the key, the code and what its class supports (#1035)", async () => {
+  const rm = await import("../src/read-model.mjs");
+  const CASES = [
+    // what, the reads, the answer's class, the audit's word, what a part-way refusal adds
+    ["a key of another type", { index: answeredWith("WRONGTYPE") }, "key", "queues-may-be-short-key", " Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again."],
+    ["a permission", { rows: { "host:h:hostw": answeredWith("NOPERM") } }, "permission", "queues-may-be-short-permission", " Valkey answers host:h:hostw with NOPERM. Waiting does not change that: fix this Valkey user's ACL, then pause again."],
+    ["a passing state", { scan: answeredWith("BUSY") }, undefined, "queues-may-be-short", " Valkey answers the look for queues with BUSY. A later read may succeed: pause the fleet again."],
+    ["a code of no class", { index: answeredWith("READONLY") }, undefined, "queues-may-be-short", " Valkey answers host:live with READONLY. Pause the fleet again once the list can be read whole."],
+    ["no answer", { index: noAnswer }, undefined, "queues-may-be-short", ""],
+    ["an error reply and a read with no answer", { index: answeredWith("WRONGTYPE"), scan: noAnswer }, "key", "queues-may-be-short-key", " Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key. Another read got no answer: pause the fleet again once Valkey answers and that is put right."],
+  ];
+  for (const [what, reads, lasting, word, added] of CASES) {
+    const f = fixture();
+    let flip = () => Promise.resolve();
+    const { fleet } = shortToolFleet(f, () => reads, { flip: (name) => flip(name) });
+    const options = { ...f.options, fleet, readModel: { ...rm, killSwitchPlan: () => ({ urls: [f.paths.valkeyUrl], disagreement: null, context: null }) } };
+    const rows = () => f.rows.map((r) => [r.action, r.outcome, r.reason ?? null]);
+    let keep = null;
+    try {
+      // A resume is a person's to confirm, so it goes through a dialog; a pause runs headless.
+      for (const [tool, toolCtx] of [["dispatch_pause", { hasUI: false }], ["dispatch_resume", { hasUI: true, ui: { confirm: async () => true } }]]) {
+        f.rows.length = 0;
+        const out = await executeToolAction(tool, {}, toolCtx, options);
+        assert.deepEqual([out.applied, out.queuesMayBeShort, out.queuesShortLasting], [true, true, lasting], `${what}, ${tool}: ${JSON.stringify(out)}`);
+        assert.deepEqual(rows(), [["write", "ok", null], ["write", "ok", word], ["write-applied", "ok", null]], `${what}, ${tool}`);
+      }
+      // Part-way: the shared queue's pause is sent and never answered. The step's own timer is unref'd, so this test
+      // holds the event loop open while it runs out.
+      flip = (name) => (name === "pi-jobs" ? new Promise(() => {}) : Promise.resolve());
+      keep = setInterval(() => {}, 20);
+      const sentence = `The fleet pause did not reach every queue, so some queues may be paused and others not, and the list of queues may be short, so other queues may exist and were not paused.${added} An operator can look at the fleet in the console and pause it again once Valkey answers.`;
+      await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => (assert.equal(modelToolRefusal(e), sentence, what), true));
+      assert.doesNotMatch(added, /refus/i);
+    } finally {
+      clearInterval(keep);
+      await fleet.dispose();
+    }
+  }
+  // The refusal's own words by the cause, with the flags a result carries.
+  assert.equal(switchPartialRefusal(false, true, false, false, { waits: false, errors: [{ key: "host:live", code: "WRONGTYPE" }] }), "The fleet resume did not reach every queue, so some queues may be resumed and others not, and the list of queues may be short, so other queues may exist and were not resumed. Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then resume again. An operator can look at the fleet in the console before trying the resume again.");
+  assert.equal(switchPartialRefusal(true, false, false, false, { waits: false, errors: [{ key: "host:live", code: "WRONGTYPE" }] }), switchPartialRefusal(true, false, false), "a list that is not short says nothing of a cause");
+  assert.equal(switchPartialRefusal(true, true, true, false, null), switchPartialRefusal(true, true, true));
+});
+
+// Issue #1035: the tool previewed twice, so on a Valkey that does not answer a pause waited its snapshot's bound two
+// times before the kill switch was sent.
+test("a fleet pause or resume through its tool previews once and rereads only the plan's refusal before the write; an action with no recheck is still previewed twice (#1035)", async () => {
+  const rm = await import("../src/read-model.mjs");
+  const f = fixture();
+  const asked = [];
+  const { fleet, counted } = shortToolFleet(f, () => ({}), { flip: (name) => (asked.push(name), Promise.resolve()) });
+  let plans = 0;
+  let refuseFrom = Infinity;
+  const killSwitchPlan = ({ paused }) => {
+    plans += 1;
+    return plans >= refuseFrom && !paused ? { refused: "this console's Valkey and the service's disagree; a resume reaches neither until they agree" } : { urls: [f.paths.valkeyUrl], disagreement: null, context: null };
+  };
+  const options = { ...f.options, fleet, readModel: { ...rm, killSwitchPlan } };
+  const dialogs = [];
+  const person = { hasUI: true, ui: { confirm: async (...args) => (dialogs.push(args), true) } };
+  try {
+    counted.snapshots = 0;
+    assert.equal((await executeToolAction("dispatch_pause", {}, { hasUI: false }, options)).applied, true);
+    assert.equal(counted.snapshots, 1, "a headless pause: one preview, so one snapshot");
+    for (const tool of ["dispatch_pause", "dispatch_resume"]) {
+      counted.snapshots = 0;
+      assert.equal((await executeToolAction(tool, {}, person, options)).applied, true, tool);
+      assert.equal(counted.snapshots, 1, `${tool}: one preview behind the dialog too`);
+    }
+    // The control: one queue's pause has no recheck, and is previewed again after its dialog.
+    counted.snapshots = 0;
+    assert.equal((await executeToolAction("dispatch_pause", { queue: "pi-jobs" }, person, options)).applied, true);
+    assert.equal(counted.snapshots, 2, "previewed twice, as every action without a recheck is");
+    // What the recheck rereads: the plan. It comes to refuse a resume while the dialog is open, and nothing is sent.
+    asked.length = 0;
+    f.rows.length = 0;
+    const openDialog = { hasUI: true, ui: { confirm: async () => { refuseFrom = plans + 1; return true; } } };
+    await assert.rejects(executeToolAction("dispatch_resume", {}, openDialog, options), /changed since its preview/);
+    assert.deepEqual([asked, f.rows.filter((r) => r.action === "write").length], [[], 0], "no resume was sent and no write was audited");
+    refuseFrom = Infinity;
+    // One Undo in the dialog of a pause previewed without a snapshot: the dialog's own.
+    const unread = { ...fleet, snapshot: async () => null };
+    dialogs.length = 0;
+    assert.equal((await executeToolAction("dispatch_pause", {}, person, { ...options, fleet: unread })).applied, true);
+    assert.equal(dialogs.length, 1);
+    assert.equal((dialogs[0][1].match(/Undo: /g) ?? []).length, 1, dialogs[0][1]);
+    assert.match(dialogs[0][1], /could not be read; a pause still reaches every queue the kill switch finds/);
+  } finally {
+    await fleet.dispose();
   }
 });
 

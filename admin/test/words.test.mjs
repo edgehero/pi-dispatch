@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { stripAnsi } from "../src/style.mjs";
-import { DOCS_ROOT, capitalised, listed, QUEUE_ERRORS_NAMED, queueErrorsLead, queueErrorsLine, queueErrorsOf, HELD_LABEL, NO_EXPLANATION, NO_REASON_FAILED, OUTCOME_KEYS, OUTCOME_KEY_WORDS, RECORD_REASON_RE, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, UNNAMED_FIELD, VENUE_LABEL, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence, switchListShort, switchShortNote } from "../src/words.mjs";
+import { DOCS_ROOT, capitalised, listed, QUEUE_ERRORS_NAMED, queueErrorsLead, queueErrorsLine, queueErrorsOf, HELD_LABEL, NO_EXPLANATION, NO_REASON_FAILED, OUTCOME_KEYS, OUTCOME_KEY_WORDS, RECORD_REASON_RE, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, UNNAMED_FIELD, VENUE_LABEL, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence, erroredReadWords, KILL_SWITCH_UNREAD_TEXT, switchListShort, switchShortCause, switchShortCauseSentence, switchShortLead, switchShortNote, switchShortThen } from "../src/words.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { NESTED_REASONS, REASONS, explainReason } from "../../worker/src/reason-catalog.mjs";
 import { RECOVERY_COMMENTS } from "../../worker/src/comment-tables.mjs";
@@ -13,7 +13,12 @@ import { RUNNER_COMPLETED_REASONS } from "../../worker/src/run-history.mjs";
 import { RUN_OUTCOMES } from "../../worker/src/portfolio-snapshot.mjs";
 import { LIVE_OUTCOMES } from "../../worker/src/live-transcript.mjs";
 import { recordOutcomeEnum } from "../../worker/test/helpers/spec-enum.mjs";
-import { killSwitchShortNote } from "../../worker/src/cli.mjs";
+import { killSwitchShortCause, killSwitchShortNote, statusShortNote } from "../../worker/src/cli.mjs";
+import { REPLY_CODES_BY_CLASS, REPLY_ERROR_CLASSES, replyErrorClass } from "../../worker/src/reply-error-class.mjs";
+import * as workerConnection from "../../worker/src/connection.mjs";
+import { readLiveHosts } from "../../worker/src/host-registry.mjs";
+import { discoverHostQueuesReporting } from "../../worker/src/queue.mjs";
+import { erroredReadWords as readModelErroredReadWords, setQueuePaused } from "../src/read-model.mjs";
 import { loadVisibleWidth } from "./helpers/renderer.mjs";
 
 // Issue #710, PR 2: the console and the `/dispatch` panel say one vocabulary, read from admin/src/words.mjs. Each table
@@ -499,6 +504,178 @@ test("a kill switch over a set of queues that may be short says one sentence on 
   // "Once Valkey answers": a page can stay unread after Valkey answers while the switch works (issue #986).
   assert.doesNotMatch(switchShortNote(true), /Fleet reads|once .* reads/);
   assert.deepEqual([{ blind: "x" }, { incomplete: "y" }, { ok: true }, null].map(switchListShort), [true, true, false, false]);
+});
+
+/**
+ * A Valkey client for the kill switch's discovery whose three reads answer as `how` says (issue #1035): `index`, the
+ * registry's `host:live`; `rows`, a host's row by its key; `scan`, the look for queues. Each a function giving the
+ * reply; a read not named answers well, with `hosta` and `hostw` live.
+ */
+const SHORT_HOSTS = ["hosta", "hostw"];
+function discoveryClient({ index = null, rows = {}, scan = null, hosts = SHORT_HOSTS } = {}) {
+  return {
+    on() {},
+    disconnect() {},
+    smembers: () => (index ? index() : Promise.resolve([...hosts])),
+    hgetall: (key) => (rows[key] ? rows[key]() : Promise.resolve({ name: key.slice("host:h:".length), routes: "true", beatAt: String(Date.now()) })),
+    async pttl() { return 60_000; },
+    async srem() { return 0; },
+    scan: () => (scan ? scan() : Promise.resolve(["0", []])),
+  };
+}
+const answered = (code) => () => Promise.reject(Object.assign(new Error(`${code} said by Valkey about the key`), { name: "ReplyError" }));
+const dropped = () => Promise.reject(new Error("Connection is closed."));
+const silent = () => new Promise(() => {});
+
+/** What both discoveries make of one such client: the CLI's cause, and the admin's from its own switch's answer. */
+async function bothCauses(how) {
+  const client = discoveryClient(how);
+  const [fleet, existing] = await Promise.all([readLiveHosts(client, { timeoutMs: 60 }).catch((error) => ({ unreachable: error?.message ?? String(error) })), discoverHostQueuesReporting(client, { timeoutMs: 60 })]);
+  const makeQueueFn = () => ({ async pause() {}, async resume() {}, async close() {} });
+  // The admin's registry read gets half of this bound and never under a quarter of a second (`fleetQueuesOn`), so the
+  // bound is wide enough that a silent row runs out its own read, not the whole registry's.
+  const res = await setQueuePaused({ url: "redis://unused", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => discoveryClient(how), timeoutMs: 600 });
+  return { cli: killSwitchShortCause(fleet, existing), res, admin: switchShortCause(res) };
+}
+
+// Issue #1035: every short list said "once Valkey answers", also where Valkey had answered and the cause stays.
+const SHORT_STATES = [
+  ["the index answered with WRONGTYPE", { index: answered("WRONGTYPE") }, { waits: false, errors: [{ key: "host:live", code: "WRONGTYPE", class: "key" }], more: 0, lasting: "key" },
+    "the list of queues may be short: Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused"],
+  ["the index answered with NOPERM", { index: answered("NOPERM") }, { waits: false, errors: [{ key: "host:live", code: "NOPERM", class: "permission" }], more: 0, lasting: "permission" },
+    "the list of queues may be short: Valkey answers host:live with NOPERM. Waiting does not change that: fix this Valkey user's ACL, then pause again; other queues may exist and were not paused"],
+  ["the index answered with BUSY", { index: answered("BUSY") }, { waits: false, errors: [{ key: "host:live", code: "BUSY", class: "passing" }], more: 0, lasting: null },
+    "the list of queues may be short: Valkey answers host:live with BUSY. A later read may succeed: pause the fleet again; other queues may exist and were not paused"],
+  ["the index answered with a code of no class", { index: answered("READONLY") }, { waits: false, errors: [{ key: "host:live", code: "READONLY", class: "other" }], more: 0, lasting: null },
+    "the list of queues may be short: Valkey answers host:live with READONLY. Pause the fleet again once the list can be read whole; other queues may exist and were not paused"],
+  ["the index got no answer", { index: dropped }, { waits: true, errors: [], more: 0, lasting: null },
+    "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers"],
+  ["a row not read in time", { rows: { "host:h:hostw": silent } }, { waits: true, errors: [], more: 0, lasting: null },
+    "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers"],
+  ["a row answered with WRONGTYPE", { rows: { "host:h:hostw": answered("WRONGTYPE") } }, { waits: false, errors: [{ key: "host:h:hostw", code: "WRONGTYPE", class: "key" }], more: 0, lasting: "key" },
+    "the list of queues may be short: Valkey answers host:h:hostw with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused"],
+  ["a row answered with NOAUTH and another not read in time", { rows: { "host:h:hostw": answered("NOAUTH"), "host:h:hosta": silent } }, { waits: true, errors: [{ key: "host:h:hostw", code: "NOAUTH", class: "permission" }], more: 0, lasting: "permission" },
+    "the list of queues may be short: Valkey answers host:h:hostw with NOAUTH. Waiting does not change that: fix this Valkey user's ACL. Another read got no answer: pause the fleet again once Valkey answers and that is put right; other queues may exist and were not paused"],
+  ["the look for queues answered with NOPERM", { scan: answered("NOPERM") }, { waits: false, errors: [{ key: null, code: "NOPERM", class: "permission" }], more: 0, lasting: "permission" },
+    "the list of queues may be short: Valkey answers the look for queues with NOPERM. Waiting does not change that: fix this Valkey user's ACL, then pause again; other queues may exist and were not paused"],
+  ["the look for queues got no answer", { scan: dropped }, { waits: true, errors: [], more: 0, lasting: null },
+    "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers"],
+  ["a row loading, the look for queues with a key of another type, the other row silent", { rows: { "host:h:hosta": answered("LOADING"), "host:h:hostw": silent }, scan: answered("WRONGTYPE") }, { waits: true, errors: [{ key: null, code: "WRONGTYPE", class: "key" }, { key: "host:h:hosta", code: "LOADING", class: "passing" }], more: 0, lasting: "key" },
+    "the list of queues may be short: Valkey answers the look for queues with WRONGTYPE. Waiting does not change that: remove or repair that key. Another read got no answer: pause the fleet again once Valkey answers and that is put right; other queues may exist and were not paused (1 more read was answered with an error)"],
+  ["a row loading and the index's other row silent", { rows: { "host:h:hosta": answered("LOADING"), "host:h:hostw": silent } }, { waits: true, errors: [{ key: "host:h:hosta", code: "LOADING", class: "passing" }], more: 0, lasting: null },
+    "the list of queues may be short: Valkey answers host:h:hosta with LOADING, and another read got no answer. Pause the fleet again once Valkey answers; other queues may exist and were not paused"],
+];
+
+test("why a kill switch's list of queues may be short is told apart on both discoveries: no answer and rows not read in time wait, an error reply is said by its key, its code and its class (issue #1035)", { timeout: 20_000 }, async () => {
+  for (const [what, how, cause, sentence] of SHORT_STATES) {
+    const { cli, res, admin } = await bothCauses(how);
+    assert.equal(switchListShort(res), true, what);
+    assert.deepEqual(admin, cause, `${what}: the admin's cause`);
+    assert.deepEqual(cli, cause, `${what}: the CLI's cause, the same from its own two reads`);
+    assert.equal(switchShortNote(true, admin), sentence, what);
+    for (const paused of [true, false]) assert.equal(killSwitchShortNote(paused, cli), switchShortNote(paused, admin), `${what}: the CLI's sentence, word for word`);
+    assert.equal(switchShortNote(false, admin), sentence.replace("Pause the fleet again", "Resume the fleet again").replace("pause the fleet again", "resume the fleet again").replace("then pause again", "then resume again").replace("were not paused", "were not resumed"), `${what}: a resume`);
+    // "Refused" is no word for a read: Valkey answered it. And "once Valkey answers" is said only where a read waits.
+    assert.doesNotMatch(sentence, /refus/i, what);
+    assert.equal(/once Valkey answers/.test(sentence), cause.waits, `${what}: waiting is said exactly where a read waits`);
+    assert.equal(/Waiting does not change that/.test(sentence), cause.lasting !== null, `${what}: a cause that stays is said to stay`);
+  }
+  // Twenty-three rows answered with an error: both keep twenty and count three more, and both keep the one that
+  // holds another kind of value, the last by name, ahead of the twenty-two a busy Valkey would read later.
+  const hosts = Array.from({ length: 23 }, (_, i) => `h${String(i).padStart(2, "0")}`);
+  const many = await bothCauses({ hosts, rows: Object.fromEntries(hosts.map((h) => [`host:h:${h}`, answered(h === "h22" ? "WRONGTYPE" : "BUSY")])) });
+  assert.deepEqual([many.admin.errors.length, many.admin.more, many.admin.errors[0].key, many.admin.errors[1].key, many.admin.errors[19].key, many.admin.lasting], [20, 3, "host:h:h22", "host:h:h00", "host:h:h18", "key"]);
+  assert.deepEqual(many.cli, many.admin);
+  assert.equal(killSwitchShortNote(true, many.cli), switchShortNote(true, many.admin));
+  assert.match(switchShortNote(true, many.admin), /Valkey answers host:h:h22 with WRONGTYPE\. Waiting does not change that: remove or repair that key, then pause again; .* \(22 more reads were answered with an error\)$/);
+  // A whole discovery is not short and has no cause.
+  const whole = await bothCauses({});
+  assert.deepEqual([switchListShort(whole.res), whole.admin, whole.cli, Object.hasOwn(whole.res, "shortCause")], [false, null, null, false]);
+});
+
+test("the short list's cause takes keys and codes alone, orders them by class, caps them, and reads an answer that names no cause as one that waits (issue #1035)", () => {
+  assert.equal(switchShortCause({ ok: true }), null);
+  assert.equal(switchShortCause(null), null);
+  // An older answer, or a discovery that threw: short, with nothing saying why.
+  assert.deepEqual(switchShortCause({ blind: "registry down" }), { waits: true, errors: [], more: 0, lasting: null });
+  assert.deepEqual(switchShortCause({ incomplete: "x", shortCause: "junk" }), { waits: true, errors: [], more: 0, lasting: null });
+  // No client's words: a key that is no registry key, a code that is no single word, an entry that is no object.
+  const junk = { blind: "x", shortCause: { waits: false, errors: [{ key: "host:h:a b", code: "WRONGTYPE" }, { key: "bull:pi-jobs:meta", code: "WRONGTYPE" }, { key: "host:live", code: "WRONGTYPE Operation against" }, { key: "host:live", code: 7 }, null, "x"] } };
+  assert.deepEqual(switchShortCause(junk), { waits: true, errors: [], more: 0, lasting: null }, "nothing left of it, so it waits as an answer with no cause does");
+  // Order: a key of another type, a permission, any other code, a passing state; each class in the order given.
+  const mixed = { blind: "x", shortCause: { waits: false, errors: [{ key: "host:h:busy", code: "BUSY" }, { key: "host:h:other", code: "READONLY" }, { key: null, code: "NOPERM" }, { key: "host:h:k2", code: "WRONGTYPE" }, { key: "host:h:k1", code: "WRONGTYPE" }] } };
+  assert.deepEqual(switchShortCause(mixed).errors.map((e) => [e.key, e.class]), [["host:h:k2", "key"], ["host:h:k1", "key"], [null, "permission"], ["host:h:other", "other"], ["host:h:busy", "passing"]]);
+  assert.equal(switchShortCause(mixed).lasting, "key");
+  assert.equal(switchShortCause({ blind: "x", shortCause: { waits: false, errors: [{ key: "host:live", code: "BUSY" }] } }).lasting, null);
+  // Two Valkeys: both answers' reads, and it waits when either does.
+  const two = switchShortCause([{ blind: "x", shortCause: { waits: false, errors: [{ key: "host:live", code: "NOPERM" }] } }, { ok: true }, { incomplete: "y", shortCause: { waits: true, errors: [] } }]);
+  assert.deepEqual(two, { waits: true, errors: [{ key: "host:live", code: "NOPERM", class: "permission" }], more: 0, lasting: "permission" });
+  // An answer that is short and says nothing of why waits, also beside one that names an error reply.
+  assert.equal(switchShortCause([{ blind: "x", shortCause: { waits: false, errors: [{ key: "host:live", code: "NOPERM" }] } }, { blind: "y" }]).waits, true);
+  assert.equal(switchShortCause([{ blind: "x", shortCause: { waits: false, errors: [{ key: "host:live", code: "NOPERM" }] } }, { ok: true }]).waits, false);
+  // At most twenty are kept, the rest counted with what the answer already counted.
+  const many = switchShortCause({ blind: "x", shortCause: { waits: false, more: 4, errors: Array.from({ length: 23 }, (_, i) => ({ key: `host:h:h${i}`, code: "WRONGTYPE" })) } });
+  assert.deepEqual([many.errors.length, many.more], [20, 7]);
+  assert.match(switchShortNote(true, many), / \(26 more reads were answered with an error\)$/);
+});
+
+test("the short note keeps what to put right inside an audit row's 200 code points, with the longest host name (issue #1035)", () => {
+  const longest = `host:h:${"h".repeat(64)}`;
+  for (const [code, remedy] of [["WRONGTYPE", "remove or repair that key"], ["WRONGPASS", "fix this Valkey user's ACL"]]) {
+    for (const paused of [true, false]) {
+      const note = switchShortNote(paused, switchShortCause({ blind: "x", shortCause: { waits: false, errors: [{ key: longest, code }] } }));
+      const kept = [...note].slice(0, 200).join("");
+      assert.ok(kept.includes(`Valkey answers ${longest} with ${code}. Waiting does not change that: ${remedy}`), kept);
+    }
+  }
+});
+
+test("status' short note, the part-way answer's closing words, a tool's cause sentence and the panel's lead follow the same split (issue #1035)", () => {
+  const cause = (shortCause) => switchShortCause({ blind: "x", shortCause });
+  const key = cause({ waits: false, errors: [{ key: "host:live", code: "WRONGTYPE" }] });
+  const permission = cause({ waits: true, errors: [{ key: "host:h:hostw", code: "NOPERM" }] });
+  const passing = cause({ waits: false, errors: [{ key: null, code: "LOADING" }] });
+  const other = cause({ waits: false, errors: [{ key: "host:live", code: "READONLY" }, { key: "host:h:a", code: "READONLY" }] });
+  const waits = cause({ waits: true, errors: [] });
+  // `pi-dispatch status`: the same parts with its own next step and what its sums leave out.
+  assert.equal(statusShortNote(false), "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and the sums above leave them out. Run pi-dispatch status again once Valkey answers");
+  assert.equal(statusShortNote(false, waits), statusShortNote(false));
+  assert.equal(statusShortNote(false, key), "the list of queues may be short: Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then run pi-dispatch status again; other queues may exist and the sums above leave them out");
+  assert.equal(statusShortNote(true, permission), "the list of queues may be short: Valkey answers host:h:hostw with NOPERM. Waiting does not change that: fix this Valkey user's ACL. Another read got no answer: run pi-dispatch status again once Valkey answers and that is put right; other queues may exist and the line above leaves out what they hold");
+  assert.equal(statusShortNote(false, passing), "the list of queues may be short: Valkey answers the look for queues with LOADING. A later read may succeed: run pi-dispatch status again; other queues may exist and the sums above leave them out");
+  assert.equal(statusShortNote(true, other), "the list of queues may be short: Valkey answers host:live with READONLY. Run pi-dispatch status again once the list can be read whole; other queues may exist and the line above leaves out what they hold (1 more read was answered with an error)");
+  // The console's part-way answer closes with it.
+  assert.equal(switchShortThen(true, waits), "Other queues may exist and were not paused: pause the fleet again once Valkey answers");
+  assert.equal(switchShortThen(true, null), switchShortThen(true, waits));
+  assert.equal(switchShortThen(false, key), "Other queues may exist and were not resumed: Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then resume again");
+  assert.equal(switchShortThen(true, passing), "Other queues may exist and were not paused: Valkey answers the look for queues with LOADING. A later read may succeed: pause the fleet again");
+  assert.equal(switchShortThen(true, other), "Other queues may exist and were not paused: Valkey answers host:live with READONLY. Pause the fleet again once the list can be read whole (1 more read was answered with an error)");
+  // A tool's refusal adds a sentence only where a read was answered with an error.
+  assert.equal(switchShortCauseSentence(true, waits), "");
+  assert.equal(switchShortCauseSentence(true, null), "");
+  assert.equal(switchShortCauseSentence(true, key), " Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again.");
+  assert.equal(switchShortCauseSentence(false, permission), " Valkey answers host:h:hostw with NOPERM. Waiting does not change that: fix this Valkey user's ACL. Another read got no answer: resume the fleet again once Valkey answers and that is put right.");
+  // The `/dispatch` panel's lead, first in a part-way line.
+  assert.equal(switchShortLead(), "the list of queues may be short, so other queues may exist and were not switched; ");
+  assert.equal(switchShortLead(waits), switchShortLead());
+  assert.equal(switchShortLead(key), "the list of queues may be short (Valkey answers host:live with WRONGTYPE: remove or repair that key first), so other queues may exist and were not switched; ");
+  assert.equal(switchShortLead(permission), "the list of queues may be short (Valkey answers host:h:hostw with NOPERM: fix this Valkey user's ACL first; another read got no answer), so other queues may exist and were not switched; ");
+  assert.equal(switchShortLead(passing), "the list of queues may be short (Valkey answers the look for queues with LOADING: a later read may succeed), so other queues may exist and were not switched; ");
+  assert.equal(switchShortLead(other), "the list of queues may be short (Valkey answers host:live with READONLY), so other queues may exist and were not switched; ");
+  for (const said of [switchShortThen(true, key), switchShortCauseSentence(true, key), switchShortLead(key), statusShortNote(false, key)]) assert.doesNotMatch(said, /refus|once Valkey answers/i);
+});
+
+test("the classifier is one table in a leaf of the worker, which its client hands on and the words modules read (issue #1035)", () => {
+  assert.equal(workerConnection.replyErrorClass, replyErrorClass);
+  assert.equal(workerConnection.REPLY_ERROR_CLASSES, REPLY_ERROR_CLASSES);
+  assert.equal(workerConnection.REPLY_CODES_BY_CLASS, REPLY_CODES_BY_CLASS);
+  // The leaf imports nothing, so the CLI and this module take it without the Valkey client.
+  assert.doesNotMatch(readFileSync(fileURLToPath(new URL("../../worker/src/reply-error-class.mjs", import.meta.url)), "utf8"), /^import |\bimport\(/m);
+  assert.match(readFileSync(fileURLToPath(new URL("../src/words.mjs", import.meta.url)), "utf8"), /from "@edgehero\/pi-dispatch\/reply-error-class"/);
+  assert.equal(JSON.parse(readFileSync(fileURLToPath(new URL("../../worker/package.json", import.meta.url)), "utf8")).exports["./reply-error-class"], "./src/reply-error-class.mjs");
+  // One function for the words of a read answered with an error, whichever module a caller takes it from.
+  assert.equal(readModelErroredReadWords, erroredReadWords);
+  assert.equal(KILL_SWITCH_UNREAD_TEXT, "The kill switch works without a read: a pause reaches every queue it finds, and its answer names them.");
 });
 
 // Issue #1064: a queue Valkey answered with an error is carried under one name and said in one sentence.

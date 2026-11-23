@@ -55,7 +55,7 @@ import { NO_EXPLANATION, docsHref } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { TIMELINE_DEFAULTS, TIMELINE_ROWS, TIMELINE_WAIT_WORDS, TIMELINE_ZOOMS, timelineHtml, timelineLegend, timelineModel } from "../timeline.mjs";
-import { BEAT_FRESH_MS, HOSTS_UNREAD_TEXT, NO_BEAT_READ, REGISTRY_PART_TEXT, registryReadInPart, rowLastSeen, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, hostsUnread, moneyHtml, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
+import { BEAT_FRESH_MS, HOSTS_UNREAD_TEXT, NO_BEAT_READ, REGISTRY_PART_TEXT, registryReadInPart, rowLastSeen, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, hostsUnread, killSwitchUnreadForms, pausedStateUnknown, moneyHtml, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
 
 // ---- the sentences -----------------------------------------------------------------------------------------------------
 
@@ -263,12 +263,14 @@ const setupOf = (view) => firstRunState(view?.data?.snapshot ?? null, { session:
 
 /**
  * One of the overview's eight: the fixed sentence in its card when there is no snapshot, nothing while the first run's
- * checklist stands in for the overview, else `render(snapshot, view)`.
+ * checklist stands in for the overview, else `render(snapshot, view)`. `unread(view)` (issue #1035) is what a card
+ * draws under that sentence when there is no snapshot: the Hosts card alone gives one, the kill switch's two forms
+ * (`killSwitchUnreadForms`, the one change a page that read nothing still offers); every other card offers none.
  */
-function overviewPanel(title, render) {
+function overviewPanel(title, render, { unread = null } = {}) {
   return (view) => {
     const s = view?.data?.snapshot;
-    if (!s) return ui.card({ title, body: html`<p class="muted">${OVERVIEW_UNREAD_TEXT}</p>` });
+    if (!s) return ui.card({ title, body: html`<p class="muted">${OVERVIEW_UNREAD_TEXT}</p>${typeof unread === "function" ? unread(view) : null}` });
     if (setupOf(view).applies) return html``;
     return render(s, view);
   };
@@ -1174,8 +1176,12 @@ export const overviewHosts = overviewPanel("Hosts", (s, view) => {
   const w = workersOnline(s);
   const hosts = hostsOf(s);
   const state = q.pausedState ? ui.chip("Paused", { status: "attention", icon: "pause" }) : q.pausedPartial ? ui.chip(`Partly paused: ${pausedText(s)}`, { status: "attention", icon: "pause" }) : null;
-  // Fleet's rule (`panels/fleet.mjs`): Pause fleet unless the whole fleet is paused, Resume fleet once any of it is.
-  const fleetAct = !act ? null : html`${q.pausedState ? null : ui.actForm({ action: "fleet-pause", label: "Pause fleet", kind: ["sm", "danger"], icon: "pause" })}${q.pausedState || q.pausedPartial ? ui.actForm({ action: "fleet-resume", label: "Resume fleet", kind: ["sm", "paid"], icon: "play" }) : null}`;
+  // Fleet's rule (`panels/fleet.mjs`): Pause fleet unless the whole fleet is paused, Resume fleet once any of it is,
+  // and BOTH whenever some queue's state is not known (issue #1035, `pausedStateUnknown`: a queue Valkey answered
+  // with an error, no queue read, a registry not read whole). With every queue that was read running and one errored,
+  // the head offered no Resume for a queue that may be paused; a pause reaches every queue it finds either way.
+  const unknown = pausedStateUnknown(s);
+  const fleetAct = !act ? null : html`${q.pausedState && !unknown ? null : ui.actForm({ action: "fleet-pause", label: "Pause fleet", kind: ["sm", "danger"], icon: "pause" })}${q.pausedState || q.pausedPartial || unknown ? ui.actForm({ action: "fleet-resume", label: "Resume fleet", kind: ["sm", "paid"], icon: "play" }) : null}`;
   const sub = workersText(s, w);
   const banner = w.none
     ? ui.banner({ status: "failed", icon: "fleet", sm: true, title: NO_WORKER_TEXT, actions: ui.btn({ kind: "sm", label: "Open Fleet", href: hrefTo(view, "fleet") }) })
@@ -1208,7 +1214,7 @@ export const overviewHosts = overviewPanel("Hosts", (s, view) => {
   });
   const list = rows.length > 0 ? html`<ul class="hosts">${rows}</ul>` : q.fleetDegraded ? null : html`<p class="muted">${HOSTS_EMPTY.body}</p>`;
   return ui.card({ title: "Hosts", sub, end: state === null && fleetAct === null ? null : html`${state}${fleetAct}`, body: html`${banner}${degraded}${list}` });
-});
+}, { unread: killSwitchUnreadForms });
 
 // ---- the first run -------------------------------------------------------------------------------------------------------
 

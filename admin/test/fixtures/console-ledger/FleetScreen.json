@@ -42,6 +42,7 @@
     {"el":"Why it failed in the Failed table","kind":"readme","status":"illustrative","reason":"the reason is an operator's detail, one fold under the table (REQ-CONSOLE-SECURITY (l))"},
     {"el":"fleet-consumer-failed.operator","kind":"state","status":"new","panel":"p-hosts","source":"admin/src/console/panels/fleet.mjs#fleetHosts","golden":["panels/fleet-consumer-failed.operator"],"shows":["Queue consumer stopped","dot tone-failed"]},
     {"el":"fleet-registry-never-read.operator","kind":"state","status":"new","panel":"p-hosts","source":"admin/src/console/panels/fleet.mjs#fleetHosts","golden":["panels/fleet-registry-never-read.operator"],"shows":["The hosts could not be read, so what they hold is not known"]},
-    {"el":"fleet-no-snapshot.viewer","kind":"state","status":"new","panel":"p-hosts","source":"admin/src/console/panels/fleet.mjs#fleetHosts","golden":["panels/fleet-no-snapshot.viewer"],"shows":["Valkey could not be read. The next refresh tries again."]}
+    {"el":"fleet-no-snapshot.viewer","kind":"state","status":"new","panel":"p-hosts","source":"admin/src/console/panels/fleet.mjs#fleetHosts","golden":["panels/fleet-no-snapshot.viewer"],"shows":["Valkey could not be read. The next refresh tries again."]},
+    {"el":"fleet-no-snapshot.operator","kind":"state","status":"new","panel":"p-fleetbar","source":"admin/src/console/panels/fleet.mjs#fleetBar","golden":["panels/fleet-no-snapshot.operator"],"shows":["The kill switch works without a read: a pause reaches every queue it finds, and its answer names them.","Pause the fleet","Resume the fleet"]}
   ]
 }
