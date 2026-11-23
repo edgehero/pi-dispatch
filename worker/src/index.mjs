@@ -89,10 +89,11 @@ export const SCOPE_BUSY_RECHECK_MS = 5_000;
 // counted 17,455 of them in 90 minutes, from local runs behind one held folder. The delay now follows how long the
 // SCOPE has been busy with someone waiting for it (`waitBackoffMs` under this ceiling, in `deferScope`): 5s for the
 // first 50s, 10s for the next 50s, then 20s, which is about 100 wakes across that hold for a job that waited all of
-// it, and a short wait is asked as often as before. Every job waiting for one scope gets the same delay, as at the
-// fixed 5s: a cadence per job let a job that had just arrived (5s) take a freed scope ahead of one that had waited
-// an hour (20s) most of the time. And the cadence starts over when a job takes the scope, so the jobs behind a new
-// holder ask at 5s again.
+// it, and a scope that has only now become busy is asked for as often as before. Every job waiting for one scope
+// gets the same delay, as at the fixed 5s: a cadence per job let a job that had just arrived (5s) take a freed scope
+// ahead of one that had waited an hour (20s) most of the time. So a job that arrives where others already wait gets
+// their delay, up to 20s, however short its own wait turns out to be. And the cadence starts over when a job takes
+// the scope, so the jobs behind a new holder ask at 5s again.
 // The ceiling is 20s, not `waitBackoffMs`'s own fifteen minutes, for two reasons. A freed scope should not sit unused
 // for minutes. And every delay must stay under the wait gate's 30s floor, which is what tells a wait deferral from a
 // scope deferral by its wake instant where no defer record says why (INT-WAIT-PROFILES-CONTRACT). 5s, 10s and 20s
@@ -100,8 +101,25 @@ export const SCOPE_BUSY_RECHECK_MS = 5_000;
 // that is computed can still land on one of them (the wait gate's throttled re-ask is the larger of 11s and a quarter
 // of its backoff, plus jitter: 20s to 22s at an 80s interval), so the instant is evidence and the record is the answer.
 export const SCOPE_BUSY_RECHECK_MAX_MS = 20_000;
-/** How many jobs' waits for a busy scope the processor remembers at once (`scopeWaits`). */
+// How long a scope may go without a deferral before its cadence starts over (issue #1023). A waiting job that is
+// alive and can be picked up is deferred again within its delay, at most the ceiling above, so every job this worker
+// remembers waiting there is overdue once the scope has been quiet for longer. 10s on top is what a wake may be late:
+// the grace after which the console's reader stops calling a due job deferred and calls it waiting for pickup
+// (`WAITING_DUE_GRACE_MS`). What is quiet for longer is not the wait it was: its waiters ran on another host (a fleet
+// lease), were removed, or were held elsewhere (a pause window, a worker with no free slot), and the scope has
+// probably changed hands since. Without this a fleet lease's cadence stayed at the ceiling behind a waiter another
+// host had run: a job that came to wait for it six hours later was deferred 20s at once.
+export const SCOPE_BUSY_QUIET_MS = SCOPE_BUSY_RECHECK_MAX_MS + 10_000;
+/** How many jobs' waits for a busy scope a worker remembers at once (`scopeWaits`), over all its queues. */
 export const SCOPE_WAITS_MAX = 1000;
+/**
+ * What a worker remembers of the jobs waiting for a busy scope (issue #1023): `scopeWaits`, the waiting jobs, and
+ * `scopeBusy`, the scopes they wait for (`makeProcessor` says what each holds). Built ONCE per worker and handed to
+ * every processor, as the in-flight map is and for its reason: a worker with a host queue runs two processors over
+ * one set of slots, so two memories were two cadences on one scope, and a take on one queue left the other queue's
+ * waiters at the ceiling.
+ */
+export const makeScopeWaitState = () => ({ scopeWaits: new Map(), scopeBusy: new Map() });
 
 // The newer-release re-check (issue #761, DES-STORE-VERSION-WHEN-NEEDED): a job this worker cannot read, or one whose
 // settings, triggers or pause windows file a newer pi-dispatch wrote, waits for this host's upgrade. Nothing here can
@@ -348,49 +366,56 @@ function makeBeforePickupRecorder({ projects, settleSteerBeforePickup, recordRun
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, privateEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, jobLimits = () => ({}), claimRefreshMs = CLAIM_REFRESH_MS, minuteMs = 60_000, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs(), valkeyTag = null }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, privateEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, jobLimits = () => ({}), claimRefreshMs = CLAIM_REFRESH_MS, minuteMs = 60_000, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs(), valkeyTag = null, scopeWaitState = makeScopeWaitState() }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
 	// is about 100 of them. The verdict cannot change between them (same record, same attempt), so one line says it.
 	// Bounded, oldest out first, so a long-lived worker holds at most REJECTED_SEEN_MAX keys.
 	const rejectedSeen = new Set();
-	// WAITING FOR A BUSY SCOPE (issue #1023), two maps that `deferScope` keeps.
-	// `scopeBusy`: what is waited for (a slot's key or a fleet lease's, `busyKey`) to `{ key, since, waiters }`. `since`
-	// is the first deferral on that scope while it had no entry, and the re-check backs off from it, the same for every
-	// job waiting there. The entry goes when a job takes the scope (the jobs behind the new holder start again at the
-	// short re-check) and when the last job this processor remembers waiting for it is gone, so it never outlives its
-	// waiters: a fleet lease is taken on other hosts too, where this processor sees no take, and a stale `since` there
-	// would start a later wait at the ceiling.
-	// `scopeWaits`: job id to `{ timestamp, deferrals, waitedMs, busy }`, from the first deferral a scope gate gave the
-	// job until it holds every scope slot it needs. It is what makes a wait ONE episode in the log, `scope_busy_deferred`
-	// at its first deferral and `scope_busy_ended` when the job takes its scope, where every wake used to say a line.
-	// `waitedMs` adds up the delays the scope gates gave this job, so a pause window that held it meanwhile is not in
-	// it. `timestamp` is the job's own (BullMQ's creation time): a job added again under an id whose earlier job was
-	// removed while it waited is another job, and starts its own episode. `busy` is the `scopeBusy` entry it last
-	// waited on, counted there once.
+	// WAITING FOR A BUSY SCOPE (issue #1023), two maps that `deferScope` keeps. They are the WORKER's
+	// (`makeScopeWaitState`): `createWorker` builds them once and every processor of the worker reads and writes the same
+	// two, so a scope has one cadence whichever queue its waiters came from.
+	// `scopeBusy`: what is waited for (a slot's key or a fleet lease's, `busyKey`) to `{ key, since, last, waiters }`.
+	// `since` is the first deferral on that scope while it had no entry, and the re-check backs off from it, the same
+	// for every job waiting there. `last` is the newest deferral on it. The cadence starts over three ways: a job takes
+	// the scope through this worker (the jobs behind the new holder start again at the short re-check), the last job
+	// remembered waiting for it is gone, or nobody has been deferred on it for SCOPE_BUSY_QUIET_MS. The third is for the
+	// waiter this worker remembers and will never see again: a fleet lease is taken on other hosts too, where this
+	// worker sees no take, and the job another host ran stays remembered here until the bound drops it. A quiet scope's
+	// entry is REPLACED, not emptied: a job remembered on the old one that does come back (a pause window held it, or
+	// the worker had no free slot) moves to the new one and goes on with its episode.
+	// `scopeWaits`: queue and job id (`waitKey`) to `{ timestamp, deferrals, waitedMs, busy }`, from the first deferral
+	// a scope gate gave the job until it holds every scope slot it needs. It is what makes a wait ONE episode in the
+	// log, `scope_busy_deferred` at its first deferral and `scope_busy_ended` when the job takes its scope, where every
+	// wake used to say a line. The queue is in the key because a job id is only unique within its queue. `waitedMs`
+	// adds up the delays the scope gates gave this job, so a pause window that held it meanwhile is not in it.
+	// `timestamp` is the job's own (BullMQ's creation time): a job added again under an id whose earlier job was removed
+	// while it waited is another job, and starts its own episode. `busy` is the `scopeBusy` entry it last waited on,
+	// counted there once.
 	// Process memory, as the slot count itself is and for its reason (DES-SCOPED-LIMITS-AND-FOLDER-MUTEX, "Why the count
 	// is process memory": one worker per daemon, so one process sees every pickup of a host's jobs), and because nothing
 	// decides on it: it shapes a delay and two log lines. A restart forgets it; the scopes then start over at the short
 	// re-check and a waiting job says its first line again.
-	// Bounded: `scopeWaits` holds at most SCOPE_WAITS_MAX jobs, the one deferred longest ago dropped first (a job can end
-	// where this processor never sees it: cancelled or removed while delayed, or run by another host), and `scopeBusy`
-	// holds no entry without a remembered waiter, so it can hold no more entries than that.
-	const scopeWaits = new Map();
-	const scopeBusy = new Map();
+	// Bounded: `scopeWaits` holds at most SCOPE_WAITS_MAX jobs over the worker's queues, the one deferred longest ago
+	// dropped first (a job can end where this worker never sees it: cancelled or removed while delayed, or run by
+	// another host), and `scopeBusy` holds no entry without a remembered waiter, so it can hold no more entries than
+	// that.
+	const { scopeWaits, scopeBusy } = scopeWaitState;
 	const busyKey = (where, key) => `${where}\u0000${key}`;
-	// One job fewer waits on `busy`; the entry goes with its last one. By identity: an entry a take already removed may
-	// have a successor under the same key, which is not this one.
+	const waitKey = (job) => `${job.queueName ?? QUEUE}\u0000${job.id}`;
+	// One job fewer waits on `busy`; the entry goes with its last one. By identity: an entry a take removed or a quiet
+	// spell replaced may have a successor under the same key, which is not this one.
 	const leaveBusy = (busy) => {
 		if (!busy) return;
 		busy.waiters -= 1;
 		if (busy.waiters <= 0 && scopeBusy.get(busy.key) === busy) scopeBusy.delete(busy.key);
 	};
-	/** Forget what is remembered of job `id`'s wait, and return it (null where nothing was). */
-	const endScopeWait = (id) => {
-		const wait = scopeWaits.get(id) ?? null;
+	/** Forget what is remembered of a job's wait (by its `waitKey`), and return it (null where nothing was). */
+	const endScopeWait = (key) => {
+		const wait = scopeWaits.get(key) ?? null;
 		if (wait === null) return null;
-		scopeWaits.delete(id);
+		scopeWaits.delete(key);
 		leaveBusy(wait.busy);
 		return wait;
 	};
@@ -1155,16 +1180,20 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			await releaseAllHolds();
 			// Issue #1023, the job's episode first: only its FIRST deferral is logged. What is remembered under this id for a
 			// job of another `timestamp` is an earlier job's, and is dropped before anything is counted.
-			let wait = scopeWaits.get(job.id);
+			const key = waitKey(job);
+			let wait = scopeWaits.get(key);
 			const first = !wait || wait.timestamp !== job.timestamp;
 			if (first) {
 				leaveBusy(wait?.busy);
 				wait = { timestamp: job.timestamp, deferrals: 0, waitedMs: 0, busy: null };
 			}
 			// Then the delay: by how long the scope this gate names (`fields.on`) has been busy with someone waiting, 5s,
-			// then 10s, then 20s (SCOPE_BUSY_RECHECK_MAX_MS says why per scope and why it stops there).
-			let busy = scopeBusy.get(fields.on);
-			if (!busy) scopeBusy.set(fields.on, (busy = { key: fields.on, since: nowMs, waiters: 0 }));
+			// then 10s, then 20s (SCOPE_BUSY_RECHECK_MAX_MS says why per scope and why it stops there). An entry nobody
+			// has been deferred on for SCOPE_BUSY_QUIET_MS is a past wait's and is replaced, so this one starts at 5s.
+			let busy = scopeBusy.get(fields.on) ?? null;
+			if (busy !== null && nowMs - busy.last > SCOPE_BUSY_QUIET_MS) busy = null;
+			if (busy === null) scopeBusy.set(fields.on, (busy = { key: fields.on, since: nowMs, last: nowMs, waiters: 0 }));
+			busy.last = nowMs;
 			const delayMs = Math.min(waitBackoffMs(SCOPE_BUSY_RECHECK_MS, nowMs - busy.since), SCOPE_BUSY_RECHECK_MAX_MS);
 			if (wait.busy !== busy) {
 				leaveBusy(wait.busy);
@@ -1174,8 +1203,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			wait.deferrals += 1;
 			wait.waitedMs += delayMs;
 			// Set again on every deferral so that it is the newest in the map: the bound drops the one deferred longest ago.
-			scopeWaits.delete(job.id);
-			scopeWaits.set(job.id, wait);
+			scopeWaits.delete(key);
+			scopeWaits.set(key, wait);
 			if (scopeWaits.size > SCOPE_WAITS_MAX) endScopeWait(scopeWaits.keys().next().value);
 			if (first) deps?.log?.(fields.event, { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs, ...fields.extra });
 			// The defer record is still written on EVERY deferral, never once per wait: its `until` is the instant the job
@@ -1260,7 +1289,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// to add up to. The entry goes first, so a later wait of the same job (another gate below can defer it and give
 		// these slots back) is an episode of its own; one left under this id by an earlier job says nothing. The job holds
 		// its slots here and no `try` around this gives them back, so a logger that throws must not get past this line.
-		const scopeWait = endScopeWait(job.id);
+		const scopeWait = endScopeWait(waitKey(job));
 		if (scopeWait && scopeWait.timestamp === job.timestamp) {
 			try {
 				deps?.log?.("scope_busy_ended", { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", waitedMs: scopeWait.waitedMs, deferrals: scopeWait.deferrals });
@@ -2663,7 +2692,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			deferred = error instanceof DelayedError;
 			throw error;
 		} finally {
-			if (!deferred) endScopeWait(job.id);
+			if (!deferred) endScopeWait(waitKey(job));
 		}
 	};
 }
@@ -2703,7 +2732,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, readModelRoles, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, pauseWindowsNewer, triggersNewer, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, jobLimits, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, privateEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs() }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, readModelRoles, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, pauseWindowsNewer, triggersNewer, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, jobLimits, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, privateEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs(), scopeWaitState = makeScopeWaitState() }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -2833,6 +2862,9 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			// Issue #599, phase 2: SHARED across both workers for the host slot's reason: the registry row lists what this
 			// HOST runs, and two maps would each list half.
 			runningJobs,
+			// Issue #1023: SHARED across both workers, for the in-flight map's reason: the two queues' jobs wait for the same
+			// slots, so the memory of who waits for a scope, and for how long it has been busy, is the worker's.
+			scopeWaitState,
 		});
 
 		// Issue #464: only a connection `parseConnection` built, which judges and pins the Valkey it dials.
