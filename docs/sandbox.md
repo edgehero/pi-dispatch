@@ -356,6 +356,16 @@ at another daemon is invisible to it, and only the rules above protect it.
   passes that follow this one. Each pass that did something writes one `sandbox_reaper_pass` line to the worker log:
   how many runs it removed and kept, whether it stopped before the end, how long it took, how much of that was rest,
   and the slowest answer the runtime gave about one run.
+  **Beside a job the sweep gives way** (issue #1023). A burst of removals while a job's container is starting can
+  stall a container runtime that runs in a VM, and the jobs pay for it. So a pass waits while one of this worker's
+  job containers is starting (before it asks the runtime anything, once it has listed what is open, and again after
+  each run), for at most 20 seconds a pass; that wait does not count toward the pass's 20 seconds. And while a job container is starting or running, a
+  pass removes at most 5 runs and rests at least 1 second after each. A worker that always has a job running still
+  removes about five runs a minute (a pass a minute), which is some 7,200 a day. The sweep at boot is not slowed,
+  since no job runs yet. A pass that waited says for how long in its line (`waitedForStartsMs`, which is part of the
+  time the pass took), and a pass that ran beside a job says `busy: true`. Only this worker's own job containers
+  count: a sandbox you open, a canary replay and doctor's probes are started by other programs, and a pass beside
+  them is not slowed. These four numbers are chosen, not yet measured on a slow runtime.
 - **The retention window is bounded but not quota'd.** At the default daily cap that is roughly 25
   directories at a time. There is no byte ceiling; `doctor` reports the count.
 - **One worker per retention directory.** `PI_SANDBOX_DIR` belongs to one worker, as a Docker daemon does

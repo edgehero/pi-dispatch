@@ -3,9 +3,10 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { makeContainerActivity } from "../src/container-activity.mjs";
 import { makeSweepFollowUps } from "../src/retention-sweep.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { isSandboxTombstone, listSandboxes, makeSandboxReaper as realMakeSandboxReaper, pinSandbox, readManifest, retainJobDir, sandboxDeadline, sandboxEntryName, sandboxExpiry, sandboxTombstoneAge, SANDBOX_MANIFEST, SANDBOX_PASS_BUDGET_MS, SANDBOX_PASS_MAX_REAPS, SANDBOX_REST_MAX_MS, SANDBOX_REST_MIN_MS, SANDBOX_REST_POLL_MS, SANDBOX_TOMBSTONE_PREFIX, SANDBOX_TOMBSTONE_RELOG_MS, SANDBOX_TOMBSTONE_STUCK_MS } from "../src/sandbox-store.mjs";
+import { isSandboxTombstone, listSandboxes, makeSandboxReaper as realMakeSandboxReaper, pinSandbox, readManifest, retainJobDir, sandboxDeadline, sandboxEntryName, sandboxExpiry, sandboxTombstoneAge, SANDBOX_MANIFEST, SANDBOX_PASS_BUDGET_MS, SANDBOX_PASS_MAX_REAPS, SANDBOX_PASS_MAX_REAPS_BUSY, SANDBOX_REST_MAX_MS, SANDBOX_REST_MIN_BUSY_MS, SANDBOX_REST_MIN_MS, SANDBOX_REST_POLL_MS, SANDBOX_START_WAIT_MAX_MS, SANDBOX_TOMBSTONE_PREFIX, SANDBOX_TOMBSTONE_RELOG_MS, SANDBOX_TOMBSTONE_STUCK_MS } from "../src/sandbox-store.mjs";
 // Issue #978: these tests pin each entry's own outcome and lines. The pass's rests get a sleep that returns at once,
 // and its one summary line (`sandbox_reaper_pass`, pinned by its own tests below) is left out of what they read.
 const withoutPassLine = (log) => (log ? (event, fields) => event === "sandbox_reaper_pass" || log(event, fields) : log);
@@ -1652,4 +1653,254 @@ test("the default rest holds the event loop, so a boot pass with nothing else ru
 	const child = spawnSync(process.execPath, ["--input-type=module", "-e", script, root], { encoding: "utf8", timeout: 30_000 });
 	assert.equal(child.status, 0, `the process ran the pass to its end (stderr: ${child.stderr})`);
 	assert.equal(JSON.parse(child.stdout).reaped, 2);
+});
+
+// ── issue #1023: beside jobs ────────────────────────────────────────────────────────────────────────
+
+/**
+ * `paced` with the worker's count of its job containers handed to the reaper, as a pair of functions of the pass's own
+ * clock (`t`, in ms) so a test says when a container is starting or running, and with the pass's first runtime call
+ * (`listRunning`) recorded as `list` among the events.
+ */
+function besideJobs(entries, { starting = () => 0, running = () => 0, ...over } = {}) {
+	const p = paced(entries, over);
+	const at = () => p.options.clock();
+	const activity = { starting: () => starting(at()), running: () => running(at()) };
+	// A pass that waits without end fails here, at once, where it would otherwise hold the whole file.
+	const sleep = async (ms) => {
+		if (at() > 3_600_000) throw new Error("the pass has slept for more than an hour of its own clock");
+		return p.options.sleep(ms);
+	};
+	const options = { ...p.options, sleep, activity, listRunning: async () => (p.events.push("list"), []) };
+	return { ...p, options, passLines: () => p.logs.filter(([e]) => e === "sandbox_reaper_pass").map(([, f]) => f) };
+}
+const sleeps = (events) => events.filter((e) => e.startsWith("sleep:")).map((e) => Number(e.slice("sleep:".length)));
+
+test("the bounds beside jobs are pinned by literal (issue #1023)", () => {
+	// By literal: a test derived from a constant would follow it to any value.
+	assert.equal(SANDBOX_START_WAIT_MAX_MS, 20_000);
+	assert.equal(SANDBOX_PASS_MAX_REAPS_BUSY, 5);
+	assert.equal(SANDBOX_REST_MIN_BUSY_MS, 1_000);
+});
+
+test("a pass waits while a job container is starting, before it asks a runtime anything, and says how long (issue #1023)", async () => {
+	// A container is starting for the pass's first 3 s; nothing runs after it.
+	const p = besideJobs({ a: { createdAt: hoursAgo(50) }, b: { createdAt: hoursAgo(50) } }, { starting: (t) => (t < 3000 ? 1 : 0) });
+	const out = await realMakeSandboxReaper(p.options)();
+	assert.deepEqual(p.events.slice(0, 13), [...Array(12).fill("sleep:250"), "list"], "twelve slices of the stop poll, and only then the first runtime call");
+	assert.deepEqual(p.events.slice(13).filter((e) => !e.startsWith("sleep:")), ["isOpen:a", "rename:a", "remove:a", "isOpen:b", "rename:b", "remove:b"]);
+	assert.deepEqual(out, { more: false, reaped: 2, held: 0, ms: 3200, restedMs: 200, slowestCheckMs: 0, waitedForStartsMs: 3000 });
+	assert.deepEqual(p.passLines(), [{ ...out, busy: true }], "the line says the wait, and that the pass ran beside a job");
+	assert.equal(Object.hasOwn(out, "busy"), false, "the result does not: there `busy` is a call that met a pass in flight");
+});
+
+test("a start that begins in the middle of a pass is waited for after the entry's rest, before the next entry (issue #1023)", async () => {
+	// The first run's removal takes 2 s; a container starts while it runs and is up 1.5 s after the rest began.
+	const p = besideJobs({ a: { createdAt: hoursAgo(50) }, b: { createdAt: hoursAgo(50) } }, { removeMs: (name) => (name === "a" ? 2000 : 0), starting: (t) => (t >= 1000 && t < 5500 ? 1 : 0) });
+	const out = await realMakeSandboxReaper(p.options)();
+	// a: 2 s, its rest 2 s (to 4 s, the busy floor is under it), then the wait until 5.5 s in six slices, then b, whose
+	// rest is the idle floor again: the start is over and nothing runs.
+	assert.deepEqual(p.events, ["list", "isOpen:a", "rename:a", "remove:a", ...Array(8).fill("sleep:250"), ...Array(6).fill("sleep:250"), "isOpen:b", "rename:b", "remove:b", "sleep:100"]);
+	assert.equal(out.waitedForStartsMs, 1500);
+	assert.equal(out.restedMs, 2100, "the wait is not a rest: 2 s after the first run and 100 ms after the second");
+});
+
+test("a start that begins while the pass lists the open sandboxes is waited for before the first run is asked about (issue #1023)", async () => {
+	// Nothing is starting at the top of the pass. The listing takes 2 s (a slow runtime), a container starts 0.5 s into
+	// it and is up at 4 s: without a wait here the first run would be asked about and removed beside that start.
+	const p = besideJobs({ a: { createdAt: hoursAgo(50) } }, { starting: (t) => (t >= 500 && t < 4000 ? 1 : 0) });
+	const listRunning = async () => {
+		p.events.push("list");
+		p.advance(2000);
+		return [];
+	};
+	const out = await realMakeSandboxReaper({ ...p.options, listRunning })();
+	assert.deepEqual(p.events, ["list", ...Array(8).fill("sleep:250"), "isOpen:a", "rename:a", "remove:a", "sleep:100"]);
+	assert.deepEqual([out.reaped, out.waitedForStartsMs, out.ms], [1, 2000, 4100]);
+});
+
+test("a pass waits SANDBOX_START_WAIT_MAX_MS for starts in all, at the top and after its rests together, and then goes on (issue #1023)", async () => {
+	// A container is always starting. The whole allowance goes at the top; no rest waits again.
+	const always = besideJobs(expiredRuns(3), { starting: () => 1 });
+	const out = await realMakeSandboxReaper(always.options)();
+	assert.equal(always.events.indexOf("list"), 80, "eighty slices of 250 ms, then the pass's first runtime call");
+	assert.equal(out.waitedForStartsMs, 20_000);
+	assert.equal(out.reaped, 3, "the pass still sweeps");
+	assert.deepEqual(restsOf(always.events), [20_000, 1000, 1000, 1000], "after the wait, only the entries' own rests");
+	// Split: 15 s at the top, nothing starting at that instant, then a start again for good. What is left is 5 s, used
+	// after the first entry's rest (100 ms: nothing was starting when it began); the later rests wait no more.
+	const split = besideJobs(expiredRuns(3), { starting: (t) => (t === 15_000 ? 0 : 1) });
+	const second = await realMakeSandboxReaper(split.options)();
+	assert.equal(split.events.indexOf("list"), 60);
+	assert.equal(second.waitedForStartsMs, 20_000, "fifteen at the top and five after the first rest, never more than the bound");
+	assert.deepEqual(restsOf(split.events), [15_000, 100 + 5000, 1000, 1000]);
+	// The next pass has its own allowance.
+	const next = besideJobs(expiredRuns(1), { starting: () => 1 });
+	const reap = realMakeSandboxReaper(next.options);
+	assert.equal((await reap()).waitedForStartsMs, 20_000);
+	next.fs.files["/sbx/z"] = "<dir>";
+	next.fs.files[`/sbx/z/${SANDBOX_MANIFEST}`] = JSON.stringify({ jobId: "z", createdAt: hoursAgo(50) });
+	assert.equal((await reap()).waitedForStartsMs, 20_000, "a new pass waits anew");
+});
+
+test("the wait for a start is not charged to the pass's time budget (issue #1023)", async () => {
+	// The #978 budget case again (each runtime ask 3 s, so a run costs 6 s with its rest and the budget stops the pass
+	// at 24 s), behind a 20 s wait for a start: charged, the pass would have stopped after its first run.
+	const p = besideJobs(expiredRuns(10), { askMs: () => 3000, starting: (t) => (t < 20_000 ? 1 : 0) });
+	const out = await realMakeSandboxReaper(p.options)();
+	assert.deepEqual(out, { more: true, reaped: 4, held: 0, ms: 44_000, restedMs: 12_000, slowestCheckMs: 3000, waitedForStartsMs: 20_000 });
+	assert.equal(p.events.filter((e) => e.startsWith("isOpen:")).length, 4);
+});
+
+test("beside a running job a pass removes at most SANDBOX_PASS_MAX_REAPS_BUSY and rests at least SANDBOX_REST_MIN_BUSY_MS after each entry (issue #1023)", async () => {
+	const p = besideJobs(expiredRuns(12), { running: () => 1 });
+	const reap = realMakeSandboxReaper(p.options);
+	const first = await reap();
+	assert.deepEqual([first.reaped, first.more], [5, true], "five, and the rest is the next pass's");
+	assert.deepEqual(restsOf(p.events), [1000, 1000, 1000, 1000, 1000], "a second after each, where an idle pass rests 100 ms");
+	assert.ok(sleeps(p.events).every((ms) => ms <= SANDBOX_REST_POLL_MS), "still in slices of the stop poll");
+	assert.equal(Object.hasOwn(first, "waitedForStartsMs"), false, "a running job is not waited for");
+	const [second, third] = [await reap(), await reap()];
+	assert.deepEqual([second.reaped, second.more, third.reaped, third.more], [5, true, 2, false], "every pass moves on, so the lap ends");
+	assert.deepEqual(p.passLines().map((f) => [f.reaped, f.more, f.busy]), [[5, true, true], [5, true, true], [2, false, true]]);
+	// A starting container the wait has given up on is beside the pass as much as a running one.
+	const starting = besideJobs(expiredRuns(12), { starting: () => 1 });
+	const beside = await realMakeSandboxReaper(starting.options)();
+	assert.deepEqual([beside.reaped, beside.more], [5, true]);
+});
+
+test("the bounds are read at each boundary: a job that starts in the middle of a pass tightens what is left, one that ends loosens it (issue #1023)", async () => {
+	// Each runtime ask takes 50 ms and each idle rest 100, so a run begins every 150 ms. A job starts running at 925 ms,
+	// inside the seventh run's ask: that run's rest has the busy floor, and the next boundary finds seven removals, over five.
+	const tightened = besideJobs(expiredRuns(60), { askMs: () => 50, running: (t) => (t >= 925 ? 1 : 0) });
+	const out = await realMakeSandboxReaper(tightened.options)();
+	assert.deepEqual([out.reaped, out.more], [7, true], "the pass stops at the first boundary after the job began");
+	assert.deepEqual(restsOf(tightened.events), [...Array(6).fill(100), 1000], "and the rest that follows that start has the busy floor");
+	assert.deepEqual(tightened.passLines().map((f) => f.busy), [true]);
+	// The other way: a job runs for the first three runs and then ends. The pass goes on to the idle bounds.
+	const loosened = besideJobs(expiredRuns(60), { running: (t) => (t < 2500 ? 1 : 0) });
+	const idle = await realMakeSandboxReaper(loosened.options)();
+	assert.deepEqual([idle.reaped, idle.more], [50, true], "fifty, the idle bound, although it began beside a job");
+	assert.deepEqual(restsOf(loosened.events).slice(0, 5), [1000, 1000, 1000, 100, 100]);
+});
+
+test("a pass beside jobs still visits one entry before any bound can stop it (issue #1023)", async () => {
+	// A container starting for good, a job running, and a runtime whose answer takes longer than the whole time budget.
+	const p = besideJobs(expiredRuns(3), { starting: () => 1, running: () => 3, askMs: () => 25_000 });
+	const reap = realMakeSandboxReaper(p.options);
+	const passes = [await reap(), await reap(), await reap()];
+	assert.deepEqual(passes.map((o) => [o.reaped, o.more]), [[1, true], [1, true], [1, false]], "one run a pass at the least, and the lap ends");
+	assert.deepEqual(runsLeft(p.fs, "r"), []);
+});
+
+test("no wait sits between a run's guards and its removal: a start that begins during the runtime's answer is waited for after the entry (issue #1023)", async () => {
+	// The start begins while the runtime is asked about `a` (the guard) and lasts 2 s. A wait there would have the removal
+	// act on an answer that is seconds old.
+	let began = null;
+	const p = besideJobs({ a: { createdAt: hoursAgo(50) }, b: { createdAt: hoursAgo(50) } }, { starting: (t) => (began !== null && t < began + 2000 ? 1 : 0) });
+	const isOpen = p.options.isOpen;
+	p.options.isOpen = async (args) => {
+		if (args.name === "a") began = p.options.clock();
+		return isOpen(args);
+	};
+	await realMakeSandboxReaper(p.options)();
+	assert.deepEqual(p.events.slice(0, 4), ["list", "isOpen:a", "rename:a", "remove:a"], "asked, renamed and removed with nothing in between");
+	assert.deepEqual(restsOf(p.events)[0], 1000 + 1000, "then the entry's rest (the busy floor) and the wait for what is left of the start");
+	assert.deepEqual(p.events.filter((e) => !e.startsWith("sleep:")).slice(4), ["isOpen:b", "rename:b", "remove:b"]);
+	// The same holds for a leftover tombstone: its delete, then its rest, then the wait.
+	const tomb = besideJobs({}, { starting: (t) => (t >= 500 && t < 2000 ? 1 : 0), removeMs: () => 700 });
+	tomb.fs.files["/sbx/.reap-4242-1-0"] = "<dir>";
+	tomb.fs.files[`/sbx/.reap-4242-1-0/${SANDBOX_MANIFEST}`] = JSON.stringify({ jobId: "t0", createdAt: hoursAgo(50) });
+	await realMakeSandboxReaper({ ...tomb.options, pid: 4242 })();
+	assert.equal(tomb.events[0], "remove:.reap-4242-1-0", "the delete first");
+	assert.deepEqual(restsOf(tomb.events)[0], 1000 + 500, "its rest (the busy floor), then the wait to the end of the start");
+});
+
+test("the network sweep is paced beside jobs too: its rests have the busy floor and wait for a start (issue #1023)", async () => {
+	const p = besideJobs({}, { running: () => 1, starting: (t) => (t >= 1000 && t < 1500 ? 1 : 0) });
+	const sweepNetworks = async ({ pace }) => {
+		for (const n of ["n1", "n2"]) {
+			p.events.push(`network:${n}`);
+			if (!(await pace())) return { swept: [], notes: [], more: true };
+		}
+		return { swept: [], notes: [] };
+	};
+	const out = await realMakeSandboxReaper({ ...p.options, sweepNetworks })();
+	assert.deepEqual(p.events.filter((e) => !e.startsWith("sleep:")), ["list", "network:n1", "network:n2"]);
+	assert.deepEqual(restsOf(p.events), [1000 + 500, 1000], "the first network's rest and the wait behind it, then the second's rest");
+	assert.equal(out.waitedForStartsMs, 500);
+});
+
+test("with a count that says nothing is starting or running, a pass is exactly the pass without one (issue #1023)", async () => {
+	const entries = () => ({ ...expiredRuns(55), young: { createdAt: hoursAgo(1) }, open: { createdAt: hoursAgo(50) } });
+	const without = paced(entries(), { askMs: () => 40, open: (name) => name === "open" });
+	const withIdle = besideJobs(entries(), { askMs: () => 40, open: (name) => name === "open" });
+	const plain = realMakeSandboxReaper({ ...without.options, listRunning: async () => (without.events.push("list"), []) });
+	const counted = realMakeSandboxReaper(withIdle.options);
+	for (let pass = 0; pass < 3; pass++) assert.deepEqual(await counted(), await plain(), `pass ${pass + 1}: the same result, key for key`);
+	assert.deepEqual(withIdle.events, without.events, "the same calls and the same sleeps, in the same order");
+	assert.deepEqual(withIdle.logs, without.logs, "and the same lines: no new field on a pass that met no job");
+	assert.ok(without.logs.some(([e]) => e === "sandbox_reaper_pass"));
+});
+
+test("a count that throws, or answers no number, reads as nothing starting and nothing running, and the pass never throws (issue #1023)", async () => {
+	for (const [name, activity] of [
+		["throws", { starting: () => { throw new Error("broken"); }, running: () => { throw new Error("broken"); } }],
+		["no number", { starting: () => "many", running: () => Number.NaN }],
+		["negative", { starting: () => -1, running: () => -5 }],
+		["no functions", {}],
+	]) {
+		const p = paced(expiredRuns(7));
+		const out = await realMakeSandboxReaper({ ...p.options, activity })();
+		assert.deepEqual(out, { more: false, reaped: 7, held: 0, ms: 700, restedMs: 700, slowestCheckMs: 0 }, name);
+		assert.deepEqual(restsOf(p.events), Array(7).fill(100), name);
+	}
+});
+
+test("a pass told to stop while it waits for a start wakes within one slice and removes nothing (issue #1023)", async () => {
+	const p = besideJobs(expiredRuns(2), { starting: () => 1 });
+	let slices = 0;
+	const sleep = p.options.sleep;
+	const out = await realMakeSandboxReaper({ ...p.options, sleep: async (ms) => (slices++, sleep(ms)) })({ stopped: () => slices >= 2 });
+	assert.equal(slices, 2, "the stop is asked before each slice");
+	assert.deepEqual([out.reaped, out.stopped, out.waitedForStartsMs], [0, true, 500]);
+	assert.deepEqual(runsLeft(p.fs, "r").length, 2);
+});
+
+test("a pass that only waited for a start says its line (issue #1023)", async () => {
+	const p = besideJobs({}, { starting: (t) => (t < 1000 ? 1 : 0) });
+	const out = await realMakeSandboxReaper(p.options)();
+	assert.deepEqual(out, { more: false, reaped: 0, held: 0, ms: 1000, restedMs: 0, slowestCheckMs: 0, waitedForStartsMs: 1000 });
+	assert.deepEqual(p.passLines(), [{ ...out, busy: true }]);
+});
+
+test("the reaper reads the worker's own count: a start holds a pass, a run makes it small, and the end frees it (issue #1023)", async () => {
+	// The real count on the pass's clock, driven as a run function drives it: the container is up 1 s into the pass (its
+	// first output), reported while the pass waits.
+	const p = paced(expiredRuns(20));
+	const activity = makeContainerActivity({ now: () => p.options.clock() });
+	const run = activity.enter();
+	let slices = 0;
+	const sleep = async (ms) => {
+		await p.options.sleep(ms);
+		if (++slices === 4) run.started();
+	};
+	const reap = realMakeSandboxReaper({ ...p.options, sleep, activity });
+	const beside = await reap();
+	assert.deepEqual([beside.waitedForStartsMs, beside.reaped, beside.more], [1000, 5, true], "held for the start, then small beside the run");
+	run.ended();
+	const after = await reap();
+	assert.deepEqual([after.reaped, after.more, Object.hasOwn(after, "waitedForStartsMs")], [15, false, false], "the job is over: an ordinary pass");
+
+	// A start that never reports: a pass waits its own 20 s for it and goes on, small. Once the count's own bound has
+	// passed (two minutes) no pass waits for it any more, and it still makes the passes small.
+	const lost = paced(expiredRuns(12));
+	const count = makeContainerActivity({ now: () => lost.options.clock() });
+	count.enter();
+	const sweep = realMakeSandboxReaper({ ...lost.options, activity: count });
+	const first = await sweep();
+	assert.deepEqual([first.waitedForStartsMs, first.reaped, first.more], [20_000, 5, true]);
+	lost.advance(120_000);
+	const later = await sweep();
+	assert.deepEqual([Object.hasOwn(later, "waitedForStartsMs"), later.reaped, later.more], [false, 5, true]);
 });

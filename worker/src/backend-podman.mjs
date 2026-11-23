@@ -986,6 +986,8 @@ export const PODMAN_BACKEND_OPTIONS = Object.freeze([
 	"openLiveTranscript",
 	// issue #646: the inbox relay's opener, as start.mjs hands local's
 	"openInboxRelay",
+	// issue #1023: the worker's count of its job containers (container-activity.mjs), as start.mjs hands local's
+	"containerActivity",
 	// the floor the per-job observation preflight judges, and the boot-built reaper
 	"backendFloor",
 	"reap",
@@ -1125,6 +1127,7 @@ export function makePodmanBackend(opts = {}) {
 		onOutput,
 		openLiveTranscript = null,
 		openInboxRelay = null,
+		containerActivity = null,
 		backendFloor = {},
 		reap,
 		listJobContainers,
@@ -1177,6 +1180,8 @@ export function makePodmanBackend(opts = {}) {
 		...(onOutput ? { onOutput } : {}),
 		...(openLiveTranscript ? { openLiveTranscript } : {}),
 		...(openInboxRelay ? { openInboxRelay } : {}),
+		// Issue #1023: this venue's runs are counted where local's are, so the sandbox sweep sees a podman start too.
+		...(containerActivity ? { containerActivity } : {}),
 		globalPiDir,
 		allowGlobalExtensions,
 		packagePaths,

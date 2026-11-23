@@ -151,6 +151,30 @@ export const SANDBOX_REST_MAX_MS = 10_000;
 /** How often a rest looks at whether its pass was told to stop, so a shutdown never waits out a whole rest. */
 export const SANDBOX_REST_POLL_MS = 250;
 
+/**
+ * How long ONE pass waits, in all, for job containers that are starting (issue #1023), in slices of
+ * `SANDBOX_REST_POLL_MS`. A container start is the daemon's most loaded moment (a network, a create, a start), and
+ * a burst of removals beside it is what stalled a VM-backed daemon under running jobs. So a pass asks the worker's
+ * count (`activity.starting()`, container-activity.mjs) before its first runtime call, once that call has answered
+ * and after each rest, and waits while it is above zero. Bounded per pass, so a host that starts a job every few seconds still sweeps: once this is
+ * used up the pass goes on, in the small steps below. The wait is not charged to `SANDBOX_PASS_BUDGET_MS`: a pass that
+ * waited 20 s and then ran out of time would have removed nothing, every time.
+ * Not measured on a slow daemon; a start that takes longer than this is met by the small passes instead.
+ */
+export const SANDBOX_START_WAIT_MAX_MS = 20_000;
+
+/**
+ * The bounds on a pass while a job container is starting or running (issue #1023), in place of
+ * `SANDBOX_PASS_MAX_REAPS` and `SANDBOX_REST_MIN_MS`: at most this many removals, and at least this long a rest after
+ * each entry. Read at every loop boundary and every rest, so a job that starts in the middle of a pass tightens what
+ * is left of it and one that ends loosens it. The time budget is the same. A pass still visits one entry before any
+ * bound can stop it and the follow-up passes still come a minute apart (`makeSweepFollowUps`), so a host that always
+ * runs a job still removes about five runs a minute, 7,200 a day (the host of issue #1023 retained about 640 a day).
+ * Not measured on a slow daemon either: small enough that the removals beside a running job are a few a minute.
+ */
+export const SANDBOX_PASS_MAX_REAPS_BUSY = 5;
+export const SANDBOX_REST_MIN_BUSY_MS = 1_000;
+
 /** `kill(pid, 0)`: true unless the process is gone (ESRCH). EPERM means alive under another account. */
 export function defaultPidAlive(pid) {
 	try {
@@ -470,6 +494,22 @@ export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = (
  * `stopped: true` for a pass told to stop), says the same in one `sandbox_reaper_pass` line when the pass did anything,
  * and `more` means only that the lap is not over. A pass that resumes past the tombstones or the runs still lists the
  * root and asks which sandboxes run, since the network sweep keys on both.
+ *
+ * BESIDE JOBS (issue #1023). `activity` is the worker's count of the job containers it is starting and running
+ * (container-activity.mjs); start.mjs hands the one every venue's run function reports through. With it a pass:
+ *   - WAITS while a container is starting, before its first runtime call (the listing of the open sandboxes), once
+ *     that listing has answered and after each rest, in slices of `SANDBOX_REST_POLL_MS` and for at most
+ *     `SANDBOX_START_WAIT_MAX_MS` in all, outside the time budget. Only ever there: never between an entry's guards
+ *     (the runtime's answer, the fresh read, the read through the tombstone) and the removal they guard, where a wait
+ *     would have the removal act on a look that is seconds old;
+ *   - is SMALLER while one is starting or running: `SANDBOX_PASS_MAX_REAPS_BUSY` removals and a rest of at least
+ *     `SANDBOX_REST_MIN_BUSY_MS`, each read at the boundary or the rest it applies to.
+ * It still visits one entry before anything can stop it, so the lap moves on every pass however busy the host is. The
+ * pass says how long it waited (`waitedForStartsMs`, in the result and the line) and that it ran beside a job
+ * (`busy: true`, in the line only: on a result that word already means a call that met a pass in flight). Without an
+ * `activity` (every caller but the worker), and with one that counts nothing (the boot pass, before any job), a pass is
+ * exactly the pass it was. A count that throws or is no number reads as zero: the sweep's contract is that it never
+ * throws, and a sweep that stopped for a broken counter would be the worse fault.
  */
 export function makeSandboxReaper({
 	sandboxDir,
@@ -501,6 +541,9 @@ export function makeSandboxReaper({
 	// Issue #978: the one wait a rest is made of, asked in slices of at most `SANDBOX_REST_POLL_MS`. NOT unref'd: the
 	// boot pass rests before anything else holds the event loop, and an unref'd timer there lets the process exit.
 	sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+	// Issue #1023: `{ starting(), running() }`, the worker's count of its job containers (see BESIDE JOBS above). Null
+	// counts none, and every pass is then what it was.
+	activity = null,
 }) {
 	// Across passes, never reset: two tombstones of one pass share `pid` and `at`, and a pass on the same millisecond as
 	// the last must not reuse a name either.
@@ -523,6 +566,9 @@ export function makeSandboxReaper({
 		if (tally) return { busy: true };
 		tally = { started: clock(), reaped: 0, held: new Set(), removals: 0, visited: 0, rests: 0, restedMs: 0 };
 		tally.slowestCheckMs = 0;
+		// Issue #1023: what is left of this pass's wait for starting containers, how many slices it waited and how long
+		// that took on the pass's clock, and whether a boundary or a rest found a job starting or running.
+		Object.assign(tally, { waitLeft: SANDBOX_START_WAIT_MAX_MS, waits: 0, waitedMs: 0, busy: false });
 		try {
 			return await sweep(stopped);
 		} finally {
@@ -533,6 +579,8 @@ export function makeSandboxReaper({
 	/** One pass, under `reapSandboxes`'s single flight. Never throws, and resolves the pass's result (`finish`). */
 	async function sweep(stopped) {
 		if (!sandboxDir) return finish(false);
+		// Issue #1023: before this pass asks a runtime anything (the listing of open sandboxes is its first call).
+		if (activity !== null) await holdForStarts(stopped);
 		let names;
 		try {
 			names = fs.readdirSync(sandboxDir);
@@ -619,6 +667,11 @@ export function makeSandboxReaper({
 			log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message ?? "running-lookup-failed") });
 			return finish(false);
 		}
+		// Issue #1023: and again once the listing has answered. Reading every manifest and asking each runtime can take
+		// seconds on a slow daemon, long enough for a job to begin starting, and the first run below would be asked about
+		// and removed beside it. What the listing said is no staler for this than for the rests that follow: each run's
+		// own runtime is asked again right before its rename, whenever the pass gets to it.
+		if (activity !== null) await holdForStarts(stopped);
 
 		const at = now();
 		// The listing this pass STARTED with, captured before anything is removed. Keying the network sweep on
@@ -891,21 +944,63 @@ export function makeSandboxReaper({
 
 	/**
 	 * Whether this pass has spent its budget (issue #978): `SANDBOX_PASS_BUDGET_MS` of its own clock since it started,
-	 * rests included, or `SANDBOX_PASS_MAX_REAPS` removals made. Asked only at the loop boundaries named in the header,
-	 * never inside one entry's stretch, and through `budgetSpent` there.
+	 * rests included (its waits for starting containers not, issue #1023), or `SANDBOX_PASS_MAX_REAPS` removals made
+	 * (`SANDBOX_PASS_MAX_REAPS_BUSY` beside a job). Asked only at the loop boundaries named in the header, never inside
+	 * one entry's stretch, and through `budgetSpent` there.
 	 */
 	function spent() {
-		return clock() - tally.started >= SANDBOX_PASS_BUDGET_MS || tally.removals >= SANDBOX_PASS_MAX_REAPS;
+		// Issue #1023: the time waited for starting containers is not the pass's own, and the removals allowed are fewer
+		// beside a job, read here, at the boundary that asks.
+		return clock() - tally.started - tally.waitedMs >= SANDBOX_PASS_BUDGET_MS || tally.removals >= (busy() ? SANDBOX_PASS_MAX_REAPS_BUSY : SANDBOX_PASS_MAX_REAPS);
+	}
+
+	/** `read()` as a count (issue #1023): zero for a throw and for anything that is no positive number. */
+	function countOf(read) {
+		try {
+			const n = read();
+			return Number.isFinite(n) && n > 0 ? n : 0;
+		} catch {
+			return 0;
+		}
+	}
+
+	/** Whether a job container is starting or running right now (issue #1023), noted for the pass's line. */
+	function busy() {
+		if (activity === null) return false;
+		const is = countOf(() => activity.starting()) > 0 || countOf(() => activity.running()) > 0;
+		if (is) tally.busy = true;
+		return is;
 	}
 
 	/**
-	 * Rest after an entry that took `took` ms (issue #978): that long, clamped to `SANDBOX_REST_MIN_MS` and
+	 * Wait while a job container is starting (issue #1023): slices of `SANDBOX_REST_POLL_MS`, `stopped` asked before
+	 * each, until none is starting or this pass's `SANDBOX_START_WAIT_MAX_MS` is used up. Like a rest it ends by the
+	 * slices it asked for, and what it took on the pass's clock is what the budget leaves out and the summary says.
+	 * Called at the top of a pass, after its listing of the open sandboxes and at the end of a rest only: each is
+	 * between entries, with no guard pending.
+	 */
+	async function holdForStarts(stopped) {
+		const from = clock();
+		while (tally.waitLeft > 0 && !stopped() && countOf(() => activity.starting()) > 0) {
+			tally.busy = true;
+			const slice = Math.min(tally.waitLeft, SANDBOX_REST_POLL_MS);
+			await sleep(slice);
+			tally.waitLeft -= slice;
+			tally.waits += 1;
+		}
+		tally.waitedMs += clock() - from;
+	}
+
+	/**
+	 * Rest after an entry that took `took` ms (issue #978): that long, clamped to `SANDBOX_REST_MIN_MS`
+	 * (`SANDBOX_REST_MIN_BUSY_MS` beside a job, issue #1023) and
 	 * `SANDBOX_REST_MAX_MS`, in slices of `SANDBOX_REST_POLL_MS` with `stopped` asked before each, so a pass told to stop
 	 * wakes within one slice. It ends by the slices it asked for, never by the clock, so a sleep that returns early ends
 	 * too; the time it actually took is what the summary counts.
 	 */
 	async function rest(took, stopped) {
-		let left = Math.min(SANDBOX_REST_MAX_MS, Math.max(SANDBOX_REST_MIN_MS, Number.isFinite(took) ? took : 0));
+		// Issue #1023: a longer floor beside a job, read as this rest begins.
+		let left = Math.min(SANDBOX_REST_MAX_MS, Math.max(busy() ? SANDBOX_REST_MIN_BUSY_MS : SANDBOX_REST_MIN_MS, Number.isFinite(took) ? took : 0));
 		const from = clock();
 		tally.rests += 1;
 		while (left > 0 && !stopped()) {
@@ -914,15 +1009,20 @@ export function makeSandboxReaper({
 			left -= slice;
 		}
 		tally.restedMs += clock() - from;
+		// Issue #1023: and before the next entry, the wait for a container that is starting. The entry this rest follows
+		// is done, so nothing here sits between a guard and its act.
+		if (activity !== null) await holdForStarts(stopped);
 	}
 
 	/**
 	 * The pass's result (issue #978), `{ more, reaped, held, ms, restedMs, slowestCheckMs }` plus `stopped: true` for a
 	 * pass told to stop, which never asks for more (it is the worker shutting down). `held` counts the runs and tombstones
 	 * it kept for a reason, a run with a sandbox open among them. Said once as `sandbox_reaper_pass` when the pass did
-	 * anything (removed or held an entry, rested after one, or left the lap unfinished), so a quiet pass on a tidy
-	 * host says nothing and the line a slow daemon produces carries the reading that would tell the cause: how long the
-	 * pass took, how much of that was rest, and the slowest runtime answer.
+	 * anything (removed or held an entry, rested after one, waited for a starting container, or left the lap
+	 * unfinished), so a quiet pass on a tidy host says nothing and the line a slow daemon produces carries the reading
+	 * that would tell the cause: how long the pass took, how much of that was rest, and the slowest runtime answer.
+	 * Issue #1023 adds `waitedForStartsMs` to both for a pass that waited for a starting job container (`ms` is the whole
+	 * pass, that wait and the rests included), and `busy: true` to the line for a pass that met a job starting or running.
 	 */
 	function finish(more, wasStopped = false) {
 		const summary = {
@@ -932,9 +1032,12 @@ export function makeSandboxReaper({
 			ms: Math.round(clock() - tally.started),
 			restedMs: Math.round(tally.restedMs),
 			slowestCheckMs: Math.round(tally.slowestCheckMs),
+			// Issue #1023: only for a pass that waited, so every other pass's result and line are what they were.
+			...(tally.waits > 0 ? { waitedForStartsMs: Math.round(tally.waitedMs) } : {}),
 			...(wasStopped ? { stopped: true } : {}),
 		};
-		if (summary.more || summary.reaped > 0 || summary.held > 0 || tally.rests > 0) log("sandbox_reaper_pass", summary);
+		// `busy` in the line and not in the result: `{ busy: true }` is already what a call that met a pass in flight gets.
+		if (summary.more || summary.reaped > 0 || summary.held > 0 || tally.rests > 0 || tally.waits > 0) log("sandbox_reaper_pass", tally.busy ? { ...summary, busy: true } : summary);
 		// A pass that ends without `more` for any reason but a stop ends the LAP (issue #978): at its end, or cut short by a
 		// listing or runtime fault. Resuming one a fault cut short would leave a tombstone or a run that appeared meanwhile
 		// before its place for yet another sweep, where the next lap clears tombstones first, as its contract says.
