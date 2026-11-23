@@ -15,7 +15,7 @@ import { fakeAllocRedis } from "./helpers/fake-alloc-redis.mjs";
 import { CONSOLE_AUDIT_FIELD_MAX } from "@edgehero/pi-dispatch/console-audit";
 import { escapeControls } from "@edgehero/pi-dispatch/projects";
 import { HOST_SET } from "@edgehero/pi-dispatch/host-registry";
-import { switchShortNote } from "../src/words.mjs";
+import { queueErrorsLine, switchShortNote } from "../src/words.mjs";
 
 // Issue #642's review: EVERY panel write surface, driven through the real extension the way pi drives it, appends its
 // audit row (actor role `panel`) before its write lands, and a `failed` row after one that did not land. One table row
@@ -740,11 +740,19 @@ test("a tool's paid start that was sent and not confirmed is audited as action-u
 // tool. Three things a pruning reader removes are planted first and must still be there after every tool: a
 // `host:live` member with no row, a `wait:held` member with no hash, and a run mirror id with no record. The person's
 // surfaces then prune them, as they always have.
+//
+// Each tool's third entry (issue #1064) says whether its answer rests on the queues' own reads, a queue's paused state
+// or counts: a function that takes its answer over a queue Valkey answered with an error and gives the map that names
+// the queue and whether the tool's own key says the answer is not whole; or null for a tool whose answer none of those
+// enters (the files, the run records, the host registry's rows, Valkey's counters), which answers as over any fleet.
 const READ_TOOLS = Object.freeze([
-  ["dispatch_status", {}], ["dispatch_runs", {}], ["dispatch_costs", {}], ["dispatch_capacity", {}], ["dispatch_triggers", {}],
-  ["dispatch_pauses", {}], ["dispatch_limits", {}], ["dispatch_waits", {}], ["dispatch_projects", {}], ["dispatch_allocations", {}],
-  ["dispatch_failed", {}], ["dispatch_waiting", {}], ["dispatch_setup", {}], ["dispatch_hosts", {}], ["dispatch_models", {}],
-  ["dispatch_secrets", {}], ["dispatch_connections", {}],
+  ["dispatch_status", {}, (out) => [out.queue?.queueErrors, out.queue?.partial === true && Array.isArray(out.queue?.unavailableQueues)]],
+  ["dispatch_runs", {}, null], ["dispatch_costs", {}, null], ["dispatch_capacity", {}, null], ["dispatch_triggers", {}, null],
+  ["dispatch_pauses", {}, null], ["dispatch_limits", {}, null], ["dispatch_waits", {}, null], ["dispatch_projects", {}, null], ["dispatch_allocations", {}, null],
+  ["dispatch_failed", {}, (out) => [out.queueErrors, out.complete === false && out.more === null]],
+  ["dispatch_waiting", {}, (out) => [out.queueErrors, out.complete === false]],
+  ["dispatch_setup", {}, null], ["dispatch_hosts", {}, null], ["dispatch_models", {}, null],
+  ["dispatch_secrets", {}, null], ["dispatch_connections", {}, null],
 ]);
 
 test("every tool registered as read-only is in the census of tools that write nothing (#1036)", () => {
@@ -845,5 +853,156 @@ test("the read tools write nothing to Valkey: no key appears, goes or changes, a
     r.disconnect();
     indexMod._setAllocationSeamsForTests({});
     fx.restore();
+  }
+});
+
+// Issue #1064: one queue whose meta key holds a string made every read of the deployment fail whole, as a Valkey that
+// could not be reached: `/dispatch status`, `dispatch_status`, the panel, and the setup wizard's probe, which then took
+// a deployed Valkey for none.
+test("dispatch_status names the keys a queue left out of its read comes under (#1064)", () => {
+  assert.match(tools().dispatch_status.description, /In queue: partial true means a queue's read failed: unavailableQueues names each queue left out of the counts, and queueErrors gives the code of Valkey's error reply for each one answered with an error/);
+  assert.match(tools().dispatch_status.description, /pausedState is false while a queue is left out, since whether that queue is paused is not known/);
+});
+
+test("every read tool that rests on the queues' reads tells a model what queueErrors means for its answer (#1064)", () => {
+  const t = tools();
+  for (const [name, , unread] of READ_TOOLS) assert.equal(/queueErrors/.test(t[name].description), unread !== null, name);
+  assert.match(t.dispatch_failed.description, /`queueErrors` gives the code of Valkey's error reply for each queue whose paused state or counts was answered with one: its failed jobs are in no total, so `more` is null and `complete` false/);
+  assert.match(t.dispatch_waiting.description, /whether that queue is paused is not known, so a job of it listed as waiting for a free slot may be waiting on a pause, `complete` is false/);
+});
+
+/**
+ * Run `fn(queue)` on the live Valkey with one live host whose queue's meta key is a string, so that queue's paused read
+ * is answered with WRONGTYPE, then take away every key that was not there before: the host's row, the string, and what
+ * the readers built.
+ */
+async function withErroredQueue(fn) {
+  const fx = deployment({ valkey: LIVE });
+  const { default: IORedis } = await import("ioredis");
+  const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  const host = `h1064-${process.pid}-${Date.now().toString(36)}`;
+  const queue = `pi-jobs@${host}`;
+  const scanAll = async () => {
+    const keys = [];
+    let cursor = "0";
+    do {
+      const [next, batch] = await r.scan(cursor, "COUNT", 1000);
+      cursor = String(next);
+      keys.push(...batch);
+    } while (cursor !== "0");
+    return keys;
+  };
+  const found = new Set(await scanAll());
+  try {
+    await r.sadd(HOST_SET, host);
+    await r.hset(`host:h:${host}`, { name: host, routes: "true", beatAt: String(Date.now()), jobs: "[]" });
+    await r.set(`bull:${queue}:meta`, "not a hash");
+    return await fn(queue);
+  } finally {
+    await r.srem(HOST_SET, host).catch(() => {});
+    const made = (await scanAll().catch(() => [])).filter((k) => !found.has(k));
+    if (made.length > 0) await r.del(...made).catch(() => {});
+    r.disconnect();
+    fx.restore();
+  }
+}
+
+// One table, one loop: READ_TOOLS says which read tools rest on the queues' own reads. Each of those names the queue
+// and says its answer is not whole; each of the others answers, where the ones that build a reader had thrown or
+// answered "unknown", and says nothing of a queue its answer does not hold.
+test("every read tool answers over a queue whose meta key holds a string, and the ones that rest on the queues' reads name it and say they are not whole (#1064)", { timeout: 180_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  const answerOf = async (name, params) => {
+    const out = await tool(name, params);
+    assert.equal(out?.threw, undefined, `${name} answered (${out?.threw})`);
+    return JSON.parse(out.content[0].text);
+  };
+  await withErroredQueue(async (queue) => {
+    for (const [name, params, unread] of READ_TOOLS) {
+      const answer = await answerOf(name, params);
+      assert.ok(!JSON.stringify(answer).includes("Operation against"), `${name}: the reply's code alone`);
+      if (unread === null) assert.ok(!JSON.stringify(answer).includes("queueErrors"), `${name} holds no queue's paused state or counts, so it names none`);
+      else assert.deepEqual(unread(answer), [{ [queue]: "WRONGTYPE" }, true], `${name} names the queue and says it is not whole`);
+    }
+    // The held money is the hosts' rows, read: over such a queue it was "unknown" while the snapshot failed whole.
+    assert.equal((await answerOf("dispatch_costs", {})).held.unknown, undefined);
+  });
+  // The control, the same deployment read whole: no tool names a queue.
+  const fx = deployment({ valkey: LIVE });
+  try {
+    for (const [name, params, unread] of READ_TOOLS) if (unread !== null) assert.equal(unread(await answerOf(name, params))[0], undefined, `${name} read whole`);
+  } finally {
+    fx.restore();
+  }
+});
+
+test("over a queue whose meta key holds a string, dispatch_status, /dispatch status and the panel name it and read the rest (#1064)", { timeout: 90_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  await withErroredQueue(async (queue) => {
+    const sentence = queueErrorsLine([{ queue, error: "WRONGTYPE" }]);
+    const status = JSON.parse((await tool("dispatch_status", {})).content[0].text);
+    assert.deepEqual([status.queue.unreachable, status.queue.partial, status.queue.unavailableQueues, status.queue.queueErrors, status.queue.pausedState], [undefined, true, [queue], { [queue]: "WRONGTYPE" }, false], JSON.stringify(status.queue));
+    assert.ok(status.queue.queues >= 2 && typeof status.queue.counts.waiting === "number", "the shared queue is read and counted");
+    assert.ok(!JSON.stringify(status).includes("Operation against"), "the reply's code alone");
+
+    // `/dispatch status` answers in a message, not a note: the handler on a pi that keeps what it is sent.
+    const sent = [];
+    let handler = null;
+    indexMod.default(new Proxy({}, { get: (_t, k) => (k === "registerCommand" ? (_n, def) => (handler = def.handler) : k === "sendMessage" ? (m) => sent.push(String(m?.content)) : () => {}) }));
+    await handler("status", { hasUI: true, ui: scriptedUi().ui });
+    const said = sent.join("\n");
+    assert.ok(said.includes(`\n  ${sentence}\n`), said);
+    assert.doesNotMatch(said, /Queue: unreachable|Operation against/);
+
+    await withPanel(async (comp) => {
+      await until(() => screen(comp).includes("Not read, so not in these counts"), `the panel to name the queue (${screen(comp).split("\n").slice(0, 4).join(" / ")})`);
+      const drawn = screen(comp);
+      assert.ok(drawn.includes(`└ ${sentence}`), drawn.split("\n").slice(0, 4).join("\n"));
+      assert.doesNotMatch(drawn.split("\n").slice(0, 3).join("\n"), /unreachable/);
+    });
+  });
+});
+
+// The wizard asks "is a queue reachable here?" before it offers to set one up. One queue's error reply answered no.
+test("the setup wizard's own probe finds the queue reachable on a Valkey that answers one queue's read with an error (#1064)", { timeout: 60_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  const { detectDeployment } = await jiti.import(fileURLToPath(new URL("../src/setup-wizard.ts", import.meta.url)));
+  await withErroredQueue(async () => {
+    // No pointer, no path in the environment and no deployment files: the probe alone decides.
+    const empty = tempDir("pd-1064-wizard-");
+    const det = await detectDeployment({ env: { PI_DISPATCH_DEPLOYMENT_FILE: join(empty, "absent.json"), VALKEY_URL: LIVE }, cwd: empty });
+    assert.deepEqual([det.state, det.detail], ["reachable", `queue reachable at ${LIVE}`]);
+  });
+});
+
+// With a queue left out the deployment reads "partly paused" at most. A deployment whose every queue that was read IS
+// paused must stay resumable from the tool and the command: the resume is sent, the queues that answer are resumed, and
+// the queue Valkey answers with an error is said as that, in the kill switch's own words (issues #1014, #1041).
+test("a fleet whose every read queue is paused beside one whose meta key holds a string is still resumed by dispatch_resume and /dispatch resume (#1064)", { timeout: 90_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  const { makeQueue } = await import("@edgehero/pi-dispatch/queue");
+  const { parseConnection } = await import("@edgehero/pi-dispatch/connection");
+  const { default: IORedis } = await import("ioredis");
+  const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  const pauseShared = async () => {
+    const q = makeQueue(parseConnection(LIVE), { name: "pi-jobs" });
+    await q.pause();
+    await q.close();
+    assert.equal(await r.hexists("bull:pi-jobs:meta", "paused"), 1);
+  };
+  try {
+    await withErroredQueue(async (queue) => {
+      await pauseShared();
+      const status = JSON.parse((await tool("dispatch_status", {})).content[0].text).queue;
+      assert.deepEqual([status.pausedState, status.pausedPartial, status.queueErrors], [false, true, { [queue]: "WRONGTYPE" }], "every queue that was read is paused: partly, never wholly");
+      // The tool: the resume reaches the shared queue, and its answer says Valkey answered one with an error.
+      const out = await tool("dispatch_resume", {});
+      assert.equal(await r.hexists("bull:pi-jobs:meta", "paused"), 0, `resumed (${JSON.stringify(out).slice(0, 300)})`);
+      assert.match(String(out?.threw), /Valkey answered a resume with an error, which can come after the queue was resumed/);
+      // The command: the same, naming both queues.
+      await pauseShared();
+      const said = (await command("resume")).join("\n");
+      assert.equal(await r.hexists("bull:pi-jobs:meta", "paused"), 0, said);
+      assert.ok(said.includes(`ANSWERED WITH AN ERROR for ${queue} (its state could not be read, so it may have partly applied); known switched: pi-jobs`), said);
+    });
+  } finally {
+    await r.hdel("bull:pi-jobs:meta", "paused").catch(() => {});
+    r.disconnect();
   }
 });

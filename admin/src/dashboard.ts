@@ -44,7 +44,7 @@ import { FORGE_JOB_RETENTION_DAYS, LOCAL_JOB_KEPT_FAILED_S } from "@edgehero/pi-
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 // The one vocabulary both surfaces read (issue #710): outcome words, the venue label, the Spend and Held titles.
-import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, SWITCH_ERRORED_READS, VENUE_LABEL, outcomeWord, reasonWords, recordReason, rowNumber, switchErroredQueue, switchListShort, switchShortNote } from "./words.mjs";
+import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, SWITCH_ERRORED_READS, VENUE_LABEL, outcomeWord, queueErrorsLine, queueErrorsOf, reasonWords, recordReason, rowNumber, switchErroredQueue, switchListShort, switchShortNote } from "./words.mjs";
 import { outcomeNote } from "./loaded-words.mjs";
 import { beatAgeOf, doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorStale } from "./doctor-view.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
@@ -1894,7 +1894,7 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
       // The degraded path carries the breakdown too (review finding): the acceptance is about the
       // PANEL, not about its wide rendering, and both parts are already on the snapshot.
       lines: toLines(
-        renderStatus(snapshot.queue, {
+        renderStatus(queueRead(snapshot), {
           heldCount: Array.isArray(snapshot.held?.rows) ? snapshot.held.rows.length + (Number(snapshot.held.more) || 0) : undefined,
           cronNext: Array.isArray(snapshot.schedulers) ? snapshot.schedulers.length : undefined,
         }),
@@ -2043,7 +2043,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
   // the collapsed divider names. Status and runs carry no priority: the header is the panel's one
   // constant and the runs viewport already bounds itself.
   const sections: any[] = [
-    { key: "status", head: null, body: [statusHeader(snapshot.queue, inner, styler, snapshot.fetchedAt, supersededCount(snapshot.failed)), ...delayedBreakdownLine(snapshot, inner, styler)] },
+    { key: "status", head: null, body: [statusHeader(queueRead(snapshot), inner, styler, snapshot.fetchedAt, supersededCount(snapshot.failed)), ...queueErrorsRow(snapshot, inner, styler), ...delayedBreakdownLine(snapshot, inner, styler)] },
     // `b split` rides this divider's meta when the deployment has an allocation envelope (issue #504 part C): the footer
     // has no headroom for another hint (`keyHints`' arithmetic), the `j projects` precedent on the runs divider.
     { key: "spend", head: [`${SPEND_TITLE.toLowerCase()} & limits`, `jobs & tokens/day · s set${snapshot.envelopeSet ? " · b split" : ""}`], body: spendLines(snapshot.budget, snapshot.settings, inner, styler, snapshot.fetchedAt), priority: 4, viewKey: "s" },
@@ -2447,19 +2447,36 @@ function supersededCount(failed: any): number {
   return rows.filter((r: any) => typeof r?.supersededBy === "string" && r.supersededBy !== "").length;
 }
 
-/** The one-line STATUS header: `● RUNNING  N waiting · … · K workers        HH:MM:SS`. */
+/**
+ * The snapshot's queue slice with, beside it, the queues its read left out because Valkey answered with an error
+ * (issue #1064): `queueErrors` is the snapshot's own key, and the header and the narrow status text are handed the
+ * slice alone. An unreachable or missing slice is handed on as it is.
+ */
+function queueRead(snapshot: any): any {
+  const queue = snapshot?.queue;
+  return !queue || queue.unreachable ? queue : { ...queue, queueErrors: snapshot.queueErrors };
+}
+
+/**
+ * The one-line STATUS header: `● RUNNING  N waiting · … · K workers        HH:MM:SS`. Over queues the snapshot left out
+ * because Valkey answered their read with an error (issue #1064, `queueRead`), the counts are those of the queues that
+ * were read, which the line under the header says (`queueErrorsRow`); and when none was read the word is NOT READ,
+ * never RUNNING, since nothing here read a queue that runs.
+ */
 function statusHeader(queue: any, inner: number, styler: any, fetchedAt: any, superseded = 0): string {
   if (!queue || queue.unreachable) {
     return styler.cell(`queue unreachable (${cellOf(queue?.unreachable ?? "?")})`, inner, { color: "error" });
   }
   const c = queue.counts ?? {};
-  const running = !queue.pausedState && !queue.pausedPartial;
+  const errored = queueErrorsOf(queue).length;
+  const noneRead = errored > 0 && Number.isSafeInteger(queue.queues) && errored >= queue.queues;
+  const running = !queue.pausedState && !queue.pausedPartial && !noneRead;
   const failed = Number(c.failed ?? 0);
   // Three states, not two. A fleet where one host is paused and another is spending is the state an
   // operator most needs named, and it is precisely the one a boolean cannot say.
   const stateColor = running ? "success" : "warning";
   const dot = styler.fg(stateColor, "●");
-  const word = styler.bold(styler.fg(stateColor, running ? "RUNNING" : queue.pausedPartial ? "PART PAUSED" : "PAUSED"));
+  const word = styler.bold(styler.fg(stateColor, running ? "RUNNING" : noneRead ? "NOT READ" : queue.pausedPartial ? "PART PAUSED" : "PAUSED"));
   const sep = styler.fg("dim", " · ");
   // `delayed` renders only when nonzero, NEUTRAL, never amber: every cron scheduler keeps one
   // permanent job in the delayed set (its next occurrence), and the count also mixes retry backoff,
@@ -2485,6 +2502,20 @@ function statusHeader(queue: any, inner: number, styler: any, fetchedAt: any, su
   const gap = inner - styler.visibleLen(left) - clock.length;
   if (gap < 1) return styler.cell(styler.stripAnsi(left), inner);
   return left + " ".repeat(gap) + styler.fg("dim", clock);
+}
+
+/**
+ * The queues the snapshot left out because Valkey answered their read with an error (issue #1064), in warning colour
+ * under the header, or nothing: which queues and what Valkey answered, that they are in none of the header's counts
+ * (the delayed one among them), and that whether they are paused is not known. The sentence every surface shares
+ * (`queueErrorsLine`), wrapped to the frame and never clipped, since its end is the part about the paused state. With
+ * such a queue the header says PART PAUSED where every queue it read is paused, since the fleet is not known wholly
+ * paused, and RUNNING where none is.
+ */
+function queueErrorsRow(snapshot: any, inner: number, styler: any): string[] {
+  const errored = queueErrorsOf(snapshot);
+  if (errored.length === 0) return [];
+  return wrapColumns(cellOf(queueErrorsLine(errored)), Math.max(1, inner - 2), styler).map((l, i) => fitLine(styler.fg("warning", `${i === 0 ? "└ " : "  "}${l}`), inner, styler));
 }
 
 /**

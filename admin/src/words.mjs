@@ -164,6 +164,44 @@ export function switchErroredQueue({ queue, reads }) {
   return `${queue} (${reads === "paused" || reads === "running" ? `reads ${reads} now` : SWITCH_READ_UNKNOWN})`;
 }
 
+/**
+ * The queues a read left out because Valkey answered their read with an error (issue #1064): `[{ queue, error }]` off
+ * `queueErrors`, the map `{ <queue>: <code> }` that the fleet reader's snapshot, `readQueueState`, the state API and
+ * `pi-dispatch status` all carry under that one name. A queue name and the reply's code alone (one word of letters,
+ * digits and `_`), anything else left out, so no client's words reach a page, a tool's answer or the audit. For every
+ * surface: the console's pages and its switch previews, the `/dispatch` panel and its status line, the agent tools.
+ */
+export function queueErrorsOf(read) {
+  const map = read?.queueErrors;
+  if (map === null || typeof map !== "object" || Array.isArray(map)) return [];
+  return Object.entries(map).filter(([queue, error]) => queue !== "" && typeof error === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(error)).map(([queue, error]) => ({ queue, error }));
+}
+
+/** How many queues `queueErrorsLead` names before it counts the rest (the switch previews' own bound, issue #737). */
+export const QUEUE_ERRORS_NAMED = 20;
+
+/**
+ * How every surface starts what it says of those queues (issue #1053's words for a switch preview, shared since issue
+ * #1064): "Not read, so not in these counts: pi-jobs@hostb (Valkey answered WRONGTYPE)", each queue with what Valkey
+ * answered, at most `QUEUE_ERRORS_NAMED` named and then "and N more". What follows is the surface's own: a switch
+ * preview says the switch is still sent, a page says the paused state is not known (`queueErrorsLine`). An entry
+ * whose `error` is null is a queue whose read got no answer at all, which the status line names beside the others
+ * (`readQueueState`'s `unavailableQueues`); `queueErrorsOf` never gives one.
+ */
+export function queueErrorsLead(errored) {
+  const named = errored.slice(0, QUEUE_ERRORS_NAMED).map((e) => `${e.queue} (${e.error === null ? "no answer" : `Valkey answered ${e.error}`})`).join(", ");
+  return `Not read, so not in these counts: ${errored.length > QUEUE_ERRORS_NAMED ? `${named}, and ${errored.length - QUEUE_ERRORS_NAMED} more` : named}`;
+}
+
+/**
+ * The one sentence for a page, the panel and the status line over such queues (issue #1064): which queues, what Valkey
+ * answered, that they are in none of the counts beside it, and that whether they are paused is not known. Waiting does
+ * not read them: the cause is a key Valkey answers with an error, which stays until it is repaired.
+ */
+export function queueErrorsLine(errored) {
+  return `${queueErrorsLead(errored)}; whether ${errored.length === 1 ? "it is" : "they are"} paused is not known`;
+}
+
 /** Names in a sentence: "a", "a and b", "a, b and c". The order is the caller's. */
 export function listed(names) {
   return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;

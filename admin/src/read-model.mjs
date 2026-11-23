@@ -323,7 +323,19 @@ function parseNonNegInt(raw, fallback) {
 /**
  * Read paused state, the five job counts, and the worker count through one failFast Queue, always closed.
  * `getWorkers` is EMPTY on Redis providers without CLIENT SETNAME, so an empty/absent list degrades to
- * "unknown" rather than reporting zero live workers. Any connection error returns `{ unreachable }`.
+ * "unknown" rather than reporting zero live workers. `{ unreachable }` only when NOTHING answered (issue #1064).
+ *
+ * ONE QUEUE'S FAILED READ IS THAT QUEUE'S (issue #1064). Each queue's paused state and counts settle on their own, by
+ * `pi-dispatch status`'s rule and under its keys, each present only when it holds: `partial: true` and
+ * `unavailableQueues` name the queues one of whose two reads failed, and `queueErrors`, `{ <queue>: <code> }`, those
+ * Valkey answered with an error reply, by the reply's code alone (`replyErrorCode`). Such a queue is in none of the
+ * counts, and `pausedState` is false while one is left out, since a fleet with a queue nobody read is not known to be
+ * wholly paused; `pausedPartial` is true only when a queue that WAS read is paused. Read together in one
+ * `Promise.all`, one queue whose meta key held a string rejected every queue's read, and the catch answered the whole
+ * deployment as unreachable with Valkey's error text: the setup wizard's probe took a Valkey that answers for one
+ * that does not. An error reply is an answer, so a fleet where every queue is answered with one is `partial`, never
+ * unreachable; a failure that is no reply (a connection that failed, a bound that fired) beside a read that answered
+ * leaves that queue out without a code, and when no read answered at all it is the whole read's, as before.
  *
  * Three keys say when the queues it read may not be all of them (issue #1036), each present only when it holds, by the
  * names `pi-dispatch status` and the reader's snapshot use: `queuesMayBeShort` (the host registry or the look for
@@ -354,10 +366,28 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
     // Across every queue, because "is this deployment paused" is the question. `queues[0]` alone would
     // report the shared queue's state and call it the deployment's -- so a half-paused fleet, which
     // `setQueuePaused` can leave behind if it fails mid-loop, would read as fully one or fully the other.
-    const pausedStates = await Promise.all(queues.map((q) => q.isPaused()));
-    const pausedState = pausedStates.every(Boolean);
+    // Each read settled by itself (issue #1064), and the two kinds at once: one after the other, a Valkey that answers
+    // nothing would cost two command bounds before this said so.
+    const settled = (read) => Promise.resolve().then(read).then((value) => ({ value }), (error) => ({ error }));
+    const [pausedRead, countsRead] = await Promise.all([
+      Promise.all(queues.map((q) => settled(() => q.isPaused()))),
+      Promise.all(queues.map((q) => settled(() => q.getJobCounts("waiting", "active", "paused", "delayed", "failed")))),
+    ]);
+    const reads = [...pausedRead, ...countsRead];
+    // Nothing answered (an error reply is an answer): the read is unreachable, in the first failure's words, as before.
+    const unanswered = reads.find((r) => r.error !== undefined && replyErrorCode(r.error) === null);
+    if (unanswered && !reads.some((r) => r.error === undefined || replyErrorCode(r.error) !== null)) throw unanswered.error;
+    const failedAt = (i) => pausedRead[i].error !== undefined || countsRead[i].error !== undefined;
+    const unavailableQueues = names.filter((_, i) => failedAt(i));
+    const queueErrors = Object.fromEntries(names.flatMap((name, i) => {
+      const code = replyErrorCode(pausedRead[i].error) ?? replyErrorCode(countsRead[i].error);
+      return code === null ? [] : [[name, code]];
+    }));
+    const readAt = names.flatMap((_, i) => (failedAt(i) ? [] : [i]));
+    const pausedStates = readAt.map((i) => pausedRead[i].value);
+    const pausedState = unavailableQueues.length === 0 && pausedStates.every(Boolean);
     const pausedPartial = pausedStates.some(Boolean) && !pausedState;
-    const perQueue = await Promise.all(queues.map((q) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed")));
+    const perQueue = readAt.map((i) => countsRead[i].value);
     // Summed, because an operator asking "what is this deployment doing" means the deployment.
     const counts = perQueue.reduce((acc, c) => {
       for (const [k, v] of Object.entries(c ?? {})) acc[k] = (acc[k] ?? 0) + (Number(v) || 0);
@@ -382,7 +412,13 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
       queues.map((q) => (typeof q.getJobSchedulers === "function" ? q.getJobSchedulers(0, -1, true).catch(() => null) : Promise.resolve(null))),
     );
     const cronNext = schedulerLists.some((l) => !Array.isArray(l)) ? null : schedulerLists.reduce((n, l) => n + l.length, 0);
-    return { pausedState, ...(pausedPartial && { pausedPartial }), counts, workers: resolved.count, workerNames: resolved.names, cronNext, ...(blind || incomplete ? { queuesMayBeShort: true } : {}), ...(blindPartial === true ? { registryReadInPart: true } : {}), ...(hostErrors ? { hostErrors } : {}) };
+    return {
+      // `queues` (issue #1064): how many queues were asked, the snapshot's `queue.queues`, so a line that leaves some
+      // out can tell "some were not read" from "none was".
+      pausedState, ...(pausedPartial && { pausedPartial }), counts, queues: names.length, workers: resolved.count, workerNames: resolved.names, cronNext,
+      ...(unavailableQueues.length > 0 ? { partial: true, unavailableQueues, ...(Object.keys(queueErrors).length > 0 ? { queueErrors } : {}) } : {}),
+      ...(blind || incomplete ? { queuesMayBeShort: true } : {}), ...(blindPartial === true ? { registryReadInPart: true } : {}), ...(hostErrors ? { hostErrors } : {}),
+    };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
@@ -4903,7 +4939,7 @@ const FLEET_READ_TIMEOUT_MS = 2_000;
  */
 export const TRIGGER_SKEW_READ_MS = FLEET_READ_TIMEOUT_MS;
 
-/** A switch preview's read of one queue that Valkey answered with an error (issue #1053), beside the reply's code. */
+/** A snapshot's read of one queue that Valkey answered with an error (issues #1053, #1064), beside the reply's code. */
 const ERRORED_READ = Symbol("errored-read");
 
 /** How many hosts a snapshot's `queue.unreadHosts` names (issue #1036); `queue.unreadHostsMore` counts the rest. */
@@ -5656,16 +5692,18 @@ export function createFleetReader(
       // Issue #737: the waiting jobs, started now beside the queue reads and awaited at the end (cached, so at most one
       // read per WAITING_TTL_MS). Null when this call did not ask for them.
       const waitingRead = waiting === true ? waitingOf(queues, Array.isArray(projectsView?.projects) ? projectsView.projects : null, Array.isArray(triggersView?.triggers) ? triggersView.triggers : null, opts?.freshWaiting === true) : null;
-      // Issue #1053: on a switch preview's read, a queue whose paused state or counts Valkey answers with an error (its
-      // meta key holding a string, say) is that one queue not read, named in `switchErrored` with the reply's code,
-      // never a snapshot that fails for the whole fleet: the one-queue preview refused every queue for it, said as a
-      // Valkey that could not be reached. Any other failure still fails the snapshot, as before. Only on that read: a
-      // page draws `queueCounts` as every queue it reads, so on the per-tick read such a queue still fails the snapshot
-      // loudly rather than going missing from a page that would not say so.
-      const errorReply = (read) => (preview === null ? read : Promise.resolve(read).catch((e) => {
+      // A queue whose paused state or counts Valkey answers with an error (its meta key holding a string, say) is that
+      // one queue not read, named in `queueErrors` with the reply's code, never a snapshot that fails for the whole
+      // fleet. On a switch preview's read since issue #1053, where the one-queue preview had refused every queue for it;
+      // on EVERY read since issue #1064: the per-tick read still failed whole, so every page of a deployment with one
+      // such key said that Valkey could not be read while Valkey answered and every other queue read fine. A page
+      // draws `queueCounts` as the queues it read, so the snapshot carries `queueErrors` on every read for it to say
+      // which queue is missing from them. Any other failure (no answer, a connection that failed) is no answer about
+      // any queue and still fails the snapshot, as before.
+      const errorReply = (read) => Promise.resolve(read).catch((e) => {
         if (replyErrorCode(e) === null) throw e;
         return { [ERRORED_READ]: replyErrorCode(e) };
-      }));
+      });
       const [pausedRead, countsRead, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerLists, activeLists, stallCounts] = await Promise.all([
         Promise.all(queues.map((q) => errorReply(q.isPaused()))),
         Promise.all(queues.map((q) => errorReply(q.getJobCounts("waiting", "active", "paused", "delayed", "failed")))),
@@ -5697,11 +5735,11 @@ export function createFleetReader(
       // part, or a row Valkey answers with an error from the start). A host not read that has a last row keeps its queue
       // in the set, so it does not count. The lists read queue by queue (`active`, `schedulers`) are floors while true.
       const hostQueuesUnasked = (fleetDegraded !== null && lastHostsAt === null) || fleetUnasked;
-      // The queues a switch preview's read got an error reply for (issue #1053), each with the first reply's code, and
-      // every other queue as it was read: an errored queue is in neither `queueCounts` nor the sums, and
-      // `switchErrored` names it.
+      // The queues whose read got an error reply, each with the first reply's code, and every other queue as it was
+      // read: an errored queue is in neither `queueCounts` nor the sums, and `queueErrors` names it,
+      // `{ <queue>: <code> }`, the name and shape `pi-dispatch status` prints (`{}` when none).
       const erroredCode = (i) => pausedRead[i]?.[ERRORED_READ] ?? countsRead[i]?.[ERRORED_READ] ?? null;
-      const switchErrored = queues.flatMap((q, i) => (erroredCode(i) === null ? [] : [{ queue: q?.name ?? "-", error: erroredCode(i) }]));
+      const queueErrors = Object.fromEntries(queues.flatMap((q, i) => (erroredCode(i) === null ? [] : [[q?.name ?? "-", erroredCode(i)]])));
       const readAt = queues.flatMap((_, i) => (erroredCode(i) === null ? [i] : []));
       const pausedStates = readAt.map((i) => pausedRead[i]);
       const countsPer = readAt.map((i) => countsRead[i]);
@@ -5710,7 +5748,12 @@ export function createFleetReader(
       for (const c of countsPer) for (const [k, v] of Object.entries(c ?? {})) counts[k] = (counts[k] ?? 0) + Number(v ?? 0);
       // A HALF-paused deployment must read as neither whole one: `every` is the honest AND, and `some` carries the
       // disagreement out so the header can name it rather than rounding it to one side.
-      const pausedState = pausedStates.every(Boolean);
+      // Over the queues that were READ, and so never "wholly paused" while one was not (issue #1064): with a queue left
+      // out for an error reply, `every` held for the rest alone, and held for no queue at all when none was read. The
+      // partial flag stays evidence of a paused queue that was read: true when one is paused and the fleet is not known
+      // wholly paused, which a queue that was not read never makes true by itself. So, with `queueErrors` not empty:
+      // every read queue paused is "partly paused", none paused is "running", and each surface names the queue beside it.
+      const pausedState = Object.keys(queueErrors).length === 0 && pausedStates.every(Boolean);
       const pausedPartial = !pausedState && pausedStates.some(Boolean);
       const schedulerList = schedulerLists.flatMap((list) => (Array.isArray(list) ? list : []));
       // ONLY the id, the queue and the start off each active Job -- a Job's `.data` holds issue title/body/username
@@ -5915,6 +5958,9 @@ export function createFleetReader(
           pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded, ...(fleetPartial ? { registryReadInPart: true } : {}),
           fleetError, unreadHosts: fleetUnread.slice(0, UNREAD_HOSTS_MAX), ...(fleetUnread.length > UNREAD_HOSTS_MAX ? { unreadHostsMore: fleetUnread.length - UNREAD_HOSTS_MAX } : {}),
         },
+        // Issue #1064: the queues Valkey answered with an error, left out of `queueCounts` and of `queue.counts`
+        // (`queue.queues` still counts them), `{ <queue>: <code> }`, on every read, `{}` when none.
+        queueErrors,
         // Issue #641: each queue's own counts beside the summed ones, so a surface can say which host's queue is deep.
         queueCounts: readAt.map((qi, i) => ({ queue: queues[qi]?.name ?? "-", paused: Boolean(pausedStates[i]), counts: Object.fromEntries(Object.entries(countsPer[i] ?? {}).map(([k, v]) => [k, Number(v ?? 0)])) })),
         // Issue #596, phase 3: each live host's budget and use, as the registry publishes them (integers as text, `off`,
@@ -6007,9 +6053,8 @@ export function createFleetReader(
         ...(waitingJobs !== null ? { waiting: waitingJobs } : {}),
         // Issue #737: what a switch preview's `queueCounts` cover, only on a call that asked for the switch's queues.
         // `switchUnread` (issue #964): the queues the switch flips that it did not read, this host's own where no discovery named it.
-        // `switchErrored` (issue #1053): the queues of that read Valkey answered with an error, `{ queue, error }` with
-        // the reply's code alone, never its words.
-        ...(preview !== null ? { switchTotal: preview.total, switchTruncated: preview.truncated, switchIncomplete: preview.incomplete, switchUnread: preview.unread, switchErrored } : {}),
+        // The queues of that read Valkey answered with an error are `queueErrors` above, as on every read (issue #1064).
+        ...(preview !== null ? { switchTotal: preview.total, switchTruncated: preview.truncated, switchIncomplete: preview.incomplete, switchUnread: preview.unread } : {}),
       };
     },
     /**

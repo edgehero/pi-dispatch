@@ -101,7 +101,7 @@ import { scrubControls } from "../panel.mjs";
 import { LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
 import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES } from "@edgehero/pi-dispatch/steer-inbox";
 import { compareTranscriptIds, replyCodeOf, TRANSCRIPT_ID_RE, TRANSCRIPT_PAGE_MAX } from "../read-model.mjs";
-import { outcomeWord, recordReason } from "../words.mjs";
+import { outcomeWord, queueErrorsOf, recordReason } from "../words.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
 import { dataUnread } from "./panels/common.mjs";
 import { STREAM_SHUTDOWN, streamEndOf } from "./session-ends.mjs";
@@ -889,6 +889,11 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
     paused: { state: Boolean(q.pausedState), partial: Boolean(q.pausedPartial) },
     counts: countsOf(q.counts),
     queues: (Array.isArray(s.queueCounts) ? s.queueCounts : []).map((c) => ({ queue: str(c?.queue), paused: Boolean(c?.paused), counts: countsOf(c?.counts) })),
+    // The queues Valkey answered with an error (issue #1064), `{ <queue>: <code> }`, the name and shape of
+    // `pi-dispatch status`' line, `{}` when none. Such a queue is in neither `queues` nor `counts`, and whether it is
+    // paused is not known: `paused.state` is false while this is not empty, and `paused.partial` is true only when a
+    // queue that was read is paused. A code is one word of Valkey's, never the reply's words.
+    queueErrors: Object.fromEntries(queueErrorsOf(s).map((e) => [str(e.queue), e.error])),
     workers: typeof q.workers === "number" ? q.workers : null,
     fleetDegraded: Boolean(q.fleetDegraded),
     // Beside `fleetDegraded` (issue #1036; `registryReadInPart` is issue #1062's flag, which this document did not yet

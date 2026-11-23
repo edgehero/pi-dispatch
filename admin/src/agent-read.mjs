@@ -13,15 +13,28 @@ const WHY_TOKENS = new Set([...REASON_TOKENS, "fallback-unlisted", "unboundable"
 export const agentReasonToken = (value) => typeof value === "string" && REASON_TOKENS.has(value) ? value : null;
 const ID = /^[A-Za-z0-9_][A-Za-z0-9._:@/+#!~-]{0,299}$/;
 const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
-const STRINGS = new Set(["class", "basis", "field", "rule", "ref", "scopeId", "touchScopeId", "digest", "envelopeDigest", "afterDigest", "beforeDigest", "models", "fallbackModels", "auxiliaryModels", "kept", "members", "memory", "cpus", "hostShare", "modelRole", "role", "property", "word", "assertedBy", "armedBy", "observedBy", "blessed", "default", "format", "sourcesSeen", "sourceStatus", "readStatus", "served", "floor", "coverage", "mirror", "capture", "providerFailure", "modelWhy", "whyKnown", "reasonKey", "stat", "unit", "maxCostUsd", "maxSubscriptionUsd", "dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd", "dayUsd", "weekUsd", "monthUsd", "totalUsd","class", "role", "page", "id", "jobId", "runId", "draftRunId", "sourceRunId", "queue", "host", "worker", "version", "piVersion", "kind", "runKind", "type", "mode", "status", "state", "outcome", "reason", "why", "provider", "model", "backend", "venue", "project", "projectId", "repo", "repository", "target", "flow", "key", "scope", "ledger", "window", "source", "writer", "name", "planId", "action", "cause", "classification", "vocabulary", "triggerType", "cron", "expression", "from", "to", "tz", "date", "at", "startedAt", "endedAt", "finishedAt", "createdAt", "updatedAt", "next", "keptUntil", "retainedUntil"]);
+const STRINGS = new Set(["class", "basis", "field", "rule", "ref", "scopeId", "touchScopeId", "digest", "envelopeDigest", "afterDigest", "beforeDigest", "models", "fallbackModels", "auxiliaryModels", "kept", "members", "memory", "cpus", "hostShare", "modelRole", "role", "property", "word", "assertedBy", "armedBy", "observedBy", "blessed", "default", "format", "sourcesSeen", "sourceStatus", "readStatus", "served", "floor", "coverage", "mirror", "capture", "providerFailure", "modelWhy", "whyKnown", "reasonKey", "stat", "unit", "maxCostUsd", "maxSubscriptionUsd", "dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd", "dayUsd", "weekUsd", "monthUsd", "totalUsd","class", "role", "page", "id", "jobId", "runId", "draftRunId", "sourceRunId", "queue", "unavailableQueues", "host", "worker", "version", "piVersion", "kind", "runKind", "type", "mode", "status", "state", "outcome", "reason", "why", "provider", "model", "backend", "venue", "project", "projectId", "repo", "repository", "target", "flow", "key", "scope", "ledger", "window", "source", "writer", "name", "planId", "action", "cause", "classification", "vocabulary", "triggerType", "cron", "expression", "from", "to", "tz", "date", "at", "startedAt", "endedAt", "finishedAt", "createdAt", "updatedAt", "next", "keptUntil", "retainedUntil"]);
 // The only `note` values a model or an agent is handed: this build's own sentences beside a run record a newer
 // pi-dispatch wrote (issue #761), the one `dispatch_runs` gives and the one the run page and `/api/run` give, and
 // `outcomeNote`'s closed sentences beside a run that lacked its flow or an extension (issue #800, `isOutcomeNote`).
 const OWN_NOTES = new Set([NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE]);
 const PRIVATE = new Set(["closeActors", "reviewAuthors", "text", "body", "task", "title", "description", "summary", "instructions", "note", "notes", "phase", "phases", "progress", "recoveryProgress", "failedReason", "reasonText", "whyText", "fix", "fixes", "command", "argv", "path", "paths", "root", "roots", "resolver", "secretProfiles", "secretBundles", "secretReferences", "secrets", "headers", "args", "url", "href", "html", "transcript", "entries", "privateDraft", "draft", "question", "sources", "probabilities", "standing", "standingAnswers", "answerRules", "rules", "groups", "questionGroups", "triggerEditor", "forkPoints", "sandboxHosts", "sandboxHostsProblem", "configLocations", "barLines", "classification", "draftRunId", "sourceRunId", "loaded", "outcomeNote", "hostLoads", "loads", "sandboxRun", "triggerGets", "modelChoices", "history"]);
 
+/**
+ * The maps of a name to the code of Valkey's error reply for its read: `queueErrors`, a queue's (issue #1064), and
+ * `hostErrors`, a host row's (issue #1036). Their fields are names, not keys this table knows, so the string rule
+ * dropped every one and a reader got `{}`: that something was answered with an error, and neither what nor with what.
+ * A name passes as an id and a code as one word of letters, digits and `_` (the reply's first word, never its
+ * sentence); any other entry is left out.
+ */
+const ERROR_MAPS = new Set(["queueErrors", "hostErrors"]);
+const REPLY_CODE = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
+
 export function agentReadProjection(value, key = "", depth = 0) {
   if (depth > 16 || value === undefined) return undefined;
+  if (ERROR_MAPS.has(key) && value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return Object.fromEntries(Object.entries(value).slice(0, 5000).filter(([name, code]) => ID.test(name) && typeof code === "string" && REPLY_CODE.test(code)));
+  }
   if (key === "modelSelection") return recordedModelSelection(value);
   // Console APIs also project raw records, without passing through modelRunRecord first. Keep its count-only rule
   // here too, and preserve an already projected count without exposing a malformed map's reference values.

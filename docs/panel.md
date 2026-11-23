@@ -41,6 +41,13 @@ behind the panel's, a notice points you back at `/dispatch setup`.
 The same data is there as plain commands, all local, with no model involved: `/dispatch status | pause | resume | run | runs | logs |
 chat | budget | insights | console | triggers | settings | set | unset | priorities | setup | secrets`.
 
+When Valkey answers one queue's read with an error (its `bull:<queue>:meta` key holding a string, say), `/dispatch status` and the
+panel read every other queue and say so under the counts: "Not read, so not in these counts: pi-jobs@hostb (Valkey answered
+WRONGTYPE); whether it is paused is not known". Neither calls the deployment paused while a queue is left out: where every queue
+that was read is paused they say partly paused, where none is, running, and where no queue was read, not known (the panel's header:
+NOT READ). Waiting does not read such a queue: its key has to be removed or repaired. Only a Valkey that gives no answer at all is
+"unreachable".
+
 `/dispatch console` opens the web console or prints how to reach it, signed in when you have one operator token, the
 console runs and a browser on this machine will open it ([console](console.md#from-pi-dispatch-console)), and
 `/dispatch chat` opens a run's conversation ([chat](chat.md#in-pi-dispatch-chat)).

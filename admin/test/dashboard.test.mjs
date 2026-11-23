@@ -3210,6 +3210,69 @@ test("a HALF paused deployment is reported as neither running nor paused", async
   await deps.dispose();
 });
 
+// Issue #1064: one queue whose read Valkey answers with an error made the panel's read fail whole ("queue unreachable").
+test("the panel over a queue Valkey answers with an error draws the fleet it read, names that queue under the header and never says PAUSED or RUNNING for a queue nobody read (#1064)", async () => {
+  const v = fakePanelValkey({ hosts: [{ name: "mini1", routes: "true" }, { name: "mini2", routes: "true" }] });
+  const wrongtype = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+  let broken = new Set(["pi-jobs@mini2"]);
+  const makeQueueFn = (c, opts) => {
+    const q = v.deps.makeQueueFn(c, opts);
+    const real = q.isPaused;
+    if (!q.patched) Object.assign(q, { patched: true, isPaused: () => (broken.has(q.name) ? wrongtype() : real.call(q)) });
+    return q;
+  };
+  const deps = createDashboardDeps(panelPaths, { ...v.deps, makeQueueFn });
+  // The panel itself, on what the panel's own reader gives it.
+  const drawn = async (width = 120) => {
+    const snap = await deps.fetchSnapshot();
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+    await flush();
+    const lines = comp.render(width).map(stripAnsi);
+    await comp.dispose();
+    return lines.join("\n");
+  };
+  const SENTENCE = "└ Not read, so not in these counts: pi-jobs@mini2 (Valkey answered WRONGTYPE); whether it is paused is not known";
+  // A frame's lines without their borders, as one line of text.
+  const flat = (text) => text.split("\n").map((l) => l.replace(/^│ ?| ?│$/g, "").trim()).join(" ");
+  try {
+    // Every queue that was read is paused: partly, never wholly, with the queue that was not read named under it.
+    v.paused.add("pi-jobs");
+    v.paused.add("pi-jobs@mini1");
+    const part = await drawn();
+    assert.match(part, /● PART PAUSED {2}2 waiting/, part);
+    assert.ok(part.split("\n")[2].startsWith(`│ ${SENTENCE} `), part.split("\n")[2]);
+    assert.doesNotMatch(part, /unreachable|Operation against/);
+    // None that was read is paused: RUNNING is of the two it read, and the line still names the third.
+    v.paused.clear();
+    const running = await drawn();
+    assert.match(running, /● RUNNING {2}2 waiting/, running);
+    assert.ok(running.includes(SENTENCE), running);
+    // A frame too narrow for the sentence wraps it; its end, the part about the paused state, is not cut off.
+    const tight = await drawn(60);
+    assert.ok(!tight.includes(SENTENCE) && flat(tight).includes(SENTENCE), tight);
+    for (const line of tight.split("\n")) assert.equal(visibleLen(line), 60, line);
+    // The plain text of a terminal too narrow for the frame says it too.
+    const snap = await deps.fetchSnapshot();
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => snap }) });
+    await flush();
+    const narrow = comp.render(0).join("\n");
+    await comp.dispose();
+    assert.ok(narrow.includes("Queue: running") && narrow.includes(`  ${SENTENCE.slice(2)}`), narrow);
+    // No queue was read: the word is NOT READ, and nothing says RUNNING or PAUSED.
+    broken = new Set(["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2"]);
+    const none = await drawn(140);
+    assert.match(none, /● NOT READ {2}0 waiting/, none);
+    assert.doesNotMatch(none.split("\n").slice(0, 3).join("\n"), /RUNNING|PAUSED/);
+    // Read whole again, the header and its section are as they were: no line under it.
+    broken = new Set();
+    const whole = await drawn();
+    assert.match(whole, /● RUNNING {2}3 waiting/, whole);
+    assert.doesNotMatch(whole, /Not read, so not in these counts/);
+  } finally {
+    await deps.dispose();
+  }
+});
+
 test("the SHARED queue paused while a host still spends must not read as paused", async () => {
   // The dangerous direction, and the one a `queues[0]` boolean gets wrong: a pause that ran while a host
   // was invisible leaves `pi-jobs` stopped and that host draining. Reading the shared queue's flag and

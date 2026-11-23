@@ -26,15 +26,18 @@ function paths() {
 /**
  * A real fleet reader over `keys`. `registryDown()` and `scanDown()` fail the registry's SMEMBERS and the keyspace
  * SCAN; `failed` is each queue's failed jobs; `clock` an object whose `t` is the reader's now; `pttl` a host row's PTTL
- * (-1: no expiry); `built`, when given, gets the name of each queue the reader builds.
+ * (-1: no expiry); `built`, when given, gets the name of each queue the reader builds; `errored` names the queues whose
+ * paused read Valkey answers with WRONGTYPE (a meta key that holds a string).
  */
-function readerOver(keys, { registryDown, scanDown, failed, clock = { t: AT }, readLiveHostsFn, redis: wrap = (r) => r, pttl = PTTL, built = null } = {}) {
+function readerOver(keys, { registryDown, scanDown, failed, clock = { t: AT }, readLiveHostsFn, redis: wrap = (r) => r, pttl = PTTL, built = null, errored = [] } = {}) {
   const redis = wrap(keyedRedis(keys, { registryDown, scanDown, pttlOf: (key) => (key.startsWith("host:h:") ? pttl : -1) }));
   const make = quietQueue([], { failed });
+  const wrongtype = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
   return createFleetReader(paths(), {
     makeQueueFn: (c, opts) => {
       built?.push(opts?.name ?? "pi-jobs");
-      return make(c, opts);
+      const q = make(c, opts);
+      return errored.includes(q.name) ? { ...q, isPaused: wrongtype } : q;
     },
     parseConnectionFn: () => ({}),
     redisFn: () => redis,
@@ -217,7 +220,8 @@ test("dispatch_failed builds the registry's queues and at most as many others as
 });
 
 // Issue #1053: the failed read goes through the kill switch's set, whose read names a queue Valkey answered with an
-// error (`switchErrored`) instead of failing; that queue is in no count, so the failed total leaves its jobs out.
+// error (`queueErrors`, since issue #1064) instead of failing; that queue is in no count, so the failed total leaves
+// its jobs out.
 test("dispatch_failed over a queue whose read Valkey answered with an error is not complete, and how many more is not known (#1053)", async () => {
   const keys = { ...registryKeys({}), ...metas("pi-jobs@hostb") };
   const failed = { "pi-jobs@hostb": Array.from({ length: 25 }, (_, i) => failedJob(`f${i}`, AT - i * MIN)) };
@@ -236,9 +240,42 @@ test("dispatch_failed over a queue whose read Valkey answered with an error is n
   });
   const got = await read("failed", reader);
   assert.deepEqual([got.unavailable, got.more, got.complete, got.jobs.length], [false, null, false, 20], "its 25 failed jobs are in no total: neither none more nor complete");
+  // It names the queue, with the reply's code alone (issue #1064): not whole, and why.
+  assert.deepEqual(got.queueErrors, { "pi-jobs@hostb": "WRONGTYPE" });
+  assert.ok(!JSON.stringify(got).includes("Operation against"));
   // The same set read whole is complete, and its count is known again.
   const whole = await read("failed", readerOver(keys, { failed }));
-  assert.deepEqual([whole.more, whole.complete], [5, false]);
+  assert.deepEqual([whole.more, whole.complete, Object.hasOwn(whole, "queueErrors")], [5, false, false]);
+});
+
+// Issue #1064: once the snapshot answered over such a queue, the tools that had thrown answered without naming it.
+test("over a queue Valkey answered with an error, the tools whose answer rests on the queues' reads name it and are not complete; the ones that read hosts, files and counters answer as over any fleet (#1064)", async () => {
+  // A live host that routes, so its own queue is one of the queues every read asks.
+  const keys = { ...registryKeys({ mini1: row({ routes: "true" }) }), ...metas("pi-jobs@mini1") };
+  const over = (kind) => read(kind, readerOver(keys, { errored: ["pi-jobs@mini1"] }));
+  // The waiting jobs: why a job of that queue waits depends on a paused state nobody read.
+  const waiting = await over("waiting");
+  assert.deepEqual([waiting.unavailable, waiting.complete, waiting.queueErrors, waiting.jobs], [false, false, { "pi-jobs@mini1": "WRONGTYPE" }, []]);
+  const whole = await read("waiting", readerOver(keys));
+  assert.deepEqual([whole.complete, Object.hasOwn(whole, "queueErrors")], [true, false], "read whole: complete, and no map");
+  const failed = await over("failed");
+  assert.deepEqual([failed.complete, failed.more, failed.queueErrors], [false, null, { "pi-jobs@mini1": "WRONGTYPE" }]);
+  // The hosts are the registry's rows, the setup steps the files', the doctor's and the rows', the held money the rows':
+  // a queue's paused state or counts enters none of them, so each answers what it answers over any fleet.
+  const hosts = await over("hosts");
+  assert.deepEqual([hosts.unavailable, hosts.hosts.map((h) => h.name), Object.hasOwn(hosts, "queueErrors")], [false, ["mini1"], false]);
+  assert.deepEqual(hosts, await read("hosts", readerOver(keys)));
+  const setup = await over("setup");
+  assert.deepEqual([setup, Object.hasOwn(setup, "queueErrors")], [await read("setup", readerOver(keys)), false]);
+  const held = (opts) => readHeldForAgent({ paths: paths(), nowMs: AT, reads: { fleet: () => readerOver(keys, opts) } });
+  assert.deepEqual(await held({ errored: ["pi-jobs@mini1"] }), await held({}));
+  assert.equal((await held({ errored: ["pi-jobs@mini1"] })).unknown, undefined, "held money read off the rows, not unknown");
+  // A name that is no id is not handed on, and the answer still says it is not complete.
+  const odd = await read("waiting", createFleetReader(paths(), {
+    makeQueueFn: (c, opts) => ({ ...quietQueue()(c, opts), name: "pi-jobs odd name", isPaused: () => Promise.reject(Object.assign(new Error("ERR no"), { name: "ReplyError" })) }),
+    parseConnectionFn: () => ({}), redisFn: () => keyedRedis(registryKeys({})), readLiveHostsFn: (r, o) => readLiveHosts(r, { ...o, now: () => AT }), nowFn: () => AT, readOnly: true,
+  }));
+  assert.deepEqual([odd.complete, odd.queueErrors], [false, {}]);
 });
 
 test("dispatch_failed over a failed set that could not be read: jobs null and unavailable", async () => {

@@ -3047,7 +3047,7 @@ test("the console's own switch, through a real Valkey whose queue's meta key hol
   }
 });
 
-test("a switch preview's snapshot, through a real Valkey where one queue's meta key holds a string, names that queue as answered with WRONGTYPE and reads the rest (#1053, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
+test("a switch preview's snapshot, the per-tick one and the status read, through a real Valkey where one queue's meta key holds a string, name that queue as answered with WRONGTYPE and read the rest (#1053, #1064, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
   const { makeQueue } = await import("@edgehero/pi-dispatch/queue");
   const { makeRedisClient, parseConnection } = await import("@edgehero/pi-dispatch/connection");
   const url = process.env.VALKEY_TEST_URL;
@@ -3076,12 +3076,36 @@ test("a switch preview's snapshot, through a real Valkey where one queue's meta 
     await direct.del(key("pi-jobs@hostb", "meta"));
     await direct.set(key("pi-jobs@hostb", "meta"), "not a hash");
     const s = await reader.snapshot({ switchQueues: true });
-    assert.deepEqual(s.switchErrored, [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }]);
+    assert.deepEqual(s.queueErrors, { "pi-jobs@hostb": "WRONGTYPE" });
     assert.deepEqual(s.queueCounts.map((q) => q.queue), ["pi-jobs", "pi-jobs@hosta"], "every other queue is read");
     assert.equal(s.queueCounts.find((q) => q.queue === "pi-jobs@hosta").counts.waiting, 1);
     assert.ok(!JSON.stringify(s).includes("Operation against"), "the reply's code alone");
     const one = await reader.snapshot({ switchQueues: true, queue: "pi-jobs@hostb" });
-    assert.deepEqual(one.switchErrored, [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }], "the one-queue read names it too");
+    assert.deepEqual(one.queueErrors, { "pi-jobs@hostb": "WRONGTYPE" }, "the one-queue read names it too");
+    // The per-tick read, every page's (issue #1064): it failed whole on that key, as a Valkey that could not be read.
+    const paged = createFleetReader({ valkeyUrl: url, logsDir, triggersPath }, {
+      makeQueueFn: asked,
+      readLiveHostsFn: async () => ({ hosts: [{ name: "hosta", routes: "true" }, { name: "hostb", routes: "true" }] }), discoverHostQueuesFn: async () => ({ names: [] }), readOnly: true,
+    });
+    try {
+      const tick = await paged.snapshot();
+      assert.deepEqual([tick.queueErrors, tick.queueCounts.map((q) => q.queue), tick.queue.queues, tick.queue.pausedState, tick.queue.pausedPartial], [{ "pi-jobs@hostb": "WRONGTYPE" }, ["pi-jobs", "pi-jobs@hosta"], 3, false, false]);
+      assert.deepEqual([tick.queue.counts.waiting, Object.hasOwn(tick, "switchErrored")], [1, false], "hosta's one job, and hostb's in no sum");
+      // hosta paused for real: every queue that was read but one is running, so partly paused, on a queue that was read.
+      const hosta = makeQueue(parseConnection(url), { name: `${prefix}pi-jobs@hosta` });
+      await hosta.pause();
+      await hosta.close();
+      const half = await paged.snapshot();
+      assert.deepEqual([half.queue.pausedState, half.queue.pausedPartial, half.queueErrors], [false, true, { "pi-jobs@hostb": "WRONGTYPE" }]);
+    } finally {
+      await paged.dispose();
+    }
+    // The status read behind `/dispatch status`, `dispatch_status` and the setup wizard's probe (issue #1064): it answered
+    // `{ unreachable }` with Valkey's own words for the whole deployment.
+    const probe = () => ({ on() {}, disconnect() {}, async smembers() { return []; }, async scan() { return ["0", ["bull:pi-jobs@hosta:meta", "bull:pi-jobs@hostb:meta"]]; } });
+    const state = await readQueueState({ url, makeQueueFn: asked, redisFn: probe, readOnly: true });
+    assert.deepEqual([state.unreachable, state.partial, state.unavailableQueues, state.queueErrors, state.queues, state.pausedState, state.pausedPartial], [undefined, true, ["pi-jobs@hostb"], { "pi-jobs@hostb": "WRONGTYPE" }, 3, false, true]);
+    assert.ok(!JSON.stringify(state).includes("Operation against"), "the reply's code alone");
   } finally {
     await reader.dispose();
     let cursor = "0";

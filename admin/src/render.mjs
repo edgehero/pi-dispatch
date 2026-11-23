@@ -25,7 +25,7 @@ import { clip, columnsOf, fmtCost, pad, scrubControls, sliceColumns } from "./pa
 // is asserted to do no I/O of its own, and reaching for it through the I/O module is the wrong direction.
 import { KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 // The one vocabulary the console and the panel read (issue #710): the runs table's OUTCOME column says the same words.
-import { outcomeWord, recordReason } from "./words.mjs";
+import { outcomeWord, queueErrorsLine, queueErrorsOf, recordReason } from "./words.mjs";
 import { newerSkippedSentence } from "./newer-release.mjs";
 // The applied split's own vocabulary (issue #987), imported for the reason `KNOWN_KEYS` is: the key's name and the
 // outcomes that change the split are the worker's, and a copy here would be the second one. No statement of that
@@ -132,8 +132,17 @@ export function renderStatus(queue, { heldCount, cronNext } = {}) {
   // A half-paused deployment is its own state and must not read as either whole one: `setQueuePaused`
   // can leave one behind if it fails partway through the fleet, and an operator told "running" would
   // walk away from a host that is stopped.
-  const state = queue.pausedPartial ? "PARTIALLY paused" : queue.pausedState ? "paused" : "running";
-  return [`Queue: ${state}`, `  ${line}${breakdown}`, `  workers: ${workers}${named}`].join("\n");
+  // A queue whose read failed (issue #1064) is in none of the counts and its paused state is not known, which one
+  // line under the counts says, in the sentence every surface shares (`queueErrorsLine`): the queues Valkey answered
+  // with an error by name and code (`queueErrors`), and those of `readQueueState`'s `unavailableQueues` whose read got
+  // no answer by name. With none of the queues read (`queue.queues` of them asked, every one left out) the state is
+  // "not known", never "running": nothing here read a queue that runs.
+  const errored = queueErrorsOf(queue);
+  const coded = new Set(errored.map((e) => e.queue));
+  const unread = [...errored, ...(Array.isArray(queue.unavailableQueues) ? queue.unavailableQueues : []).filter((name) => typeof name === "string" && name !== "" && !coded.has(name)).map((name) => ({ queue: name, error: null }))];
+  const noneRead = unread.length > 0 && Number.isSafeInteger(queue.queues) && unread.length >= queue.queues;
+  const state = queue.pausedPartial ? "PARTIALLY paused" : queue.pausedState ? "paused" : noneRead ? "not known" : "running";
+  return [`Queue: ${state}`, `  ${line}${breakdown}`, ...(unread.length > 0 ? [`  ${cell(queueErrorsLine(unread))}`] : []), `  workers: ${workers}${named}`].join("\n");
 }
 
 /** The column count of `v` drawn after a space, which is where every cell of `renderRuns` is drawn. */
