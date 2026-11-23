@@ -83,6 +83,14 @@ function asPinned(views) {
   };
 }
 
+/**
+ * The deployment's paths, for a test that runs another of the console's services over the same files and a client of
+ * its own that answers nothing (`downRedis`): what that service says in an outage, beside what the reader says.
+ */
+export function outagePaths() {
+  return deploymentPaths();
+}
+
 /** The reader's `fileViews()`: the snapshot's own keys and shapes, from the files alone. `pinned: false`: exactly as read. */
 export function fileViewsFixture({ pinned = true } = {}) {
   const views = outageReader(deploymentPaths()).fileViews();

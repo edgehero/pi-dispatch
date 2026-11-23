@@ -130,7 +130,7 @@ import { parseRunPath, RUN_PATH_PREFIX, runPathLink } from "./run-path.mjs";
 import { runTranscriptSection } from "./transcript.mjs";
 import { WHATIF_MODEL_RE } from "./whatif.mjs";
 import { SPEND_TITLE, VENUE_LABEL, recordReason } from "../words.mjs";
-import { RUN_MIRROR_READ_MS, RUN_RECORD_UNREAD, runAbsent, runPlaces } from "../read-model.mjs";
+import { RUN_MIRROR_READ_MS, RUN_RECORD_UNREAD, runAbsent, runPlaces, TRIGGER_SKEW_READ_MS } from "../read-model.mjs";
 import { fromNewerRelease } from "../newer-release.mjs";
 import { agentReadProjection } from "../agent-read.mjs";
 import { runAnswerDraft } from "./panels/run.mjs";
@@ -767,6 +767,20 @@ function formsDrawn(who) {
 }
 
 /**
+ * Start `reads` together and wait for every one of them (issue #988). Each is a function that makes one read of a
+ * page load and fills the page's data with its answer, or with what that read draws when it failed. Every one is
+ * waited for whatever another does: a read that throws what it has no catch for takes no other read's answer or
+ * fallback with it, none goes on behind a load that has ended, and none rejects with nobody to take it. Such a throw
+ * is then this call's own, the first in the order the reads were given, so which error a load ends with does not
+ * depend on which read was quicker.
+ */
+async function together(reads) {
+  const ended = await Promise.allSettled(reads.map(async (read) => read()));
+  const thrown = ended.find((end) => end.status === "rejected");
+  if (thrown) throw thrown.reason;
+}
+
+/**
  * Read what screen `name` shows for `query` (a `parsePageQuery` result's `query`). `deps`:
  *
  *   - `fleet`: a `createFleetReader` instance (`snapshot`, `runsPage`, `runById`, and `parkedCount` for the screens that
@@ -797,7 +811,7 @@ function formsDrawn(who) {
  * together, so a load waits for that scan once; a live load's (`who.live`) costs none, and keeps what the request was
  * told of an absence (the reader's `lookUp`).
  *
- * ONE DEADLINE OVER WHAT A LOAD ASKS OF VALKEY (issues #987 and #988, `page-deadline.mjs`). The reads below are made
+ * ONE DEADLINE OVER WHAT A LOAD ASKS OF VALKEY (issues #987 and #988, `page-deadline.mjs`). The reads below were made
  * one after another, each with a bound of its own, so on a Valkey that is connected and does not answer a page took
  * the sum of them. Every read that asks Valkey now runs under one deadline counted from the start of the load. THE
  * RULE: the page never puts an answer of its own in place of one a read can give itself. So a read is handed its
@@ -805,10 +819,11 @@ function formsDrawn(who) {
  * built by its own code from what its files hold. Two ways, by whether the read takes a bound:
  *
  *   - `drawn`: a read that takes its bound from the page (`within`: its own, or what is left of the deadline when
- *     that is sooner, never under 1 ms): a run's record, the run history, the runs' window, and the views over the
- *     snapshot. It is made for as long as the grace has not passed, since what it reads of this host's files needs no
- *     Valkey, and it is waited for `PAGE_VIEW_GRACE_MS` past the deadline, in which the reader says in its own words
- *     what it could not read. Only a reader that ends in neither is cut, and then it is the read that failed.
+ *     that is sooner, never under 1 ms): a run's record, the run history, the runs' window, the zero touch report
+ *     and its touched runs, the answer rules, and the views over the snapshot. It is made for as long as the grace
+ *     has not passed, since what it reads of this host's files needs no Valkey, and it is waited for
+ *     `PAGE_VIEW_GRACE_MS` past the deadline, in which the reader says in its own words what it could not read.
+ *     Only a reader that ends in neither is cut, and then it is the read that failed.
  *   - `asked`: a read that takes no bound (the snapshot, a transcript's state, the hosts' publications). It is waited
  *     for until the deadline, and is not made once the deadline has passed. It is then drawn exactly as that read is
  *     drawn for a Valkey that did not answer: `asked` throws into the read's own catch, and `askedOr` answers what a
@@ -819,6 +834,15 @@ function formsDrawn(who) {
  * files alone (the audit log, the secrets view, the editor's hints), synchronous work, and the Insights pages'
  * assembly, which is mostly a fold over the run records and whose Valkey reads keep the bounds they have inside it.
  *
+ * THE READS START TOGETHER (issue #988, with issue #987's sums). One deadline over reads made one after another has a
+ * cost of its own: a Valkey that is slow and still answers pays its delay once per read, so a page of thirty reads
+ * could meet its deadline with reads still to make, and call unread what a console without a deadline read whole. A
+ * read that needs nothing from another read of the load is therefore started beside the others, in one wave, and a
+ * read that needs another's answer is started when that one has settled (the waves at the end of this function say
+ * which, and why). A load then takes its longest chain of reads, not their sum. Each read keeps the bound, the way
+ * under the deadline and the catch it had, so a read that failed or was cut is drawn as it was before, and `together`
+ * waits for every read of a wave whatever another does.
+ *
  * Never throws for a read that fails: the field is null (or carries a sentence), and the panel says so.
  */
 export async function loadPageData(name, query, deps = {}, who = {}) {
@@ -828,6 +852,18 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // Issue #737: the deployment the console serves, by its folder's last part (`cli.mjs`'s `pageDeps.deployment`), for
   // the first run's checklist; null where the caller passes none.
   const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
+  // The Insights assembly is started here, before anything else of the load is set up, and awaited where the page
+  // reads it. It reads the clock for its own window as it starts, and its charts are drawn against `now` above: with
+  // work between the two readings a capacity bar whose window ends a millisecond after the page's instant is drawn as
+  // one with part of it missing, which a first load after a start then showed. The console's cache starts an assembly
+  // one turn of the microtask queue after it is asked for (`cachedPerWindow`), so that turn is given at once: the
+  // assembly has read its clock before this load goes on.
+  const insightsStarted = PAGE_READS[name].includes("insights")
+    ? (async () => deps.insights(q.range ?? INSIGHTS_DEFAULT_RANGE, { fullPaths: q.paths === "full" && who?.role === "operator", project: q.project ?? null, role: who?.role ?? "viewer", view: name === "insights" ? "spend" : name.slice("insights-".length) }))()
+    : null;
+  // Its rejection is taken where the page awaits it; until then it must not be one nobody handles.
+  insightsStarted?.catch(() => {});
+  if (insightsStarted !== null) await null;
   // This load's deadline, and the ways a read runs under it (see above). `cut` marks the load; `within` is the
   // deadline's, remembering whether it handed out less than a read's own bound, which with a deadline that has passed
   // by the time that read's view returns says the view was cut too.
@@ -851,7 +887,9 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // reader is handed, so past the deadline the reader still answers, with this host's part and the mirror not reached.
   const mirrorBound = () => ({ timeoutMs: within(RUN_MIRROR_READ_MS) });
   const runsPageOf = (opts) => drawn(() => deps.fleet.runsPage({ ...opts, ...mirrorBound() }));
-  const runByIdOf = (id, opts = {}) => drawn(() => deps.fleet.runById(id, { ...opts, ...mirrorBound() }));
+  // A run opened with the host that holds it is asked of that host after the mirror: the reader takes each of those
+  // reads' bounds from `within` as it makes them, so it ends in its own words and not in the page's.
+  const runByIdOf = (id, opts = {}) => drawn(() => deps.fleet.runById(id, { ...opts, ...mirrorBound(), within }));
   // The runs' window is a shared read with a bound of its own: this load waits for it as long as its deadline has.
   const runsWindowRead = () => drawn(() => deps.fleet.runsWindow?.({ timeoutMs: within(Infinity) }));
   // The trigger page's Fire now check is started here and awaited where the page reads it (issue #961): it has a bound
@@ -860,94 +898,17 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   const fireCheck = name === "trigger" && formsDrawn(who)
     ? Promise.resolve().then(() => (typeof deps.triggerFireCheck === "function" ? deps.triggerFireCheck(q.index) : { refusal: "Fire now is not available in this deployment." })).catch(() => ({ refusal: FIRE_CHECK_UNREAD }))
     : null;
-  if (name === "watch" || name === "watch-board") data.watch = await askedOr(() => loadWatchData(deps.watch, q, { board: name === "watch-board", privateRead: who?.role === "operator" && who?.live !== true }), { unavailable: true });
   const reads = PAGE_READS[name];
-  if (["parked", "answer-rules", "run"].includes(name) && deps.answerer) {
-    const operatorRead = who?.role === "operator" || who?.live === true && who?.role === undefined;
-    try { data.answerer = await asked(() => deps.answerer.read({ role: operatorRead ? "operator" : who?.role ?? "viewer", ...(name === "run" && operatorRead ? { runId: q.id } : {}) })); }
-    catch { data.answerer = { state: "unavailable", partial: true, rows: [] }; }
-  }
-  if (name === "overview" && (who?.role === "operator" || who?.live === true && who?.role === undefined) && typeof deps.agentWrites === "function") {
-    try { data.agentWrites = await deps.agentWrites(); } catch { data.agentWrites = { unavailable: true, partial: true }; }
-  }
+  // Files and synchronous work, as it was: nothing here asks Valkey, so none of it is a read to start beside another.
   // Private workspace and opener configuration reads never join /api/state or a viewer's shared load.
-  if ((who?.role === "operator" || who?.live === true && who?.role === undefined) && ["sandboxes", "run", "host", "trigger"].includes(name) && deps.sandboxes) {
-    if (["sandboxes", "run"].includes(name) && typeof deps.gatewayView === "function") {
-      try { data.browserGateways = await asked(() => deps.gatewayView()); } catch { data.browserGateways = { enabledHosts: [], sessions: [], problem: "Browser-terminal information could not be read. Use the native terminal route." }; }
-    }
+  const privateReads = Boolean((who?.role === "operator" || who?.live === true && who?.role === undefined) && ["sandboxes", "run", "host", "trigger"].includes(name) && deps.sandboxes);
+  if (privateReads) {
     try { const hosts = deps.sandboxes.hosts(); data.sandboxHosts = hosts.config ?? null; data.sandboxHostsProblem = hosts.refusal ?? null; } catch { data.sandboxHosts = null; data.sandboxHostsProblem = "Terminal host configuration could not be read. Inspect its owner, permissions and format."; }
-    if (name === "sandboxes") {
-      try { data.sandboxes = await asked(() => deps.sandboxes.read(q)); } catch { data.sandboxes = null; data.readFailed = true; }
-      // The run a kept workspace came from, for what opens: its record's `loaded`, unknown when it cannot be read. A read that
-      // failed is not a record with nothing in it, so it says so rather than "not recorded". `readRunById` answers that and does not
-      // throw: `{ unreadable }` or `{ invalid }`, and only `{ missing }` means both places were read and hold none.
-      if (typeof q.id === "string" && typeof deps.fleet?.runById === "function") {
-        let found = null;
-        try { found = await runByIdOf(q.id); } catch { found = { unreadable: true }; }
-        data.sandboxRun = found?.record ?? null;
-        if (found?.unreadable || found?.invalid) data.sandboxRunUnread = true;
-      }
-    }
-  }
-  // What the hosts published (issue #800). A missing or failed read is unknown, never an error page and never "the same".
-  if (reads.includes("hostLoads")) {
-    // A read that threw is marked (issue #962): null alone is also a console that wires no such read, and the trigger
-    // page's card must say the hosts could not be read, never that no live host can run the trigger's jobs.
-    try { data.hostLoads = typeof deps.hostLoads === "function" ? await asked(() => deps.hostLoads()) : null; } catch { data.hostLoads = null; data.hostLoadsUnread = true; }
-  }
-  if (name === "zero-touch") {
-    // A read that threw (issue #962) is caught, as before, and says so: `failure` is what the panel words, and the
-    // console's log gets the error's code or kind. Never the error's own text on the page or in the log: it may name a
-    // path or a host.
-    try { data.zeroTouch = typeof deps.zeroTouch === "function" ? await asked(() => deps.zeroTouch({ windowDays: q.days, project: q.project, scopeId: q.scope, role: who?.role })) : null; }
-    catch (err) {
-      // A read the page's deadline cut is no failure of this console (issue #988): it is unavailable, as the read's
-      // own answer for a Valkey that did not answer is, with no reason of the console's and nothing for its log.
-      if (err instanceof PageDeadlinePassed) data.zeroTouch = { state: "unavailable" };
-      else {
-        data.zeroTouch = { state: "unavailable", failure: "read-failed" };
-        const kind = [err?.code, err?.name].find((v) => typeof v === "string" && /^[A-Za-z0-9_]{1,40}$/.test(v)) ?? "error";
-        try { deps.log?.(`console: the Zero touch read failed (${kind})`); } catch { /* a log that cannot be written fails no page */ }
-      }
-    }
-    // Role projection happens before page data can be inspected or reused, not just while rendering a group panel.
-    data.zeroTouch = zeroTouchView(data.zeroTouch, { role: who?.role, windowDays: q.days, nowMs: now });
   }
   if (["config", "trigger", "trigger-add", "triggers"].includes(name) && typeof deps.configLocations === "function") data.configLocations = deps.configLocations();
   // The by-id lookups' one question for this load (see above): the hub's, or this request's, read before any of them.
   const lookup = who?.live === true ? { live: true } : typeof deps.fleet?.lookupQuestion === "function" ? deps.fleet.lookupQuestion() : {};
   if (name === "run" && typeof deps.env?.PI_CHAIN_MAX_PER_JOB === "string" && /^\d{1,9}$/.test(deps.env.PI_CHAIN_MAX_PER_JOB)) data.chainMaxPerJob = Number(deps.env.PI_CHAIN_MAX_PER_JOB);
-  if (reads.includes("snapshot")) {
-    try {
-      data.snapshot = await asked(() => (reads.includes("waiting") ? deps.fleet.snapshot({ waiting: true }) : deps.fleet.snapshot()));
-    } catch (err) {
-      data.snapshot = null;
-      // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
-      data.readFailed = true;
-      // Issue #988: the read did not fail, the page's deadline cut it (or had passed before it could be made).
-      if (err instanceof PageDeadlinePassed) data.snapshotFailure = "late";
-      // Issue #844: what the deployment's files hold needs no Valkey, so a page still draws it rather than an empty
-      // list. Absent where the reader has none or it throws: a panel then says the fact could not be read.
-      try { if (typeof deps.fleet?.fileViews === "function") data.files = deps.fleet.fileViews() ?? null; } catch { data.files = null; }
-    }
-  }
-  if (reads.includes("setup")) {
-    try { data.setup = setupFacts(typeof deps.setup === "function" ? await drawn(() => deps.setup({ role: who.role, snapshot: data.snapshot, within })) : null, { role: who.role ?? "operator" }); }
-    catch { data.setup = setupFacts(null, { role: who.role }); }
-  }
-  if (reads.includes("models")) {
-    try { data.models = typeof deps.modelsView === "function" ? await drawn(() => deps.modelsView(data.snapshot, { within })) : null; }
-    catch { data.models = null; }
-  }
-  if (reads.includes("secrets")) {
-    // Issue #962: with no snapshot the declarations still come from the files (`data.files`, set where the snapshot failed).
-    try { data.secrets = typeof deps.secretsView === "function" ? await deps.secretsView(data.snapshot, data.files ?? null) : secretsView({ snapshot: data.snapshot, files: data.files ?? null, env: deps.env ?? {} }); }
-    catch { data.secrets = null; }
-  }
-  if (reads.includes("connections")) {
-    try { data.connections = typeof deps.connections === "function" ? await drawn(() => deps.connections(data.snapshot, { within })) : null; }
-    catch { data.connections = null; }
-  }
   // Issue #849: whether the host-setup grant is on, for the pages that send an operator to /setup rather than a terminal. One boolean, none of `setup`'s reads.
   if (["overview", "fleet", "host"].includes(name) && typeof deps.setupGranted === "function") {
     try { data.setupGranted = deps.setupGranted() === true; }
@@ -963,25 +924,6 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     try { data.devices = typeof deps.devices === "function" ? deps.devices() : null; }
     catch { data.devices = null; }
   }
-  if (reads.includes("updates")) {
-    try { data.updates = typeof deps.updates === "function" ? await drawn(() => deps.updates({ within })) : null; }
-    catch { data.updates = null; }
-  }
-  if (reads.includes("project")) {
-    try { data.projectView = typeof deps.projectView === "function" ? await drawn(() => deps.projectView(q.id, data.snapshot, { within })) : { id: q.id, state: "unreadable" }; }
-    catch { data.projectView = { id: q.id, state: "unreadable" }; }
-  }
-  if (name === "triggers") {
-    // Issue #844: with no snapshot the rules still come from the files; what only Valkey says of them is marked unread.
-    // Issue #962: with no file views either, the schedulers are as unread as with them. A list that only lacks its
-    // rules would say "No next fire is published" of a Valkey nobody read.
-    const listed = data.snapshot ?? (data.files ? { ...data.files, schedulersUnread: true } : data.snapshot === null ? { schedulersUnread: true } : null);
-    try { data.triggerList = typeof deps.triggerList === "function" ? await drawn(() => deps.triggerList(listed, { within })) : triggerListOf({ snapshot: listed, now }); }
-    catch {
-      // The same input again, without the reader; and should the file views themselves be what it cannot take, none.
-      try { data.triggerList = triggerListOf({ snapshot: listed, now }); } catch { data.triggerList = triggerListOf({ snapshot: null, now }); }
-    }
-  }
   if (name === "trigger") {
     // What the card draws, read once with the digest of those same bytes (`readTriggerGetsEntry`), and the digest only where a person's
     // form is drawn, because it covers the entry's prompt and secret references. Not for an agent, whose copy of the data has neither.
@@ -992,20 +934,6 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
         try { const models = typeof deps.pricedModels === "function" ? deps.pricedModels() : []; data.modelChoices = Array.isArray(models) ? models : []; } catch { data.modelChoices = []; }
       }
     }
-    if (data.snapshot && typeof deps.fleet?.triggerSkew === "function") {
-      try { data.snapshot = { ...data.snapshot, triggerSkew: { [q.index]: await asked(() => deps.fleet.triggerSkew(q.index, data.snapshot.waiting)) } }; } catch { /* An unreadable skew check remains unknown. */ }
-    }
-    data.triggerDetail = triggerDetailOf(data.snapshot, q.index, { now });
-    // Issue #962: which bundle a trigger's project binds is the triggers file's and the projects file's to say, so with
-    // no snapshot it is read from the file views. No run is asked for: the card names the bundle, not what a run received.
-    if (data.snapshot === null && Array.isArray(data.files?.triggers?.triggers)) {
-      try { data.fileBundles = secretBundlesView({ triggers: data.files.triggers, settings: data.files.settings, env: deps.env ?? {}, projects: data.files.projects }) ?? { bundles: [], byIndex: {} }; } catch { /* left unset: the card says the bundles are not known */ }
-    }
-    // Made at the top of the load, so past the deadline its answer is taken where it has one and not waited for where it has none.
-    if (fireCheck !== null) data.triggerFireCheck = await askedOr(fireCheck, () => ({ refusal: FIRE_CHECK_UNREAD }));
-  }
-  if (name === "trigger" || name === "trigger-add") {
-    try { data.triggerEditor = typeof deps.triggerEditor === "function" ? await deps.triggerEditor() : readTriggerEditor({ paths: deps.paths ?? {}, env: deps.env ?? {} }); } catch { data.triggerEditor = {}; }
   }
   if (name === "fleet") {
     try {
@@ -1013,92 +941,261 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       data.killSwitch = plan ? { disagreement: plan.disagreement ?? null, refused: plan.refused ?? null, resumeCommand: plan.resumeCommand ?? null, resumeArgv: Array.isArray(plan.resumeArgv) ? [...plan.resumeArgv] : null } : null;
     } catch { data.killSwitch = { refused: "The deployment's kill switch could not be read." }; }
   }
-  if (name === "host") {
-    data.host = data.snapshot?.hostBudgets?.find((host) => host.name === q.name) ?? null;
-    try { const history = await runsPageOf({ filter: { host: q.name }, limit: RUNS_PER_PAGE }); data.hostHistory = { ...history, records: history?.runs ?? [] }; } catch { data.hostHistory = null; }
-    // Capacity is an expensive historical fold. A live replacement deliberately omits its panel, keeping the initial chart.
-    if (who?.live !== true) {
-      try { data.hostCapacity = typeof deps.hostCapacity === "function" ? await drawn(() => deps.hostCapacity(q.name, { within })) : null; } catch { data.hostCapacity = null; }
-    } else data.live = true;
-  }
-  if (reads.includes("subscriptions")) data.subscriptions = await subscriptionsOf(deps);
-  if (reads.includes("runsPage")) {
-    try {
-      data.runsPage = q.filter?.touched === "1" ? await asked(() => deps.zeroTouchRuns({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter, windowDays: Number(q.filter.days), scopeId: q.filter.scope ?? null })) : await runsPageOf({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter ?? null });
-    } catch {
-      data.runsPage = null;
-      data.readFailed = true;
+  // Each read of the page, as a function that makes it and fills `data` with its answer or with what that read draws
+  // when it failed. Nothing is read yet: the waves at the end of this function start them.
+  const watchRead = async () => {
+    if (name === "watch" || name === "watch-board") data.watch = await askedOr(() => loadWatchData(deps.watch, q, { board: name === "watch-board", privateRead: who?.role === "operator" && who?.live !== true }), { unavailable: true });
+  };
+  const answererRead = async () => {
+    if (["parked", "answer-rules", "run"].includes(name) && deps.answerer) {
+      const operatorRead = who?.role === "operator" || who?.live === true && who?.role === undefined;
+      try { data.answerer = await drawn(() => deps.answerer.read({ role: operatorRead ? "operator" : who?.role ?? "viewer", ...(name === "run" && operatorRead ? { runId: q.id } : {}), within })); }
+      catch { data.answerer = { state: "unavailable", partial: true, rows: [] }; }
     }
-  }
-  if (reads.includes("runsWindow")) {
-    try {
-      data.runsWindow = (await runsWindowRead()) ?? null;
-    } catch {
-      data.runsWindow = null;
+  };
+  const agentWritesRead = async () => {
+    if (name === "overview" && (who?.role === "operator" || who?.live === true && who?.role === undefined) && typeof deps.agentWrites === "function") {
+      try { data.agentWrites = await deps.agentWrites(); } catch { data.agentWrites = { unavailable: true, partial: true }; }
     }
-  }
-  if (reads.includes("run")) {
-    try {
-      data.run = await runByIdOf(q.id, { historyHost: q.historyHost ?? null });
-    } catch {
-      data.run = { unreadable: RUN_RECORD_UNREAD };
-      data.readFailed = true;
+  };
+  const gatewayRead = async () => {
+    if (privateReads && ["sandboxes", "run"].includes(name) && typeof deps.gatewayView === "function") {
+      try { data.browserGateways = await asked(() => deps.gatewayView()); } catch { data.browserGateways = { enabledHosts: [], sessions: [], problem: "Browser-terminal information could not be read. Use the native terminal route." }; }
     }
+  };
+  const sandboxesRead = async () => {
+    if (privateReads && name === "sandboxes") {
+      try { data.sandboxes = await asked(() => deps.sandboxes.read(q)); } catch { data.sandboxes = null; data.readFailed = true; }
+    }
+  };
+  const sandboxRunRead = async () => {
+    // The run a kept workspace came from, for what opens: its record's `loaded`, unknown when it cannot be read. A read that
+    // failed is not a record with nothing in it, so it says so rather than "not recorded". `readRunById` answers that and does not
+    // throw: `{ unreadable }` or `{ invalid }`, and only `{ missing }` means both places were read and hold none.
+    if (privateReads && name === "sandboxes" && typeof q.id === "string" && typeof deps.fleet?.runById === "function") {
+      let found = null;
+      try { found = await runByIdOf(q.id); } catch { found = { unreadable: true }; }
+      data.sandboxRun = found?.record ?? null;
+      if (found?.unreadable || found?.invalid) data.sandboxRunUnread = true;
+    }
+  };
+  const hostLoadsRead = async () => {
+    // What the hosts published (issue #800). A missing or failed read is unknown, never an error page and never "the same".
+    if (reads.includes("hostLoads")) {
+      // A read that threw is marked (issue #962): null alone is also a console that wires no such read, and the trigger
+      // page's card must say the hosts could not be read, never that no live host can run the trigger's jobs.
+      try { data.hostLoads = typeof deps.hostLoads === "function" ? await asked(() => deps.hostLoads()) : null; } catch { data.hostLoads = null; data.hostLoadsUnread = true; }
+    }
+  };
+  const zeroTouchRead = async () => {
+    if (name === "zero-touch") {
+      // A read that threw (issue #962) is caught, as before, and says so: `failure` is what the panel words, and the
+      // console's log gets the error's code or kind. Never the error's own text on the page or in the log: it may name a
+      // path or a host.
+      try { data.zeroTouch = typeof deps.zeroTouch === "function" ? await drawn(() => deps.zeroTouch({ windowDays: q.days, project: q.project, scopeId: q.scope, role: who?.role, within })) : null; }
+      catch (err) {
+        // A read the page's deadline cut is no failure of this console (issue #988): it is unavailable, as the read's
+        // own answer for a Valkey that did not answer is, with no reason of the console's and nothing for its log.
+        if (err instanceof PageDeadlinePassed) data.zeroTouch = { state: "unavailable" };
+        else {
+          data.zeroTouch = { state: "unavailable", failure: "read-failed" };
+          const kind = [err?.code, err?.name].find((v) => typeof v === "string" && /^[A-Za-z0-9_]{1,40}$/.test(v)) ?? "error";
+          try { deps.log?.(`console: the Zero touch read failed (${kind})`); } catch { /* a log that cannot be written fails no page */ }
+        }
+      }
+      // Role projection happens before page data can be inspected or reused, not just while rendering a group panel.
+      data.zeroTouch = zeroTouchView(data.zeroTouch, { role: who?.role, windowDays: q.days, nowMs: now });
+    }
+  };
+  const snapshotRead = async () => {
+    if (reads.includes("snapshot")) {
+      try {
+        data.snapshot = await asked(() => (reads.includes("waiting") ? deps.fleet.snapshot({ waiting: true }) : deps.fleet.snapshot()));
+      } catch (err) {
+        data.snapshot = null;
+        // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
+        data.readFailed = true;
+        // Issue #988: the read did not fail, the page's deadline cut it (or had passed before it could be made).
+        if (err instanceof PageDeadlinePassed) data.snapshotFailure = "late";
+        // Issue #844: what the deployment's files hold needs no Valkey, so a page still draws it rather than an empty
+        // list. Absent where the reader has none or it throws: a panel then says the fact could not be read.
+        try { if (typeof deps.fleet?.fileViews === "function") data.files = deps.fleet.fileViews() ?? null; } catch { data.files = null; }
+      }
+    }
+  };
+  const setupRead = async () => {
+    if (reads.includes("setup")) {
+      try { data.setup = setupFacts(typeof deps.setup === "function" ? await drawn(() => deps.setup({ role: who.role, snapshot: data.snapshot, within })) : null, { role: who.role ?? "operator" }); }
+      catch { data.setup = setupFacts(null, { role: who.role }); }
+    }
+  };
+  const modelsRead = async () => {
+    if (reads.includes("models")) {
+      try { data.models = typeof deps.modelsView === "function" ? await drawn(() => deps.modelsView(data.snapshot, { within })) : null; }
+      catch { data.models = null; }
+    }
+  };
+  const secretsRead = async () => {
+    if (reads.includes("secrets")) {
+      // Issue #962: with no snapshot the declarations still come from the files (`data.files`, set where the snapshot failed).
+      try { data.secrets = typeof deps.secretsView === "function" ? await deps.secretsView(data.snapshot, data.files ?? null) : secretsView({ snapshot: data.snapshot, files: data.files ?? null, env: deps.env ?? {} }); }
+      catch { data.secrets = null; }
+    }
+  };
+  const connectionsRead = async () => {
+    if (reads.includes("connections")) {
+      try { data.connections = typeof deps.connections === "function" ? await drawn(() => deps.connections(data.snapshot, { within })) : null; }
+      catch { data.connections = null; }
+    }
+  };
+  const updatesRead = async () => {
+    if (reads.includes("updates")) {
+      try { data.updates = typeof deps.updates === "function" ? await drawn(() => deps.updates({ within })) : null; }
+      catch { data.updates = null; }
+    }
+  };
+  const projectRead = async () => {
+    if (reads.includes("project")) {
+      try { data.projectView = typeof deps.projectView === "function" ? await drawn(() => deps.projectView(q.id, data.snapshot, { within })) : { id: q.id, state: "unreadable" }; }
+      catch { data.projectView = { id: q.id, state: "unreadable" }; }
+    }
+  };
+  const triggerListRead = async () => {
+    if (name === "triggers") {
+      // Issue #844: with no snapshot the rules still come from the files; what only Valkey says of them is marked unread.
+      // Issue #962: with no file views either, the schedulers are as unread as with them. A list that only lacks its
+      // rules would say "No next fire is published" of a Valkey nobody read.
+      const listed = data.snapshot ?? (data.files ? { ...data.files, schedulersUnread: true } : data.snapshot === null ? { schedulersUnread: true } : null);
+      try { data.triggerList = typeof deps.triggerList === "function" ? await drawn(() => deps.triggerList(listed, { within })) : triggerListOf({ snapshot: listed, now }); }
+      catch {
+        // The same input again, without the reader; and should the file views themselves be what it cannot take, none.
+        try { data.triggerList = triggerListOf({ snapshot: listed, now }); } catch { data.triggerList = triggerListOf({ snapshot: null, now }); }
+      }
+    }
+  };
+  const triggerDetailRead = async () => {
+    if (name === "trigger") {
+      if (data.snapshot && typeof deps.fleet?.triggerSkew === "function") {
+        try { data.snapshot = { ...data.snapshot, triggerSkew: { [q.index]: await drawn(() => deps.fleet.triggerSkew(q.index, data.snapshot.waiting, { timeoutMs: within(TRIGGER_SKEW_READ_MS) })) } }; } catch { /* An unreadable skew check remains unknown. */ }
+      }
+      data.triggerDetail = triggerDetailOf(data.snapshot, q.index, { now });
+      // Issue #962: which bundle a trigger's project binds is the triggers file's and the projects file's to say, so with
+      // no snapshot it is read from the file views. No run is asked for: the card names the bundle, not what a run received.
+      if (data.snapshot === null && Array.isArray(data.files?.triggers?.triggers)) {
+        try { data.fileBundles = secretBundlesView({ triggers: data.files.triggers, settings: data.files.settings, env: deps.env ?? {}, projects: data.files.projects }) ?? { bundles: [], byIndex: {} }; } catch { /* left unset: the card says the bundles are not known */ }
+      }
+    }
+  };
+  const fireCheckRead = async () => {
+    // Made at the top of the load, so past the deadline its answer is taken where it has one and not waited for where it has none.
+    if (fireCheck !== null) data.triggerFireCheck = await askedOr(fireCheck, () => ({ refusal: FIRE_CHECK_UNREAD }));
+  };
+  const editorRead = async () => {
+    if (name === "trigger" || name === "trigger-add") {
+      try { data.triggerEditor = typeof deps.triggerEditor === "function" ? await deps.triggerEditor() : readTriggerEditor({ paths: deps.paths ?? {}, env: deps.env ?? {} }); } catch { data.triggerEditor = {}; }
+    }
+  };
+  const hostHistoryRead = async () => {
+    if (name === "host") {
+      try { const history = await runsPageOf({ filter: { host: q.name }, limit: RUNS_PER_PAGE }); data.hostHistory = { ...history, records: history?.runs ?? [] }; } catch { data.hostHistory = null; }
+    }
+  };
+  const hostCapacityRead = async () => {
+    if (name === "host") {
+      // Capacity is an expensive historical fold. A live replacement deliberately omits its panel, keeping the initial chart.
+      if (who?.live !== true) {
+        try { data.hostCapacity = typeof deps.hostCapacity === "function" ? await drawn(() => deps.hostCapacity(q.name, { within })) : null; } catch { data.hostCapacity = null; }
+      } else data.live = true;
+    }
+  };
+  const subscriptionsRead = async () => {
+    if (reads.includes("subscriptions")) data.subscriptions = await subscriptionsOf(deps);
+  };
+  const runsPageRead = async () => {
+    if (reads.includes("runsPage")) {
+      try {
+        data.runsPage = q.filter?.touched === "1" ? await drawn(() => deps.zeroTouchRuns({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter, windowDays: Number(q.filter.days), scopeId: q.filter.scope ?? null, within })) : await runsPageOf({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter ?? null });
+      } catch {
+        data.runsPage = null;
+        data.readFailed = true;
+      }
+    }
+  };
+  const windowRead = async () => {
+    if (reads.includes("runsWindow")) {
+      try {
+        data.runsWindow = (await runsWindowRead()) ?? null;
+      } catch {
+        data.runsWindow = null;
+      }
+    }
+  };
+  const runRead = async () => {
+    if (reads.includes("run")) {
+      try {
+        data.run = await runByIdOf(q.id, { historyHost: q.historyHost ?? null });
+      } catch {
+        data.run = { unreadable: RUN_RECORD_UNREAD };
+        data.readFailed = true;
+      }
+    }
+  };
+  const childrenRead = async () => {
     if (data.run?.record) Object.assign(data, await childrenOf(deps.fleet, data.run.record, { readPage: runsPageOf }).then(({ children, searched, incomplete }) => ({ children, childrenSearched: searched, childrenIncomplete: incomplete })));
-  }
-  // Issue #920: what a forge job's /artifacts folder left, from this host's store (the manifest only, never a file).
-  if (reads.includes("artifacts") && typeof deps.fleet?.artifacts === "function") {
-    try {
-      data.artifacts = data.run?.record ? deps.fleet.artifacts(q.id, data.run.record) : null;
-    } catch {
-      data.artifacts = null;
+  };
+  const transcriptRead = async () => {
+    if (reads.includes("transcriptMeta") && typeof deps.fleet?.transcriptMeta === "function") {
+      // Issue #643: whether the run has a live transcript stream, without a byte of its text (the stream's text goes to an
+      // operator's page entry events or `/api/transcript`, never a panel). Read for both roles, as all page data is; only an operator's page uses it.
+      // Only a read's own answer (`exists` true or false) says whether a stream exists: anything else, an answer that is
+      // not one included, is a stream that could not be read, never "none".
+      try {
+        const meta = await asked(() => deps.fleet.transcriptMeta(q.id));
+        const read = meta !== null && typeof meta === "object" && !meta.unreachable && !meta.invalid && typeof meta.exists === "boolean";
+        data.transcript = read ? { exists: meta.exists, ended: meta.ended === true, outcome: typeof meta.outcome === "string" ? meta.outcome : null, length: Number.isSafeInteger(meta.length) ? meta.length : 0, lastId: typeof meta.lastId === "string" && TRANSCRIPT_ID_RE.test(meta.lastId) ? meta.lastId : null } : { unreachable: true, exists: false };
+      } catch {
+        data.transcript = { unreachable: true, exists: false };
+      }
     }
-  }
-  if (reads.includes("transcriptMeta") && typeof deps.fleet?.transcriptMeta === "function") {
-    // Issue #643: whether the run has a live transcript stream, without a byte of its text (the stream's text goes to an
-    // operator's page entry events or `/api/transcript`, never a panel). Read for both roles, as all page data is; only an operator's page uses it.
-    // Only a read's own answer (`exists` true or false) says whether a stream exists: anything else, an answer that is
-    // not one included, is a stream that could not be read, never "none".
-    try {
-      const meta = await asked(() => deps.fleet.transcriptMeta(q.id));
-      const read = meta !== null && typeof meta === "object" && !meta.unreachable && !meta.invalid && typeof meta.exists === "boolean";
-      data.transcript = read ? { exists: meta.exists, ended: meta.ended === true, outcome: typeof meta.outcome === "string" ? meta.outcome : null, length: Number.isSafeInteger(meta.length) ? meta.length : 0, lastId: typeof meta.lastId === "string" && TRANSCRIPT_ID_RE.test(meta.lastId) ? meta.lastId : null } : { unreachable: true, exists: false };
-    } catch {
-      data.transcript = { unreachable: true, exists: false };
+  };
+  const progressRead = async () => {
+    if (reads.includes("progress") && typeof deps.fleet?.progress === "function") {
+      // Issue #644: the run's progress snapshot, WHOLE (its phase names and note included), read once for both roles as
+      // all page data is; `runProgress` draws the model's words for an operator alone. Page data is never serialized to a
+      // browser: only rendered panels leave this process.
+      // Issue #662: by the job's RUN id, and with whether this attempt's run went on as a recovery (`progressOfRun`), so a
+      // recovery's own page shows its live progress and the attempt it continues shows its own record's, not the
+      // recovery's. A fleet without it (an older reader double) reads by the page's id, as before.
+      try {
+        if (typeof deps.fleet.progressOfRun === "function") {
+          const got = await asked(() => deps.fleet.progressOfRun(q.id, data.run?.record ?? null));
+          data.progress = got?.progress ?? { unreachable: true };
+          if (got?.continues === true) data.progressContinues = { as: typeof got.continuesAs === "string" && RUN_ID_RE.test(got.continuesAs) ? got.continuesAs : null };
+        } else data.progress = await asked(() => deps.fleet.progress(q.id));
+      } catch {
+        data.progress = { unreachable: true };
+        // A continued attempt shows its own record whatever the read did: the record alone says its run went on.
+        if (typeof deps.fleet.progressOfRun === "function" && data.run?.record?.reason === "recovery-enqueued") data.progressContinues = { as: null };
+      }
     }
-  }
-  if (reads.includes("progress") && typeof deps.fleet?.progress === "function") {
-    // Issue #644: the run's progress snapshot, WHOLE (its phase names and note included), read once for both roles as
-    // all page data is; `runProgress` draws the model's words for an operator alone. Page data is never serialized to a
-    // browser: only rendered panels leave this process.
-    // Issue #662: by the job's RUN id, and with whether this attempt's run went on as a recovery (`progressOfRun`), so a
-    // recovery's own page shows its live progress and the attempt it continues shows its own record's, not the
-    // recovery's. A fleet without it (an older reader double) reads by the page's id, as before.
-    try {
-      if (typeof deps.fleet.progressOfRun === "function") {
-        const got = await asked(() => deps.fleet.progressOfRun(q.id, data.run?.record ?? null));
-        data.progress = got?.progress ?? { unreachable: true };
-        if (got?.continues === true) data.progressContinues = { as: typeof got.continuesAs === "string" && RUN_ID_RE.test(got.continuesAs) ? got.continuesAs : null };
-      } else data.progress = await asked(() => deps.fleet.progress(q.id));
-    } catch {
-      data.progress = { unreachable: true };
-      // A continued attempt shows its own record whatever the read did: the record alone says its run went on.
-      if (typeof deps.fleet.progressOfRun === "function" && data.run?.record?.reason === "recovery-enqueued") data.progressContinues = { as: null };
+  };
+  const liveFactsRead = async () => {
+    if (name === "run" && !data.run?.record && typeof deps.fleet?.runLiveFacts === "function") {
+      try { data.activeRun = await asked(() => deps.fleet.runLiveFacts(q.id, lookup)); } catch { data.activeRun = null; }
     }
-  }
-  if (name === "run" && !data.run?.record && typeof deps.fleet?.runLiveFacts === "function") {
-    try { data.activeRun = await asked(() => deps.fleet.runLiveFacts(q.id, lookup)); } catch { data.activeRun = null; }
-  }
-  if (reads.includes("inbox") && typeof deps.fleet?.inbox === "function") {
-    // Issue #646: a steer-armed job's inbox, WITHOUT TEXT (the reader's `readJobInbox`: ids, modes, sources, states,
-    // times and byte counts), and whether its run takes messages now. Both roles get the list; `runInbox` draws the
-    // message form and the withdraw buttons for an operator alone.
-    try {
-      data.inbox = await asked(() => deps.fleet.inbox(q.id));
-    } catch {
-      data.inbox = { unreachable: true };
+  };
+  const inboxRead = async () => {
+    if (reads.includes("inbox") && typeof deps.fleet?.inbox === "function") {
+      // Issue #646: a steer-armed job's inbox, WITHOUT TEXT (the reader's `readJobInbox`: ids, modes, sources, states,
+      // times and byte counts), and whether its run takes messages now. Both roles get the list; `runInbox` draws the
+      // message form and the withdraw buttons for an operator alone.
+      try {
+        data.inbox = await asked(() => deps.fleet.inbox(q.id));
+      } catch {
+        data.inbox = { unreachable: true };
+      }
     }
-  }
+  };
   // The chat facts with their answer check, and the actions' checks, run together (see above).
   const chatRead = async () => {
     // Issue #647: the chat this run can have (`chatFactsOf`: the job's queue state, its active recovery, and for a parked
@@ -1128,92 +1225,164 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     data.rerunCheck = await askedOr(() => rerunCheckOf(deps.fleet, q.id, record, { now: () => now, lookup }), () => (typeof deps.fleet?.rerunCheck === "function" ? { unreachable: true } : null));
     if (!refusedBeforeStart(record)) data.sandboxCheck = await sandboxCheckOf(deps.fleet, q.id, record, { now: () => now });
   };
-  await Promise.all([reads.includes("chat") ? chatRead() : null, reads.includes("actions") && data.run?.record ? actionsRead() : null]);
-  if (name === "run" && data.run?.record && (who?.role === "operator" || who?.live === true && who?.role === undefined) && typeof deps.sandboxes?.workspace === "function") {
-    try { data.workspace = await asked(() => deps.sandboxes.workspace(data.run.record)); } catch { data.workspace = { unknown: true, sessionsUnknown: true }; }
-  }
-  if (name === "run" && data.run?.record) {
-    const record = data.run.record;
-    // These lookups are bounded by the worker's own replica/recovery caps, never a history scan. A related record
-    // remains PII-free; no retained queue payload is passed to a renderer.
-    const siblings = [];
-    if (Number.isInteger(record.replica) && Number.isInteger(record.replicas) && record.replicas <= REPLICAS_MAX && record.replicas >= 2) {
-      const stem = String(record.recoveryOf ?? record.jobId ?? "").replace(/-r[1-3](?=\.r[1-2]$|$)/, "-r");
-      for (let i = 1; i <= record.replicas; i += 1) {
-        if (i === record.replica) continue;
-        const id = stem.replace(/-r(?=\.r[1-2]$|$)/, `-r${i}`);
-        if (id !== record.jobId && RUN_ID_RE.test(id)) siblings.push(id);
+  const runChatRead = async () => {
+    if (reads.includes("chat")) await chatRead();
+  };
+  const runActionsRead = async () => {
+    if (reads.includes("actions") && data.run?.record) await actionsRead();
+  };
+  const workspaceRead = async () => {
+    if (name === "run" && data.run?.record && (who?.role === "operator" || who?.live === true && who?.role === undefined) && typeof deps.sandboxes?.workspace === "function") {
+      try { data.workspace = await asked(() => deps.sandboxes.workspace(data.run.record)); } catch { data.workspace = { unknown: true, sessionsUnknown: true }; }
+    }
+  };
+  // The records of the run's recoveries, as `relatedRead` read them: the progress of the run that continues this one
+  // is read against its own record.
+  let recoveries = [];
+  const relatedRead = async () => {
+    if (name === "run" && data.run?.record) {
+      const record = data.run.record;
+      // These lookups are bounded by the worker's own replica/recovery caps, never a history scan. A related record
+      // remains PII-free; no retained queue payload is passed to a renderer.
+      const siblings = [];
+      if (Number.isInteger(record.replica) && Number.isInteger(record.replicas) && record.replicas <= REPLICAS_MAX && record.replicas >= 2) {
+        const stem = String(record.recoveryOf ?? record.jobId ?? "").replace(/-r[1-3](?=\.r[1-2]$|$)/, "-r");
+        for (let i = 1; i <= record.replicas; i += 1) {
+          if (i === record.replica) continue;
+          const id = stem.replace(/-r(?=\.r[1-2]$|$)/, `-r${i}`);
+          if (id !== record.jobId && RUN_ID_RE.test(id)) siblings.push(id);
+        }
+      }
+      const related = async (id) => { try { return (await runByIdOf(id))?.record ?? null; } catch { return null; } };
+      const base = typeof record.recoveryOf === "string" && RUN_ID_RE.test(record.recoveryOf) ? record.recoveryOf : q.id;
+      const recoveryIds = record.checkpoints || record.recovered || record.recoverSkipped || String(record.reason ?? "").startsWith("recovery-")
+        ? [base, ...Array.from({ length: RECOVERY_CAP }, (_, i) => `${base}.r${i + 1}`)].filter((id) => id !== q.id && RUN_ID_RE.test(id)) : [];
+      const [siblingRecords, recoveryRecords, trigger, holds] = await Promise.all([
+        Promise.all(siblings.map(related)), Promise.all(recoveryIds.map(related)),
+        typeof deps.fleet.runTrigger === "function" ? Promise.resolve().then(() => deps.fleet.runTrigger(record.triggerIndex, record.triggerType)).catch(() => null) : null,
+        recoveryIds.length && typeof deps.fleet.runHolds === "function" ? askedOr(() => deps.fleet.runHolds(q.id, record), null).catch(() => null) : null,
+      ]);
+      data.siblings = siblingRecords.filter(Boolean);
+      data.recoveryRuns = [record, ...recoveryRecords.filter(Boolean)].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+      data.trigger = trigger;
+      data.runHolds = holds;
+      recoveries = recoveryRecords;
+    }
+  };
+  const continuationRead = async () => {
+    if (name === "run" && data.run?.record) {
+      const recoveryRecords = recoveries;
+      const continuation = data.chat?.activeJobId ?? data.chat?.queuedJobId;
+      if (continuation && continuation !== q.id && RUN_ID_RE.test(continuation)) {
+        await together([
+          async () => { try { data.recoveryLive = await asked(() => deps.fleet.runLiveFacts?.(continuation, lookup)) ?? null; } catch { data.recoveryLive = null; } },
+          async () => { try { data.recoveryProgress = await asked(() => deps.fleet.progressOfRun?.(continuation, recoveryRecords.find((r) => r?.jobId === continuation) ?? null)) ?? null; } catch { data.recoveryProgress = null; } },
+        ]);
       }
     }
-    const related = async (id) => { try { return (await runByIdOf(id))?.record ?? null; } catch { return null; } };
-    const base = typeof record.recoveryOf === "string" && RUN_ID_RE.test(record.recoveryOf) ? record.recoveryOf : q.id;
-    const recoveryIds = record.checkpoints || record.recovered || record.recoverSkipped || String(record.reason ?? "").startsWith("recovery-")
-      ? [base, ...Array.from({ length: RECOVERY_CAP }, (_, i) => `${base}.r${i + 1}`)].filter((id) => id !== q.id && RUN_ID_RE.test(id)) : [];
-    const [siblingRecords, recoveryRecords, trigger, holds] = await Promise.all([
-      Promise.all(siblings.map(related)), Promise.all(recoveryIds.map(related)),
-      typeof deps.fleet.runTrigger === "function" ? Promise.resolve().then(() => deps.fleet.runTrigger(record.triggerIndex, record.triggerType)).catch(() => null) : null,
-      recoveryIds.length && typeof deps.fleet.runHolds === "function" ? askedOr(() => deps.fleet.runHolds(q.id, record), null).catch(() => null) : null,
-    ]);
-    data.siblings = siblingRecords.filter(Boolean);
-    data.recoveryRuns = [record, ...recoveryRecords.filter(Boolean)].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
-    data.trigger = trigger;
-    data.runHolds = holds;
-    const continuation = data.chat?.activeJobId ?? data.chat?.queuedJobId;
-    if (continuation && continuation !== q.id && RUN_ID_RE.test(continuation)) {
-      try { data.recoveryLive = await asked(() => deps.fleet.runLiveFacts?.(continuation, lookup)) ?? null; } catch { data.recoveryLive = null; }
-      try { data.recoveryProgress = await asked(() => deps.fleet.progressOfRun?.(continuation, recoveryRecords.find((r) => r?.jobId === continuation) ?? null)) ?? null; } catch { data.recoveryProgress = null; }
-    }
-    if (refusedBeforeStart(record)) {
+  };
+  const refusedSnapshotRead = async () => {
+    if (name === "run" && data.run?.record && refusedBeforeStart(data.run.record)) {
       try { data.snapshot = await asked(() => deps.fleet.snapshot()); } catch (err) { data.snapshot = null; if (err instanceof PageDeadlinePassed) data.snapshotFailure = "late"; }
+    }
+  };
+  const refusedWindowRead = async () => {
+    if (name === "run" && data.run?.record && refusedBeforeStart(data.run.record)) {
       try { data.runsWindow = await runsWindowRead() ?? null; } catch { data.runsWindow = null; }
     }
-  }
-  if (reads.includes("insights")) {
-    const fullPaths = q.paths === "full" && who?.role === "operator";
-    try {
-      data.insights = await deps.insights(q.range ?? INSIGHTS_DEFAULT_RANGE, { fullPaths, project: q.project ?? null, role: who?.role ?? "viewer", view: name === "insights" ? "spend" : name.slice("insights-".length) });
-    } catch {
-      data.insights = null;
-      // Nothing here writes a log, so the sentence names none. What throws is a fold over a record it cannot read (a run
-      // record whose `usage.models` is not a list, say), not an outage: every outage read answers with its own unknowns.
-      data.insightsError = "The spend history could not be assembled.";
-    }
-    try {
-      const models = typeof deps.pricedModels === "function" ? deps.pricedModels() : [];
-      data.pricedModels = Array.isArray(models) ? models : [];
-    } catch {
-      data.pricedModels = [];
-    }
-    if (typeof q.whatif === "string") {
-      if (typeof deps.whatIf !== "function") data.whatIf = { model: q.whatif, flow: q.flow, unreachable: "the what-if reader is not wired" };
-      else {
-        try {
-          data.whatIf = await deps.whatIf({ model: q.whatif, flow: q.flow ?? null, range: q.range, project: q.project ?? null, runs: q.runs ?? "24h" });
-        } catch {
-          data.whatIf = { model: q.whatif, flow: q.flow, unreachable: "the what-if estimate failed" };
+  };
+  const insightsRead = async () => {
+    if (reads.includes("insights")) {
+      try {
+        data.insights = await insightsStarted;
+      } catch {
+        data.insights = null;
+        // Nothing here writes a log, so the sentence names none. What throws is a fold over a record it cannot read (a run
+        // record whose `usage.models` is not a list, say), not an outage: every outage read answers with its own unknowns.
+        data.insightsError = "The spend history could not be assembled.";
+      }
+      try {
+        const models = typeof deps.pricedModels === "function" ? deps.pricedModels() : [];
+        data.pricedModels = Array.isArray(models) ? models : [];
+      } catch {
+        data.pricedModels = [];
+      }
+      if (typeof q.whatif === "string") {
+        if (typeof deps.whatIf !== "function") data.whatIf = { model: q.whatif, flow: q.flow, unreachable: "the what-if reader is not wired" };
+        else {
+          try {
+            data.whatIf = await deps.whatIf({ model: q.whatif, flow: q.flow ?? null, range: q.range, project: q.project ?? null, runs: q.runs ?? "24h" });
+          } catch {
+            data.whatIf = { model: q.whatif, flow: q.flow, unreachable: "the what-if estimate failed" };
+          }
         }
       }
     }
-  }
-  if (reads.includes("audit")) {
-    try {
-      data.audit = await readAuditView({ read: (a) => deps.audit({ ...a, positions: true }), verify: deps.auditVerify, query: q, perPage: AUDIT_PER_PAGE });
-    } catch {
-      data.audit = null;
+  };
+  const auditRead = async () => {
+    if (reads.includes("audit")) {
+      try {
+        data.audit = await readAuditView({ read: (a) => deps.audit({ ...a, positions: true }), verify: deps.auditVerify, query: q, perPage: AUDIT_PER_PAGE });
+      } catch {
+        data.audit = null;
+      }
     }
-  }
-  if (reads.includes("parkedChecks") && data.snapshot && formsDrawn(who)) {
-    // Issue #737: whether each parked run that could take an answer can take one here, the planner's own check
-    // (`parkedAnswerCheckOf`, reused per run for PARK_CHECK_CACHE_MS, an unreadable answer as long as a good one), for
-    // the rows `parkedCheckRows` names. Not for a load no form is drawn from (a viewer's, a read-only console's): the
-    // panel draws a form for an operator on a console that takes changes alone.
-    const rows = parkedCheckRows(data.snapshot);
-    const isoOf = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
-    const unread = () => (typeof deps.fleet?.parkedAnswerCheck === "function" ? { unreachable: true } : null);
-    const got = await Promise.all(rows.map((p) => askedOr(() => parkedAnswerCheckOf(deps.fleet, p.jobId, { jobId: p.jobId, endedAt: isoOf(p.parkedAt), target: p.target }, { now: () => now, lookup }), unread)));
-    data.parkedChecks = Object.fromEntries(rows.map((p, i) => [p.jobId, got[i]]));
-  }
-  if (reads.includes("parkedCount")) data.parkedCount = await askedOr(() => parkedCountOf(deps), null);
+  };
+  const parkedChecksRead = async () => {
+    if (reads.includes("parkedChecks") && data.snapshot && formsDrawn(who)) {
+      // Issue #737: whether each parked run that could take an answer can take one here, the planner's own check
+      // (`parkedAnswerCheckOf`, reused per run for PARK_CHECK_CACHE_MS, an unreadable answer as long as a good one), for
+      // the rows `parkedCheckRows` names. Not for a load no form is drawn from (a viewer's, a read-only console's): the
+      // panel draws a form for an operator on a console that takes changes alone.
+      const rows = parkedCheckRows(data.snapshot);
+      const isoOf = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
+      const unread = () => (typeof deps.fleet?.parkedAnswerCheck === "function" ? { unreachable: true } : null);
+      const got = await Promise.all(rows.map((p) => askedOr(() => parkedAnswerCheckOf(deps.fleet, p.jobId, { jobId: p.jobId, endedAt: isoOf(p.parkedAt), target: p.target }, { now: () => now, lookup }), unread)));
+      data.parkedChecks = Object.fromEntries(rows.map((p, i) => [p.jobId, got[i]]));
+    }
+  };
+  const parkedCountRead = async () => {
+    if (reads.includes("parkedCount")) data.parkedCount = await askedOr(() => parkedCountOf(deps), null);
+  };
+  // THE WAVES (see above). A read that needs another read's answer is started when that read has settled, never before:
+  //   - the snapshot, then the views that take it: a view that read the snapshot again would wait for it twice, the
+  //     stacked timeout issue #962 removed, so each is handed the one this load read (or the files, where it failed);
+  //   - the trigger's skew check after the snapshot: it is asked about the snapshot's own waiting rows;
+  //   - a run's record, then all that is keyed on it: its children, progress, chat, actions, workspace and related
+  //     runs, and for a run refused before it started the snapshot and the runs' window its page draws;
+  //   - the chat, then its answer check (inside `chatRead`: only a chat that can take a reply has one), then the reads
+  //     of the run that continues it, which the chat names and whose record the related runs' read holds;
+  //   - the pages of a search for children (`childrenOf`): each page's cursor comes from the page before it.
+  // Left as they were, one after another inside one read: the Insights assembly with its what-if estimate, and a
+  // run's fork points, re-run check and sandbox check (`actionsRead`), of which the re-run check alone asks Valkey.
+  const snapshotReads = async () => {
+    await snapshotRead();
+    if (name === "host") data.host = data.snapshot?.hostBudgets?.find((host) => host.name === q.name) ?? null;
+    await together([setupRead, modelsRead, secretsRead, connectionsRead, projectRead, triggerListRead, triggerDetailRead, parkedChecksRead]);
+  };
+  const recordReads = async () => {
+    await runRead();
+    // Issue #920: what a forge job's /artifacts folder left, from this host's store (the manifest only, never a file).
+    if (reads.includes("artifacts") && typeof deps.fleet?.artifacts === "function") {
+      try {
+        data.artifacts = data.run?.record ? deps.fleet.artifacts(q.id, data.run.record) : null;
+      } catch {
+        data.artifacts = null;
+      }
+    }
+    await together([
+      childrenRead, progressRead, liveFactsRead, workspaceRead, refusedSnapshotRead, refusedWindowRead, runActionsRead,
+      async () => {
+        await together([runChatRead, relatedRead]);
+        await continuationRead();
+      },
+    ]);
+  };
+  await together([
+    watchRead, answererRead, agentWritesRead, gatewayRead, sandboxesRead, sandboxRunRead, hostLoadsRead, zeroTouchRead, snapshotReads,
+    updatesRead, fireCheckRead, editorRead, hostHistoryRead, hostCapacityRead, subscriptionsRead, runsPageRead, windowRead, recordReads,
+    transcriptRead, inboxRead, insightsRead, auditRead, parkedCountRead,
+  ]);
   return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "setup" ? { setup: setupFacts(data.setup, { role: "agent" }) } : {}), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}) } : data;
 }
 

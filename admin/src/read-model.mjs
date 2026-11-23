@@ -4745,6 +4745,11 @@ export function doctorSelfName(env) {
 
 /** How long the reader waits on the registry before drawing the fleet it last knew. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
+/**
+ * How long the fleet reader's skew check waits for one waiting job (the reader's own read bound), named (issue #988)
+ * for a page that hands the check this or what is left of its deadline, whichever is sooner.
+ */
+export const TRIGGER_SKEW_READ_MS = FLEET_READ_TIMEOUT_MS;
 
 /** A switch preview's read of one queue that Valkey answered with an error (issue #1053), beside the reply's code. */
 const ERRORED_READ = Symbol("errored-read");
@@ -5433,12 +5438,15 @@ export function createFleetReader(
       return waitingOf(queues, Array.isArray(projects?.projects) ? projects.projects : null, Array.isArray(triggers?.triggers) ? triggers.triggers : null);
     },
     // `viaFs` (issue #800): a preview asks what the PROPOSED file would refuse, by handing in the dry run's file system.
-    async triggerSkew(index, waiting, { fs: viaFs = fs } = {}) {
+    // `timeoutMs` (issue #988): the bound of each job's lookup where a caller names one (a page hands it what is left
+    // of its deadline), `TRIGGER_SKEW_READ_MS` otherwise. The check then ends inside the caller's time and says for
+    // itself that it was incomplete, where a caller that stopped waiting could only say nothing was checked.
+    async triggerSkew(index, waiting, { fs: viaFs = fs, timeoutMs = TRIGGER_SKEW_READ_MS } = {}) {
       return readTriggerSkew({ index, waiting, triggersPath: paths.triggersPath, fs: viaFs, lookupJob: async (name, id) => {
         const queues = await fleetQueues();
         const q = queues.find((q) => q.name === name) ?? (pool.has(name) ? queueNamed(name) : null);
         return q ? q.getJob(id) : null;
-      }, timeoutMs: FLEET_READ_TIMEOUT_MS });
+      }, timeoutMs });
     },
     async snapshot(opts = {}) {
       const waiting = opts?.waiting === true;
@@ -5914,13 +5922,20 @@ export function createFleetReader(
       return readRunsPage(redis, { ...opts, logsDir: paths.logsDir, fs, now: nowFn, localIndex });
     },
     // `timeoutMs` (issue #988) is the mirror read's bound where a caller names one (a page hands it what is left of its
-    // deadline), `readRunById`'s own otherwise.
-    async runById(jobId, { historyHost = null, timeoutMs } = {}) {
+    // deadline), `readRunById`'s own otherwise. `within` is the caller's deadline as a function (a bound's own, or what
+    // is left when that is sooner), for the two reads that follow the mirror's where a host is asked for its own
+    // history, one after the other: with it each ends inside the caller's time, and this answers in its own words (the
+    // host is not available, or could not provide the record) where the caller would otherwise have to say something
+    // of its own. The registry's read is the reader's shared one and keeps its bound: a caller whose time ends first
+    // goes on with the hosts last seen, which is what that read leaves when the registry does not answer.
+    async runById(jobId, { historyHost = null, timeoutMs, within = null } = {}) {
       const local = await readRunById(redis, { logsDir: paths.logsDir, jobId, fs, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
       if (local.record || local.invalid || !historyHost) return local;
-      await fleetQueues();
+      const bounded = typeof within === "function";
+      if (bounded) await withTimeout(fleetQueues(), within(Infinity), null);
+      else await fleetQueues();
       if (!lastHosts.some((h) => h.name === historyHost)) return { unreadable: "the host holding this run is not available" };
-      const got = await readHostHistory({ redis, host: historyHost, query: { id: jobId } });
+      const got = await readHostHistory({ redis, host: historyHost, query: { id: jobId }, ...(bounded ? { timeoutMs: within(HOST_HISTORY_READ_MS) } : {}) });
       return got.record?.jobId === jobId ? { record: shownRecord(got.record), source: "host" } : { unreadable: "the host could not provide this run's record" };
     },
     // The live transcript (issue #643), off this reader's held client and bounded by its timeout: `readTranscriptSince`
@@ -7138,6 +7153,11 @@ export const RUNS_PAGE_EXAMINE_MAX = 2000;
  * (issue #988) for a page that hands the reader this or what is left of its deadline, whichever is sooner.
  */
 export const RUN_MIRROR_READ_MS = 2_500;
+/**
+ * How long a host is given to answer for a run of its own history (`readHostHistory`'s own default), named here
+ * (issue #988) for a caller with a deadline, which hands the host's read this or what it has left.
+ */
+export const HOST_HISTORY_READ_MS = 5_000;
 const RUNS_PAGE_BATCH = 200;
 
 /**
