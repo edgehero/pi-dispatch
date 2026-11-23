@@ -1,4 +1,6 @@
 /** Fresh producer admission for model-requested local starts (#766). No persona or request rationale is authority. */
+import { ALLOWANCE_UNREAD } from "./read-model.mjs";
+
 export function paidStartEnvironment(env, grantsEnv) {
   const roots = grantsEnv?.PI_DISPATCH_RUN_ROOTS;
   const hourly = grantsEnv?.PI_DISPATCH_RUN_PER_HOUR;
@@ -15,6 +17,10 @@ export async function checkAgentRerun(plan, { rm, env, grantsEnv, now, consumeRa
   const result = await rm.checkDispatchRun({ folder: job.folder, flow: job.flow, aiInvoked: true, consumeRate, env: granted.env, now });
   // The count against the hour was sent and not answered (issue #961): nothing was queued, and nothing is given back.
   if (result.allowanceMayBeUsed) return { refusal: "Nothing was queued. The paid-start allowance was sent this start and did not answer, so one start of this hour may have been used.", partial: true };
-  if (result.refused || result.unreachable) return { refusal: result.refused ?? "The paid-start admission could not read its shared allowance." };
+  if (result.refused) return { refusal: result.refused };
+  // Valkey did not answer the hour's allowance, with nothing counted: the one sentence for it (issue #987), which Fire
+  // now and the `run-enqueue` preview say too. It had words of its own here, "The paid-start admission could not read
+  // its shared allowance.", which did not say that nothing was queued.
+  if (result.unreachable) return { refusal: ALLOWANCE_UNREAD };
   return { ok: true };
 }

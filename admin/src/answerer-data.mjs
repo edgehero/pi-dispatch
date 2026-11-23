@@ -8,10 +8,19 @@ import { parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { makeAnswerDraftStore, answerStandingSource, answerRuleConfigDigest, answerApiRoot } from "@edgehero/pi-dispatch/answerer";
 import { planStandingAnswerAdd, applyStandingAnswerAdd, planAnswerDraftDrop } from "./answerer-actions.mjs";
-import { boundedClient, CONFIRM_READ_TIMEOUT_MS, valkeyRead, within } from "./job-actions.mjs";
+import { boundedClient, CONFIRM_READ_TIMEOUT_MS, refusedByValkey, valkeyRead, within } from "./job-actions.mjs";
+import { writeTracking } from "./read-model.mjs";
 
 /** What a read that ran out of time answers inside the service, told apart from every value a store returns. */
 const READ_LATE = Symbol("read-late");
+
+/**
+ * What a draft's drop says when its write was asked for and not answered (issue #987). The store ends each of its
+ * commands by a timer of its own, 2 seconds, before the client's bound, with an error that cannot say whether the
+ * command was sent, and the drop threw it on: the confirm then said the change could not be made and that nothing was
+ * changed, of a drop that landed when Valkey woke (measured on a real console: the row read `dropped` after the wake).
+ */
+export const DRAFT_DROP_UNCONFIRMED = "The draft may or may not have been dropped: the drop was asked for and Valkey did not answer. Reload its run page once Valkey answers before trying again.";
 
 const hash = text => createHash("sha256").update(text).digest("hex");
 const RUN_RE = /^[A-Za-z0-9._:-]{1,200}$/;
@@ -38,12 +47,15 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
   // What a timed path throws because Valkey did not answer is marked `valkeyNotSent` (issue #987), which the console's
   // preview answers as Valkey unreachable with Try again: this timer's own error, and a read asked through
   // `valkeyRead`, whose mark is kept where every other is dropped. True of each of them, since none writes.
-  const using = async (fn, { timed = false } = {}) => {
+  // `tracking` hands `fn` the client's write tracker beside the store (`writeTracking`), for a path whose answer depends
+  // on whether a write had left when the store gave up on it.
+  const using = async (fn, { timed = false, tracking = false } = {}) => {
     const redis = boundedClient(redisFn, paths.valkeyUrl);
     const release = () => {
       try { redis.disconnect?.(); } catch { /* already closed */ }
     };
-    const work = Promise.resolve().then(() => fn(storeFn({ redis, now, retentionDays: Number(env.PI_LOG_RETENTION_DAYS ?? 30) })));
+    const tracked = tracking ? writeTracking(redis) : null;
+    const work = Promise.resolve().then(() => fn(storeFn({ redis: tracked ? tracked.redis : redis, now, retentionDays: Number(env.PI_LOG_RETENTION_DAYS ?? 30) }), tracked));
     if (!timed) {
       try { return await work; }
       finally { release(); }
@@ -121,14 +133,22 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
         if (!got.plan || got.plan.afterDigest !== entry.afterDigest || got.plan.beforeDigest !== entry.beforeDigest) return { invalid: "The standing answers changed since the preview. Reload and preview again." };
         return applyStandingAnswerAdd({ plan: got.plan, paths, fs });
       }
-      if (name === "answer-draft-drop") return using(async store => {
-        // The read has an end of its own; the drop below has none but its client's, whose error says whether it was sent.
+      if (name === "answer-draft-drop") return using(async (store, tracked) => {
+        // The read has an end of its own. The drop below has the store's (2 seconds for each command), whose error
+        // cannot say whether its command was sent, so what it left is told by what the client was asked: nothing was
+        // changed while the store had only read (the row's own read comes first), and once the write was asked for it
+        // may or may not have been made (issue #987). Valkey's own reply is an answer, and is thrown on as it is.
         const read = await readInTime(currentDraft(store, params.runId));
         if (read === READ_LATE) return { unreachable: true };
         const got = planAnswerDraftDrop({ params, draft: read.draft });
         if (!got.plan) return { invalid: got.refusal };
-        return await store.drop(params.runId, { draftRunId: params.draftRunId, draftDigest: params.digest }) ? { ok: true } : { invalid: "The draft changed before it could be dropped. Reload its run page." };
-      });
+        try {
+          return await store.drop(params.runId, { draftRunId: params.draftRunId, draftDigest: params.digest }) ? { ok: true } : { invalid: "The draft changed before it could be dropped. Reload its run page." };
+        } catch (err) {
+          if (refusedByValkey(err)) throw err;
+          return tracked.wrote ? { invalid: DRAFT_DROP_UNCONFIRMED, partial: true } : { unreachable: true };
+        }
+      }, { tracking: true });
       return { invalid: "This answerer action is not available." };
     },
     async sent({ runId, draftRunId, digest, text, by }) {
