@@ -337,7 +337,6 @@ const MARKS = Object.freeze({
     ["the failed jobs", { snapshot: { ...SNAP, failed: { unreachable: "Command timed out" } } }],
     ["the doctor results", { snapshot: { ...SNAP, doctor: { unreachable: "the doctor results could not be read" } } }],
     ["a settings overlay nobody could read", { snapshot: { ...SNAP, settings: { path: "settings.json", invalid: "settings file unreadable (EACCES)" } } }],
-    ["a settings overlay that does not load, which the Caps card words the same", { snapshot: { ...SNAP, settings: { path: "settings.json", invalid: "settings file is not valid JSON" } } }],
     ["no view of the settings overlay", { snapshot: { ...SNAP, settings: null } }],
     ["the day's failures, as the reader answers a fold that failed", { snapshot: { ...SNAP, failures24h: null } }],
     ["the day's runs, of a fold that failed", { snapshot: { ...SNAP, runsDay: null } }],
@@ -436,6 +435,8 @@ test("dataUnread, by page: each read a page makes beside its snapshot marks the 
     ["runs", { runsPage: { ...READ.runs.runsPage, mirror: "bounded" } }, "an agent's copy of a mirror that answered"],
     ["host", { hostHistory: { runs: [], records: [], mirror: "bounded" } }, "the same, on the page of a host no record names"],
     ["overview", { snapshot: { ...SNAP, settings: { path: "settings.json", overlay: {} } } }, "a settings file that does not exist: an empty overlay, read"],
+    // One word per case (issue #988): the Caps card says this one does not load, which is not a read that failed.
+    ["overview", { snapshot: { ...SNAP, settings: { path: "settings.json", invalid: "settings file is not valid JSON" } } }, "a settings overlay that was read and does not load"],
     ["overview", { snapshot: { queue: { fleetDegraded: null } } }, "a snapshot that was asked for none of these parts"],
     ["overview", { snapshot: { ...SNAP, runsDay: { runs: [], partial: false }, spendByHour: { hours: [], partial: true, floor: true } } }, "a day read whole, and hours that may be short, which its card says in other words"],
     ["fleet", { snapshot: { ...SNAP, failures24h: null, runsDay: null, spendByHour: null } }, "the day's fold, which Fleet does not draw"],

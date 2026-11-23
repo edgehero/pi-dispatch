@@ -8,10 +8,11 @@ import { makeAnswererService } from "../../src/answerer-data.mjs";
 import { readHostLoadsView } from "../../src/host-loads-view.mjs";
 import { assembleHostCapacity } from "../../src/insights-assembly.mjs";
 import { readProjectView } from "../../src/project-view.mjs";
-import { createFleetReader, readCapacity, readSubscriptions, scanRunRecords } from "../../src/read-model.mjs";
+import { readModelsView } from "../../src/models-view.mjs";
+import { configLocationsOf, createFleetReader, readCapacity, readSubscriptions, readTriggerEditor, scanRunRecords } from "../../src/read-model.mjs";
 import { makeSandboxService } from "../../src/sandbox-data.mjs";
 import { triggerListOf } from "../../src/trigger-list.mjs";
-import { keyedRedis, quietQueue, registryKeys } from "./fleet-reader-fakes.mjs";
+import { downQueue, downRedis, keyedRedis, quietQueue, registryKeys } from "./fleet-reader-fakes.mjs";
 import { tempDir } from "./temp-dir.mjs";
 
 /**
@@ -29,13 +30,13 @@ export const iso = (ago) => new Date(NOW - ago).toISOString();
  * in a state of its own: "absent" (it does not exist), "invalid" (it is there and is not JSON) or "unreadable" (it is
  * there and nobody may read it).
  */
-export function deployment(records = [], { logs = "folder", files = {} } = {}) {
+export function deployment(records = [], { logs = "folder", files = {}, triggers = null } = {}) {
   const dir = join(tempDir("pd-988-pill-"), "deployment");
   mkdirSync(logs === "folder" ? join(dir, "logs") : dir, { recursive: true });
   // `logs: "file"`: the run history's folder is not one, so this host's run files cannot be listed.
   if (logs === "file") writeFileSync(join(dir, "logs"), "not a folder");
   const paths = { valkeyUrl: "redis://unused", logsDir: join(dir, "logs"), globalPiDir: join(dir, "pi"), schedulerStallMax: 2, triggersPath: join(dir, "triggers.json"), projectsFile: join(dir, "projects.json"), settingsFile: join(dir, "settings.json"), subscriptionsPath: join(dir, "subscriptions.json") };
-  writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [{ on: { type: "label", any: ["go"] }, run: { kind: "github", flow: "fix" } }] }));
+  writeFileSync(paths.triggersPath, JSON.stringify(triggers ?? { triggers: [{ on: { type: "label", any: ["go"] }, run: { kind: "github", flow: "fix" } }] }));
   writeFileSync(paths.projectsFile, JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }] }));
   writeFileSync(paths.settingsFile, JSON.stringify({ maxTurns: 30 }));
   if (logs === "folder") for (const record of records) writeFileSync(join(paths.logsDir, `${record.jobId}.json`), JSON.stringify(record));
@@ -52,8 +53,8 @@ export function deployment(records = [], { logs = "folder", files = {} } = {}) {
  * A console's page dependencies as `cli.mjs` wires them for these four pages, on `redis` and `queue` and over a
  * deployment folder that holds `records`.
  */
-export function consoleOn({ redis, queue = quietQueue(), records = [], logs = "folder", files = {}, gateway = async () => ({ enabledHosts: [], sessions: [] }) }) {
-  const { dir, paths, env } = deployment(records, { logs, files });
+export function consoleOn({ redis, queue = quietQueue(), records = [], logs = "folder", files = {}, triggers = null, gateway = async () => ({ enabledHosts: [], sessions: [] }) }) {
+  const { dir, paths, env } = deployment(records, { logs, files, triggers });
   const fleet = createFleetReader(paths, { redisFn: () => redis, makeQueueFn: queue, parseConnectionFn: () => ({}), nowFn: () => NOW, readOnly: true, dollarEnvFn: () => env });
   const services = { paths, env, now: () => NOW, redisFn: () => redis };
   return {
@@ -68,6 +69,9 @@ export function consoleOn({ redis, queue = quietQueue(), records = [], logs = "f
     selfHost: () => "build3",
     setupGranted: () => false,
     watch: fleet.watch,
+    modelsView: (snapshot, { within } = {}) => readModelsView({ paths, env, deploymentDir: dir, now: NOW, snapshot, fleet, redis, within }),
+    triggerEditor: () => readTriggerEditor({ paths, env, deploymentDir: dir }),
+    configLocations: () => configLocationsOf({ paths, deploymentDir: dir }),
     projectView: (id, snapshot, { within } = {}) => readProjectView({ id, snapshot, paths, env, deploymentDir: dir, fleet, now: NOW, within }),
     // The list's history: this host's scan and what the snapshot holds of the fleet's mirror, with the coverage the
     // console states for it (a scan that failed is a side unread).
@@ -105,8 +109,8 @@ export const pillOf = (page) => {
 /**
  * A page as a console draws it for `role`: its data; every place a panel says "could not be read", as `said` (the
  * panel and the words around it, a sentence or a cell of a table) and counted per panel as `times`; what the rule
- * says of that data (`pill`); the whole page's words (`words`); and whether the page the server draws carries the
- * pill's mark (`marked`, null on a page with no pill).
+ * says of that data (`pill`); the whole page (`whole`) and its words (`words`); and whether the page the server draws
+ * carries the pill's mark (`marked`, null on a page with no pill).
  */
 export async function drawn(page, qs, deps, role) {
   const query = parsePageQuery(page, new URLSearchParams(qs)).query;
@@ -121,7 +125,7 @@ export async function drawn(page, qs, deps, role) {
     for (const place of found) said.push(`${panel.id}: ${place.trim()}`);
   }
   const whole = String((await renderPage(page, ctx)).html);
-  return { data, said, times, pill: dataUnread(data), words: wordsOf(whole), marked: pillOf(whole) };
+  return { data, said, times, pill: dataUnread(data), whole, words: wordsOf(whole), marked: pillOf(whole) };
 }
 
 export const RUN = { v: 1, jobId: "gh-1", attempt: 1, kind: "github", target: "acme/web#12", project: "web", host: "build3", backend: "local", flow: "fix", outcome: "completed", reason: null, startedAt: iso(120_000), endedAt: iso(60_000) };
@@ -179,3 +183,16 @@ export const failing = (client, commands) => new Proxy(client, { get: (target, k
 export const unanswered = new Proxy({}, { get: (_, key) => (typeof key === "symbol" || key === "then" ? undefined : key === "exec" ? () => Promise.reject(new Error("Command timed out")) : () => unanswered) });
 /** A queue that answers, but for `calls`. */
 export const failingQueue = (calls) => (connection, opts) => ({ ...quietQueue()(connection, opts), ...Object.fromEntries(calls.map((call) => [call, () => Promise.reject(new Error("Command timed out"))])) });
+
+/** The states a rule of the console is held to: every read answering, each command and each queue call failing alone, and all. */
+export const STATES = [
+  ["every read answers", () => ({ redis: healthy(HOST), records: [RUN, REFUSED] })],
+  ["a Valkey that holds nothing", () => ({ redis: healthy(), records: [RUN, REFUSED] })],
+  ["a fleet whose mirror is on", () => ({ redis: mirroring([FAR]), records: [RUN, REFUSED] })],
+  ...["smembers", "hgetall", "hmget", "hget", "get", "mget", "lrange", "zrange", "zrevrangebyscore", "scan", "exists", "zscore", "pttl", "time", "xlen", "xrange", "xrevrange", "zrangebyscore", "eval"].map((command) => [`${command} is not answered`, () => ({ redis: failing(healthy(HOST), [command]), records: [RUN, REFUSED] })]),
+  ["no pipeline is answered", () => ({ redis: { ...healthy(HOST), pipeline: () => unanswered }, records: [RUN, REFUSED] })],
+  ...["getJob", "getJobCounts", "getActive", "getFailed", "getJobSchedulers", "getWorkers", "isPaused", "getJobState"].map((call) => [`the queue's ${call} is not answered`, () => ({ redis: healthy(HOST), queue: failingQueue([call]), records: [RUN, REFUSED] })]),
+  ["this host's run files cannot be listed", () => ({ redis: healthy(HOST), logs: "file" })],
+  ...["triggers", "projects", "settings"].flatMap((file) => [["absent", "does not exist"], ["invalid", "is not JSON"], ["unreadable", "may not be read"]].map(([state, words]) => [`the ${file} file ${words}`, () => ({ redis: healthy(HOST), records: [RUN, REFUSED], files: { [file]: state } })])),
+  ["nothing is answered", () => ({ redis: downRedis(), queue: downQueue(), records: [RUN, REFUSED] })],
+];

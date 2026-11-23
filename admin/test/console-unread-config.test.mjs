@@ -12,7 +12,7 @@ import { TRIGGER_GETS_WORDS } from "../src/trigger-gets-view.mjs";
 import { SECRETS_CELL_UNREAD, SECRETS_FILES_ONLY_TEXT, SECRETS_FILES_ONLY_TITLE, SECRETS_RUN_UNREAD, secretsProfilesUnreadText } from "../src/console/panels/secrets.mjs";
 import { BUNDLE_UNREAD, FORGE_NONE_HINT, FORGE_UNREAD_HINT, SCHEDULE_UNREAD, STALL_CAP_UNREAD } from "../src/console/panels/trigger.mjs";
 import { HOST_UNREAD_WORDS, RECENT_UNREAD_TEXT } from "../src/console/panels/updates.mjs";
-import { GRANTS_UNREAD } from "../src/console/panels/connections.mjs";
+import { GRANTS_REFUSED, GRANTS_UNREAD } from "../src/console/panels/connections.mjs";
 import { PACKAGES_MALFORMED_TEXT, PACKAGES_UNREAD_TEXT } from "../src/console/panels/config.mjs";
 import { readConsoleAudit, CONSOLE_AUDIT_DIR } from "@edgehero/pi-dispatch/console-audit";
 import { readDeploymentUpdates, readTriggersFile, HOST_ADOPT_STATES } from "../src/updates-view.mjs";
@@ -301,6 +301,12 @@ test("/config/connections: a private endpoint's grants are not known where the t
   const unread = await page((snapshot, reads) => { endpoints(reads); snapshot.triggers = { unreadable: "EACCES" }; });
   assert.ok(unread.includes(GRANTS_UNREAD), unread.match(/printer.{0,200}/)?.[0]);
   assert.ok(!/printer .*?no trigger/.test(unread.match(/printer.{0,200}/)?.[0] ?? ""), "never no trigger of a file nobody read");
+  assert.ok(!unread.includes(GRANTS_REFUSED), "a file nobody could read is not one that does not load");
+  // One word per case (issue #988): a triggers file that was read and is refused does not load.
+  const refused = await page((snapshot, reads) => { endpoints(reads); snapshot.triggers = { invalid: "triggers file is not valid JSON" }; });
+  assert.ok(refused.includes(GRANTS_REFUSED) && !refused.includes(GRANTS_UNREAD) && !/printer .*?no trigger/.test(refused.match(/printer.{0,200}/)?.[0] ?? ""), refused.match(/printer.{0,200}/)?.[0]);
+  assert.deepEqual(privateEndpointsView(declared, undefined, { triggersUnread: true, triggersRefused: true }).triggersRefused, true);
+  assert.equal(Object.hasOwn(privateEndpointsView(declared, undefined, { triggersUnread: true }), "triggersRefused"), false, "a key only for a file that was read and is refused");
   for (const triggers of [{ missing: true }, { triggers: [] }]) {
     const read = await page((snapshot, reads) => { endpoints(reads); snapshot.triggers = triggers; });
     assert.ok(/printer .*?no trigger/.test(read) && !read.includes(GRANTS_UNREAD), JSON.stringify(triggers));
@@ -417,6 +423,9 @@ test("/config/connections: Notifications says which triggers keep a status comme
   };
   const note = `Which triggers also keep a status comment is ${GRANTS_UNREAD}.`;
   assert.ok((await page({ unreadable: "EACCES" })).includes(note));
+  // One word per case (issue #988): the same of a file that was read and is refused.
+  const refused = await page({ invalid: "triggers file is not valid JSON" });
+  assert.ok(refused.includes(`Which triggers also keep a status comment is ${GRANTS_REFUSED}.`) && !refused.includes(note));
   for (const triggers of [{ missing: true }, { triggers: [] }]) {
     const read = await page(triggers);
     assert.ok(read.includes("Forge comments: on; paid failures and requests for input.") && !read.includes(note), JSON.stringify(triggers));

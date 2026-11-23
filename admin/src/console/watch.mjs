@@ -46,8 +46,10 @@ export async function loadWatchData(store, query, { board = false, privateRead =
       }
     }
     return out;
-  } catch {
-    return { unavailable: true };
+  } catch (error) {
+    // One word per case (issue #988): a triggers file that was read and is refused does not load, and one nobody could
+    // read could not be read. Neither is a store that could not be read.
+    return { unavailable: true, ...(["invalid", "unreadable"].includes(error?.watchConfiguration) ? { triggersFile: error.watchConfiguration === "invalid" ? "does not load" : "could not be read" } : {}) };
   }
 }
 
@@ -93,7 +95,7 @@ function findingRows(findings, rule, now, config) {
 
 export function watchPanel(view) {
   const data = view.data?.watch;
-  if (data?.unavailable || !data) return html`<div class="card"><h2>Watch unavailable</h2><p>The watch store could not be read. This is not an empty list.</p></div>`;
+  if (data?.unavailable || !data) return html`<div class="card"><h2>Watch unavailable</h2><p>${data?.triggersFile ? `The triggers file ${data.triggersFile}, so its watch rules and sources are not shown.` : "The watch store could not be read."} This is not an empty list.</p></div>`;
   const rules = rows(data.rules);
   return html`<div class="stack"><div class="card"><h2>Sources</h2>${sourceSummaries(data).length ? html`<ul>${sourceSummaries(data).map((source) => html`<li class="tx__b">${source.id}: ${source.verify ?? "signature check"}${Number.isSafeInteger(source.maxPerDay) ? html`, daily cap ${source.maxPerDay}` : null}; last delivery ${source.lastDeliveryAt ? new Date(source.lastDeliveryAt).toISOString() : "unknown"}; ${source.suppressed} suppressed, ${source.capped} capped. Credential health is unknown here; doctor checks on the receiver host.</li>`)}</ul>` : html`<p>No source status is available. Doctor checks source credentials.</p>`}</div><div class="card"><div class="card__head"><h2>Watch rules</h2></div><p>Sources and rules are written by hand in triggers.json. Findings cannot choose a job's permissions.</p>${rules.length ? html`<ul>${rules.map((r) => html`<li class="tx__b">${link("/watch/board", "rule", r.id)}: ${r.source ?? "unknown source"}${Number.isSafeInteger(r.maxPerDay) ? html`, at most ${r.maxPerDay} findings per day` : null}${r.flow ? html`, flow ${r.flow}` : null}${r.mode ? html`, ${r.mode}` : null}${["closed", "active", "uncertain", "suppressed"].includes(r.summary?.lastIssueStatus) ? html`; issue ${r.summary.lastIssueStatus}${["watch-issue-close-uncertain", "watch-issue-close-raced", "watch-issue-close-policy-changed"].includes(r.summary?.lastIssueReason) ? html` (${r.summary.lastIssueReason})` : null}` : null}</li>`)}</ul>` : html`<p>No watch rules have received findings.</p>`}</div><div class="card"><h2>Findings${data.selectedRule ? html` for ${data.selectedRule}` : null}</h2>${rows(data.findings).length ? html`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Finding</th><th>Severity</th><th>Count</th><th>Outcome</th><th>Cooldown</th><th>Job</th></tr></thead><tbody>${findingRows(data.findings, data.selectedRule ?? view.query?.rule, view.now, rows(data.rules).find((r) => r.id === (data.selectedRule ?? view.query?.rule)))}</tbody></table></div>` : html`<p>No retained findings for this rule.</p>`}</div></div>`;
 }
@@ -133,7 +135,7 @@ function publicTrace(entries) {
 
 export function watchBoardPanel(view) {
   const data = view.data?.watch;
-  if (data?.unavailable || !data) return html`<div class="card"><h2>Board unavailable</h2><p>The watch store could not be read. Try again.</p></div>`;
+  if (data?.unavailable || !data) return html`<div class="card"><h2>Board unavailable</h2><p>${data?.triggersFile ? `The triggers file ${data.triggersFile}, so this board is not shown. Fix the file and reload.` : "The watch store could not be read. Try again."}</p></div>`;
   const board = data.board;
   const summary = publicBoardSummary(board);
   return html`<div class="stack"><div class="card"><h2 class="tx__b">Rule ${view.query?.rule}</h2><p>${link("/watch", "rule", view.query?.rule, "All findings")}</p><p>A person approves code changes. Each finding runs in a fresh bounded job.</p></div><div class="card"><h2>Board</h2><p>Version ${count(board?.version)}${board?.frozen ? ", frozen" : ""}</p>${view.role === "operator" ? operatorBoardBlocks(board) : html`<p>Board blocks: ${summary.blockCount}; proposals: ${summary.proposalCount}; retained versions: ${summary.versionCount}.</p>`}${summary.blockCount === 0 ? html`<p>No adopted board yet.</p>` : null}${boardControls(view, board)}</div><div class="card"><h2>Finding history</h2>${rows(data.findings).map((f) => html`<p><a class="link" href="/watch/board?rule=${encodeURIComponent(view.query?.rule ?? "")}&amp;finding=${encodeURIComponent(f.id ?? "")}">${f.id}</a>: ${f.verdict ?? f.status ?? "unknown"}, ${count(f.count)} events</p>`)}</div>${decisionSummary(data)}${view.query?.finding ? html`<div class="card"><h2>Evidence and trace</h2><ol>${publicTrace(data.trace)}</ol>${view.role === "operator" ? html`${privateTrace(data)}<p>${link("/api/watch-trace", "finding", view.query.finding, "Download private evidence as JSON")}</p>` : html`<p>Samples, query text, decision state and notes are shown to operators only.</p>`}</div>` : null}</div>`;

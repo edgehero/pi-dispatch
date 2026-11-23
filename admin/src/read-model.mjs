@@ -3839,7 +3839,15 @@ export function triggerDetailOf(snapshot, index, { now = snapshot?.readAt, subsc
     cost24h: measured.reduce((sum, n) => sum + (n ?? 0), 0) / 1_000_000,
     cost24hMicros: measured.reduce((sum, n) => sum + (n ?? 0), 0),
     costIncomplete: measured.some((n) => n === null),
-    historyIncomplete: Boolean(snapshot.parkedUnreachable || snapshot.failures24hFloor),
+    // The counts are floors where the day's fold was not read whole (`parkedUnreachable`), where it ended inside the day
+    // (`failures24hFloor`), and where the fleet's mirror did not answer the list's own read (issue #988). The fold is
+    // kept between reads, so for as long as it is a mirror that has just stopped answering leaves it whole: the list
+    // beside it is then the only read that says so, and the page said "0 runs" of a history it had not read.
+    historyIncomplete: Boolean(snapshot.parkedUnreachable || snapshot.failures24hFloor || mirrorDidNotAnswer(snapshot.runMirror)),
+    // `historyUnread`: the same mirror, for the page's words. A trigger with no run in what was read is one whose runs
+    // are not known, where the page said no runs were found. A window that ended inside the day was read whole: a
+    // floor, and not this.
+    historyUnread: mirrorDidNotAnswer(snapshot.runMirror),
     lastRuns: runs.slice(0, 5), history: runs, queued: trigger.runKind === "local" ? null : trigger.type === "cron" ? queued : snapshot.triggerSkew?.[index]?.queued ?? queued,
     skewed: snapshot.triggerSkew?.[index]?.rows ?? null,
     skewIncomplete: snapshot.triggerSkew?.[index]?.incomplete ?? true,
@@ -3894,6 +3902,15 @@ export function normalizeSecretBundlesForDisplay(value) {
  * describe two different versions of a file an operator saved between two reads. The view's shapes pass
  * through untouched (`missing`, `unreadable`, `invalid`), with an empty map beside them.
  */
+/**
+ * What the watch readers throw of a triggers file they could not take, with which case it is (`configuration`:
+ * "unreadable", nobody could read it; "invalid", it was read and is refused), for the page's word.
+ */
+const watchConfigurationError = (configuration) => Object.assign(new Error(`watch configuration ${configuration === "invalid" ? "does not load" : "unreadable"}`), { watchConfiguration: configuration });
+
+/** Whether the snapshot's word for the fleet's run mirror says it was on and did not answer: "unreachable (why)". */
+const mirrorDidNotAnswer = (word) => typeof word === "string" && word.startsWith("unreachable");
+
 export function readTriggersWithInstructions({ triggersPath, fs = nodeFs, includeTasks = false }) {
   let text = null;
   const capture = { readFileSync: (p, enc) => (text = fs.readFileSync(p, enc)) };
@@ -5218,14 +5235,15 @@ export function createFleetReader(
       try { config = JSON.parse(fs.readFileSync(paths.triggersPath, "utf8")); } catch (err) {
         // A triggers file that does not exist holds no source (issue #988), as it holds no rule (`listRules`).
         if (err?.code === "ENOENT") return [];
-        throw new Error("watch configuration unreadable");
+        // One word per case (issue #988): read and refused does not load; a read that failed is unreadable.
+        throw watchConfigurationError(typeof err?.code === "string" && /^E[A-Z0-9]+$/.test(err.code) ? "unreadable" : "invalid");
       }
       const sources = config.watchSources ?? {};
       return Object.entries(sources).slice(0, 256).map(([id, source]) => ({ id, verify: source.verify, maxBodyBytes: source.maxBodyBytes, maxPerDay: source.maxPerDay }));
     },
     async listRules() {
     const configured = readTriggers({ triggersPath: paths.triggersPath, fs });
-    if (configured.invalid || configured.unreadable) throw new Error("watch configuration unreadable");
+    if (configured.invalid || configured.unreadable) throw watchConfigurationError(configured.unreadable ? "unreadable" : "invalid");
     const rules = (configured.triggers ?? []).filter((t) => t.type === "watch");
     const observed = await watchStore.listRules();
     const merged = new Map(observed.map((r) => [r.id, r]));

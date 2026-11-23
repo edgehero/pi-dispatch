@@ -126,7 +126,7 @@ function authoredRefs(entry, deployment, envList) {
 }
 
 /** Caller-supplied clock and I/O facts. No policy oracle here can authorize a run. */
-export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], deployment = {}, envList = null, overlay = null, overlayUnknown = false, configUnknown = false, cooldowns = [], records = [], sourceRecords = [], snapshot, windows = [], coverage = {}, now, status: statusFn = failoverModelStatus, resolveFolder } = {}) {
+export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], deployment = {}, envList = null, overlay = null, overlayUnknown = false, configUnknown = false, configProblem = null, cooldowns = [], records = [], sourceRecords = [], snapshot, windows = [], coverage = {}, now, status: statusFn = failoverModelStatus, resolveFolder } = {}) {
   if (!Number.isSafeInteger(now) || now < 0) throw new TypeError("modelsViewOf requires the caller's clock");
   const statuses = new Map();
   const status = ref => {
@@ -135,7 +135,7 @@ export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], dep
   };
   const facts = collectModelPolicies({ entries, modelRoles, projects, deployment, envList, conservativeLocal: true, ...(resolveFolder ? { resolveFolder } : {}) });
   const banners = facts.checks.map(check => ({ kind: "role-conflict", reason: check.reason, index: check.sourceIndex, project: check.project, ...(check.projectUnknown === true ? { projectUnknown: true } : {}), label: check.label, fix: check.fix }));
-  if (configUnknown) banners.unshift({ kind: "configuration-unavailable", reason: "model-roles-invalid", label: "The model policy could not be read and validated. Roles and routing are unknown.", fix: "Check the triggers, projects and settings files before editing a role." });
+  if (configUnknown) banners.unshift({ kind: "configuration-unavailable", reason: "model-roles-invalid", label: configProblem ? `The ${configProblem.file} ${configProblem.word}, so the model policy is not known. Roles and routing are unknown.` : "The model policy could not be read and validated. Roles and routing are unknown.", fix: "Check the triggers, projects and settings files before editing a role." });
   if (overlayUnknown) banners.push({ kind: "catalog-unavailable", reason: "model-unknown", label: "The model catalog overlay could not be read. Price status is unknown.", fix: "Check models.json in the global pi overlay; no default routing is assumed." });
   const observedCooldowns = Array.isArray(cooldowns) ? cooldowns.filter(row => splitModelEntry(row?.ref) && ["rate-limited", "quota-exhausted", "overloaded"].includes(row.kind) && integer(row.until) !== null && row.until > now && row.until <= 253402300799999).map(row => ({ ref: row.ref, kind: row.kind, until: row.until })) : [];
   if (cooldowns === null) banners.push({ kind: "cooldowns-unavailable", reason: "model-cooldown", label: "Model cooldowns could not be read. Current failover routing is unknown.", fix: "Check Valkey and reload; no model was selected." });
@@ -205,10 +205,18 @@ export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], dep
   // snapshot at all (undefined: a comparison over records alone) asked for neither list.
   const waitingUnread = snapshot !== undefined && (snapshot === null || !snapshot.waiting || Boolean(snapshot.waiting.unreachable));
   const proposalsUnread = snapshot !== undefined && (snapshot === null || !snapshot.doctor || Boolean(snapshot.doctor.unreachable));
-  return { now, scopes: [...new Set(["default", ...projects.map(project => project.id), ...scopes])], state: configUnknown ? "unreadable" : "ready", partial: true, banners, roles, randomPools, recentRandom, cooldowns: observedCooldowns, cooldownsUnread: cooldowns === null, waitingUnread, proposalsUnread, models, proposals,
+  return { now, scopes: [...new Set(["default", ...projects.map(project => project.id), ...scopes])], state: configUnknown ? "unreadable" : "ready", ...(configUnknown && configProblem ? { configProblem: { file: configProblem.file, word: configProblem.word } } : {}), partial: true, banners, roles, randomPools, recentRandom, cooldowns: observedCooldowns, cooldownsUnread: cooldowns === null, waitingUnread, proposalsUnread, models, proposals,
     canaries: canariesOf(retained, roles, deployment, now, sourceRecords), waiting, recentFallbacks,
     coverage: { complete: false, partial: true, records: retained.length, days: MODELS_LIMITS.days, truncated: dedup.size > MODELS_LIMITS.records || coverage.truncated === true, notes } };
 }
+
+/**
+ * One word per case for a configuration file the policy could not take (issue #988): it "could not be read" where the
+ * read failed (an errno, or the settings reader's own word for it), and it "does not load" where it was read and is
+ * refused. A file that does not exist never comes here: it is an empty document.
+ */
+const fileProblemWord = (error) => (error?.settingsUnreadable === true || (typeof error?.code === "string" && /^E[A-Z0-9]+$/.test(error.code)) ? "could not be read" : "does not load");
+const settingsRefusal = (invalid) => Object.assign(new Error("invalid settings"), { settingsUnreadable: /^settings file unreadable/.test(String(invalid)) });
 
 function readText(path, fs, { missing = null } = {}) {
   if (!path) return missing;
@@ -288,19 +296,28 @@ export async function readModelsView({ paths = {}, env = {}, deploymentDir = nul
   now = typeof now === "function" ? now() : now;
   let configUnknown = false, overlayUnknown = false, entries = [], modelRoles = {}, projects = [], limits = [], overlay = null, envList = null;
   let settings = snapshot?.settings?.overlay ?? {};
+  // Which file stopped the policy, for the page's word (issue #988): `at` names the one being taken when the read threw.
+  let at = "triggers file", configProblem = null;
   try {
     const text = reads.triggers ? await reads.triggers() : readText(paths.triggersPath, fs, { missing: '{"triggers":[]}' });
     const parsed = parseTriggersDocument(text, paths.triggersPath);
     entries = JSON.parse(text).triggers;
     modelRoles = parsed.modelRoles ?? {};
+    at = "projects file";
     const projectText = reads.projects ? await reads.projects() : readText(paths.projectsFile, fs);
     projects = projectText === null ? [] : parseProjects(projectText, paths.projectsFile);
+    at = "scoped-limits file";
     const limitsText = reads.limits ? await reads.limits() : readText(paths.scopedLimitsPath, fs);
     limits = limitsText === null ? [] : parseScopedLimits(limitsText, paths.scopedLimitsPath);
-    if (snapshot?.settings?.invalid) throw new Error("invalid settings observation");
-    if (!snapshot?.settings) { const view = readSettingsView({ settingsFile: paths.settingsFile, fs }); if (view.invalid) throw new Error("invalid settings"); settings = view.overlay ?? {}; }
+    at = "settings overlay";
+    if (snapshot?.settings?.invalid) throw settingsRefusal(snapshot.settings.invalid);
+    if (!snapshot?.settings) { const view = readSettingsView({ settingsFile: paths.settingsFile, fs }); if (view.invalid) throw settingsRefusal(view.invalid); settings = view.overlay ?? {}; }
+    at = null;
     envList = allowedModelsFrom(env);
-  } catch { configUnknown = true; }
+  } catch (error) {
+    configUnknown = true;
+    if (at !== null) configProblem = { file: at, word: fileProblemWord(error) };
+  }
   try { overlay = reads.overlay ? await reads.overlay() : readOverlayModels(paths.globalPiDir, { readFileSync: (path, encoding) => readText(path, fs), lstatSync: path => fs.lstatSync(path) }); }
   catch { overlayUnknown = true; }
   const deployment = { provider: settings.provider ?? env.PI_PROVIDER ?? DEFAULT_PROVIDER, model: settings.model ?? env.PI_MODEL ?? DEFAULT_MODEL, maxCostUsd: settings.maxCostUsd ?? env.PI_MAX_COST_USD ?? null };
@@ -328,7 +345,7 @@ export async function readModelsView({ paths = {}, env = {}, deploymentDir = nul
   finally { if (owned) client?.disconnect?.(); }
   const windows = specs.map(spec => ({ ...spec, counterMicros: counters?.get(spec.key) ?? null }));
   const subscriptionAuth = await readSubscriptionAuthView({ snapshot, read: reads.subscriptionAuth, now });
-  return { subscriptionAuth, ...modelsViewOf({ entries, modelRoles, projects, deployment, envList, overlay, overlayUnknown, configUnknown, cooldowns, records, sourceRecords, snapshot, windows, coverage: historyCoverage, now, ...(reads.status ? { status: reads.status } : {}) }) };
+  return { subscriptionAuth, ...modelsViewOf({ entries, modelRoles, projects, deployment, envList, overlay, overlayUnknown, configUnknown, configProblem, cooldowns, records, sourceRecords, snapshot, windows, coverage: historyCoverage, now, ...(reads.status ? { status: reads.status } : {}) }) };
 }
 
 /** Explicit machine projection: no doctor prose, command, path, prompt, URL, arbitrary field or secret reaches a model. */

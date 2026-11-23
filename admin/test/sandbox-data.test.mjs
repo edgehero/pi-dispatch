@@ -231,9 +231,10 @@ test("preparation reads refuse inaccessible limits and a configured missing proj
   const s = setup(), params = { repo: "acme/web", index: 0, ref: "HEAD", host: "mini1", pin: false };
   const fs = { ...nodeFs, readFileSync(path, ...args) { if (path === s.paths.scopedLimitsPath) throw Object.assign(new Error("not for the log"), { code: "EACCES" }); return nodeFs.readFileSync(path, ...args); } };
   const inaccessible = makeSandboxService({ paths: s.paths, env: {}, deploymentDir: s.dir, fleet: s.fleet, fs, now: () => NOW });
-  assert.match((await inaccessible.preview("sandbox-prepare", params)).refusal, /could not be read/);
+  // One word per case, of the file that stopped it (issue #988): one sentence said "could not be read" of all three.
+  assert.equal((await inaccessible.preview("sandbox-prepare", params)).refusal, "The scoped-limits file could not be read. Fix the deployment configuration before preparing a sandbox.");
   s.paths.projectsFile = s.paths.projectsPath; unlinkSync(s.paths.projectsFile);
-  assert.match((await s.service.preview("sandbox-prepare", params)).refusal, /could not be read/);
+  assert.equal((await s.service.preview("sandbox-prepare", params)).refusal, "The projects file does not exist. Fix the deployment configuration before preparing a sandbox.");
   s.paths.projectsFile = null; unlinkSync(s.paths.scopedLimitsPath);
   assert.ok((await s.service.preview("sandbox-prepare", params)).payload);
 });

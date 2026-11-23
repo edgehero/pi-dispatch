@@ -16,8 +16,8 @@ import { html as escapedHtml } from "../html.mjs";
 // Keep indented source readable without emitting whitespace-only lines when an optional fragment is absent.
 const html = (strings, ...values) => escapedHtml(strings.map(s => s.replace(/[ \t]*\n[ \t]*/g, "\n")), ...values);
 import * as ui from "../kit.mjs";
-import { canAct, shownPath, runLink, moneyHtml, timeHtml } from "./common.mjs";
-import { actForm, field, area, table, facts } from "./config-ui.mjs";
+import { canAct, changesOffered, shownPath, runLink, moneyHtml, timeHtml } from "./common.mjs";
+import { actForm, field, area, table, facts, noChangeText } from "./config-ui.mjs";
 const card = (title, body) => ui.card({ title, body });
 const detail = (v) => v.data?.triggerDetail ?? {};
 // The row at this place in the file, as the snapshot's detail found it by the index each row carries, or with Valkey down the row the card read from the
@@ -154,7 +154,7 @@ export function triggerRuns(v) {
           >${d.historyIncomplete ? "at least " : ""}${d.count24h ??
           "unknown"}</b
         >
-        runs in the last 24 hours · ${moneyHtml(d.cost24hMicros)} metered
+        ${d.count24h === 1 ? "run" : "runs"} in the last 24 hours · ${d.historyIncomplete ? "at least " : ""}${moneyHtml(d.cost24hMicros)} metered
         spend${d.costIncomplete
           ? " (metered portion only; some runs have no cost)"
           : ""}.
@@ -171,7 +171,8 @@ export function triggerRuns(v) {
               <td>${recordReason(r) ? reasonWords(recordReason(r)).sentence ?? `No explanation is available for ${recordReason(r)}.` : "No reason was recorded."}</td>
             </tr>`,
         ),
-        Array.isArray(d.history) || !othersUnread(v) ? "No runs were found in the available history." : TRIGGER_GETS_WORDS.historyUnread,
+        // A mirror that did not answer (`historyUnread`, issue #988) is a history not read, as with Valkey down: never "no runs".
+        (Array.isArray(d.history) || !othersUnread(v)) && d.historyUnread !== true ? "No runs were found in the available history." : TRIGGER_GETS_WORDS.historyUnread,
       )}
       ${trigger(v)?.runKind === "local" ? null : html`<p>
         Jobs in line now:
@@ -336,6 +337,8 @@ export function editFields(v, t = {}, group = null) {
 }
 export function triggerEdit(v) {
   const t = trigger(v);
+  // A page that could not read the deployment offers no change (issue #988): said here, once, in place of the form.
+  if (canAct(v) && !changesOffered(v)) return card("Edit", html`<p class="muted">${noChangeText()}</p>`);
   return !t || !canAct(v)
     ? html``
     : card(
@@ -365,7 +368,7 @@ export function triggerTrust(v) {
           ? html`<h3>Instructions</h3>
               <blockquote>
                 <pre>
-${v.data?.snapshot?.triggerInstructions?.[v.query.index] ??
+${v.data?.snapshot?.triggerInstructions?.[v.query.index] ?? v.data?.fileTexts?.instructions?.[v.query.index] ??
                   "Instructions could not be read. Reload to try again."}</pre
                 >
               </blockquote>`
@@ -377,7 +380,7 @@ ${v.data?.snapshot?.triggerInstructions?.[v.query.index] ??
       v.role === "operator"
         ? html`<h3>Task</h3>
             <pre>
-${v.data?.snapshot?.triggerTasks?.[v.query.index] ??
+${v.data?.snapshot?.triggerTasks?.[v.query.index] ?? v.data?.fileTexts?.tasks?.[v.query.index] ??
               "Task could not be read."}</pre
             >`
         : null}`,
@@ -395,7 +398,7 @@ export function triggerKinds(v) {
             ${d.cron?.next == null ? (v.data?.snapshot ? "not known (schedule not published)" : SCHEDULE_UNREAD) : d.cron.overdueMs > 0 ? "overdue" : "on time"}; stalls
             ${t.stalls ?? d.cron?.stalls ?? "not known"} of ${stallCapOf(v, d)}.
           </p>
-          ${canAct(v)
+          ${changesOffered(v)
             ? v.data?.triggerFireCheck?.refusal
               ? html`<p>${v.data.triggerFireCheck.refusal}</p>`
               : v.data?.triggerFireCheck?.plan
@@ -438,7 +441,7 @@ export function triggerChange(v) {
       </p>
       <p>${othersUnread(v) ? TRIGGER_GETS_WORDS.othersUnread : fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? fileRefused(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? (t ? "This console loads the triggers file." : null)}</p>
       ${(detail(v).skewed ?? []).map(job => html`<p>${runLink(job.jobId)}: ${job.field ?? job.conditions ?? "trigger changed"}</p>`)}
-      ${t && canAct(v)
+      ${t && changesOffered(v)
         ? actForm("trigger-delete", {
             hidden: [["index", v.query.index, "int"]],
             label: `Delete row ${v.query.index + 1}`,
@@ -452,6 +455,9 @@ export function triggerAdd(v) {
       "Add a trigger",
       html`<p>Forms are off on this read-only console.</p>`,
     );
+  // A page that could not read the deployment offers no change (issue #988): the form's choices (the forges, the
+  // projects, the hosts' venues) are the snapshot's.
+  if (!changesOffered(v)) return card("Add a trigger", html`<p class="muted">${noChangeText()}</p>`);
   const recipe = TRIGGER_RECIPES[v.query?.recipe] ?? null;
   const prefill = recipe?.fields ?? {};
   const forges = opts(v).forges ?? [];

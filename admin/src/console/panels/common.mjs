@@ -248,13 +248,20 @@ export const hostLoadsOf = (data) => data?.hostLoads ?? (data?.hostLoadsUnread =
 const partUnread = (s, parts) => s !== null && typeof s === "object" && parts.some((part) => unreached(s[part]));
 
 /**
- * A settings overlay the snapshot holds and could not use: a file that could not be read or does not load (`invalid`,
- * the reader's one word for both), which the overview's Caps card says could not be read. A file that does not exist
- * is an empty overlay, read.
+ * Whether a settings view is of an overlay that was read and is refused (issue #988): it "does not load", which is
+ * not a read that failed. The settings reader folds a file nobody could read into the same `invalid`, with these
+ * words first, and that one "could not be read".
+ */
+export const overlayRefused = (read) => read !== null && typeof read === "object" && typeof read.invalid === "string" && !/^settings file unreadable/.test(read.invalid);
+
+/**
+ * A settings overlay the snapshot holds and that was not read: a file nobody could read, or a view that holds no
+ * overlay, which the overview's Caps card says could not be read. A file that does not exist is an empty overlay,
+ * read; one that was read and is refused does not load (`overlayRefused`), and the card says that.
  */
 const overlayUnread = (s) => {
   const read = s !== null && typeof s === "object" ? s.settings : undefined;
-  if (read === undefined) return false;
+  if (read === undefined || overlayRefused(read)) return false;
   return !(read !== null && typeof read === "object" && !read.invalid && read.overlay !== null && typeof read.overlay === "object" && !Array.isArray(read.overlay));
 };
 
@@ -306,7 +313,9 @@ const PAGE_UNREAD = Object.freeze({
   setup: (d) => partUnread(d.snapshot, ["doctor"]) || Boolean(d.snapshot?.triggers?.unreadable),
   parked: (d) => {
     const answerer = d.answerer;
-    if (answerer !== null && typeof answerer === "object" && typeof answerer.state === "string" && answerer.state !== "ok") return true;
+    // A triggers file that was read and is refused (`configuration: "invalid"`) does not load: the page says that, and
+    // it is not a read that failed.
+    if (answerer !== null && typeof answerer === "object" && typeof answerer.state === "string" && answerer.state !== "ok" && answerer.configuration !== "invalid") return true;
     if (d.parkedChecks !== null && typeof d.parkedChecks === "object" && Object.values(d.parkedChecks).some(unreached)) return true;
     const rows = Array.isArray(d.snapshot?.parked) ? d.snapshot.parked : [];
     return rows.some((row) => row !== null && typeof row === "object" && Object.hasOwn(row, "pendingScan") && parkedVerdictOf(row.pendingScan).says === CHAT_REFUSALS.parkedUnknown);
@@ -411,6 +420,24 @@ export function pausedStateUnknown(s) {
   if (s === null || typeof s !== "object") return true;
   return queueErrorsOf(s).length > 0 || Boolean(s.queue?.fleetDegraded);
 }
+
+/**
+ * Whether a page could not read the deployment: its snapshot failed, so what it draws is what the files hold.
+ */
+export const deploymentUnread = (view) => view?.data?.readFailed === true && (view.data.snapshot === null || view.data.snapshot === undefined);
+
+/**
+ * Whether a page offers a change to the deployment's files (issue #988): an operator on a console that takes changes
+ * (`canAct`), on a page that read the deployment. A page that could not read it offers no change: its forms were
+ * drawn from the files alone, and what a change is judged against (the hosts that would take it, the queues, the runs
+ * that hold money) was not read. Configuration and Secrets drew none in that state; a trigger's page, Add a trigger,
+ * a project and Models did. The page says so once (`noChangeText`), and the file can still be changed by hand.
+ *
+ * NEVER the kill switch. Pausing and resuming the fleet are what an operator reaches for when the deployment cannot
+ * be read, so their forms ask `canAct` and nothing else: this rule is for a change to a file, not for an act on the
+ * queues.
+ */
+export const changesOffered = (view) => canAct(view) && !deploymentUnread(view);
 
 /** The sentence that sends an operator to /setup's doctor on this console's own host (issue #849). */
 export const DOCTOR_FROM_SETUP = "here in the browser, without its container probes; the command below also runs those.";

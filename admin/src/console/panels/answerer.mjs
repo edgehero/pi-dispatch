@@ -17,6 +17,13 @@ const ruleHref = id => `/parked/rules${typeof id === "string" ? `#${encodeURICom
 // them and failed on the triggers file alone) and the standing answers (no list). None of them is drawn as a zero, an
 // empty list or "none".
 export const ANSWERER_STANDING_UNREAD = "Not known: the standing answers could not be read.";
+/**
+ * The same two for a triggers file that was read and is refused (issue #988, the service's `configuration:
+ * "invalid"`): it does not load, which is not a read that failed.
+ */
+export const ANSWERER_FILE_REFUSED = "The triggers file does not load, so its answer rules and standing answers are not shown. These questions still wait for a person; open a run to answer it.";
+export const ANSWERER_STANDING_REFUSED = "Not known: the triggers file does not load.";
+const fileRefused = (state) => state?.configuration === "invalid";
 const resultsRead = state => state?.state !== "unavailable";
 const sourceName = source => typeof source?.name === "string" ? source.name : "Named source unavailable";
 
@@ -57,7 +64,7 @@ export function answererStanding(view) {
   const rows = listed ? state.standing : [];
   // How often an answer was cited is counted over the results, so it is said only where they were read.
   const cited = answer => resultsRead(state) ? `${number(answer.used) === 1 ? "cited once" : `cited ${number(answer.used)} times`} in retained results` : "citations not known";
-  return ui.card({ title: "Standing answers", sub: "Adopted by you", body: html`<ul class="pa-sts">${rows.map(answer => html`<li class="pa-st"><span class="pa-st__n">${ui.icon("flag", { size: "sm" })}<b>${answer.title}</b></span><span class="pa-st__a">${answer.text}</span><span class="pa-st__m">${answer.adoptedAt ? `adopted ${answer.adoptedAt}` : "adoption date not recorded"}; ${cited(answer)}</span></li>`)}</ul>${!listed ? html`<p>${ANSWERER_STANDING_UNREAD}</p>` : !rows.length ? html`<p>No standing answer has been adopted.</p>` : null}${canAct(view) ? standingAnswerEditor({ id: "standing-new", projects: [...new Set((state?.rules ?? []).flatMap(r => r.projects))] }) : null}<p class="pa-foot">A standing answer is reviewed in its own preview and Confirm. Adding one sends no reply.</p>` });
+  return ui.card({ title: "Standing answers", sub: "Adopted by you", body: html`<ul class="pa-sts">${rows.map(answer => html`<li class="pa-st"><span class="pa-st__n">${ui.icon("flag", { size: "sm" })}<b>${answer.title}</b></span><span class="pa-st__a">${answer.text}</span><span class="pa-st__m">${answer.adoptedAt ? `adopted ${answer.adoptedAt}` : "adoption date not recorded"}; ${cited(answer)}</span></li>`)}</ul>${!listed ? html`<p>${fileRefused(state) ? ANSWERER_STANDING_REFUSED : ANSWERER_STANDING_UNREAD}</p>` : !rows.length ? html`<p>No standing answer has been adopted.</p>` : null}${canAct(view) ? standingAnswerEditor({ id: "standing-new", projects: [...new Set((state?.rules ?? []).flatMap(r => r.projects))] }) : null}<p class="pa-foot">A standing answer is reviewed in its own preview and Confirm. Adding one sends no reply.</p>` });
 }
 
 export function standingAnswerEditor({ id, projects = [], runId = null, text = "", repo = "" }) {
@@ -74,7 +81,7 @@ export function answererRules(view) {
 
 export function answererParked(view, { manualAnswer = () => null } = {}) {
   const state = view.data?.answerer;
-  if (view.page === "answer-rules" && view.role === "operator" && !state?.rules?.length) return ui.card({ title: "Answer rules", body: state?.state === "ok" ? "No answer rule is configured. Write an answerRules entry by hand in triggers.json before drafts can start. Standing answers do not enable drafting by themselves." : ANSWERER_READ_FAILURE });
+  if (view.page === "answer-rules" && view.role === "operator" && !state?.rules?.length) return ui.card({ title: "Answer rules", body: state?.state === "ok" ? "No answer rule is configured. Write an answerRules entry by hand in triggers.json before drafts can start. Standing answers do not enable drafting by themselves." : fileRefused(state) ? ANSWERER_FILE_REFUSED : ANSWERER_READ_FAILURE });
   if (!state || !(state.rules?.length || state.rows?.length || state.state !== "ok")) return null;
   const operator = view.role === "operator";
   const s = view.data?.snapshot ?? null;
@@ -100,7 +107,7 @@ export function answererParked(view, { manualAnswer = () => null } = {}) {
     : operator && !known ? html`<section id="answerer-yours" class="stack"><p class="pa-sect"><b>Waiting for a person</b><span>${parked.length}</span></p>${parked.map(question)}</section>`
     : operator ? html`<section id="answerer-yours" class="stack"><p class="pa-sect"><b>Yours to answer</b><span>${yours.length}</span></p>${yours.map(question)}</section><section id="answerer-drafted" class="stack"><p class="pa-sect"><b>Drafted for you</b><span>${drafts.length}</span></p>${drafts.map(question)}</section>${sentCard}` : html`<p class="pa-sect"><b>Waiting for a person</b><span>${parked.length}</span></p><div class="cards-2 pav-grid">${parked.map(question)}</div>${sentCard}<p>Answers, drafts, their sources and the answer rule are for operators.</p>`;
   // Over parked runs that were not read there is no question to speak of: that banner alone stands.
-  const failure = state.state !== "ok" && parkedUnread === null ? ui.banner({ status: "attention", title: ANSWERER_READ_FAILURE }) : null;
+  const failure = state.state !== "ok" && parkedUnread === null ? ui.banner({ status: "attention", title: fileRefused(state) ? ANSWERER_FILE_REFUSED : ANSWERER_READ_FAILURE }) : null;
   const side = operator ? html`<div class="stack pa-desktop-rule">${answererRules(view)}${answererStanding(view)}</div><p class="collapsed pa-phone-rule">Answer rules draft for you; you send. <a class="link" href="/parked/rules">Open rules and standing answers</a></p>` : null;
   return html`${failure}<div class="${operator ? "cols" : "stack"}"><div class="stack">${main}</div>${side}</div>`;
 }

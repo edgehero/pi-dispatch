@@ -775,12 +775,18 @@ test("Caps draws the overlay's caps only from a settings read made whole: an inv
   const settingsUnread = "The settings overlay could not be read, so its caps are not drawn.";
   // The reader's answer for an overlay the worker's validator refuses, on which the worker refuses every job; a read
   // with no overlay object; and no settings read at all.
-  for (const settings of [{ path: "/srv/pi/settings.json", invalid: "dailyCap: must be a positive integer" }, { path: "/srv/pi/settings.json", overlay: null }, { path: "/srv/pi/settings.json", overlay: [] }, null, undefined]) {
+  // One word per case (issue #988): an overlay that was read and is refused does not load; one nobody could read, and
+  // a view with no overlay, could not be read.
+  const settingsRefused = "The settings overlay does not load, so its caps are not drawn.";
+  for (const settings of [{ path: "/srv/pi/settings.json", invalid: "dailyCap: must be a positive integer" }, { path: "/srv/pi/settings.json", invalid: "settings file unreadable (EACCES)" }, { path: "/srv/pi/settings.json", overlay: null }, { path: "/srv/pi/settings.json", overlay: [] }, null, undefined]) {
     const what = JSON.stringify(settings) ?? "undefined";
+    const refused = typeof settings?.invalid === "string" && !settings.invalid.startsWith("settings file unreadable");
+    const settingsUnread = refused ? settingsRefused : "The settings overlay could not be read, so its caps are not drawn.";
     const out = draw(overviewCaps, snapshot({ settings, dollars: { rows: [] } }));
     assert.ok(out.includes(settingsUnread), `${what}: said`);
+    assert.equal(out.includes("could not be read"), !refused, `${what}: its own word, and not the other`);
     assert.ok(!out.includes(CAPS_EMPTY_TEXT) && !out.includes("No cap is set"), `${what}: never the empty sentence`);
-    assert.ok(!out.includes("must be a positive") && !out.includes("/srv/pi"), `${what}: never the reader's message or path`);
+    assert.ok(!out.includes("must be a positive") && !out.includes("/srv/pi") && !out.includes("EACCES"), `${what}: never the reader's message or path`);
     // Beside the dollar windows, read on their own: those are drawn, and the overlay's are not.
     const beside = draw(overviewCaps, snapshot({ settings }));
     assert.ok(beside.includes(settingsUnread) && beside.includes('title="Deploy $ today: ') && !beside.includes('title="Jobs ') && !beside.includes("Soft hold"), `${what}: the dollar windows alone`);
@@ -788,7 +794,7 @@ test("Caps draws the overlay's caps only from a settings read made whole: an inv
   // An invalid read that still carries an overlay's keys draws none of them.
   assert.ok(!draw(overviewCaps, snapshot({ settings: { invalid: "x", overlay: { dailyCap: 40, softHoldPct: 80 } } })).includes('title="Jobs today'));
   // Read whole: its caps, and no such line.
-  assert.ok(!draw(overviewCaps, snapshot()).includes(settingsUnread));
+  assert.ok(![settingsUnread, settingsRefused].some((line) => draw(overviewCaps, snapshot()).includes(line)));
 });
 
 // ---- Waitlists -------------------------------------------------------------------------------------------------------

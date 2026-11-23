@@ -40,16 +40,19 @@ test("the list of triggers that ran here says it could not be told from a file i
     const projectView = await readProjectView(input({ reads: { triggers: () => readTriggers({ triggersPath }) } }));
     return String(projectTriggers({ role: "operator", data: { projectView } }));
   };
-  const UNKNOWN = "The triggers file could not be loaded, so which triggers ran here is unknown.";
+  // One word per case (issue #988): one umbrella, "could not be loaded", said all three.
+  const UNKNOWN = (word) => `The triggers file ${word}, so which triggers ran here is unknown.`;
+  const ABSENT = "The triggers file does not exist, so no run here is attributed to a trigger.";
   const NONE = "No retained run here was attributed to a trigger in the last 24 hours.";
-  for (const [what, path] of [["a failed read", failed], ["a file that does not parse", broken], ["no file", join(dir, "absent.json")]]) {
+  for (const [what, path, words] of [["a failed read", failed, UNKNOWN("could not be read")], ["a file that does not parse", broken, UNKNOWN("does not load")], ["no file", join(dir, "absent.json"), ABSENT]]) {
     const page = await said(path);
-    assert.ok(page.includes(UNKNOWN), what);
-    assert.ok(!page.includes(NONE), what);
+    assert.ok(page.includes(words), what);
+    assert.ok(!page.includes(NONE) && !page.includes("could not be loaded"), what);
+    assert.equal([UNKNOWN("could not be read"), UNKNOWN("does not load"), ABSENT].filter((other) => page.includes(other)).length, 1, `${what}: its own word, and no other`);
   }
   const page = await said(fine);
-  assert.ok(page.includes(NONE) && !page.includes(UNKNOWN), "a file it read, holding no such trigger");
-  assert.ok(String(projectTriggers({ role: "operator", data: { projectView: { state: "ready", triggers: [] } } })).includes(UNKNOWN), "a view that does not say it read the file claims no run of none");
+  assert.ok(page.includes(NONE) && !page.includes("is unknown") && !page.includes(ABSENT), "a file it read, holding no such trigger");
+  assert.ok(String(projectTriggers({ role: "operator", data: { projectView: { state: "ready", triggers: [] } } })).includes(UNKNOWN("could not be read")), "a view that does not say it read the file claims no run of none");
 });
 
 test("project holds use exact UTC enforcement windows, not today's holds for a weekly or monthly envelope", () => {
@@ -274,8 +277,10 @@ test("hostile malformed triggers never enter project facts, HTML or the agent, a
     fs.writeFileSync(paths.triggersPath, text);
     const actual = await readProjectView({ id: "billing", paths, now: NOW, snapshot: { hostBudgets: [host([])] }, reads: { scan: () => [], allocation: () => ({ unset: true }), sizing: () => ({ projects: {} }), fleetRuns: () => ({ runs: [], incomplete: false }) } });
     assert.equal(actual.state, "ready");
-    assert.match(actual.editRefusal, /triggers file could not be loaded.*Run pi-dispatch doctor/);
-    assert.match(actual.deleteRefusal, /triggers file could not be loaded/);
+    // Each of these was read and is refused: it does not load (issue #988), which is not a file that could not be read.
+    assert.match(actual.editRefusal, /triggers file does not load.*Run pi-dispatch doctor/);
+    assert.match(actual.deleteRefusal, /triggers file does not load/);
+    assert.ok(!/could not be (?:read|loaded)/.test(`${actual.editRefusal} ${actual.deleteRefusal}`));
     assert.equal(actual.bundleKnown, false);
     assert.equal(projectViewForAgent(actual).bundleKnown, false);
     const ctx = { role: "operator", readOnly: false, data: { projectView: actual } };
@@ -349,7 +354,7 @@ test("invalid preflight sources and an untyped hostile refusal get fixed actiona
   assert.deepEqual(raw.blocker, { kind: "source", source: "scoped-limits" });
   const got = await readProjectView({ id: "billing", paths, now: NOW, snapshot: { hostBudgets: [host([])] }, reads: { scan: () => [], allocation: () => ({ unset: true }), sizing: () => ({ projects: {} }), fleetRuns: () => ({ runs: [], incomplete: false }) } });
   // Use the regular project source seam while the actual preflight retains the worker parser's failure.
-  assert.match(got.deleteRefusal ?? "", /scoped-limits file could not be loaded.*Run pi-dispatch doctor/);
+  assert.match(got.deleteRefusal ?? "", /scoped-limits file does not load.*Run pi-dispatch doctor/);
   assert.doesNotMatch(got.deleteRefusal, /PRIVATE_DIAGNOSTIC|private-root/);
   const hostile = { refusal: "rejected: dispatch_tool PRIVATE_DIAGNOSTIC /Users/private-root (parser detail)" };
   const fallback = await readProjectView(input({ reads: { edit: () => hostile, delete: () => hostile } }));

@@ -5,8 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeLiveHub } from "../src/console/live.mjs";
 import { loadPageData, PAGES, pagePanels, parsePageQuery } from "../src/console/pages.mjs";
-import { downQueue, downRedis } from "./helpers/fleet-reader-fakes.mjs";
-import { consoleOn, drawn, failing, failingQueue, FAR, healthy, HOST, mirroring, NOW, pillOf, REFUSED, rolesOf, RUN, saysUnread, saysWhatIsMissing, unanswered, wordsOf } from "./helpers/real-console.mjs";
+import { consoleOn, drawn, failing, failingQueue, FAR, healthy, HOST, mirroring, NOW, pillOf, REFUSED, rolesOf, RUN, saysUnread, saysWhatIsMissing, STATES, unanswered, wordsOf } from "./helpers/real-console.mjs";
 
 /**
  * The live pill agrees with the page (issue #988): it says Not live wherever a panel of the page says "could not be
@@ -104,18 +103,6 @@ test("each read of these pages that fails is said by a panel and by the pill, in
 
 /** Every live page, as the real loader draws it here: `[page, query]`. */
 const LIVE_PAGES = [["overview", ""], ["overview", "rows=host"], ["fleet", ""], ["setup", ""], ["parked", ""], ["runs", ""], ["run", "id=gh-1"], ["run", "id=gh-2"], ["sandboxes", ""], ["sandboxes", "id=gh-1"], ["host", "name=build3"], ["host", "name=build9"]];
-/** The states the rule is held to: every read answering, each command and each queue call failing alone, and all. */
-const STATES = [
-  ["every read answers", () => ({ redis: healthy(HOST), records: [RUN, REFUSED] })],
-  ["a Valkey that holds nothing", () => ({ redis: healthy(), records: [RUN, REFUSED] })],
-  ["a fleet whose mirror is on", () => ({ redis: mirroring([FAR]), records: [RUN, REFUSED] })],
-  ...["smembers", "hgetall", "hmget", "hget", "get", "mget", "lrange", "zrange", "zrevrangebyscore", "scan", "exists", "zscore", "pttl", "time", "xlen", "xrange", "xrevrange", "zrangebyscore", "eval"].map((command) => [`${command} is not answered`, () => ({ redis: failing(healthy(HOST), [command]), records: [RUN, REFUSED] })]),
-  ["no pipeline is answered", () => ({ redis: { ...healthy(HOST), pipeline: () => unanswered }, records: [RUN, REFUSED] })],
-  ...["getJob", "getJobCounts", "getActive", "getFailed", "getJobSchedulers", "getWorkers", "isPaused", "getJobState"].map((call) => [`the queue's ${call} is not answered`, () => ({ redis: healthy(HOST), queue: failingQueue([call]), records: [RUN, REFUSED] })]),
-  ["this host's run files cannot be listed", () => ({ redis: healthy(HOST), logs: "file" })],
-  ...["triggers", "projects", "settings"].flatMap((file) => [["absent", "does not exist"], ["invalid", "is not JSON"], ["unreadable", "may not be read"]].map(([state, words]) => [`the ${file} file ${words}`, () => ({ redis: healthy(HOST), records: [RUN, REFUSED], files: { [file]: state } })])),
-  ["nothing is answered", () => ({ redis: downRedis(), queue: downQueue(), records: [RUN, REFUSED] })],
-];
 
 /**
  * Where the rule does not hold yet on the real reader, each with why and what ends it. An entry is `state | page for

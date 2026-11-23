@@ -30,7 +30,15 @@ export const SANDBOX_REQUEST_UNCONFIRMED = unconfirmedWrite({ what: "The sandbox
  */
 export const SANDBOX_CONFIG_UNREAD = "The triggers, projects or scoped limits could not be read. Fix the deployment configuration before preparing a sandbox.";
 export const SANDBOX_NO_TRIGGERS_FILE = "The triggers file does not exist, so there is no trigger to prepare a sandbox as.";
-const configRefusal = (error) => (error?.noTriggersFile === true ? SANDBOX_NO_TRIGGERS_FILE : SANDBOX_CONFIG_UNREAD);
+/**
+ * One word per case, for the file that stopped the configuration (issue #988): it "could not be read" where nobody
+ * could read it, it "does not load" where it was read and is refused, and a file the deployment configures "does not
+ * exist" where it is absent. One sentence, "could not be read", said all three of three files at once.
+ */
+export const sandboxConfigRefusal = (file, word) => `The ${file} ${word}. Fix the deployment configuration before preparing a sandbox.`;
+const configRefusal = (error) => (error?.noTriggersFile === true ? SANDBOX_NO_TRIGGERS_FILE : error?.sandboxConfig ? sandboxConfigRefusal(error.sandboxConfig.file, error.sandboxConfig.word) : SANDBOX_CONFIG_UNREAD);
+/** A read of `file` that failed, as the error `configRefusal` words: by what the failure was (an errno is a read that failed; anything else is a file that was read and is refused). */
+const configError = (file, error) => Object.assign(new Error("sandbox configuration unreadable", { cause: error }), { sandboxConfig: { file, word: error?.code === "ENOENT" ? "does not exist" : typeof error?.code === "string" && /^E[A-Z0-9]+$/.test(error.code) ? "could not be read" : "does not load" } });
 const refusalOf = (out) => out?.refusal ?? out?.message ?? out?.refused ?? "The sandbox request was refused.";
 
 export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs = nodeFs, now = Date.now, random = randomBytes, planFn = planSandboxPreparation } = {}) {
@@ -53,19 +61,20 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
     let triggersText;
     try { triggersText = fs.readFileSync(paths.triggersPath, "utf8"); } catch (error) {
       if (error?.code === "ENOENT") throw Object.assign(new Error("no triggers file"), { noTriggersFile: true });
-      throw error;
+      throw configError("triggers file", error);
     }
-    const parsed = parseTriggersDocument(triggersText, paths.triggersPath);
-    const optional = (path, parse, required) => {
+    let parsed;
+    try { parsed = parseTriggersDocument(triggersText, paths.triggersPath); } catch (error) { throw configError("triggers file", error); }
+    const optional = (path, parse, required, file) => {
       if (path === null || path === undefined) return [];
       try { return parse(fs.readFileSync(path, "utf8"), path); }
-      catch (error) { if (error.code === "ENOENT" && !required) return []; throw new Error("sandbox configuration unreadable", { cause: error }); }
+      catch (error) { if (error.code === "ENOENT" && !required) return []; throw configError(file, error); }
     };
     // The configured worker path wins over the panel's editable default; absence is optional only where the worker
     // has no configured file. Permission and I/O failures can never turn a size override into a plausible default.
     const projectPath = Object.hasOwn(paths, "projectsFile") ? paths.projectsFile : paths.projectsPath;
-    const projects = optional(projectPath, parseProjects, projectPath !== null && projectPath !== undefined);
-    const limits = optional(paths.scopedLimitsPath, parseScopedLimits, env.PI_SCOPED_LIMITS_FILE !== undefined);
+    const projects = optional(projectPath, parseProjects, projectPath !== null && projectPath !== undefined, "projects file");
+    const limits = optional(paths.scopedLimitsPath, parseScopedLimits, env.PI_SCOPED_LIMITS_FILE !== undefined, "scoped-limits file");
     return { triggersText, triggers: parsed.triggers, projects, limits };
   }
   function optionsOf(cfg) {

@@ -127,7 +127,9 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
           // No `standing` list where the file that holds them could not be read or did not load (issue #844): an empty
           // one would read as none adopted. A file that does not exist is another matter (issue #988): it holds no
           // answer rule and no standing answer, which is an empty document and the page's true empty state.
-          if (err?.code !== "ENOENT") return { state: "configuration-unavailable", partial: true, rows, rules: [], stats: answererStats(rows, now()) };
+          // Which of the two it is rides beside the state (issue #988): a file nobody could read (the read failed with
+          // an errno, EACCES and the like), or one that was read and is refused.
+          if (err?.code !== "ENOENT") return { state: "configuration-unavailable", configuration: typeof err?.code === "string" && /^E[A-Z0-9]+$/.test(err.code) ? "unreadable" : "invalid", partial: true, rows, rules: [], stats: answererStats(rows, now()) };
           config = { triggers: [], answerRules: [], standingAnswers: [] };
         }
         const standing = (config.standingAnswers ?? []).map(answer => ({ ...answer, used: rows.filter(r => r.sources?.some(s => s.kind === "standing" && s.id === answerStandingSource(answer).id)).length }));

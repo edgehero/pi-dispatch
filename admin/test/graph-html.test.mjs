@@ -580,8 +580,12 @@ test("a missing or invalid triggers file banners on the live page", () => {
   const missing = pageOf(buildGraphModel({ triggers: { missing: true } }));
   assert.ok(missing.includes("no triggers file found"));
 
+  // One word per case (issue #988): a file that was read and is refused does not load, and one nobody could read could
+  // not be read, which the reader says in the same field in its own words. "Invalid" said both.
   const invalid = pageOf(buildGraphModel({ triggers: { invalid: "bad json" } }));
-  assert.ok(invalid.includes("triggers file invalid: bad json"));
+  assert.ok(invalid.includes("triggers file does not load: bad json") && !invalid.includes("triggers file invalid"));
+  const unreadable = pageOf(buildGraphModel({ triggers: { invalid: "triggers file could not be read (EACCES)" } }));
+  assert.ok(unreadable.includes('<div class="banner">triggers file could not be read (EACCES)</div>') && !unreadable.includes("does not load") && !unreadable.includes("triggers file invalid"));
 });
 
 // ---- issue #418: chips are sized and cut in columns, and never through a character ----

@@ -1661,7 +1661,8 @@ export function bannersHtml(norm) {
   const banners = [];
   if (!norm.ok) banners.push("no graph model supplied; the page has nothing to draw");
   if (norm.meta.triggersMissing) banners.push("no triggers file found");
-  if (norm.meta.triggersInvalid !== null) banners.push(`triggers file invalid: ${norm.meta.triggersInvalid}`);
+  // One word per case (issue #988): the reader says a file nobody could read in the same field, in its own words.
+  if (norm.meta.triggersInvalid !== null) banners.push(/^triggers file could not be read/.test(String(norm.meta.triggersInvalid)) ? String(norm.meta.triggersInvalid) : `triggers file does not load: ${norm.meta.triggersInvalid}`);
   if (banners.length === 0) return "";
   return `<div id="banners">${banners.map((b) => `<div class="banner">${escapeHtml(b)}</div>`).join("")}</div>`;
 }

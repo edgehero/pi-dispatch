@@ -202,8 +202,12 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         let repaired = true;
         try { await fixes.repair({ readTrigger: (index) => JSON.parse(fs.readFileSync(paths.triggersPath, "utf8")).triggers?.[index], readFile: (path) => repairFiles.has(path) ? fs.readFileSync(path, "utf8") : null }); }
         catch (err) { repaired = false; log("zero_touch_fix_repair_pending", { cause: causeOf(err) }); }
-        let cfg; let configUnavailable = false;
-        try { cfg = config(); } catch { configUnavailable = true; }
+        // One word per case (issue #988): a triggers file that does not exist configures no grouping, which is an
+        // answer; one nobody could read is unread; one that was read and is refused does not load.
+        let cfg; let configUnavailable = false; let configuration = null;
+        try { cfg = config(); } catch (error) {
+          if (error?.code !== "ENOENT") { configUnavailable = true; configuration = typeof error?.code === "string" && /^E[A-Z0-9]+$/.test(error.code) ? "unreadable" : "invalid"; }
+        }
         const { groups } = step();
         const [questions, changes] = await Promise.all([groups.publicSnapshot({ names: cfg?.names ?? {} }), fixes.publicSnapshot()]);
         const selectedGroups = questions.groups.filter((g) => zeroTouchProjectMatches(g.project, project) && (!scopeId || g.scopeId === scopeId));
@@ -211,7 +215,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         const report = await readZeroTouch({ redis, logsDir: paths.logsDir, retentionDays, indexMax, localHost: env.PI_WORKER_NAME ?? null, now, windowDays, project, scopeId, groups: selectedGroups, fixes: changes.fixes, fs, includeRecords: true, ...(left ? { timeoutMs: left() } : {}) });
         const knownSources = new Set(questions.rows.map((r) => r.runId));
         const missingSources = cfg?.capture && questions.state === "ok" ? report.records.filter((r) => r.reason === "awaiting-input" && zeroTouchProjectMatches(r.project, project) && (!scopeId || r.touchScopeId === scopeId) && !knownSources.has(r.jobId)).map((r) => ({ runId: r.jobId, status: "source-unavailable" })) : [];
-        report.grouping = { enabled: cfg?.capture === true, state: configUnavailable ? "configuration-unavailable" : questions.state, partial: questions.partial, pending: selectedSources.filter((r) => r.status === "pending").length, unassigned: selectedSources.filter((r) => !r.groupId).length };
+        report.grouping = { enabled: cfg?.capture === true, state: configUnavailable ? "configuration-unavailable" : questions.state, ...(configuration === null ? {} : { configuration }), partial: questions.partial, pending: selectedSources.filter((r) => r.status === "pending").length, unassigned: selectedSources.filter((r) => !r.groupId).length };
         report.ungroupedRunIds = selectedSources.filter((r) => !r.groupId).map((r) => r.runId);
         report.groupingStatuses = [...selectedSources.filter((r) => !r.groupId).map((r) => ({ runId: r.runId, status: r.status })), ...missingSources];
         report.grouping.partial = questions.partial || missingSources.length > 0;
