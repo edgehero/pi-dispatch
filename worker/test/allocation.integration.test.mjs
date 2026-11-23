@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { makeAllocationState } from "../src/allocation.mjs";
 import { envelopeDigest, parseEnvelope } from "../src/envelope.mjs";
+import { appliedThatLanded } from "./helpers/applied-rows.mjs";
 
 // The applied split against a real Valkey (issue #504 part B): the compare-and-set is a Lua script that decodes the
 // stored state with cjson, and the lock is SET NX PX, so the race between two writers is measured here, not assumed.
@@ -58,8 +59,70 @@ test("two applies racing on one basis: exactly one applies, the other is plan-st
 			const state = JSON.parse(await admin.get(`${prefix}:plan`));
 			assert.equal(state.planId, winner.planId, "the state is the winner's, written by the CAS");
 			assert.equal(await admin.exists(`${prefix}:lock`), 0, "the winner released its own lock");
-			assert.equal(rows.filter((r) => r.outcome === "applied").length, 1);
+			assert.equal(appliedThatLanded(rows).length, 1, `round ${round}: one applied row stands for a write`);
 		}
+	} finally {
+		const keys = await admin.keys(`${prefix}*`);
+		if (keys.length > 0) await admin.del(...keys);
+	}
+});
+
+test("an apply that read the state before another's write and takes the lock after it writes applied, then apply-failed, and nothing else (live Valkey, issue #1065)", { skip, timeout: 30_000 }, async (t) => {
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const prefix = `pi-dispatch-test-alloc-late-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const admin = makeRedisClient(url, {});
+	const a = makeRedisClient(url, {});
+	const b = makeRedisClient(url, {});
+	t.after(() => {
+		admin.disconnect();
+		a.disconnect();
+		b.disconnect();
+	});
+	try {
+		const rows = [];
+		const audit = { append: (row) => rows.push(row) };
+		// mini1's lock request waits until mini2's apply has ended: mini1 read the state before mini2's write and takes
+		// the lock after mini2 released it, the order the racing tests above meet now and then.
+		let reached;
+		const atLock = new Promise((resolve) => {
+			reached = resolve;
+		});
+		let open;
+		const gate = new Promise((resolve) => {
+			open = resolve;
+		});
+		const held = new Proxy(a, {
+			get(target, name) {
+				if (name === "set") {
+					return async (...args) => {
+						if (args[0] === `${prefix}:lock`) {
+							reached();
+							await gate;
+						}
+						return target.set(...args);
+					};
+				}
+				const value = Reflect.get(target, name);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const mini1 = makeAllocationState({ redis: held, host: "mini1", audit, prefix });
+		const mini2 = makeAllocationState({ redis: b, host: "mini2", audit, prefix });
+		await mini2.reconcile({ envelope, digest, now: NOW });
+		const late = mini1.applyPlan({ envelope, digest, projects: PROJECTS, text: plan(3, 1), writer: { kind: "operator-session" }, now: NOW });
+		await atLock;
+		const first = await mini2.applyPlan({ envelope, digest, projects: PROJECTS, text: plan(1, 3), writer: { kind: "portfolio-job", jobId: "j1" }, now: NOW });
+		assert.equal(first.outcome, "applied");
+		open();
+		const second = await late;
+		assert.deepEqual([second.outcome, second.reason], ["apply-failed", "plan-stale"]);
+		// The first reconcile's neutral row aside, the rows run: the winner's write, the loser's row before its write, its failure.
+		assert.deepEqual(rows.filter((r) => r.outcome !== "neutral").map((r) => [r.host, r.outcome]), [["mini2", "applied"], ["mini1", "applied"], ["mini1", "apply-failed"]]);
+		assert.equal(rows.filter((r) => r.outcome === "applied").length, 2, "counting applied rows alone counts the write that did not happen");
+		assert.deepEqual(appliedThatLanded(rows).map((r) => r.host), ["mini2"]);
+		const state = JSON.parse(await admin.get(`${prefix}:plan`));
+		assert.equal(state.planId, first.planId, "the state is the winner's");
+		assert.equal(await admin.exists(`${prefix}:lock`), 0, "both locks were released");
 	} finally {
 		const keys = await admin.keys(`${prefix}*`);
 		if (keys.length > 0) await admin.del(...keys);

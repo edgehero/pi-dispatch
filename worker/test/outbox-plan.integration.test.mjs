@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { makeAllocationState } from "../src/allocation.mjs";
 import { envelopeDigest, parseEnvelope } from "../src/envelope.mjs";
 import { makeCollectPlan } from "../src/outbox-plan.mjs";
+import { appliedThatLanded } from "./helpers/applied-rows.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // A portfolio job's plan, collected from a real file by the real collector, racing an operator's apply on a real Valkey
@@ -69,7 +70,7 @@ test("a job's plan and an operator's apply racing on one basis: one applies, the
 			const state = JSON.parse(await admin.get(`${prefix}:plan`));
 			assert.equal(state.writer, fromJob.outcome === "applied" ? "portfolio-job" : "operator-session", "the state is the winner's");
 			assert.equal(state.jobId, fromJob.outcome === "applied" ? `repeat:pm-weekly:${round}` : null);
-			assert.equal(rows.filter((r) => r.outcome === "applied").length, 1);
+			assert.equal(appliedThatLanded(rows).length, 1, `round ${round}: one applied row stands for a write`);
 			// The loser's refusal is recorded too: no attempt is silent.
 			assert.ok(rows.some((r) => r.outcome !== "applied" && r.outcome !== "neutral"), `round ${round}: the losing attempt has its row`);
 			const logged = (await admin.lrange(`${prefix}:log`, 0, -1)).map((x) => JSON.parse(x));
