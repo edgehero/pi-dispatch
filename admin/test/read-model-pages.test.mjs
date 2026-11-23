@@ -2935,6 +2935,54 @@ test("createFleetReader: a second Valkey of the kill switch's plan takes the rea
   }
 });
 
+test("the fleet reader says of a sandbox request that was not confirmed whether anything but a read had been asked of Valkey, over the worker's own helper (#987)", async () => {
+  const { enqueueSandboxPreparation, sandboxPrepareQueueName } = await import("@edgehero/pi-dispatch/sandbox-prepare-requests");
+  const { queueWriteTracking } = await import("../src/read-model.mjs");
+  const { mk } = switchQueues();
+  const lost = () => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true });
+  const request = { op: "pin", id: `sb-${"a".repeat(32)}`, host: "hostb", by: "ops", runId: "gh-1", expect: { generation: "b".repeat(64), until: null, pin: false } };
+  // The helper's own steps, in its order: the lookup, the slot's claim on the queue's client, the add, the read back.
+  const asked = [];
+  const reading = (queue) => {
+    const reader = endingReader(mk, [{ name: "hostb", routes: true }], { makeSandboxPrepareQueueFn: () => queue, enqueueSandboxPreparationFn: enqueueSandboxPreparation });
+    return reader.sandboxPrepare(request).finally(() => reader.dispose());
+  };
+  const queueOf = (over = {}) => {
+    const jobs = new Map();
+    return {
+      name: sandboxPrepareQueueName("hostb"),
+      getJob: async (id) => (asked.push("getJob"), jobs.get(id)),
+      client: Promise.resolve({ set: async () => (asked.push("set"), "OK"), eval: async () => (asked.push("eval"), 1) }),
+      add: async (_name, data, opts) => (asked.push("add"), jobs.set(opts.jobId, { id: opts.jobId, data, getState: async () => "waiting" })),
+      close: async () => {},
+      ...over,
+    };
+  };
+  // Answered at every step: the request is pending, and nothing is said of what was asked.
+  assert.deepEqual(await reading(queueOf()), { id: request.id, state: "pending" });
+  assert.deepEqual(asked.splice(0), ["getJob", "set", "add", "getJob"]);
+  const unknown = { id: request.id, state: "unknown", message: "the host request could not be confirmed; refresh its status before preparing again" };
+  // The lookup got no answer: nothing but a read had been asked.
+  assert.deepEqual(await reading(queueOf({ getJob: () => (asked.push("getJob"), Promise.reject(lost())) })), { ...unknown, asked: false });
+  assert.deepEqual(asked.splice(0), ["getJob"]);
+  // The slot's claim was asked for and lost, and so was the add: each may land when Valkey answers again.
+  assert.deepEqual(await reading(queueOf({ client: Promise.resolve({ set: () => (asked.push("set"), Promise.reject(lost())) }) })), { ...unknown, asked: true });
+  assert.deepEqual(asked.splice(0), ["getJob", "set"]);
+  assert.deepEqual(await reading(queueOf({ add: () => (asked.push("add"), Promise.reject(lost())) })), { ...unknown, asked: true });
+  assert.deepEqual(asked.splice(0), ["getJob", "set", "add"]);
+  // The tracker alone: a queue's lookups change nothing; its add and its client's writes do, a read through that client does not.
+  const plain = queueWriteTracking({ name: "q", getJob: async () => null, add: async () => "added", client: Promise.resolve({ get: async () => "v", set: async () => "OK" }) });
+  assert.equal(plain.queue.name, "q");
+  await plain.queue.getJob("x");
+  assert.equal(await (await plain.queue.client).get("k"), "v");
+  assert.equal(plain.wrote, false);
+  assert.equal(await (await plain.queue.client).set("k", "v"), "OK");
+  assert.equal(plain.wrote, true);
+  const adding = queueWriteTracking({ add: async () => "added" });
+  assert.equal(await adding.queue.add("n", {}), "added");
+  assert.equal(adding.wrote, true);
+});
+
 test("createFleetReader builds every queue it holds on the console's bounded connection: the shared one, a host's, a sandbox request's (#842)", async () => {
   const { mk } = switchQueues();
   const conns = [];

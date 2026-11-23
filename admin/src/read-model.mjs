@@ -2171,6 +2171,37 @@ export function writeTracking(redis) {
 }
 
 /**
+ * `writeTracking` for a helper that is handed a BullMQ queue and not a client (issue #987, the worker's
+ * `enqueueSandboxPreparation`): `{ queue, wrote }`. `queue` forwards everything to the queue it was given; `wrote`
+ * turns true before `add` is called and before any command but a read leaves through the queue's own client (which the
+ * helper takes for its slot claim), by `writeTracking`'s list. The queue's lookups (`getJob`) change nothing. So a
+ * helper that swallows what its own timers threw can still be answered for by what it had asked of Valkey.
+ */
+export function queueWriteTracking(queue) {
+  let added = false;
+  let client = null;
+  const tracked = new Proxy(queue, {
+    get(target, name) {
+      if (name === "add") {
+        return (...args) => {
+          added = true;
+          return target.add(...args);
+        };
+      }
+      if (name === "client") return Promise.resolve(target.client).then((redis) => (client ??= writeTracking(redis)).redis);
+      const value = Reflect.get(target, name);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return {
+    queue: tracked,
+    get wrote() {
+      return added || client?.wrote === true;
+    },
+  };
+}
+
+/**
  * What an envelope write says when the digest's SET was sent and not answered (issue #961): the file was not written,
  * and the key may hold the new digest now or when Valkey wakes. The instruction comes FIRST (issue #987): an audit row
  * keeps 200 characters of a reason (`CONSOLE_AUDIT_FIELD_MAX`), and the sentence this replaces was cut before "set it
@@ -6256,7 +6287,15 @@ export function createFleetReader(
       await fleetQueues();
       return readSandboxSessionsFn(redis, { now: nowFn, hosts: lastHosts.map((h) => h.name), timeoutMs: FLEET_READ_TIMEOUT_MS });
     },
-    async sandboxPrepare(request) { if (!enqueueSandboxPreparationFn) return { refused: "sandbox-not-wired", message: "Sandbox requests are not wired in this console." }; return enqueueSandboxPreparationFn(sandboxQueue(request.host), request, { now: nowFn }); },
+    // The helper ends each of its steps by a timer of its own and answers `state: "unknown"` for whatever they threw,
+    // at its first lookup as at its add. `asked` (issue #987) says which it was: whether anything but a read had been
+    // asked of Valkey by then, so the confirm can say Valkey unreachable of the one and may or may not of the other.
+    async sandboxPrepare(request) {
+      if (!enqueueSandboxPreparationFn) return { refused: "sandbox-not-wired", message: "Sandbox requests are not wired in this console." };
+      const tracked = queueWriteTracking(sandboxQueue(request.host));
+      const result = await enqueueSandboxPreparationFn(tracked.queue, request, { now: nowFn });
+      return result?.state === "unknown" ? { ...result, asked: tracked.wrote } : result;
+    },
     async sandboxPreparationStatus(host, id) { return readSandboxPreparationFn ? readSandboxPreparationFn(sandboxQueue(host), id) : { id, host, state: "unknown" }; },
     // `timeoutMs: null` (issue #843): this client's command bound decides alone. The module's own 2 s timer fired first and
     // rejected with an error that could not say whether the request's SET had reached Valkey, so a request that landed

@@ -14,11 +14,16 @@ import { answerConfigDigest, answerRuleConfigDigest, makeAnswerDraftStore } from
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { readConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
 import { hostQueueName, makeQueue } from "@edgehero/pi-dispatch/queue";
+import { buildRecord, makeRecordWriter } from "@edgehero/pi-dispatch/run-history";
+import { makeSandboxInventory, sandboxInventoryKey, SANDBOX_INVENTORY_HOSTS } from "@edgehero/pi-dispatch/sandbox-inventory";
+import { sandboxPrepareQueueName, sandboxPrepareSlotKey } from "@edgehero/pi-dispatch/sandbox-prepare-requests";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { VALKEY_UNREACHABLE } from "../src/console/actions.mjs";
 import { DRAFT_DROP_UNCONFIRMED } from "../src/answerer-data.mjs";
 import { runCli } from "../src/console/cli.mjs";
 import { ALLOWANCE_UNREAD } from "../src/read-model.mjs";
+import { SANDBOX_REQUEST_UNCONFIRMED } from "../src/sandbox-data.mjs";
+import { FIX_STAGE_UNCONFIRMED } from "../src/zero-touch-data.mjs";
 import { CANARY_UNCONFIRMED } from "../src/trigger-fire.mjs";
 import { answererFixture } from "./helpers/answerer-goldens.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -504,5 +509,102 @@ test("a canary on a real console whose Valkey stops answering at its add says so
       writeFileSync(env.PI_TRIGGERS_FILE, JSON.stringify({ triggers: [{ on: { type: "cron", id: `nightly-${host}`, pattern: "0 6 * * *" }, run: { kind: "local", folder, flow: "fix", task: "t", maxCostUsd: "1" } }] }));
       return { PI_GLOBAL_PI_DIR: join(dir, "pi-global"), PI_MAX_COST_USD: "2" };
     },
+  });
+});
+
+test("a configuration fix on a real console whose Valkey stops answering at its accounting's stage changes no file and says the accounting may or may not have been staged, which is so: the row lands when Valkey wakes", live, async () => {
+  await withConsole(async (c) => {
+    // A refusal a configuration change is made because of, as its worker recorded it on this host.
+    const runId = `gh-${c.host}-refusal`;
+    const record = buildRecord({ job: { id: runId, data: { kind: "github", repo: "acme/web", target: { type: "issue", number: 42 }, trigger: { matched: { index: 0, type: "label" } } } }, result: { outcome: "policy", reason: "secret-unresolved" }, startedAt: new Date(c.now - 2000).toISOString(), endedAt: new Date(c.now - 1000).toISOString() });
+    record.touchScopeId = "a".repeat(64);
+    makeRecordWriter({ logsDir: c.env.PI_LOGS_DIR })(record);
+    // The fix rows of this run, whichever ids the store gave them, and their deletion.
+    const mine = async () => {
+      const out = [];
+      for (const id of await c.direct.zrange("zero-touch:fixes:index", 0, -1)) {
+        const row = JSON.parse((await c.direct.get(`zero-touch:fixes:meta:${id}`)) ?? "null");
+        if (row?.runId === runId) out.push(row);
+      }
+      return out;
+    };
+    c.cleanup.push(async () => {
+      for (const row of await mine()) {
+        await c.direct.del(`zero-touch:fixes:meta:${row.id}`, `zero-touch:fixes:private:${row.id}`);
+        await c.direct.zrem("zero-touch:fixes:index", row.id);
+      }
+    });
+    const preview = await c.act("setting-set", "preview", { key: "maxTurns", value: "35", becauseRun: runId });
+    assert.equal(preview.status, 200, preview.text.slice(0, 300));
+    const frozen = c.front.freezeAt(commandOn("set", "zero-touch:fixes:meta:"));
+    const confirm = await clocked(c.act("setting-set", "confirm", { ticket: preview.json.ticket }));
+    assert.equal(await Promise.race([frozen.then(() => "stopped"), sleep(1000).then(() => "never sent")]), "stopped", "Valkey stopped answering at the stage");
+    // It said "Fix accounting could not be prepared. Nothing was changed; try again when Valkey is available."
+    assert.deepEqual([confirm.res.status, confirm.res.json.error], [409, FIX_STAGE_UNCONFIRMED]);
+    assert.ok(confirm.res.json.html.includes("The change did not finish") && !/nothing was changed/i.test(confirm.res.json.html), confirm.res.json.html);
+    assert.deepEqual(c.rows().slice(-2).map((r) => [r.kind, r.outcome, r.reason ?? null]), [["setting-set", "ok", null], ["setting-set", "failed", FIX_STAGE_UNCONFIRMED]]);
+    assert.ok(confirm.ms > 1500 && confirm.ms < 7000, `the store's own bounds decided (${Math.round(confirm.ms)} ms)`);
+    assert.equal(JSON.parse(readFileSync(c.env.PI_SETTINGS_FILE, "utf8")).maxTurns, 30, "the settings file was not written");
+    assert.deepEqual(await mine(), [], "nothing reached Valkey while it did not answer");
+    await c.thawed();
+    // The stage landed at the wake, for a change that was never made: it stays pending, and the page's fixes read partial.
+    assert.deepEqual((await mine()).map((row) => [row.kind, row.state]), [["config", "pending"]]);
+    assert.equal(JSON.parse(readFileSync(c.env.PI_SETTINGS_FILE, "utf8")).maxTurns, 30);
+  }, {
+    files: ({ dir }) => {
+      writeFileSync(join(dir, "settings.json"), JSON.stringify({ maxTurns: 30, maxCostUsd: "2" }));
+      return { PI_SETTINGS_FILE: join(dir, "settings.json") };
+    },
+  });
+});
+
+test("a sandbox pin on a real console whose Valkey stops answering: at the request's lookup nothing was asked and Valkey is what is said, and at its add the request may or may not have been made, never done", live, async () => {
+  await withConsole(async (c) => {
+    // A kept workspace as its host publishes it, on this console's own host name.
+    const kept = { id: `gh-${c.host}`, v: "local", until: c.now + 23 * 3_600_000, pin: false, generation: "a".repeat(64), kind: "github", image: "pi-job:4.3.1", canOpen: true };
+    const settings = { image: "pi-job:4.3.1", defaultBackend: "local", backends: ["local"], egress: true, egressProxy: "pi-dispatch-egress-proxy", sandboxRetentionHours: 24, sandboxPinDays: 7 };
+    const requests = sandboxPrepareQueueName(c.host);
+    c.cleanup.push(async () => {
+      await c.direct.srem(SANDBOX_INVENTORY_HOSTS, c.host);
+      for (const pattern of [sandboxInventoryKey(c.host), `${sandboxPrepareSlotKey(c.host, 0).slice(0, -1)}*`, `bull:${requests}:*`]) {
+        const keys = await c.direct.keys(pattern);
+        if (keys.length > 0) await c.direct.del(...keys);
+      }
+    });
+    assert.deepEqual(await makeSandboxInventory({ redis: c.direct, host: c.host, read: async () => ({ sandboxes: [kept], sandboxRetentionHours: 24 }), settings, now: () => c.now }).publish(), { published: true });
+    /** What Valkey holds of the request: its slot claims and its queue's jobs. */
+    const held = async () => {
+      const queue = makeQueue(parseConnection(databaseUrl(), { failFast: true }), { name: requests });
+      try {
+        return [(await c.direct.keys(`${sandboxPrepareSlotKey(c.host, 0).slice(0, -1)}*`)).length, Object.values(await queue.getJobCounts()).reduce((n, count) => n + count, 0)];
+      } finally {
+        await queue.close().catch(() => {});
+      }
+    };
+    const pinWith = async (pattern) => {
+      const preview = await c.act("sandbox-pin", "preview", { host: c.host, id: kept.id });
+      assert.equal(preview.status, 200, preview.text.slice(0, 300));
+      const frozen = c.front.freezeAt(pattern);
+      const confirm = await clocked(c.act("sandbox-pin", "confirm", { ticket: preview.json.ticket }));
+      assert.equal(await Promise.race([frozen.then(() => "stopped"), sleep(1000).then(() => "never sent")]), "stopped", "Valkey stopped answering at the named command");
+      const out = { status: confirm.res.status, said: confirm.res.json.error, bar: confirm.res.json.html, ms: confirm.ms, rows: c.rows().slice(-2).map((r) => [r.kind, r.outcome, r.reason ?? null]) };
+      await c.thawed();
+      return { ...out, after: await held() };
+    };
+    // Each answered 200, "done", with a note that zero touch accounting was incomplete and that the action had succeeded.
+    // At the lookup of the request, before anything was asked to change.
+    const atLookup = await pinWith(commandOn("hgetall", `bull:${requests}:`));
+    assert.deepEqual([atLookup.status, atLookup.said], [503, VALKEY_UNREACHABLE]);
+    assert.ok(valkeyBar(atLookup.bar), atLookup.bar);
+    assert.deepEqual(atLookup.rows, [["sandbox-pin", "ok", null], ["sandbox-pin", "failed", "Valkey could not be reached"]]);
+    assert.deepEqual(atLookup.after, [0, 0], "no slot was claimed and no request made, then or at the wake");
+    // At the request's add: its slot was claimed, and the request lands when Valkey wakes.
+    const atAdd = await pinWith(THE_ADD);
+    assert.deepEqual([atAdd.status, atAdd.said], [409, SANDBOX_REQUEST_UNCONFIRMED]);
+    assert.equal(atAdd.said, "The sandbox request may or may not have been made: it was asked for and Valkey did not answer. Reload the Sandboxes page once Valkey answers before asking again.");
+    assert.ok(atAdd.bar.includes("The change did not finish") && !/nothing was changed|succeeded/i.test(atAdd.bar), atAdd.bar);
+    assert.deepEqual(atAdd.rows, [["sandbox-pin", "ok", null], ["sandbox-pin", "failed", SANDBOX_REQUEST_UNCONFIRMED]]);
+    assert.ok(atAdd.ms > 2000 && atAdd.ms < 7000, `the helper's own bound decided (${Math.round(atAdd.ms)} ms)`);
+    assert.deepEqual(atAdd.after, [1, 1], "the slot is held and the request was made at the wake");
   });
 });
