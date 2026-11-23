@@ -483,10 +483,13 @@ export function makeLiveHub({
         if (load === null) data = held.data;
         else {
           data = await load;
-          // A load the page's deadline cut (`deadlineSpent`, issue #988) is never kept: it says what a Valkey that did
-          // not answer in time left unread, so it is this tick's to draw and no later one's. The next tick reads again,
-          // and a Valkey that answers again is drawn at once, not when the page's `pageMinMs` has run out.
-          if (minMs > 0 && data?.deadlineSpent !== true && !(refresh && data?.readFailed === true)) loaded.set(dk, { at: t, data, viewersOnly });
+          // Only a load whose page says nothing unread is kept (`dataUnread`, issue #988): one the page's deadline cut,
+          // one whose own read failed, or one with a part of its page unread says what a Valkey that did not answer
+          // left unread, so it is this tick's to draw and no later one's. The next tick reads again, and a Valkey that
+          // answers again is drawn at once, not when the page's `pageMinMs` has run out: a load in flight as Valkey
+          // came back, its early reads unread, was kept and held a page at Not live for that long. A page that stays
+          // unread is then read every tick, as a page with no `pageMinMs` always is.
+          if (minMs > 0 && !dataUnread(data)) loaded.set(dk, { at: t, data, viewersOnly });
         }
       } catch (e) {
         failed(`data\n${dk}`, `console: live data for page ${page} failed (${codeOf(e)}); its streams keep their last panels`);

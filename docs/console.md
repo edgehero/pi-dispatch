@@ -2518,7 +2518,9 @@ checks up to 20 answers on each read, every 5 seconds. Only the parts of the pag
 the line under the overview's title included.
 
 A live page holds one connection open. Each token may hold `PI_CONSOLE_MAX_STREAMS` of them (default 4) across all
-its sign-ins, and the console 32 in all, of which 8 are kept for operators. A page opened past either limit still loads, but stays still until you reload it after closing
+its sign-ins, and the console 32 in all, of which 8 are kept for operators. The console reads the open pages together
+each second, so 32 open run pages mean about 37 connections to Valkey at once where there were 7; on a Valkey whose
+`maxclients` is lower (16, say) the refused connects are tried again and no page is drawn stale or unread, only later. A page opened past either limit still loads, but stays still until you reload it after closing
 another tab; its pill then says Not live, and its note says how many live tabs one token may hold, with Reload. A
 run page with its transcript open counts as one, so two run tabs leave two slots spare at the default limit. The terminal chat's separate `/api/transcript` connection also counts as one.
 

@@ -1471,7 +1471,7 @@ test("no cap on the loads a tick starts at once: one per data key, and the conso
   h.hub.close();
 });
 
-test("a load the page's deadline cut is never kept for the page's pageMinMs, whether its own read failed or not; any other load is", async () => {
+test("only a load whose page says nothing unread is kept for the page's pageMinMs: one its deadline cut, one whose own read failed and one with a part of its page unread are each read again at the next tick", async () => {
   const now = clock();
   let next = { words: "read" };
   let loads = 0;
@@ -1509,13 +1509,29 @@ test("a load the page's deadline cut is never kept for the page's pageMinMs, whe
   now.advance(1000);
   await h.hub.tick();
   assert.equal(loads, 6, "kept for the page's five seconds");
-  // A failed load that no deadline cut is kept as before: the page is read again when its five seconds are up.
+  // A failed load that no deadline cut is not kept either (it was, for the page's five seconds): its page says
+  // unread, and what is read again a second later may be whole.
   next = { words: "could not be read", readFailed: true };
   now.advance(4000);
   await h.hub.tick();
   now.advance(1000);
   await h.hub.tick();
-  assert.equal(loads, 7);
+  assert.equal(loads, 8);
+  // Nor is a good render with a part of its page unread (`dataUnread`): a load in flight as Valkey came back, its
+  // early reads unread, was kept and held the page at Not live until its five seconds were up.
+  res.take();
+  next = { page: "runs", words: "the mirror could not be read", runsPage: { runs: [], mirror: "unreachable (Command timed out)" }, runsWindow: { partial: true } };
+  now.advance(1000);
+  await h.hub.tick();
+  assert.deepEqual([loads, namesIn(res.text()), panelsIn(res.take()).map((p) => p.html)], [9, ["unread", "panel"], ["the mirror could not be read"]]);
+  next = { page: "runs", words: "read whole", runsPage: { runs: [], mirror: "ok" }, runsWindow: { partial: false } };
+  now.advance(1000);
+  await h.hub.tick();
+  assert.deepEqual([loads, namesIn(res.text()), panelsIn(res.take()).map((p) => p.html)], [10, ["fresh", "panel"], ["read whole"]], "Live at the next tick, not five seconds on");
+  // And that whole load is kept.
+  now.advance(1000);
+  await h.hub.tick();
+  assert.equal(loads, 10);
   h.hub.close();
 });
 
