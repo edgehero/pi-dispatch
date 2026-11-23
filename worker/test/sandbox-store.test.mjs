@@ -1760,6 +1760,8 @@ test("beside a running job a pass removes at most SANDBOX_PASS_MAX_REAPS_BUSY an
 	assert.deepEqual(restsOf(p.events), [1000, 1000, 1000, 1000, 1000], "a second after each, where an idle pass rests 100 ms");
 	assert.ok(sleeps(p.events).every((ms) => ms <= SANDBOX_REST_POLL_MS), "still in slices of the stop poll");
 	assert.equal(Object.hasOwn(first, "waitedForStartsMs"), false, "a running job is not waited for");
+	assert.deepEqual(p.events.filter((e) => e.startsWith("isOpen:")), ["isOpen:r000", "isOpen:r001", "isOpen:r002", "isOpen:r003", "isOpen:r004"], "so each run's runtime is asked once, as beside no job");
+	assert.equal(Object.hasOwn(first, "askedAgain"), false);
 	const [second, third] = [await reap(), await reap()];
 	assert.deepEqual([second.reaped, second.more, third.reaped, third.more], [5, true, 2, false], "every pass moves on, so the lap ends");
 	assert.deepEqual(p.passLines().map((f) => [f.reaped, f.more, f.busy]), [[5, true, true], [5, true, true], [2, false, true]]);
@@ -1788,32 +1790,195 @@ test("a pass beside jobs still visits one entry before any bound can stop it (is
 	// A container starting for good, a job running, and a runtime whose answer takes longer than the whole time budget.
 	const p = besideJobs(expiredRuns(3), { starting: () => 1, running: () => 3, askMs: () => 25_000 });
 	const reap = realMakeSandboxReaper(p.options);
-	const passes = [await reap(), await reap(), await reap()];
-	assert.deepEqual(passes.map((o) => [o.reaped, o.more]), [[1, true], [1, true], [1, false]], "one run a pass at the least, and the lap ends");
+	const passes = [await reap(), await reap(), await reap(), await reap()];
+	// The third pass removes the last run with its budget long spent, so it leaves the networks to a fourth, which has
+	// visited nothing yet and so goes on to them: the lap ends.
+	assert.deepEqual(passes.map((o) => [o.reaped, o.more]), [[1, true], [1, true], [1, true], [0, false]], "one run a pass at the least, and the lap ends");
 	assert.deepEqual(runsLeft(p.fs, "r"), []);
 });
 
-test("no wait sits between a run's guards and its removal: a start that begins during the runtime's answer is waited for after the entry (issue #1023)", async () => {
-	// The start begins while the runtime is asked about `a` (the guard) and lasts 2 s. A wait there would have the removal
-	// act on an answer that is seconds old.
-	let began = null;
-	const p = besideJobs({ a: { createdAt: hoursAgo(50) }, b: { createdAt: hoursAgo(50) } }, { starting: (t) => (began !== null && t < began + 2000 ? 1 : 0) });
+test("a start that begins while a run's runtime is asked is waited for before that run is removed, and the runtime is asked again (issue #1023)", async () => {
+	// Each ask takes 1 s. A container starts half a second into the ask about `a` and is up at 2.5 s. Without the look
+	// after the answer, `a` was renamed and deleted beside that start with the pass's whole wait unused.
+	const p = besideJobs({ a: { createdAt: hoursAgo(50) }, b: { createdAt: hoursAgo(50) } }, { askMs: () => 1000, starting: (t) => (t >= 500 && t < 2500 ? 1 : 0) });
+	const out = await realMakeSandboxReaper(p.options)();
+	// a: asked (to 1 s), six slices to the end of the start, asked AGAIN (to 3.5 s), and only then renamed and removed.
+	// Its rest is as long as its two asks took, 2 s: the wait is not the entry's time. b is asked once.
+	assert.deepEqual(p.events, ["list", "isOpen:a", ...Array(6).fill("sleep:250"), "isOpen:a", "rename:a", "remove:a", ...Array(8).fill("sleep:250"), "isOpen:b", "rename:b", "remove:b", ...Array(4).fill("sleep:250")]);
+	assert.deepEqual(out, { more: false, reaped: 2, held: 0, ms: 7500, restedMs: 3000, slowestCheckMs: 1000, waitedForStartsMs: 1500, askedAgain: 1 });
+	assert.deepEqual(p.passLines(), [{ ...out, busy: true }], "the line says how often a runtime was asked again");
+});
+
+test("after a wait before a removal the run's guards are asked anew, and their new answer decides (issue #1023)", async () => {
+	// The same start, during the ask about `a`. What the runtime said before the wait is 1.5 s old when the wait ends.
+	const scene = (second) => {
+		const p = besideJobs({ a: { createdAt: hoursAgo(50) } }, { askMs: () => 1000, starting: (t) => (t >= 500 && t < 2500 ? 1 : 0) });
+		const isOpen = p.options.isOpen;
+		let asks = 0;
+		p.options.isOpen = async (args) => {
+			const first = await isOpen(args);
+			return ++asks === 1 ? first : second();
+		};
+		return p;
+	};
+	const held = (p) => p.logs.filter(([e]) => e === "sandbox_reaper_skipped").map(([, f]) => f);
+	// A sandbox was opened on the run during the wait: it is held, not removed.
+	const opened = scene(() => true);
+	const out = await realMakeSandboxReaper(opened.options)();
+	assert.deepEqual(opened.events.filter((e) => !e.startsWith("sleep:")), ["list", "isOpen:a", "isOpen:a"], "asked twice, never renamed, never removed");
+	assert.deepEqual(held(opened), [{ entry: "a", reason: "opened-during-pass" }]);
+	assert.deepEqual([out.reaped, out.held, out.askedAgain], [0, 1, 1]);
+	assert.ok(`/sbx/a/${SANDBOX_MANIFEST}` in opened.fs.files);
+	// The runtime no longer answers: held as well.
+	const silent = scene(() => {
+		throw new Error("timed out");
+	});
+	await realMakeSandboxReaper(silent.options)();
+	assert.deepEqual(held(silent), [{ entry: "a", reason: "runtime-unanswered" }]);
+	assert.ok(`/sbx/a/${SANDBOX_MANIFEST}` in silent.fs.files);
+	// The run was pinned during the wait, and its runtime still says it is not open: the read that decides is taken
+	// after the wait, so the pin holds it.
+	const pinned = scene(() => false);
+	const sleep = pinned.options.sleep;
+	let slices = 0;
+	pinned.options.sleep = async (ms) => {
+		if (++slices === 3) pinned.fs.files[`/sbx/a/${SANDBOX_MANIFEST}`] = JSON.stringify({ jobId: "a", createdAt: hoursAgo(50), keepUntil: new Date(AT + DAY).toISOString() });
+		return sleep(ms);
+	};
+	await realMakeSandboxReaper(pinned.options)();
+	assert.deepEqual(held(pinned), [{ entry: "a", reason: "manifest-changed" }]);
+	assert.deepEqual(pinned.events.filter((e) => e.startsWith("rename:") || e.startsWith("remove:")), []);
+	// And a pass told to stop during that wait asks nothing again and removes nothing.
+	const stopping = scene(() => false);
+	const nap = stopping.options.sleep;
+	let naps = 0;
+	const stoppedOut = await realMakeSandboxReaper({ ...stopping.options, sleep: async (ms) => (naps++, nap(ms)) })({ stopped: () => naps >= 2 });
+	assert.deepEqual(stopping.events, ["list", "isOpen:a", "sleep:250", "sleep:250"]);
+	assert.deepEqual([stoppedOut.reaped, stoppedOut.stopped, Object.hasOwn(stoppedOut, "askedAgain")], [0, true, false]);
+});
+
+test("one run cannot hold a pass: a wait before its removal is taken from the pass's own, and once that is used up the removal goes ahead (issue #1023)", async () => {
+	// Nothing is starting until the first run's runtime is asked; from then on a container is starting for good.
+	let began = false;
+	const p = besideJobs(expiredRuns(3), { starting: () => (began ? 1 : 0) });
 	const isOpen = p.options.isOpen;
 	p.options.isOpen = async (args) => {
-		if (args.name === "a") began = p.options.clock();
+		began = true;
 		return isOpen(args);
 	};
-	await realMakeSandboxReaper(p.options)();
-	assert.deepEqual(p.events.slice(0, 4), ["list", "isOpen:a", "rename:a", "remove:a"], "asked, renamed and removed with nothing in between");
-	assert.deepEqual(restsOf(p.events)[0], 1000 + 1000, "then the entry's rest (the busy floor) and the wait for what is left of the start");
-	assert.deepEqual(p.events.filter((e) => !e.startsWith("sleep:")).slice(4), ["isOpen:b", "rename:b", "remove:b"]);
-	// The same holds for a leftover tombstone: its delete, then its rest, then the wait.
+	const out = await realMakeSandboxReaper(p.options)();
+	assert.deepEqual(p.events.slice(0, 2), ["list", "isOpen:r000"]);
+	assert.deepEqual(p.events.slice(2, 82), Array(80).fill("sleep:250"), "the pass's whole 20 s, before this one removal");
+	assert.deepEqual(p.events.slice(82, 85), ["isOpen:r000", "rename:r000", "remove:r000"], "asked again, and removed beside the start: no wait is left");
+	assert.deepEqual(p.events.filter((e) => e.startsWith("isOpen:")).slice(2), ["isOpen:r001", "isOpen:r002"], "the runs after it are asked once and removed");
+	assert.deepEqual([out.reaped, out.waitedForStartsMs, out.askedAgain], [3, 20_000, 1]);
+
+	// The worst case: a container that is starting every time the runtime has answered and is up within one slice. Each
+	// wait is one slice of the pass's eighty, so the runtime is asked again eighty times and then the run is removed.
+	let pending = false;
+	const worst = besideJobs({ a: { createdAt: hoursAgo(50) } }, { starting: () => (pending ? ((pending = false), 1) : 0) });
+	const ask = worst.options.isOpen;
+	worst.options.isOpen = async (args) => {
+		pending = true;
+		return ask(args);
+	};
+	const bounded = await realMakeSandboxReaper(worst.options)();
+	assert.equal(worst.events.filter((e) => e === "isOpen:a").length, 81);
+	assert.deepEqual(worst.events.slice(worst.events.lastIndexOf("isOpen:a") + 1).filter((e) => !e.startsWith("sleep:")), ["rename:a", "remove:a"], "and after the last of them nothing waits");
+	assert.deepEqual([bounded.reaped, bounded.waitedForStartsMs, bounded.askedAgain], [1, 20_000, 80]);
+});
+
+test("a leftover tombstone's delete is not waited for after its read: the look comes before, and its rest and the wait after (issue #1023)", async () => {
+	// A start that begins during the delete: the delete, then its rest (the busy floor), then the wait to the end of it.
 	const tomb = besideJobs({}, { starting: (t) => (t >= 500 && t < 2000 ? 1 : 0), removeMs: () => 700 });
 	tomb.fs.files["/sbx/.reap-4242-1-0"] = "<dir>";
 	tomb.fs.files[`/sbx/.reap-4242-1-0/${SANDBOX_MANIFEST}`] = JSON.stringify({ jobId: "t0", createdAt: hoursAgo(50) });
 	await realMakeSandboxReaper({ ...tomb.options, pid: 4242 })();
 	assert.equal(tomb.events[0], "remove:.reap-4242-1-0", "the delete first");
 	assert.deepEqual(restsOf(tomb.events)[0], 1000 + 500, "its rest (the busy floor), then the wait to the end of the start");
+
+	// A start that begins in the turn a kept tombstone yields. The first leftover holds a live pin and is put back (no
+	// delete, one turn); the pass last looked at the count before it, so the second is looked at again before its read.
+	const scene = () => {
+		let began = null;
+		const p = besideJobs({}, { starting: (t) => (began !== null && t < began + 1000 ? 1 : 0) });
+		p.fs.files["/sbx/.reap-4242-1-0"] = "<dir>";
+		p.fs.files[`/sbx/.reap-4242-1-0/${SANDBOX_MANIFEST}`] = JSON.stringify({ jobId: "kept", createdAt: hoursAgo(50), keepUntil: new Date(AT + DAY).toISOString() });
+		p.fs.files["/sbx/.reap-4242-1-1"] = "<dir>";
+		p.fs.files[`/sbx/.reap-4242-1-1/${SANDBOX_MANIFEST}`] = JSON.stringify({ jobId: "t1", createdAt: hoursAgo(50) });
+		const log = p.options.log;
+		p.options.log = (event, fields) => {
+			if (fields?.reason === "tombstone-pinned") began = p.options.clock();
+			log(event, fields);
+		};
+		p.options.pid = 4242;
+		return p;
+	};
+	const p = scene();
+	const out = await realMakeSandboxReaper(p.options)();
+	assert.deepEqual(p.events.slice(0, 6), ["rename:.reap-4242-1-0", ...Array(4).fill("sleep:250"), "remove:.reap-4242-1-1"], "the pinned one put back, the wait for the start, then the delete");
+	assert.deepEqual([out.reaped, out.waitedForStartsMs], [1, 1000]);
+	assert.equal(Object.hasOwn(out, "askedAgain"), false, "a tombstone has no runtime to ask again: its one read comes after the wait");
+	// Told to stop during that wait, the pass deletes nothing.
+	const stopping = scene();
+	const nap = stopping.options.sleep;
+	let naps = 0;
+	const stoppedOut = await realMakeSandboxReaper({ ...stopping.options, sleep: async (ms) => (naps++, nap(ms)) })({ stopped: () => naps >= 2 });
+	assert.deepEqual(stopping.events.slice(0, 3), ["rename:.reap-4242-1-0", "sleep:250", "sleep:250"]);
+	assert.deepEqual(stopping.events.filter((e) => e.startsWith("remove:") || e.startsWith("sleep:")).slice(2), [], "no third slice and no delete");
+	assert.deepEqual([stoppedOut.reaped, stoppedOut.stopped], [0, true]);
+	assert.ok(`/sbx/.reap-4242-1-1/${SANDBOX_MANIFEST}` in stopping.fs.files);
+});
+
+test("beside a job the cap counts the session networks the sweep asked the daemon about, with the runs and tombstones removed (issue #1023)", async () => {
+	// A sweeper over `n` networks that keeps its own place from pass to pass, as the real one does.
+	const networks = (p, n) => {
+		let next = 0;
+		return async ({ pace }) => {
+			while (next < n) {
+				p.events.push(`network:${next++}`);
+				if (!(await pace())) return { swept: [], notes: [], more: next < n };
+			}
+			return { swept: [], notes: [] };
+		};
+	};
+	const visited = (p) => p.events.filter((e) => e.startsWith("network:")).length;
+	const passes = async (p, sweepNetworks, n, over = {}) => {
+		const reap = realMakeSandboxReaper({ ...p.options, ...over, sweepNetworks });
+		const seen = [];
+		for (let pass = 0; pass < n; pass++) {
+			const before = visited(p);
+			const out = await reap();
+			seen.push([out.reaped, visited(p) - before, out.more]);
+		}
+		return seen;
+	};
+	// Twelve networks and no run, beside a running job: five a pass, where one pass used to take as many as its time
+	// allowed (sixteen, measured).
+	const busy = besideJobs({}, { running: () => 1 });
+	assert.deepEqual(await passes(busy, networks(busy, 12), 3), [[0, 5, true], [0, 5, true], [0, 2, false]]);
+	assert.deepEqual(busy.passLines().map((f) => f.busy), [true, true, true]);
+	// Beside no job a pass counts no network, as before: sixty in one pass, past the fifty that bound the runs.
+	const idle = besideJobs({});
+	assert.deepEqual(await passes(idle, networks(idle, 60), 1), [[0, 60, false]]);
+	// And a pass that made its fifty removals beside no job still goes on to the networks, as it always did.
+	const fifty = besideJobs(expiredRuns(50));
+	assert.deepEqual(await passes(fifty, networks(fifty, 3), 1), [[50, 1, true]]);
+	// Runs first. A pass that removed its five runs leaves every network to the next pass.
+	const both = besideJobs(expiredRuns(5), { running: () => 1 });
+	assert.deepEqual(await passes(both, networks(both, 3), 2), [[5, 0, true], [0, 3, false]]);
+	// Three runs, then the networks: two of them make the five.
+	const mixed = besideJobs(expiredRuns(3), { running: () => 1 });
+	assert.deepEqual(await passes(mixed, networks(mixed, 6), 2), [[3, 2, true], [0, 4, false]]);
+	// A job that starts running in the middle of the network sweep (at 650 ms, a network every 100 ms) ends the pass
+	// at the next network: seven asked about is over five.
+	const mid = besideJobs({}, { running: (t) => (t >= 650 ? 1 : 0) });
+	assert.deepEqual(await passes(mid, networks(mid, 20), 1), [[0, 7, true]]);
+	// A pass that begins at the networks asks about one before any bound can stop it, so the lap still ends: here the
+	// listing of the open sandboxes alone takes longer than the pass's time.
+	const slow = besideJobs({}, { running: () => 1 });
+	const listRunning = async () => (slow.advance(25_000), []);
+	assert.deepEqual(await passes(slow, networks(slow, 3), 3, { listRunning }), [[0, 1, true], [0, 1, true], [0, 1, false]]);
 });
 
 test("the network sweep is paced beside jobs too: its rests have the busy floor and wait for a start (issue #1023)", async () => {

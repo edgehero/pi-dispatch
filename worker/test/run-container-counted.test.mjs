@@ -216,3 +216,30 @@ test("the count is never the job's business: one that throws stops no run and ch
 		await assert.rejects(mod.makeRunContainer({ image: "pi-job:x", hostEnv: {}, fs, spawnFn: cli(counted()), containerActivity })(bag()), (err) => !/broken/.test(String(err?.message)));
 	}
 });
+
+test("without a count the run function is the attempt itself, not a wrapper around it (issue #1023)", { skip }, async () => {
+	// Every caller but the worker builds its run function without a count (the canary replay, a bare wiring, most
+	// tests), and gets exactly the function it had: an answer the attempt has at once is the caller's at once. A wrapper
+	// would settle it a turn later, which is a change for every one of those callers. Told by the order of two answers
+	// that are both there without waiting: a job stopped before it began, and a promise that was already resolved.
+	const stopped = () => {
+		const ac = new AbortController();
+		ac.abort();
+		return bag(ac.signal);
+	};
+	const orderOf = async (runContainer) => {
+		const order = [];
+		const run = runContainer(stopped()).then(() => order.push("run"));
+		const turn = Promise.resolve().then(() => order.push("turn"));
+		await Promise.all([run, turn]);
+		return order;
+	};
+	const options = { image: "pi-job:x", hostEnv: HOST, fs, spawnFn: cli(counted()) };
+	assert.deepEqual(await orderOf(mod.makeRunContainer(options)), ["run", "turn"], "no count: the attempt's own promise");
+	assert.deepEqual(await orderOf(mod.makeRunContainer({ ...options, containerActivity: null })), ["run", "turn"], "a count of null is no count");
+	// With a count the run is wrapped, so that every exit ends the count: its answer comes after the wrapper's turn.
+	const c = counted();
+	assert.deepEqual(await orderOf(mod.makeRunContainer({ ...options, containerActivity: c.containerActivity })), ["turn", "run"]);
+	assert.deepEqual(c.story().map(([what]) => what), ["enter", "ended"]);
+	assert.deepEqual(await mod.makeRunContainer(options)(stopped()), ABORTED);
+});
