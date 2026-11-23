@@ -121,8 +121,9 @@ export const SANDBOX_TOMBSTONE_RELOG_MS = DAY_MS;
 
 /**
  * The bound on ONE pass of the retention sweep (issue #978): wall time from the pass's start, its rests included and
- * its waits for starting job containers left out (issue #1023: a pass that waits can last `SANDBOX_START_WAIT_MAX_MS`
- * longer). A
+ * its waits for starting job containers left out (issue #1023). A pass that waits can so last
+ * `SANDBOX_START_WAIT_MAX_MS` longer, and longer again by the asks of a runtime that follow such waits inside one
+ * entry, where this budget is not read (`makeSandboxReaper` says the bound). A
  * boot after a long gap used to sweep its whole backlog in one go before the worker took a job (959 `reaped_sandbox`
  * lines back to back on one host), one runtime ask and one recursive delete per run with nothing between them, all of
  * it before pickup. How long that took there was never measured; a thousand such removals took 10 to 18 s on a healthy
@@ -525,6 +526,11 @@ export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = (
  *   - is SMALLER while one is starting or running: `SANDBOX_PASS_MAX_REAPS_BUSY` removals, the networks it asked
  *     the daemon about among them, and a rest of at least `SANDBOX_REST_MIN_BUSY_MS`, each read at the boundary or
  *     the rest it applies to. A pass that has made its removals among the runs leaves the networks to the next.
+ * HOW LONG SUCH A PASS CAN LAST. Its time budget, the entry it was on and that entry's rest, as before; and on top,
+ * what the budget leaves out: up to `SANDBOX_START_WAIT_MAX_MS` of waiting, and one more ask of a runtime after each
+ * wait before a removal, at most 80 a pass, each as long as the runtime takes to answer (an ask that gets no answer
+ * holds the run and asks no more). So a pass is bounded, and in the worst case long: 192 s measured for one removal
+ * at 2 s asks, 759 s at 9 s asks.
  * It still visits one entry before anything can stop it, so the lap moves on every pass however busy the host is. The
  * pass says how long it waited (`waitedForStartsMs`, in the result and the line), how many times it asked a runtime
  * again after a wait (`askedAgain`, in both, when it did) and that it ran beside a job
@@ -802,6 +808,11 @@ export function makeSandboxReaper({
 				// and the fresh read below comes after the last wait, so it is asked once. Each wait uses at least one slice
 				// of the pass's `SANDBOX_START_WAIT_MAX_MS`; once that is used up nothing waits and the removal goes ahead,
 				// so one run cannot hold a pass: at most 80 asks again a pass, and a start that lasts seconds leaves a few.
+				// WHAT THAT COSTS THE PASS. The budget is not read inside an entry, so these asks come on top of it: each as
+				// long as the runtime takes to answer (one that does not answer holds the run, and that ends the asking).
+				// Measured: 46 s for a pass with 2 s asks and a
+				// 3 s start during each (7 asks again); in the worst case, 80 asks again for one removal, 192 s at 2 s asks
+				// and 759 s at 9 s asks.
 				let hold = null;
 				let asked = began;
 				for (let again = false; ; again = true) {
@@ -906,6 +917,12 @@ export function makeSandboxReaper({
 		if (lap.phase === "runs") enter("networks");
 		// Issue #1023: beside a job the cap covers the networks too, so a pass that has made its removals among the runs
 		// leaves the networks to the next one, which starts here. Without a job the pass goes on as it always did.
+		// The lap's order decides when that is (issue #978, unchanged): a pass that ends on the cap with an expired run
+		// still ahead in its own listing resumes at the runs, so the networks wait for the pass that finishes the runs
+		// with removals to spare. Where runs expire ahead of the lap's place as fast as a pass removes them, the lap
+		// never leaves the runs: measured, 5 newly expired runs a pass beside a job and no network was asked about in 60
+		// passes, where 4 a pass ended the lap. Beside jobs that is 3,100 to 6,700 runs a day (the issue's host: 640);
+		// the same held before at 50 a pass.
 		if (busy() && budgetSpent()) return finish(true);
 
 		// The session networks, after the directories. Reached only when `listRunning` ANSWERED and the

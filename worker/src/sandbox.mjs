@@ -822,8 +822,9 @@ export function resolveSandbox({ jobId, sandboxDir, retentionHours, publish = []
 		return retentionHours === 0
 			? { refused: "retention-off", message: "workspace retention is off — set PI_SANDBOX_RETENTION_HOURS to a positive number to make future runs resurrectable" }
 			: // Neutral about WHEN (#446 gate round 2): the window that swept it was the worker's, or the run's own recorded
-				// deadline, and this shell's `retentionHours` is neither.
-				{ refused: "absent", message: `no retained workspace for ${jobId}: it was swept at the end of its retention window, or the run predates retention (\`pi-dispatch sandbox --list\` shows what is left)` };
+				// deadline, and this shell's `retentionHours` is neither. And neutral about WHY (issue #1023): a run whose
+				// trigger keeps no sandbox was never retained, and nothing on disk tells that from a swept one.
+				{ refused: "absent", message: `no retained workspace for ${jobId}: it was swept at the end of its retention window, or its trigger keeps no sandbox (run.retainSandbox: false), or the run predates retention (\`pi-dispatch sandbox --list\` shows what is left)` };
 	}
 	// The venue BEFORE the image and the workspace (#277): for a run from another venue those two are the
 	// symptoms, and the first refusal an operator reads should be the cause. A workspace that happens to

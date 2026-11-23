@@ -367,7 +367,12 @@ at another daemon is invisible to it, and only the rules above protect it.
   and once more before each removal. That last look is for a container that began starting while the runtime was
   answering about a run: the pass waits for it and then asks the runtime about that run again, so it never deletes
   on an answer that is older than the wait. A pass waits at most 20 seconds in all; once that is used up it goes on,
-  and the wait does not count toward the pass's 20 seconds, so a pass beside jobs can take 20 seconds longer. While
+  and the wait does not count toward the pass's 20 seconds. Nor do the asks that follow a wait: each time a pass
+  has waited before a removal it asks the runtime about that run once more, at most 80 times a pass. So a pass
+  beside jobs can take longer than its 20 seconds: by up to 20 seconds of waiting, and by one runtime answer for each
+  of those asks. One pass took 46 seconds with a runtime that answered in 2 seconds and a container that started
+  during each answer. The worst case is a container that starts every time the runtime has answered: one removal
+  then took 192 seconds at 2 seconds an answer, and 759 at 9. While
   a job container is starting or running, a pass makes at most 5 removals (a session network it asked the runtime
   about counts as one) and rests at least 1 second after each. A container that has not shown itself up 120 seconds
   after its run began counts as running from then on, so a start that never reports cannot hold the sweep.
@@ -389,7 +394,11 @@ at another daemon is invisible to it, and only the rules above protect it.
   ([keeping no sandbox](triggers.md#keeping-no-sandbox-for-a-local-command)), which takes the load away where it
   starts.
 
-  The sweep at boot is not slowed, since no job runs yet. A pass that waited says for how long in its line
+  The first pass at boot is not slowed, since the worker takes no job until it is over. The passes that follow it to
+  finish what the boot found run beside your jobs, and give way like any other. Session networks are swept after the
+  runs, so while expired runs keep arriving as fast as a pass beside jobs removes them (some 3,100 to 6,700 a day,
+  where the host this was built for makes about 640) their networks wait. A pass that waited says for how long in
+  its line
   (`waitedForStartsMs`, which is part of the time the pass took) and how many times it asked the runtime again after
   a wait (`askedAgain`); a pass that ran beside a job says `busy: true`. Only this worker's own job containers
   count, and only from the moment the worker starts the container's network or the container itself: the checks it

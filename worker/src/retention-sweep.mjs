@@ -178,9 +178,15 @@ export function makeRetentionSweep({ reapers, intervalMs, log = () => {}, now = 
  * stops at its first loop boundary past 20 s (`SANDBOX_PASS_BUDGET_MS` in `sandbox-store.mjs`), so it lasts 20 s plus
  * the entry it was on and that entry's rest (at most 10 s more); an entry's rest is as long as the entry took up to
  * that cap, and the runtime listing at the start of a pass has no rest after it. Beside the worker's jobs a pass can
- * last up to 20 s longer still: what it waited for starting job containers (`SANDBOX_START_WAIT_MAX_MS`, issue
- * #1023) is outside the 20 s, and the follow-up is armed when the pass ends, so the passes are a minute and a pass
- * apart. Each pass removes at most fifty runs:
+ * last longer still, by two things its budget leaves out (issue #1023). One is what it waited for starting job
+ * containers, at most 20 s (`SANDBOX_START_WAIT_MAX_MS`). The other is the asks again: after each such wait before a
+ * removal the run's runtime is asked once more, inside one entry, where the budget is not read. That is at most 80
+ * asks again a pass (one for each slice of the wait), each as long as the runtime takes to answer (the sweep's `ps`
+ * is given 5 s a runtime, and an ask that gets no answer holds the run and asks no more). Measured on the reaper:
+ * 46 s for one pass with 2 s asks and a 3 s start during each ask (7
+ * asks again); and in the worst case, a container that is starting each time the runtime has answered and up within
+ * one slice, 80 asks again for one removal, 192 s at 2 s asks and 759 s at 9 s asks. The follow-up is armed when the
+ * pass ends, so the passes are a minute and a pass apart. Each pass removes at most fifty runs:
  * a thousand runs take at least twenty passes, about twenty minutes at this delay on a runtime that answers at once
  * (computed from 20 measured passes of about 6 s), and longer on one that does not, which is the point.
  */
