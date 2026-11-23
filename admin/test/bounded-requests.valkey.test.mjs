@@ -6,12 +6,14 @@
 // Issue #987 adds what a forge enqueue says before its add was ever sent: through a forwarder that takes the connection
 // and closes it, with an approval that is no longer the pending one, and with the queue an approval is routed to
 // stopped at its connect. And the budget writes: a plan stopped at its first read, a revert stopped at its
-// compare-and-set (one bound, and what it leaves to be seen), and two plans racing on one basis.
+// compare-and-set (one bound, and what it leaves to be seen), and two plans racing on one basis. And a held job's
+// cancel, which leaves no connection open behind its answer on a Valkey that stopped answering.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { connect as netConnect, createServer } from "node:net";
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { makeQueue } from "@edgehero/pi-dispatch/queue";
 import { publishLook, updatesCanaryKey } from "@edgehero/pi-dispatch/updates";
@@ -21,7 +23,7 @@ import { freezingProxy } from "../../worker/test/helpers/freezing-proxy.mjs";
 import { commandOn, trippingProxy } from "./helpers/tripping-proxy.mjs";
 import { closingForwarder } from "./helpers/closing-forwarder.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { DISPATCH_RUN_COUNT_SCRIPT, applyPriorities, cancelQueuedJob, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planCancelQueued, planEnvelopeWrite, planParkedAnswer, planRerun, readAllocations, readEnvelope, revertAllocation, writeEnvelope } from "../src/read-model.mjs";
+import { DISPATCH_RUN_COUNT_SCRIPT, QUEUE_CLOSE_TIMEOUT_MS, applyPriorities, cancelHeldJob, cancelQueuedJob, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planCancelQueued, planEnvelopeWrite, planParkedAnswer, planRerun, readAllocations, readEnvelope, revertAllocation, writeEnvelope } from "../src/read-model.mjs";
 import { makeAllocationState } from "@edgehero/pi-dispatch/allocation";
 import { historyBehind } from "../src/render.mjs";
 import { APPROVAL_NOT_PENDING, CONNECT_ENDED, dispatchRunAlready, enqueueUnconfirmed } from "../src/job-actions.mjs";
@@ -655,6 +657,66 @@ test("two plans racing on one basis on a real Valkey: one applies, and its split
     // Which way the losers lost is the server's to decide; each way is one this test took.
     assert.ok(Object.keys(losers).every((reason) => ["plan-stale", "plan-busy", "plan-too-soon"].includes(reason)), JSON.stringify(losers));
   } finally {
+    await s.done();
+  }
+});
+
+/**
+ * A pass-through in front of `target` that says how many client connections are open now. One counts until the client
+ * ends or destroys it: the front closes back at once, where a Valkey that stopped answering would not, and ioredis
+ * destroys a socket it ended and nobody closed back 2 s later.
+ */
+async function countingFront(target) {
+  const to = new URL(target);
+  const open = new Set();
+  const server = createServer((client) => {
+    const upstream = netConnect({ host: to.hostname, port: Number(to.port) });
+    open.add(client);
+    for (const socket of [client, upstream]) socket.on("error", () => {});
+    client.on("data", (data) => upstream.write(data));
+    upstream.on("data", (data) => client.write(data));
+    client.on("close", () => (open.delete(client), upstream.destroy()));
+    upstream.on("close", () => client.destroy());
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const via = new URL(target);
+  via.port = String(server.address().port);
+  return {
+    url: via.toString(),
+    open: () => open.size,
+    close: () => {
+      for (const socket of open) socket.destroy();
+      server.close();
+    },
+  };
+}
+
+test("a held job's cancel on a Valkey that stops answering at its lookup answers at its own bound, and no connection of the cancel is open once the close bound has passed (#987)", live, async () => {
+  const s = await scene("t987");
+  // The lookup asks the shared queue first: its meta key in this database is this test's to delete.
+  s.own("bull:pi-jobs:*");
+  const proxy = await trippingProxy(s.url);
+  const front = await countingFront(proxy.url);
+  const TIMER = 700;
+  const settled = async () => {
+    // Past the close bound, when a queue whose close was not answered has had its connection dropped.
+    await sleep(QUEUE_CLOSE_TIMEOUT_MS + 400);
+    return front.open();
+  };
+  try {
+    // The held cancel, stopped at its lookup of the job: its queue is connected by then, so its close is a QUIT that
+    // Valkey never answers, and a bare close kept that connection open for as long as Valkey stayed silent.
+    const frozen = proxy.freezeAt(commandOn("hgetall", "bull:pi-jobs"));
+    const held = await clocked(cancelHeldJob({ url: front.url, jobId: `gh-${s.tag}`, redisFn: clientHere, timeoutMs: TIMER }));
+    assert.equal(await stoppedAt(frozen), "stopped", "Valkey stopped answering at the lookup");
+    assert.deepEqual(held.res, { invalid: "timed out reaching the queue" }, "its own timer answers, as before");
+    assert.ok(held.ms < TIMER + 1500, `${held.ms} ms`);
+    assert.ok(front.open() >= 1, "its queue's connection is still open when the answer leaves");
+    assert.equal(await settled(), 0, "and none is open once the close bound has passed");
+  } finally {
+    proxy.thaw();
+    front.close();
+    proxy.close();
     await s.done();
   }
 });

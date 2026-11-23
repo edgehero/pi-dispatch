@@ -15,6 +15,7 @@ import {
   enqueueSteer,
   estimateReserve,
   planFailedBulk,
+  cancelQueuedJob,
   planCancelQueued,
   planParkedAnswer,
   planRerun,
@@ -1534,6 +1535,33 @@ test("a steer preview whose inbox read never answers ends at its bound too, on a
   // The fleet discovery's client first, then the inbox's: bounded, with its offline queue, dropped at once.
   assert.deepEqual(made.filter((o) => o !== null), Array(2).fill({ commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }));
   assert.ok(dropped >= 2, "and the inbox client is dropped, never left to a read that does not answer");
+});
+
+test("a queued job's cancel reads and writes through the console's bounded client, at its preview and at its confirm, and drops it when its own bound fires (#987)", async () => {
+  // A job that never started, found on the shared queue; the cancel's own client answers nothing after that.
+  const job = { id: "gh-1", name: "github", attemptsMade: 0, stalledCounter: 0, data: {}, getState: async () => "waiting" };
+  const queueFn = (_c, { name }) => ({ name, getJob: async () => job, close: async () => {} });
+  const run = async (cancel) => {
+    const made = [];
+    let dropped = 0;
+    const redisFn = (_url, options) => {
+      made.push(options ?? null);
+      return quietClient({ hget: neverAnswers, hgetall: neverAnswers, disconnect() { dropped += 1; } });
+    };
+    const got = await timed(cancel({ url: "redis://x", jobId: "gh-1", redisFn, queueFn, parseConnectionFn: () => ({}), timeoutMs: 60 }));
+    return { got, made, dropped: () => dropped };
+  };
+  const preview = await run((seams) => planCancelQueued(seams));
+  assert.deepEqual(preview.got.res, { unreachable: "timed out reaching the queue" }, "its own timer answers, as before");
+  const confirm = await run((seams) => cancelQueuedJob({ ...seams, expect: { queue: "pi-jobs", attemptsMade: 0, stalledCounter: 0 } }));
+  assert.deepEqual(confirm.got.res, { unreachable: "timed out reaching the queue" });
+  for (const { got, made, dropped } of [preview, confirm]) {
+    assert.ok(got.ms < 1500, `${got.ms} ms`);
+    // The fleet discovery's client first (a read under its own timer, on a client of its own), then the cancel's: each
+    // command bound, with its offline queue, dropped at once on disconnect. It was a raw client with no bound.
+    assert.deepEqual(made, [null, { commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }]);
+    assert.ok(dropped() >= 2, "both clients are dropped when the answer leaves");
+  }
 });
 
 test("a steer confirm that was sent and not answered says may or may not, and one that was never sent says unreachable (#842)", async () => {

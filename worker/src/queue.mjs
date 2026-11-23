@@ -274,9 +274,20 @@ export function makeQueue(connection, { name = QUEUE } = {}) {
  * made" instead of waiting for it. The ONE place the console passes the bound, so the queues behind the kill switch,
  * the failed-job and steer actions, the fleet reader and the status read have it by one spelling, and since issue #961
  * so do the one-shot queues of a rerun, a parked answer, a `dispatch_run`, a trigger fire, the zero touch grouping job
- * and the schedule page (not yet: a held job's cancel, `cancelHeldJob`, and the panel's scheduler list, `readSchedulers`,
- * each under a timer of its own); never for a Worker (`parseConnection` says why). `parseConnectionFn` is the
- * caller's seam.
+ * and the schedule page, and since issue #987 the queues of a held job's cancel, `cancelHeldJob` (not yet: the panel's
+ * scheduler list, `readSchedulers`, under a timer of its own); never for a Worker (`parseConnection` says why).
+ * `parseConnectionFn` is the caller's seam.
+ *
+ * The console's raw clients take the same bound by another door, the admin's `boundedClient` (`makeRedisClient`'s
+ * `commandTimeoutMs`, with the offline queue kept and the socket dropped at once on disconnect): the steer inbox, a
+ * re-run's and a parked answer's preview, the count of a `dispatch_run`, Fire now's latch, the zero touch and
+ * answerer services, and since issue #987 the three cancels (a queued job's preview and confirm, a held job's). What
+ * still runs on a raw client with no command bound are reads, each ended by a timer of its own and its client dropped
+ * after it: the queue discovery (`readFleetQueues`), the split and its history (`readAllocations`), the registry and
+ * the held jobs (`readHosts`, `readHeldJobs`), the budget and capacity reads (`readBudget`, `readScopedBudget`,
+ * `readDollarCounters`, `readCapacity`), the run mirror (`listRunsMerged`), the triggers' stalls
+ * (`readTriggersWithStalls`), the connections and models views where no client is lent to them (`readConnections`,
+ * `readModelsView`) and the schedule page's host read (`readScheduleHosts`).
  */
 export function consoleQueueConnection(url, parseConnectionFn = parseConnection) {
 	return parseConnectionFn(url, { failFast: true, commandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS });
