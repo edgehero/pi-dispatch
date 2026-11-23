@@ -55,7 +55,7 @@ import { NO_EXPLANATION, docsHref } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { TIMELINE_DEFAULTS, TIMELINE_ROWS, TIMELINE_WAIT_WORDS, TIMELINE_ZOOMS, timelineHtml, timelineLegend, timelineModel } from "../timeline.mjs";
-import { BEAT_FRESH_MS, HOSTS_UNREAD_TEXT, NO_BEAT_READ, REGISTRY_PART_TEXT, registryReadInPart, rowLastSeen, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, hostsUnread, killSwitchUnreadForms, pausedStateUnknown, moneyHtml, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
+import { BEAT_FRESH_MS, HOSTS_UNREAD_TEXT, NO_BEAT_READ, REGISTRY_PART_TEXT, registryReadInPart, rowLastSeen, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, hostsUnread, killSwitchUnreadForms, pausedStateUnknown, moneyHtml, overlayRefused, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
 
 // ---- the sentences -----------------------------------------------------------------------------------------------------
 
@@ -185,6 +185,8 @@ const UNREAD = Object.freeze({
   activeTimeline: "The running jobs could not be read, so runs under way may be missing.",
   waitingCut: WAITING_CUT_TEXT,
   settings: "The settings overlay could not be read, so its caps are not drawn.",
+  // One word per case (issue #988): an overlay that was read and is refused is not a read that failed.
+  settingsRefused: "The settings overlay does not load, so its caps are not drawn.",
   dollars: "The dollar counters could not be read.",
   counts: "The job or token counters could not be read, so their windows are not drawn.",
   spend: "The run records could not be read, so the spend per hour is not drawn.",
@@ -850,7 +852,7 @@ export const overviewCaps = overviewPanel("Caps", (s, view) => {
     if (key !== null && !keys.includes(key)) keys.push(key);
     caps.push(ui.capsule({ name, unit: "$", window: WINDOW_WORD[r.window] ?? String(r.window), pct: pctOf(r.counterMicros, r.capMicros), status: r.full ? "failed" : "ok" }));
   }
-  const unread = [settingsRead ? null : UNREAD.settings, countsUnread ? UNREAD.counts : null, dollarsUnread ? UNREAD.dollars : null].filter(Boolean).map((t) => html`<p class="card__sub">${t}</p>`);
+  const unread = [settingsRead ? null : overlayRefused(read) ? UNREAD.settingsRefused : UNREAD.settings, countsUnread ? UNREAD.counts : null, dollarsUnread ? UNREAD.dollars : null].filter(Boolean).map((t) => html`<p class="card__sub">${t}</p>`);
   const spend = ui.btn({ kind: "sm", label: "Spend", href: hrefTo(view, "insights") });
   if (caps.length === 0) return ui.card({ title: "Caps", sub: "percent used", end: spend, body: html`${unread.length > 0 ? unread : html`<p class="muted">${CAPS_EMPTY_TEXT}</p>`}<p class="card__sub">${COUNT_WINDOWS_UTC_TEXT}</p>` });
   const legend = html`<p class="keyrow"><span><i class="k tone-ok"></i>Open</span>${hold !== null ? html`<span><i class="k tone-attention"></i>Soft hold</span>` : null}<span><i class="k tone-failed"></i>Full</span>${hold !== null ? html`<span><i class="k k--hold"></i>Soft hold line (${count(hold)}%)</span>` : null}${keys.length > 0 ? html`<span>${keys.join("; ")}</span>` : null}</p>`;

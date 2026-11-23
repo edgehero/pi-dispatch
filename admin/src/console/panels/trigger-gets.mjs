@@ -21,7 +21,8 @@ import { forgeBaseLinkOf } from "../../read-model.mjs";
 import { TRIGGER_GETS_WORDS as W, triggerGetsOf } from "../../trigger-gets-view.mjs";
 import { triggerSandboxHosts } from "../trigger-sandbox.mjs";
 import { listed } from "../../words.mjs";
-import { canAct, hostsUnread, shownPath } from "./common.mjs";
+import { canAct, changesOffered, hostsUnread, shownPath } from "./common.mjs";
+import { noChangeText } from "./config-ui.mjs";
 import { fixButton, stateLine, wordsHtml } from "./loaded-parts.mjs";
 
 const detail = (v) => v.data?.triggerDetail ?? {};
@@ -50,7 +51,7 @@ function getsOf(v) {
   return { trigger, gets: triggerGetsOf({
     trigger,
     records: detail(v).history ?? [],
-    historyUnread: !Array.isArray(detail(v).history),
+    historyUnread: !Array.isArray(detail(v).history) || detail(v).historyUnread === true,
     // A read that threw is the reader's own unreachable answer (issue #962): the note then says the hosts could not be read.
     hostLoads: v.data?.hostLoads ?? (v.data?.hostLoadsUnread === true ? { unreachable: true, hosts: [] } : null),
     // A host that does not bless the venue refuses the job before it spends, so it is no host these jobs run on.
@@ -193,13 +194,13 @@ export function triggerGets(v) {
   if (got === null) return null;
   const { trigger, gets } = got;
   const digest = v.data?.triggerGets?.pageDigest;
-  const form = canAct(v) && typeof digest === "string" && trigger.type !== "watch";
+  const form = changesOffered(v) && typeof digest === "string" && trigger.type !== "watch";
   const repositoryHref = gets.record === null ? null : forgeBaseLinkOf(gets.record, v.env);
   const fix = (problem) => (problem && v.role === "operator" ? problem.fixes.filter((one) => one.kind !== "trigger").map((one) => fixButton(one, { repositoryHref })) : null);
   const watch = trigger.type === "watch";
   const hosts = watch ? (trigger.mode === "issue" ? null : note(gets.quote, { icon: "chain" })) : html`<div class="te-hosts" role="list" aria-label="Where its jobs run">${gets.pills.map((pill) => html`<span role="listitem" class="${pill.tone === "ok" ? "te-host te-host--ok" : pill.tone === "attention" ? "te-host te-host--att" : "te-host"}">${ui.icon(pill.icon, { size: "sm" })}<b>${pill.name}</b> ${pill.word}</span>`)}</div>${note(gets.hostsNote, { icon: "doctor" })}${note(gets.quote, { icon: "chain" })}`;
   const rows = watch ? watchRows(gets, trigger, fix) : html`${sec("bolt", "Model", "what its jobs call", modelBody(gets, form), gets.last.Model)}${sec("skill", "Flow and skills", "what it is told to do", flowBody(gets, form), gets.last.Skills, gets.problems.Skills ?? null, fix(gets.problems.Skills))}${sec("layers", "Extensions", "code its jobs load", extensionsBody(gets, form), gets.last.Extensions, gets.problems.Extensions ?? null, fix(gets.problems.Extensions))}${sec("plug", "MCP servers", "outside systems it reaches", mcpBody(gets, form), gets.last.MCP, gets.problems.MCP ?? null, fix(gets.problems.MCP))}${sec("flows", "Tools", "what the agent may use", toolsBody(gets, form), gets.last.Tools)}${sec("box", "Image and secrets", "set elsewhere", imageBody(gets), gets.last.pi)}`;
-  const say = !canAct(v) && v.role === "operator" ? note([W.readOnly]) : watch ? note([W.watch]) : canAct(v) && !form ? note([W.unreadRow], { icon: "attention", tone: "attention" }) : null;
+  const say = !canAct(v) && v.role === "operator" ? note([W.readOnly]) : watch ? note([W.watch]) : canAct(v) && !changesOffered(v) ? note([noChangeText()], { icon: "attention", tone: "attention" }) : canAct(v) && !form ? note([W.unreadRow], { icon: "attention", tone: "attention" }) : null;
   // The page's banner promises a link to the refusal that sent a person here, for the actions that keep one. This one does not.
   const unlinked = form && v.query?.becauseRun ? note([W.notLinked], { icon: "attention", tone: "attention" }) : null;
   const body = form
@@ -215,6 +216,6 @@ export function triggerGetsHow(v) {
   const noTool = line("shield", "A person, at the console.", W.noTool);
   const watch = fileTrigger(v).type === "watch";
   // Of a watch rule this card only reads, and the page does not: its Edit form still writes what a rule takes, such as `maxTurns`.
-  if (!canAct(v) || watch) return ui.card({ title: W.how, body: html`<ul class="te-list">${line("eye", watch ? "This card only reads." : "Read only here.", watch ? W.watch : v.role === "operator" ? W.readOnly : W.viewer)}${noTool}</ul>` });
+  if (!changesOffered(v) || watch) return ui.card({ title: W.how, body: html`<ul class="te-list">${line("eye", watch ? "This card only reads." : "Read only here.", watch ? W.watch : v.role === "operator" ? W.readOnly : W.viewer)}${noTool}</ul>` });
   return ui.card({ title: W.how, body: html`<ul class="te-list">${line("edit", "Change it in place.", "A switch for the staged packages, each extension and each MCP server, a chip for each tool, a picker for the model and the flow.")}${line("skill", "The flow picker is not the whole list.", W.flowPicker)}${line("eye", "Nothing is written", "until you preview the change and confirm it.")}${noTool}${line("rerun", "Undo", "puts back the keys the change touched, as they were. Where this page could not write them, the preview says so.")}</ul>` });
 }

@@ -670,6 +670,11 @@ function loadTriggerEntries(triggersPath, fs) {
   try {
     return { entries: parseTriggers(fs.readFileSync(triggersPath, "utf8"), triggersPath) };
   } catch (e) {
+    // One word per case (issue #988): a file that is not there does not exist, and one nobody could read could not be
+    // read, said by the error's code (its message names the host's path). "Does not load" is a file that was read
+    // and is refused.
+    if (e?.code === "ENOENT") return { refusal: "the triggers file does not exist; nothing was queued" };
+    if (typeof e?.code === "string" && /^E[A-Z0-9]+$/.test(e.code)) return { refusal: `the triggers file could not be read (${e.code}); nothing was queued` };
     return { refusal: `the triggers file does not load (${e?.message ?? e}); nothing was queued` };
   }
 }

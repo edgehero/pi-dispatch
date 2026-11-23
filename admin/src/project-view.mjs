@@ -105,8 +105,15 @@ export function projectSizeAction(call, id) {
   return { action: `limit-${match[2]}`, limit, ...(index === undefined ? {} : { index }), row: index === undefined ? null : index + 1 };
 }
 
+/**
+ * A file view's state in the one word of its case (issue #988), or null for a file that gave its list (`key`): it
+ * "does not exist", it "does not load" (it was read and is refused), or it "could not be read" (nobody could read it,
+ * or the read threw). One umbrella, "could not be loaded", said all three.
+ */
+const fileWord = (view, key) => (Array.isArray(view?.[key]) && !view.invalid && !view.unreadable ? null : view?.missing === true ? "does not exist" : view?.invalid ? "does not load" : "could not be read");
+
 /** Only typed facts from the actual preflight may explain a blocker; raw planner text never becomes page copy. */
-function projectRefusal(result, id, operation) {
+function projectRefusal(result, id, operation, words = {}) {
   if (!result?.refusal) return null;
   const blocker = result.blocker;
   const deleting = operation === "delete";
@@ -123,7 +130,8 @@ function projectRefusal(result, id, operation) {
     if (rows.length) return `${prefix} scoped limits ${rows.length === 1 ? "row" : "rows"} ${rows.join(", ")} (project:${id}) ${rows.length === 1 ? "names" : "name"} it. Remove ${rows.length === 1 ? "that row" : "those rows"} first.`;
   }
   if (blocker?.kind === "envelope-floor" && blocker.projects?.includes(id)) return `${prefix} an envelope floor names it. Remove that floor first.`;
-  if (blocker?.kind === "source" && ["triggers", "projects", "scoped-limits"].includes(blocker.source)) return `The ${blocker.source} file could not be loaded, so this project's change cannot be checked. Run pi-dispatch doctor and correct that file.`;
+  // A planner that refuses a file the page's own reader took has read it: it does not load.
+  if (blocker?.kind === "source" && ["triggers", "projects", "scoped-limits"].includes(blocker.source)) return `The ${blocker.source} file ${words[blocker.source] ?? "does not load"}, so this project's change cannot be checked. Run pi-dispatch doctor and correct that file.`;
   return "The project configuration could not be checked. Run pi-dispatch doctor, then preview again.";
 }
 
@@ -247,7 +255,9 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
   const deletion = await guarded(() => io.delete({ id, paths, env, fs }), { refusal: "The console could not check whether this project can be deleted." });
   // The display reader is deliberately lenient. A strict planner may find a broken bundle declaration it could
   // not display, so its trigger-load refusal is also evidence that "no bundle" would be an unsafe claim.
-  const bundleKnown = Array.isArray(triggers?.triggers) && !triggers.invalid && !triggers.unreadable && ![edit, deletion].some((result) => result?.blocker?.kind === "source" && result.blocker.source === "triggers" || result?.refusal && !result.blocker);
+  const triggersFile = fileWord(triggers, "triggers");
+  const fileWords = { triggers: triggersFile, "scoped-limits": fileWord(sl, "limits") };
+  const bundleKnown = triggersFile === null && ![edit, deletion].some((result) => result?.blocker?.kind === "source" && result.blocker.source === "triggers" || result?.refusal && !result.blocker);
   if (!bundleKnown) bundle = null;
   const counts = Object.fromEntries(["completed", "failed", "refused", "cancelled", "awaiting-input", "awaiting-approval"].map((k) => [k, 0]));
   for (const r of day) { const key = outcomeKey(r.outcome, recordReason(r)); if (key) counts[key]++; }
@@ -282,7 +292,7 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
     allocation: { window, shareMicros: amount(allocation?.state?.allocations?.[id]), totalMicros: amount(allocation?.totalMicros), floorMicros: amount(allocation?.floors?.[id]), weight: amount(weights[id]), totalWeight: amount(totalWeight), split: allocation?.state ? { id: allocation.state.planId ?? null, writer: allocation.state.writer ?? null, appliedAt: allocation.state.appliedAt ?? null, validUntil: allocation.state.validUntil ?? null } : null, refused: selected.filter((r) => recordReason(r) === "allocation-cap").length, unset: !envelope, problem: allocation?.problem || allocation?.unreachable ? "The allocation could not be read." : null },
     size, sizing: sizingView, sizingUnreadable: (registryUnreadable && !registryPart) || !sizing || Boolean(sizing.unreachable) || !sl || Boolean(sl.invalid || sl.unreadable), ...(registryPart ? { sizingReadInPart: true } : {}), limits: limitRows, limitsUnreadable: !sl || Boolean(sl.invalid || sl.unreadable), bundle, bundleKnown,
     loads: projectLoadsOf(recorded.filter((r) => instant(r) >= now - LOADS_WINDOW_MS), { historyIncomplete }),
-    triggers: [...triggerCounts.values()].sort((a, b) => a.index - b.index), triggersKnown: Array.isArray(triggers?.triggers), editRefusal: projectRefusal(edit, id, "edit"), deleteRefusal: projectRefusal(deletion, id, "delete"),
+    triggers: [...triggerCounts.values()].sort((a, b) => a.index - b.index), triggersKnown: triggersFile === null, ...(triggersFile === null ? {} : { triggersFile }), editRefusal: projectRefusal(edit, id, "edit", fileWords), deleteRefusal: projectRefusal(deletion, id, "delete", fileWords),
   };
 }
 

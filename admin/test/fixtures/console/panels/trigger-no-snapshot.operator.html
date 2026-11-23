@@ -87,28 +87,18 @@ spend.
 <p>
 Jobs in line now:
 unavailable; the queue could not be read.
-</p></div></section><section id="p-trigger-gets" data-panel><div class="card"><div class="card__head"><h2>What its jobs get</h2><span class="card__sub">as a job of trigger 1 would start, from each host’s last doctor run</span></div><div class="te-hosts" role="list" aria-label="Where its jobs run"></div><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-doctor"></use></svg><span>The hosts’ doctor runs could not be read, so each reads unknown, never the same.</span></p><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg><span>The rows say what the next job gets, from the triggers file. The run history could not be read just now, so this says nothing of what its runs had.</span></p><form class="act te-form" data-action="trigger-environment-edit" data-structured="trigger-gets" autocomplete="off"><fieldset data-config-controls disabled><input type="hidden" name="index" value="0" data-type="int"><input type="hidden" name="pageDigest" value="ee4bdc563469f33ae1815b8b94ae8a2f466ae967c940ec5c462ccc63509423e9"><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-bolt"></use></svg><span>Model<small>what its jobs call</small></span></p><div class="te-sec__v"><div class="field"><label for="te-selection">Model selection</label><select id="te-selection" class="input" data-gets-mode data-gets-was="fixed"><option value="fixed" selected>Fixed model</option><option value="fallback">Ordered fallbacks</option><option value="random">Random model pool</option></select><p class="field__hint">A new run chooses once. Retries keep that model unless an evidenced subscription limit permits another choice.</p></div>
-<div class="te-grid" data-gets-fixed>
-<div class="field"><label for="te-provider">Provider</label><input id="te-provider" class="input" name="provider" type="text" value="" maxlength="256" autocomplete="off" spellcheck="false" list="te-providers" data-gets-word="provider changed"><p class="field__hint">Blank uses the deployment’s provider.</p></div>
-<div class="field"><label for="te-model">Model</label><input id="te-model" class="input" name="model" type="text" value="" maxlength="256" autocomplete="off" spellcheck="false" list="te-models" data-gets-word="model changed"><p class="field__hint">Blank uses the deployment’s model.</p></div>
-</div>
-<div class="field"><label for="te-cap">Job cap, in dollars</label><input id="te-cap" class="input" name="maxCostUsd" type="text" value="" maxlength="256" autocomplete="off" spellcheck="false" data-gets-amount data-gets-word="job cap changed"><p class="field__hint">Blank means no cap of its own.</p></div>
-<div class="field"><label for="te-allowance">Subscription allowance, in dollars</label><input id="te-allowance" class="input" name="maxSubscriptionUsd" type="text" value="" maxlength="256" autocomplete="off" spellcheck="false" data-gets-amount data-gets-word="subscription allowance changed"><p class="field__hint">The list price its subscription calls may use, checked between calls. Blank means no allowance.</p></div>
-<datalist id="te-providers"></datalist><datalist id="te-models"></datalist><datalist id="te-model-refs"></datalist>
-<div data-gets-random hidden><p class="te-sub">Random candidate pool</p><p class="te-read">Add 1 to 16 exact provider/model references.</p><div class="field"><label for="te-random-add">Add candidates</label><input id="te-random-add" class="input" list="te-model-refs" maxlength="8192" autocomplete="off" spellcheck="false" placeholder="provider/model, separated by spaces" data-gets-add="randomCandidates" data-gets-word="random pool changed"></div><p class="field__hint">Each eligible model has an equal chance. The allowed-model list still applies; the deployment's default is not an extra candidate. No model is chosen by this preview.</p></div>
-<div><p class="te-sub">Allowed models</p><p class="te-read">Any model is allowed.</p><div class="field"><label for="te-models-add">Limit to a list</label><input id="te-models-add" class="input" list="te-model-refs" maxlength="512" autocomplete="off" spellcheck="false" placeholder="provider/model, separated by spaces" data-gets-add="models" data-gets-word="allowed models changed"></div></div>
-<div data-gets-fallback hidden><p class="te-sub">If it is rate limited</p><p class="te-read">No fallback.</p><div class="field"><label for="te-fallbacks-add">Add a fallback</label><input id="te-fallbacks-add" class="input" list="te-model-refs" maxlength="512" autocomplete="off" spellcheck="false" placeholder="provider/model, separated by spaces" data-gets-add="fallbackModels" data-gets-word="fallbacks changed"></div></div><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>The run history could not be read just now, so this says nothing of what its runs had.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"></use></svg><span>Flow and skills<small>what it is told to do</small></span></p><div class="te-sec__v"><div class="field"><label for="te-flow">Flow</label><input id="te-flow" class="input" name="flow" type="text" value="tidy" maxlength="256" autocomplete="off" spellcheck="false" list="te-flows" data-gets-word="flow changed"><p class="field__hint">Pick a skill a job can find, or name one the repository holds.</p></div><datalist id="te-flows"><option value="tidy" label="as the file says"></option></datalist><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>Skills folder (<span class="code">run.skillsDir</span>): none, a folder on each host, set in the file.</span></p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>The run history could not be read just now, so this says nothing of what its runs had.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-layers"></use></svg><span>Extensions<small>code its jobs load</small></span></p><div class="te-sec__v"><div class="te-items">
-<label class="te-item" data-gets-item><input type="checkbox" checked data-gets-flag="packages" data-gets-on="staged packages on" data-gets-off="staged packages off"><span><b>Staged packages</b><small>Off writes &quot;packages&quot;: false, and none load, nor their tools, skills, prompt templates or themes.</small></span><span class="te-tag"><span class="te-pend" hidden>changed</span></span></label>
+</p></div></section><section id="p-trigger-gets" data-panel><div class="card"><div class="card__head"><h2>What its jobs get</h2><span class="card__sub">as a job of trigger 1 would start, from each host’s last doctor run</span></div><div class="te-hosts" role="list" aria-label="Where its jobs run"></div><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-doctor"></use></svg><span>The hosts’ doctor runs could not be read, so each reads unknown, never the same.</span></p><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg><span>The rows say what the next job gets, from the triggers file. The run history could not be read just now, so this says nothing of what its runs had.</span></p><p class="te-note tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"></use></svg><span>Valkey could not be read, so this page offers no change. The triggers file can still be changed by hand. Reload to try again.</span></p><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-bolt"></use></svg><span>Model<small>what its jobs call</small></span></p><div class="te-sec__v"><p class="te-read">the deployment’s model · any model allowed · no fallback · no cap of its own</p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>The run history could not be read just now, so this says nothing of what its runs had.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"></use></svg><span>Flow and skills<small>what it is told to do</small></span></p><div class="te-sec__v"><p class="te-read"><span class="code">tidy</span></p><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>Skills folder (<span class="code">run.skillsDir</span>): none, a folder on each host, set in the file.</span></p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>The run history could not be read just now, so this says nothing of what its runs had.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-layers"></use></svg><span>Extensions<small>code its jobs load</small></span></p><div class="te-sec__v"><div class="te-items">
+<div class="te-item te-item--ro"><span><b>Staged packages: on</b><small>Its jobs load what is staged on the host that runs them.</small></span><span class="te-tag"></span></div>
 
 <div class="te-item te-item--ro"><span><b>The repository’s own</b><small>.pi/extensions at the base commit, merge-gated. Changed in the repository, not here.</small></span><span class="te-tag"></span></div>
-</div><p class="te-note">No host’s doctor run can say which extensions it has.</p>
+</div><p class="te-note">Which extensions the hosts have is not known: their doctor runs could not be read.</p>
 
-<p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>Off leaves it out of these jobs by name: a staged package with its tools, skills, prompt templates and themes, an overlay extension before its code runs. A host without that name loads nothing for it. A new extension, or another version, is staged first, for every trigger. <a class="link" href="/config/updates">Open Updates</a></span></p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>The run history could not be read just now, so this says nothing of what its runs had.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plug"></use></svg><span>MCP servers<small>outside systems it reaches</small></span></p><div class="te-sec__v"><p class="te-note">No host’s doctor run can say which MCP servers it has, and this trigger names none.</p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>The run history could not be read just now, so this says nothing of what its runs had.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flows"></use></svg><span>Tools<small>what the agent may use</small></span></p><div class="te-sec__v"><div><p class="te-sub">pi’s own</p><div class="te-chips"><label class="te-chip"><input type="checkbox" checked data-gets-list="excludeTools" data-gets-value="read" data-gets-inverse data-gets-on="read on" data-gets-off="read off"><span>read</span></label><label class="te-chip"><input type="checkbox" checked data-gets-list="excludeTools" data-gets-value="bash" data-gets-inverse data-gets-on="bash on" data-gets-off="bash off"><span>bash</span></label><label class="te-chip"><input type="checkbox" checked data-gets-list="excludeTools" data-gets-value="powershell" data-gets-inverse data-gets-on="powershell on" data-gets-off="powershell off"><span>powershell</span></label><label class="te-chip"><input type="checkbox" checked data-gets-list="excludeTools" data-gets-value="edit" data-gets-inverse data-gets-on="edit on" data-gets-off="edit off"><span>edit</span></label><label class="te-chip"><input type="checkbox" checked data-gets-list="excludeTools" data-gets-value="write" data-gets-inverse data-gets-on="write on" data-gets-off="write off"><span>write</span></label><label class="te-chip"><input type="checkbox" checked data-gets-list="excludeTools" data-gets-value="grep" data-gets-inverse data-gets-on="grep on" data-gets-off="grep off"><span>grep</span></label><label class="te-chip"><input type="checkbox" checked data-gets-list="excludeTools" data-gets-value="find" data-gets-inverse data-gets-on="find on" data-gets-off="find off"><span>find</span></label><label class="te-chip"><input type="checkbox" checked data-gets-list="excludeTools" data-gets-value="ls" data-gets-inverse data-gets-on="ls on" data-gets-off="ls off"><span>ls</span></label></div></div>
+<p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>A new extension, or another version, is staged first, for every trigger. <a class="link" href="/config/updates">Open Updates</a></span></p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>The run history could not be read just now, so this says nothing of what its runs had.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plug"></use></svg><span>MCP servers<small>outside systems it reaches</small></span></p><div class="te-sec__v"><p class="te-note">Which MCP servers the hosts have is not known: their doctor runs could not be read, and this trigger names none.</p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>The run history could not be read just now, so this says nothing of what its runs had.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flows"></use></svg><span>Tools<small>what the agent may use</small></span></p><div class="te-sec__v"><div><p class="te-sub">pi’s own</p><div class="te-chips"><span class="te-chip te-chip--ro">read</span><span class="te-chip te-chip--ro">bash</span><span class="te-chip te-chip--ro">powershell</span><span class="te-chip te-chip--ro">edit</span><span class="te-chip te-chip--ro">write</span><span class="te-chip te-chip--ro">grep</span><span class="te-chip te-chip--ro">find</span><span class="te-chip te-chip--ro">ls</span></div></div>
 <p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>On means not removed. powershell, grep, find and ls stay off unless an extension turns them on, so a trigger can remove them too.</span></p>
 
-<p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>A server’s tools are offered once this trigger names it: turn it on and confirm first.</span></p>
 
-<p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>The run history could not be read just now, so this says nothing of what its runs had.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-box"></use></svg><span>Image and secrets<small>set elsewhere</small></span></p><div class="te-sec__v"><p class="te-read">each host’s own PI_JOB_IMAGE; no host says which</p><p class="te-read">Secrets: none named on this trigger; a job also gets its project’s bundle, if it has one. <a class="link" href="/config/secrets">Open Secrets</a></p><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>Set elsewhere: the image in each host’s environment or run.image in the file, secrets on the Secrets page, and the skills folder (run.skillsDir) in the file.</span></p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>The run history could not be read just now, so this says nothing of what its runs had.</p></div></div><div class="te-bar" role="status" data-gets-bar hidden><span class="te-bar__t"><b data-gets-count data-one="1 change, not written yet:" data-many="{n} changes, not written yet:"></b> <span data-gets-words></span><small>A Confirm elsewhere on this page reloads it, and drops any change not yet written in What its jobs get.</small></span><span class="te-bar__a"><button class="btn btn--primary" type="submit">Preview the change</button><button class="btn" type="reset">Discard</button></span></div></fieldset><noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript></form></div></section><section id="p-trigger-run" data-panel><div class="card"><div class="card__head"><h2>What it runs</h2></div><p>The flow, the model and its cap, the staged packages and each extension, the MCP servers and the tools are in What its jobs get.</p><h3>Edit here</h3>
+
+<p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>The run history could not be read just now, so this says nothing of what its runs had.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-box"></use></svg><span>Image and secrets<small>set elsewhere</small></span></p><div class="te-sec__v"><p class="te-read">each host’s own PI_JOB_IMAGE; which is not known: the hosts could not be read</p><p class="te-read">Secrets: none named on this trigger; a job also gets its project’s bundle, if it has one. <a class="link" href="/config/secrets">Open Secrets</a></p><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>Set elsewhere: the image in each host’s environment or run.image in the file, secrets on the Secrets page, and the skills folder (run.skillsDir) in the file.</span></p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>The run history could not be read just now, so this says nothing of what its runs had.</p></div></div></div></section><section id="p-trigger-run" data-panel><div class="card"><div class="card__head"><h2>What it runs</h2></div><p>The flow, the model and its cap, the staged packages and each extension, the MCP servers and the tools are in What its jobs get.</p><h3>Edit here</h3>
 <dl class="facts"><div class="fact"><dt>run.backend</dt><dd>not set; deployment default: local</dd></div><div class="fact"><dt>run.maxTurns</dt><dd>not set; deployment default: 30</dd></div><div class="fact"><dt>run.progress</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.steer</dt><dd>not set; deployment default: not set</dd></div></dl>
 <h3>By hand</h3>
 <dl class="facts"><div class="fact"><dt>run.secrets</dt><dd>0; deployment default: not set</dd></div><div class="fact"><dt>run.secretBundle</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.resume</dt><dd>false; deployment default: not set</dd></div><div class="fact"><dt>run.awaitInput</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.image</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.waitFor</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.replicas</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.skillsDir</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.instructions</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.task</dt><dd>set (operator only); deployment default: not set</dd></div><div class="fact"><dt>run.kind</dt><dd>local; deployment default: not set</dd></div><div class="fact"><dt>run.folder</dt><dd>.../shop; deployment default: not set</dd></div><div class="fact"><dt>run.repository</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.command</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.portfolio</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.github</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.secretsProfile</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.gates</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.gateTimeout</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.gateBudgetRaiseUsd</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.idleTimeoutMinutes</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.stallTimeoutMinutes</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.maxMinutes</dt><dd>not set; deployment default: not set</dd></div></dl>
@@ -133,113 +123,7 @@ keeps none.
 1 independent sandbox(s) race each event, on separate branches and, for development flows, separate pull requests.
 Secret profile: none. Bundle:
 shop.
-</p></div></section><section id="p-trigger-edit" data-panel><div class="card"><div class="card__head"><h2>Edit</h2></div><p class="muted">A Confirm elsewhere on this page reloads it, and drops any change not yet written in What its jobs get.</p><form
-class="act config-form stack"
-data-action="trigger-edit"
-
-autocomplete="off"
->
-<fieldset data-config-controls disabled>
-<input
-type="hidden"
-name="index"
-value="0"
- data-type="int"
-/><div class="field">
-<label
->Venue (run.backend)<select
-class="select"
-name="backend"
-
-
->
-<option
-value=""
- selected
->
-Keep current (deployment default)
-</option><option
-value="local"
-
->
-local: live transcript yes, steering yes, recovery yes, sandbox shell yes
-</option>
-</select></label
-><p class="field__hint">Blank keeps the current value (not set); deployment default: local.</p>
-<p class="field__err" data-field-error="backend" hidden></p>
-</div><div class="field">
-<label
->run.maxTurns<input
-class="input"
-name="maxTurns"
-type="text"
-value=""
- data-type="int"
-maxlength="512"
-autocomplete="off"
-spellcheck="false"
-/></label
-><p class="field__hint">Blank keeps the current value (not set); deployment default: 30.</p>
-<p class="field__err" data-field-error="maxTurns" hidden></p>
-</div><div class="field">
-<label
->Report phases (run.progress)<select
-class="select"
-name="progress"
-
- data-type="json"
->
-<option
-value=""
- selected
->
-Keep current (not set)
-</option><option
-value="true"
-
->
-true
-</option><option
-value="false"
-
->
-false
-</option>
-</select></label
-><p class="field__hint">Blank keeps the current value (not set); deployment default: not set.</p>
-<p class="field__err" data-field-error="progress" hidden></p>
-</div><div class="field">
-<label
->Take messages (run.steer)<select
-class="select"
-name="steer"
-
- data-type="json"
->
-<option
-value=""
- selected
->
-Keep current (not set)
-</option><option
-value="true"
-
->
-true
-</option><option
-value="false"
-
->
-false
-</option>
-</select></label
-><p class="field__hint">Blank keeps the current value (not set); deployment default: not set.</p>
-<p class="field__err" data-field-error="steer" hidden></p>
-</div><button class="btn btn--primary btn--sm" type="submit">Preview edit of row 1</button>
-</fieldset>
-<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
-<p class="field__err" data-form-error hidden role="alert"></p>
-</form></div></section></div><div class="stack"><section id="p-trigger-gets-how" data-panel><div class="card"><div class="card__head"><h2>How a change applies</h2></div><ul class="te-list"><li><svg class="ic" aria-hidden="true"><use href="#i-edit"></use></svg><span><b>Change it in place.</b> A switch for the staged packages, each extension and each MCP server, a chip for each tool, a picker for the model and the flow.</span></li><li><svg class="ic" aria-hidden="true"><use href="#i-skill"></use></svg><span><b>The flow picker is not the whole list.</b> It leaves out what is in a skills folder, or in a repository not on this host, and any other name can be typed.</span></li><li><svg class="ic" aria-hidden="true"><use href="#i-eye"></use></svg><span><b>Nothing is written</b> until you preview the change and confirm it.</span></li><li><svg class="ic" aria-hidden="true"><use href="#i-shield"></use></svg><span><b>A person, at the console.</b> No tool reaches this action; dispatch_trigger_edit keeps today’s scope.</span></li><li><svg class="ic" aria-hidden="true"><use href="#i-rerun"></use></svg><span><b>Undo</b> puts back the keys the change touched, as they were. Where this page could not write them, the preview says so.</span></li></ul></div></section><section id="p-trigger-trust" data-panel><div class="card"><div class="card__head"><h2>Trust model</h2></div><p>
+</p></div></section><section id="p-trigger-edit" data-panel><div class="card"><div class="card__head"><h2>Edit</h2></div><p class="muted">Valkey could not be read, so this page offers no change. The triggers file can still be changed by hand. Reload to try again.</p></div></section></div><div class="stack"><section id="p-trigger-gets-how" data-panel><div class="card"><div class="card__head"><h2>How a change applies</h2></div><ul class="te-list"><li><svg class="ic" aria-hidden="true"><use href="#i-eye"></use></svg><span><b>Read only here.</b> Forms are off on this read-only console.</span></li><li><svg class="ic" aria-hidden="true"><use href="#i-shield"></use></svg><span><b>A person, at the console.</b> No tool reaches this action; dispatch_trigger_edit keeps today’s scope.</span></li></ul></div></section><section id="p-trigger-trust" data-panel><div class="card"><div class="card__head"><h2>Trust model</h2></div><p>
 This deployment&#39;s scheduler starts it on its schedule; an operator may fire it by hand. Each forge delivery is checked against its configured authentication, bot-loop guard, sender permissions and duplicate protection, then applicable quiet hours, image, repository protection and spend caps. Cron starts from the deployment schedule instead of a webhook. A comment may select another flow; only one
 comment trigger per forge may be declared.
 </p>
@@ -249,13 +133,13 @@ Nothing merges by itself.
 </p>
 <p>No instructions are set.</p><h3>Task</h3>
 <pre>
-Task could not be read.</pre
+tidy up</pre
 ></div></section><section id="p-trigger-kinds" data-panel><div class="card"><div class="card__head"><h2>Other kinds</h2></div><p>
 Next fire: unknown. Health:
 not known (the schedule could not be read); stalls
 not known of 3.
 </p>
-<p>Fire now is not available in this deployment.</p></div></section><section id="p-trigger-change" data-panel><div class="card"><div class="card__head"><h2>Before you change it</h2></div><p>
+</div></section><section id="p-trigger-change" data-panel><div class="card"><div class="card__head"><h2>Before you change it</h2></div><p>
 A job already in line keeps what it was queued with and runs without a
 change here, unless this trigger has gained a narrowing field the job
 lacks, such as a list of models, a cap or a server: then it is refused.
@@ -268,23 +152,7 @@ Jobs that would be refused cannot be checked here.
 </p>
 <p>This page read the triggers file, and its other reads failed: the run history, the hosts and the jobs in line are unknown.</p>
 
-<form
-class="act config-form stack"
-data-action="trigger-delete"
-
-autocomplete="off"
->
-<fieldset data-config-controls disabled>
-<input
-type="hidden"
-name="index"
-value="0"
- data-type="int"
-/><button class="btn btn--danger btn--sm" type="submit">Delete row 1</button>
-</fieldset>
-<noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
-<p class="field__err" data-form-error hidden role="alert"></p>
-</form></div></section></div></div><div id="confirm-slot" class="cslot" role="region" aria-live="polite" aria-label="Preview" hidden><div class="confirm confirm--busy" aria-busy="true"><p class="confirm__h"><span data-slot-icon="busy"><svg class="ic" aria-hidden="true"><use href="#i-hourglass"></use></svg></span><span data-slot-icon="said"><svg class="ic" aria-hidden="true"><use href="#i-attention"></use></svg></span><span data-slot-title>Previewing</span></p><ul class="confirm__list confirm__ghost"><li><span></span></li><li><span></span></li></ul><p class="confirm__note" data-slot-message hidden></p><div class="confirm__act"><button class="btn btn--confirm" type="button" data-confirm disabled>Confirm</button><button class="btn btn--ghost" type="button" data-cancel>Cancel</button></div></div></div>
+</div></section></div></div><div id="confirm-slot" class="cslot" role="region" aria-live="polite" aria-label="Preview" hidden><div class="confirm confirm--busy" aria-busy="true"><p class="confirm__h"><span data-slot-icon="busy"><svg class="ic" aria-hidden="true"><use href="#i-hourglass"></use></svg></span><span data-slot-icon="said"><svg class="ic" aria-hidden="true"><use href="#i-attention"></use></svg></span><span data-slot-title>Previewing</span></p><ul class="confirm__list confirm__ghost"><li><span></span></li><li><span></span></li></ul><p class="confirm__note" data-slot-message hidden></p><div class="confirm__act"><button class="btn btn--confirm" type="button" data-confirm disabled>Confirm</button><button class="btn btn--ghost" type="button" data-cancel>Cancel</button></div></div></div>
 </main>
 </div>
 </body>

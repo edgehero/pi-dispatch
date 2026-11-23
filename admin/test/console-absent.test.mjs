@@ -2,9 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadPageData, parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { hostLoadsOf } from "../src/console/panels/common.mjs";
-import { ANSWERER_READ_FAILURE, ANSWERER_STANDING_UNREAD } from "../src/console/panels/answerer.mjs";
+import { ANSWERER_FILE_REFUSED, ANSWERER_READ_FAILURE, ANSWERER_STANDING_REFUSED, ANSWERER_STANDING_UNREAD } from "../src/console/panels/answerer.mjs";
 import { readHostLoadsView } from "../src/host-loads-view.mjs";
-import { SANDBOX_CONFIG_UNREAD, SANDBOX_NO_TRIGGERS_FILE } from "../src/sandbox-data.mjs";
+import { parkedAnswerRefusalOf } from "../src/job-actions.mjs";
+import { SANDBOX_CONFIG_UNREAD, SANDBOX_NO_TRIGGERS_FILE, sandboxConfigRefusal } from "../src/sandbox-data.mjs";
 import { TRIGGERS_FILE_ABSENT_TEXT } from "../src/trigger-list.mjs";
 import { downQueue, downRedis } from "./helpers/fleet-reader-fakes.mjs";
 import { readSandboxSessions, sandboxNoticeKey, sandboxSessionKey, sandboxSessionMember, SANDBOX_NOTICE_INDEX, SANDBOX_SESSION_INDEX, SANDBOX_SESSION_MAX } from "@edgehero/pi-dispatch/sandbox-sessions";
@@ -85,7 +86,7 @@ test("a refused run's two cards say could not be read of a read that failed, and
   assert.ok(!viewer.words.includes("Why it was refused") && !viewer.words.includes("Heartbeat"));
 });
 
-test("a triggers file that does not exist is an empty document on Parked, Watch and Sandboxes; one that is there and could not be read or does not load is not", async () => {
+test("a triggers file that does not exist is an empty document on Parked, Watch and Sandboxes; one nobody could read could not be read, and one that was read and is refused does not load", async () => {
   const on = (files) => consoleOn({ redis: healthy(HOST), records: [RUN], files });
   // Parked: the answer rules and the standing answers are the file's.
   const parked = async (files) => drawn("parked", "", on(files), "operator");
@@ -96,12 +97,14 @@ test("a triggers file that does not exist is an empty document on Parked, Watch 
     assert.ok(!got.words.includes(ANSWERER_READ_FAILURE) && !got.words.includes(ANSWERER_STANDING_UNREAD) && !saysUnread(got.words), JSON.stringify(files));
     assert.deepEqual([got.pill, got.marked], [false, false], JSON.stringify(files));
   }
+  // One word per case, here too (the three pages said "could not be read" of both): a file nobody could read is
+  // unread, with the pill; a file that was read and is refused does not load, which is not a read that failed.
   for (const state of ["unreadable", "invalid"]) {
     const got = await parked({ triggers: state });
-    assert.equal(got.data.answerer.state, "configuration-unavailable", state);
+    assert.deepEqual([got.data.answerer.state, got.data.answerer.configuration], ["configuration-unavailable", state], state);
     assert.ok(!Object.hasOwn(got.data.answerer, "standing"), `${state}: no list of standing answers, which would read as none adopted`);
-    assert.ok(got.words.includes(ANSWERER_READ_FAILURE), state);
-    assert.deepEqual([got.pill, got.marked], [true, true], state);
+    assert.deepEqual([got.words.includes(ANSWERER_READ_FAILURE), got.words.includes(ANSWERER_STANDING_UNREAD), got.words.includes(ANSWERER_FILE_REFUSED), got.words.includes(ANSWERER_STANDING_REFUSED)], state === "unreadable" ? [true, true, false, false] : [false, false, true, true], state);
+    assert.deepEqual([got.pill, got.marked, saysUnread(got.words)], state === "unreadable" ? [true, true, true] : [false, false, false], state);
   }
 
   // Watch: the sources are the file's, and a file that is not there names none.
@@ -113,10 +116,15 @@ test("a triggers file that does not exist is an empty document on Parked, Watch 
     const got = await drawn("watch", "", deps, "operator");
     assert.ok(!got.words.includes(WATCH_UNREAD) && got.words.includes("No watch rules have received findings."), JSON.stringify(files));
   }
+  // Neither is a store that could not be read: the file is named, with the word of its case.
+  const WATCH_FILE = { unreadable: "The triggers file could not be read, so its watch rules and sources are not shown. This is not an empty list.", invalid: "The triggers file does not load, so its watch rules and sources are not shown. This is not an empty list." };
   for (const state of ["unreadable", "invalid"]) {
     const deps = on({ triggers: state });
-    await assert.rejects(deps.watch.listSources(), /watch configuration unreadable/, state);
-    assert.ok((await drawn("watch", "", deps, "operator")).words.includes(WATCH_UNREAD), state);
+    const thrown = state === "unreadable" ? /watch configuration unreadable/ : /watch configuration does not load/;
+    await assert.rejects(deps.watch.listSources(), thrown, state);
+    await assert.rejects(deps.watch.listRules(), thrown, state);
+    const words = (await drawn("watch", "", deps, "operator")).words;
+    assert.deepEqual([words.includes(WATCH_UNREAD), words.includes(WATCH_FILE.unreadable), words.includes(WATCH_FILE.invalid)], [false, state === "unreadable", state === "invalid"], state);
   }
   // A file that is there and names a source lists it.
   const named = on({});
@@ -137,14 +145,20 @@ test("a triggers file that does not exist is an empty document on Parked, Watch 
   assert.ok(absent.words.includes(SANDBOX_NO_TRIGGERS_FILE) && !absent.words.includes(SANDBOX_CONFIG_UNREAD) && !saysUnread(absent.words));
   assert.equal(absent.preview.refusal, SANDBOX_NO_TRIGGERS_FILE);
   assert.deepEqual([absent.pill, absent.marked], [false, false]);
-  for (const state of ["unreadable", "invalid"]) {
-    const got = await sandboxes({ triggers: state });
-    assert.ok(got.words.includes(SANDBOX_CONFIG_UNREAD) && !got.words.includes(SANDBOX_NO_TRIGGERS_FILE), state);
-    assert.equal(got.preview.refusal, SANDBOX_CONFIG_UNREAD, state);
-    assert.deepEqual([got.pill, got.marked], [true, true], state);
+  // The file that stopped the configuration is named, with the word of its case. Only a read that failed is unread.
+  for (const [files, file, word] of [
+    [{ triggers: "unreadable" }, "triggers file", "could not be read"], [{ triggers: "invalid" }, "triggers file", "does not load"],
+    [{ projects: "unreadable" }, "projects file", "could not be read"], [{ projects: "invalid" }, "projects file", "does not load"],
+    // A projects file the deployment configures is required, so one that is absent stops it: as absent, not as unread.
+    [{ projects: "absent" }, "projects file", "does not exist"],
+  ]) {
+    const got = await sandboxes(files);
+    const said = sandboxConfigRefusal(file, word);
+    assert.ok(got.words.includes(said) && !got.words.includes(SANDBOX_NO_TRIGGERS_FILE) && !got.words.includes(SANDBOX_CONFIG_UNREAD), `${JSON.stringify(files)}: ${got.data.sandboxes.refusal}`);
+    assert.equal(got.preview.refusal, said, JSON.stringify(files));
+    const unread = word === "could not be read";
+    assert.deepEqual([got.pill, got.marked, saysUnread(got.words)], [unread, unread, unread], JSON.stringify(files));
   }
-  // The projects file keeps its rule: one the worker is configured with is required, so an absent one is unread.
-  assert.ok((await sandboxes({ projects: "absent" })).words.includes(SANDBOX_CONFIG_UNREAD));
 });
 
 test("/triggers: a zero that was read is 0, a side of the history unread is unknown or a floor, and the triggers file has one word per case", async () => {
@@ -404,4 +418,51 @@ test("an agent's session over a healthy mirror: /runs and the page of a host no 
   assert.equal(down.data.runsPage.mirror, "unreachable");
   assert.ok(down.words.includes("Other hosts' runs could not be read"));
   assert.deepEqual([down.pill, down.marked], [true, true]);
+});
+
+test("one word per case wherever a page words a file: Models, a project's page, the overview's Caps card and a parked answer's refusal", async () => {
+  const on = (files) => consoleOn({ redis: healthy(HOST), records: [RUN], files });
+  const WORD = { invalid: "does not load", unreadable: "could not be read" };
+  const OTHER = { invalid: "could not be read", unreadable: "does not load" };
+  const NAMED = { triggers: "triggers file", projects: "projects file", settings: "settings overlay" };
+  // Models: which file stopped the policy, in its word. One sentence, "could not be read and validated", said both of all three.
+  for (const [file, named] of Object.entries(NAMED)) {
+    for (const state of ["invalid", "unreadable"]) {
+      const got = await drawn("models", "", on({ [file]: state }), "operator");
+      assert.deepEqual([got.data.models.state, got.data.models.configProblem], ["unreadable", { file: named, word: WORD[state] }], `${file} ${state}`);
+      assert.ok(got.words.includes(`The ${named} ${WORD[state]}, so the models are not known.`) && got.words.includes(`The ${named} ${WORD[state]}, so the model policy is not known.`), `${file} ${state}`);
+      assert.ok(!got.words.includes(`The ${named} ${OTHER[state]}`) && !got.words.includes("Models could not be read") && !got.words.includes("could not be read and validated"), `${file} ${state}: no other word`);
+    }
+    // A file that does not exist is an empty document: the page is drawn, and says nothing of it.
+    const absent = await drawn("models", "", on({ [file]: "absent" }), "operator");
+    assert.ok(absent.data.models.state === "ready" && !Object.hasOwn(absent.data.models, "configProblem") && !/so the models are not known/.test(absent.words), `${file} absent`);
+  }
+  // A project's page: the secret bundle, the triggers that ran here and the check of a change. "Could not be loaded" said all three.
+  for (const state of ["invalid", "unreadable"]) {
+    const got = await drawn("project", "id=web", on({ triggers: state }), "operator");
+    for (const tail of ["so whether this project has a secret bundle is unknown.", "so which triggers ran here is unknown.", "so this project's change cannot be checked."]) {
+      assert.ok(got.words.includes(`The triggers file ${WORD[state]}, ${tail}`) && !got.words.includes(`The triggers file ${OTHER[state]}, ${tail}`), `${state}: ${tail}`);
+    }
+    assert.ok(!got.words.includes("could not be loaded") && !got.words.includes("The triggers file does not exist"), state);
+  }
+  const noFile = await drawn("project", "id=web", on({ triggers: "absent" }), "operator");
+  assert.ok(noFile.words.includes("The triggers file does not exist, so no secret bundle is bound to this project.") && noFile.words.includes("The triggers file does not exist, so no run here is attributed to a trigger."));
+  assert.ok(!/The triggers file (?:could not be read|does not load|could not be loaded)/.test(noFile.words) && !noFile.words.includes("is unknown"), "absent is said as absent, and nothing is unknown of it");
+  const read = await drawn("project", "id=web", on({}), "operator");
+  assert.ok(!/The triggers file (?:could not be read|does not load|does not exist|could not be loaded)/.test(read.words), "a file that was read is not worded at all");
+  // The overview's Caps card, with the pill: an overlay that was read and is refused is not a read that failed.
+  const CAPS = { invalid: "The settings overlay does not load, so its caps are not drawn.", unreadable: "The settings overlay could not be read, so its caps are not drawn." };
+  for (const state of ["invalid", "unreadable"]) {
+    const got = await drawn("overview", "", on({ settings: state }), "operator");
+    assert.ok(got.words.includes(CAPS[state]) && !got.words.includes(CAPS[state === "invalid" ? "unreadable" : "invalid"]), state);
+    assert.deepEqual([got.pill, got.marked], state === "unreadable" ? [true, true] : [false, false], state);
+  }
+  const noOverlay = await drawn("overview", "", on({ settings: "absent" }), "operator");
+  assert.ok(!Object.values(CAPS).some((line) => noOverlay.words.includes(line)) && noOverlay.pill === false, "a settings file that does not exist is an empty overlay");
+  // A parked answer's refusal, which Parked and the run's page draw: by the read's error, and never the host's path.
+  const answer = (files) => parkedAnswerRefusalOf({ jobId: "gh-1", data: { kind: "github", target: { type: "issue" } }, triggersPath: on(files).paths.triggersPath }).refusal;
+  assert.equal(answer({ triggers: "absent" }), "the triggers file does not exist; nothing was queued");
+  assert.equal(answer({ triggers: "unreadable" }), "the triggers file could not be read (EACCES); nothing was queued");
+  assert.match(answer({ triggers: "invalid" }), /^the triggers file does not load \(.*\); nothing was queued$/);
+  assert.equal(answer({}), "the triggers file has no github comment trigger, so the receiver would not route a reply either");
 });

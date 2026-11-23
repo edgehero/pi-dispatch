@@ -1019,8 +1019,11 @@ Parked and Watch show their empty state, and Sandboxes says there is no trigger 
 file that does not exist means no project (a project's page is then not found, and Secrets says there is no projects
 file), and a host's page says
 there is no capacity history for it only when the host registry and the run mirror both answered. A file that is
-there has one of two words on Triggers, a project's page, Secrets and Configuration: it could not be read where
-nobody could read it, and it does not load where it was read and is refused. Triggers says a rule had 0 runs where
+there has one of two words wherever a page words it: it could not be read where nobody could read it, and it does
+not load where it was read and is refused. That holds on Triggers, a project's page, Secrets, Configuration, Parked,
+Watch, Sandboxes, Models, Zero touch, Connections, the overview's Caps card and the flows page. Sandboxes names the
+file that stopped a preparation, and says a projects file the deployment names does not exist when it is absent. A
+file that does not load is not a read that failed, so a live page's pill stays Live over it. Triggers says a rule had 0 runs where
 the run history was read, and "unknown" only where a side of it was not. A refused run's page says its host has no
 live registry row, published no doctor result or has no queue listed where the hosts were read and that is so, and
 "could not be read" only of what was not read. Fleet says the hosts could not
@@ -1275,9 +1278,10 @@ Under them, the [timeline](#the-overviews-timeline) spans the page. Below it, th
   cap is rounded down, so a window short of its cap never reads 100%. The caps show no money: Spend opens the Spend
   page, which has the amounts. The windows are UTC days, Monday to Sunday UTC weeks and UTC months, as the budget
   counts them, and the card says so: "today" may have started at 02:00 your time. The job and token caps and the soft
-  hold come from the settings overlay, so when the console could not read that file, or the worker would refuse it
-  (and with it every job), the card draws none of them and says "The settings overlay could not be read, so its caps
-  are not drawn."; the dollar windows are read on their own and still show. A window whose counter could not be read
+  hold come from the settings overlay, so when the console could not read that file the card draws none of them and
+  says "The settings overlay could not be read, so its caps are not drawn."; when the file was read and the worker
+  would refuse it (and with it every job) it says "The settings overlay does not load, so its caps are not drawn.";
+  the dollar windows are read on their own and still show. A window whose counter could not be read
   is not drawn, and the card says so ("The job or token counters could not be read, so their windows are not
   drawn.", "The dollar counters could not be read."). It says "The settings overlay sets no cap." only when no window
   has a cap and nothing went unread, since over a failed read that would say the deployment spends without a limit;
@@ -2773,6 +2777,15 @@ effect of a change on queued jobs. A viewer sees these facts but no write contro
 Instructions are escaped for operators.
 Runs are matched by what the row says, so where the triggers file could not be read, or has no such row, the page says nothing of
 its runs or its jobs in line. Where the file gives the row but does not load, it says it could not match runs to this row.
+When Valkey could not be read, the page is drawn from the triggers file and offers no change: no Edit, Delete or Fire now, and
+no form on [what its jobs get](#what-a-triggers-jobs-get). It says "Valkey could not be read, so this page offers no change. The
+triggers file can still be changed by hand. Reload to try again." An operator still reads the instructions and the task, which the
+page takes from the file, and the image, extensions and MCP rows say the hosts could not be read rather than that no host says.
+Add a trigger, Triggers (which then has no Add a trigger button), [a project's page](#one-project) and Models follow the same
+rule, as Configuration and Secrets do by showing their files read-only. Pause and Resume on Fleet and the overview are the one
+exception: the kill switch is never withheld for this. When only the run history could not be read every form is offered, since
+no change is judged by it; a trigger's counts are then "at least", and its page says the run history could not be read rather
+than that no runs were found.
 A row is found by its place in the file, as a change finds it, so an entry the file holds but no trigger can use reads "The file's
 entry at this row is not a usable trigger" with no other row's facts or Delete in its place, and the lists link past it.
 A spent one-shot explains how to re-arm it. Cron health uses the configured stall threshold.
@@ -2945,7 +2958,7 @@ this write takes the stamp off." A `"version": 1`, or one the loader cannot read
 | A row the file did not give back | The last read, and no form. | This page could not read this trigger's row from the file, so it shows the last read and offers no change. Reload to try again. |
 | A triggers file a newer release wrote, or one the page cannot read | No card. What starts it says that the file does not load, or that it cannot be read and the error's code. | |
 | A triggers file the worker refuses that the page can still read: a key with no stamp, a row that is no trigger, a value the loader refuses | The card, from what the file holds, with its form, so the row can be fixed here, and every pill `unknown`. Before you change it says the file does not load, by what doctor last published of it or that doctor names why. | The worker refuses this file as it stands, so the rows say what it holds, not what a job gets. |
-| A page whose Valkey read failed | The card, from the file it read, and its form. Before you change it says what is unread. | The rows say what the next job gets, from the triggers file. The run history could not be read just now, so this says nothing of what its runs had. |
+| A page whose Valkey read failed | The card, from the file it read, and no form: it says Valkey could not be read, so the page offers no change. Before you change it says what is unread. | The rows say what the next job gets, from the triggers file. The run history could not be read just now, so this says nothing of what its runs had. |
 | A page reached from a refused run | The form and this line, because the page's banner links other changes to that refusal. | A change made on this card is not linked to that run's refusal. |
 
 **What a tool cannot reach.** `trigger-environment-edit` is a person's action (`rule("person", ...)`): only the console's own

@@ -199,7 +199,7 @@ export function runsFilters(view) {
  * mirror, was not read (`partial`). One rule for the strip, the project chips and the settled spend (issue #962): a
  * count said "at least" beside the same count said whole would be two answers to one question.
  */
-const windowFloor = (w) => w?.floor === true || w?.partial === true;
+export const windowFloor = (w) => w?.floor === true || w?.partial === true;
 
 /** Every run the window counts: the five outcome keys and the outcomes this release does not know. */
 function windowTotal(w) {

@@ -487,7 +487,7 @@ test("no field of the card takes a refusal: the bar says it, whichever row or wo
   assert.ok(!panel.includes("data-form-error"), "nor under the form, a line above the bar that says it");
 });
 
-test("with Valkey down, the real reader's page says what is unread: the file was read, and the card offers its form", async () => {
+test("with Valkey down, the real reader's page says what is unread: the file was read, and the card offers no change", async () => {
   const dir = tempDir("pd-800-gets-down-");
   const paths = { triggersPath: join(dir, "triggers.json"), settingsFile: join(dir, "settings.json"), logsDir: join(dir, "logs"), globalPiDir: join(dir, "overlay"), valkeyUrl: "redis://127.0.0.1:1/0" };
   nodeFs.writeFileSync(paths.triggersPath, getsFile());
@@ -498,7 +498,10 @@ test("with Valkey down, the real reader's page says what is unread: the file was
   assert.ok(!page.includes("could not be read.</p>") || !textOf(page).includes("The triggers file could not be read"), "the file was read");
   assert.ok(!textOf(page).includes("The triggers file could not be read"));
   assert.ok(!textOf(page).includes("This row does not exist"));
-  assert.ok(panelOf(page, "p-trigger-gets").includes('name="pageDigest"'), "the form the file gave");
+  // A page that could not read the deployment offers no change (issue #988): it drew the form the file gave, and
+  // what an edit is judged against had not been read.
+  assert.ok(!panelOf(page, "p-trigger-gets").includes('name="pageDigest"') && !/<form\b/.test(panelOf(page, "p-trigger-gets")), "no form over a deployment that was not read");
+  assert.equal(textOf(page).split("Valkey could not be read, so this page offers no change. The triggers file can still be changed by hand. Reload to try again.").length - 1, 2, "said by the card and in place of Edit");
   assert.ok(textOf(panelOf(page, "p-trigger-change")).includes(W.othersUnread));
   assert.ok(textOf(panelOf(page, "p-trigger-runs")).includes(W.historyUnread), "and the history is unread, not empty");
   assert.ok(!textOf(panelOf(page, "p-trigger-runs")).includes("No runs were found"));

@@ -51,6 +51,11 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   packagesLoadLess: "Its jobs load what is staged on the host that runs them, less what the file leaves out by name.",
   noExtensions: "The hosts that can say name no staged package or overlay extension.",
   noExtensionsKnown: "No host’s doctor run can say which extensions it has.",
+  // Issue #988: the three rows over hosts that were not read. "No host says" is a read's answer; this is not.
+  extensionsUnread: "Which extensions the hosts have is not known: their doctor runs could not be read.",
+  serversUnread: "Which MCP servers the hosts have is not known: their doctor runs could not be read, and this trigger names none.",
+  imageUnread: "each host’s own PI_JOB_IMAGE; which is not known: the hosts could not be read",
+  serverUnread: "how it is defined is not known: the hosts could not be read",
   forgeServer: "the job’s own forge, with its own token; in no overlay",
   bringsUnknown: "what it brings is known once a run has loaded it",
   overlayBringsUnknown: "an overlay entry has no manifest, so what it brings is known once a run has loaded it",
@@ -444,7 +449,7 @@ export const alsoNaming = (list, name) => list.filter((other) => other !== name 
  * keeps the file's spelling and its row whether or not any host shows it, so nothing in the list falls off on an edit of the rest. Under the file's `"packages": false` a package's
  * switch is moot, so it has none (`moot`), and one the file names keeps its box, disabled and unticked, so an edit of the rest sends that name back as it was.
  */
-function extensionsRow({ trigger, rows, last, records = [], historyUnread = false, hostLoads = null }) {
+function extensionsRow({ trigger, rows, last, records = [], historyUnread = false, hostLoads = null, hostsUnread = false }) {
   const known = rows.filter((row) => row.state === "current");
   const inFile = trigger.excludeExtensions ?? [];
   const withheld = trigger.packages === false;
@@ -510,7 +515,7 @@ function extensionsRow({ trigger, rows, last, records = [], historyUnread = fals
     return { value, name: named, on, moot, sub, backOn: also.length > 0 ? `${value} off the list` : `${value} back on` };
   });
   const morePackages = known.reduce((total, row) => total + (row.more?.packages ?? 0) + (row.more?.extensions ?? 0), 0);
-  return { packagesOn: !withheld, anyLeftOut: inFile.length > 0, items, more: morePackages, none: items.length === 0, noneWord: known.length > 0 ? TRIGGER_GETS_WORDS.noExtensions : TRIGGER_GETS_WORDS.noExtensionsKnown };
+  return { packagesOn: !withheld, anyLeftOut: inFile.length > 0, items, more: morePackages, none: items.length === 0, noneWord: known.length > 0 ? TRIGGER_GETS_WORDS.noExtensions : hostsUnread ? TRIGGER_GETS_WORDS.extensionsUnread : TRIGGER_GETS_WORDS.noExtensionsKnown };
 }
 
 /**
@@ -526,7 +531,7 @@ function serverWords(rows, named) {
   return [transport, where, exposure, keys.length > 0 ? `uses ${listed(keys)} by name` : null].filter(Boolean).join(" · ");
 }
 
-function mcpRow({ trigger, rows, overlayServers }) {
+function mcpRow({ trigger, rows, overlayServers, hostsUnread = false }) {
   const forge = trigger.runKind !== "local" && FORGE_MCP_KINDS.includes(trigger.forge);
   const named = trigger.mcp ?? [];
   const published = rows.flatMap((row) => (row.state === "current" ? (row.mcp ?? []) : []).map((server) => server.name));
@@ -540,9 +545,9 @@ function mcpRow({ trigger, rows, overlayServers }) {
     const lacking = rows.filter((row) => listsWhole(row, "mcp") && !(row.mcp ?? []).some((server) => server.name === name)).map((row) => row.name);
     const unknown = rows.filter((row) => !on.includes(row.name) && !off.includes(row.name) && !lacking.includes(row.name)).map((row) => row.name);
     const tag = [on.length > 0 ? listed(on) : null, off.length > 0 ? `off on ${listed(off)}` : null, lacking.length > 0 ? `not on ${listed(lacking)}` : null, unknown.length > 0 ? `unknown on ${listed(unknown)}` : null].filter(Boolean).join("; ");
-    return { name, on: named.includes(name), sub: defined.length > 0 ? serverWords(defined, named.includes(name)) : "no host says how it is defined", tag, lacks: off.length + lacking.length > 0 };
+    return { name, on: named.includes(name), sub: defined.length > 0 ? serverWords(defined, named.includes(name)) : hostsUnread ? TRIGGER_GETS_WORDS.serverUnread : "no host says how it is defined", tag, lacks: off.length + lacking.length > 0 };
   });
-  return { items, none: items.length === 0, noneWord: rows.some((row) => row.state === "current") ? TRIGGER_GETS_WORDS.noServers : TRIGGER_GETS_WORDS.noServersKnown };
+  return { items, none: items.length === 0, noneWord: rows.some((row) => row.state === "current") ? TRIGGER_GETS_WORDS.noServers : hostsUnread ? TRIGGER_GETS_WORDS.serversUnread : TRIGGER_GETS_WORDS.noServersKnown };
 }
 
 /** Whether the file takes this name: a chip for one it refuses (pi's own, a server's, one pi-dispatch gives some jobs) could only end in a refusal, so that one is shown and not switched. */
@@ -587,7 +592,7 @@ function toolsRow({ trigger, last }) {
 }
 
 /** Each host's image and pi, as it beats them out, or what the file names instead. */
-function imageRow({ trigger, rows }) {
+function imageRow({ trigger, rows, hostsUnread = false }) {
   if (trigger.image) {
     const pis = unique(rows.map((row) => hostPiFor(row, trigger.image)).filter(Boolean));
     return { words: [code(trigger.image), `, as run.image names it${pis.length === 1 ? `, with pi ${pis[0]}` : ""}`] };
@@ -597,7 +602,7 @@ function imageRow({ trigger, rows }) {
     const key = row.image ? `${row.image}${row.piVersion ? ` with pi ${row.piVersion}` : ""}` : "unknown";
     groups.set(key, [...(groups.get(key) ?? []), row.name]);
   }
-  if (groups.size === 0) return { words: ["each host’s own PI_JOB_IMAGE; no host says which"] };
+  if (groups.size === 0) return { words: [hostsUnread ? TRIGGER_GETS_WORDS.imageUnread : "each host’s own PI_JOB_IMAGE; no host says which"] };
   return { words: [...groups].flatMap(([word, names], at) => [...(at > 0 ? ["; "] : []), ...(word === "unknown" ? [`unknown on ${listed(names)}`] : [code(word), ` on ${listed(names)}`])]) };
 }
 
@@ -614,6 +619,9 @@ export function triggerGetsOf({ trigger, records = [], historyUnread = false, ho
   const liveList = liveHosts !== null;
   const names = liveHosts ?? (Array.isArray(hostLoads?.hosts) ? hostLoads.hosts.map((row) => row?.name).filter((name) => typeof name === "string") : []);
   const rows = names.map((name) => hostLoadsRow(hostLoads, name));
+  // The hosts were not read (issue #988): their doctor runs did not answer, or the live hosts could not be read and no
+  // publication names any. A row that would say "no host says" then says the read failed.
+  const hostsUnread = Boolean(hostLoads?.unreachable) || (!liveList && liveHostsUnread);
   const last = triggerLastRun(records, hostLoads);
   const quoted = last.quoted;
   const noRun = historyUnread ? TRIGGER_GETS_WORDS.historyUnread : TRIGGER_GETS_WORDS.noRun;
@@ -637,10 +645,10 @@ export function triggerGetsOf({ trigger, records = [], historyUnread = false, ho
     last: { Model: under("Model"), Skills: under("Skills"), Extensions: under("Extensions"), MCP: under("MCP"), Tools: under("Tools"), pi: under("pi") },
     model: modelRow({ trigger, defaults, modelChoices }),
     flow: { ...flowRow({ trigger, rows, editor }), ...(watch ? { doctor: null, lacking: null } : {}) },
-    extensions: extensionsRow({ trigger, rows, last: quoted, records, historyUnread, hostLoads }),
-    mcp: mcpRow({ trigger, rows, overlayServers }),
+    extensions: extensionsRow({ trigger, rows, last: quoted, records, historyUnread, hostLoads, hostsUnread }),
+    mcp: mcpRow({ trigger, rows, overlayServers, hostsUnread }),
     tools: toolsRow({ trigger, last: quoted }),
-    image: imageRow({ trigger, rows }),
+    image: imageRow({ trigger, rows, hostsUnread }),
     secrets: { profile: trigger.secretsProfile ?? null, count: trigger.secrets ?? 0, optedOut: trigger.secretBundle === false },
   };
 }

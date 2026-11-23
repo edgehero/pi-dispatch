@@ -39,6 +39,7 @@ import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { STEER_MAX_MESSAGES, STEER_TOTAL_MAX_BYTES } from "@edgehero/pi-dispatch/steer-inbox";
 import { plural, SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread, registryReadInPart, SHELLS_SHOWN, shellsShort } from "./common.mjs";
+import { windowFloor } from "./runs.mjs";
 
 const titled = (title, body) => ui.card({ title, body });
 const facts = (pairs) => ui.facts(pairs.filter(([, value]) => value !== null && value !== undefined));
@@ -1207,7 +1208,7 @@ export function runWhy(view) {
   const windowRead = window !== null && typeof window === "object";
   const n = windowRead && token ? window.byReason?.[token] ?? 0 : null;
   // A count over a window that ended inside the day, or that was folded without a side of the history, is a floor.
-  const least = windowRead && (window.partial === true || window.floor === true) ? "at least " : null;
+  const least = windowRead && windowFloor(window) ? "at least " : null;
   const { host, doctor, floorGap, doctorGap } = hostFacts(view, r.host);
   const floor = host?.backends?.floor;
   const properties = floor && typeof floor === "object" ? Object.entries(floor) : [];

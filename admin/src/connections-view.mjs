@@ -208,6 +208,8 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   const environmentUnknown = !metadata || Boolean(metadata.unreadable || metadata.untrusted || metadata.hazard || metadata.unread?.length || metadata.hazardSkipped?.length);
   const incompleteKeys = new Set([...(metadata?.unread ?? []).map((r) => r.key), ...(metadata?.hazardSkipped ?? [])]);
   const triggers = snapshot?.triggers?.triggers;
+  // The triggers file was read and is refused (issue #988): "does not load", where a file nobody could read "could not be read".
+  const triggersRefused = !Array.isArray(triggers) && Boolean(snapshot?.triggers?.invalid);
   let defaultProvider = null;
   try { defaultProvider = snapshot?.settings?.overlay?.provider ?? providerFrom(file); } catch { /* The declaration remains shown as set; no malformed provider enters a source lookup. */ }
   const providerNames = [...new Set([defaultProvider, ...(triggers ?? []).map((t) => t.provider)].filter((p) => safeName(p)))];
@@ -339,7 +341,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
     endpointFleetDeclared, endpointStatus, endpointsMore,
     endpoints: Array.isArray(endpoints) || shownEndpoints.length ? shownEndpoints.map((ep) => ({ ...ep, used: slots.get(ep.id) ?? null })) : null,
     // A triggers file that is not there grants nothing; one that was not read (or no snapshot at all) leaves the grants unknown.
-    privateEndpoints: privateEndpointsView(privateDeclared, triggers, { triggersUnread: !Array.isArray(triggers) && snapshot?.triggers?.missing !== true }),
+    privateEndpoints: privateEndpointsView(privateDeclared, triggers, { triggersUnread: !Array.isArray(triggers) && snapshot?.triggers?.missing !== true, triggersRefused }),
     providers: providerNames.map((name) => {
       const variables = providerKeyCandidates(name);
       // The worker forwards every truthy candidate in pi's pinned precedence order; no value leaves this reader.
@@ -347,7 +349,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
       const selectedVariable = providerUnknown ? null : fromEnv[0] ?? null;
       return { name, unknown: providerUnknown, variables, fromEnv, selectedVariable, credentialSource: selectedVariable ? "deployment-env" : providerUnknown || loginFallback === null ? "unknown" : loginFallback ? "pi-login" : "worker-env", loginFallback, fallback: environmentUnknown ? "the deployment’s provider credential fallback is unknown" : loginFallback ? "pi login on each host is the configured fallback; actual credentials are not published here" : "pi login disabled by PI_AUTH_FROM_PI=0; each worker needs its environment key" };
     }),
-    notify: { hook: nonblank(file, "PI_ON_FAILURE") ? basename(file.PI_ON_FAILURE) : null, timeoutMs: positive(file.PI_ON_FAILURE_TIMEOUT_MS, 10_000), triggers: (triggers ?? []).filter((t) => t.statusComment === true).map((t) => t.index).filter(Number.isInteger), unknown: environmentUnknown, history: hookHistory, ...(!Array.isArray(triggers) && snapshot?.triggers?.missing !== true ? { triggersUnread: true } : {}) },
+    notify: { hook: nonblank(file, "PI_ON_FAILURE") ? basename(file.PI_ON_FAILURE) : null, timeoutMs: positive(file.PI_ON_FAILURE_TIMEOUT_MS, 10_000), triggers: (triggers ?? []).filter((t) => t.statusComment === true).map((t) => t.index).filter(Number.isInteger), unknown: environmentUnknown, history: hookHistory, ...(!Array.isArray(triggers) && snapshot?.triggers?.missing !== true ? { triggersUnread: true, ...(triggersRefused ? { triggersRefused: true } : {}) } : {}) },
     mcp, packages, packageOptOuts: Array.isArray(triggers) ? triggers.filter((t) => t.packages === false).length : null,
     problems: connectionsProblems(hosts, snapshot?.runs ?? [], forges, pollers), snapshotUnreadable: snapshot === null,
   };
@@ -358,8 +360,9 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
  * the trigger positions that name it, then each id a trigger names that this folder does not declare (`host: null`).
  * `declared` null is a file that did not load. Ids and positions only: no trigger text. `triggersUnread` (issue #962)
  * says the triggers were not read, so a row's empty `triggers` is not "granted to no trigger"; a key only then.
+ * `triggersRefused` (issue #988) beside it says the file was read and is refused: it does not load.
  */
-export function privateEndpointsView(declared, triggers, { triggersUnread = false } = {}) {
+export function privateEndpointsView(declared, triggers, { triggersUnread = false, triggersRefused = false } = {}) {
   const named = (id) => (Array.isArray(triggers) ? triggers : []).filter((t) => Array.isArray(t?.privateEndpoints) && t.privateEndpoints.includes(id) && Number.isInteger(t.index)).map((t) => t.index);
   const rows = (Array.isArray(declared) ? declared : []).filter((e) => typeof e?.id === "string" && MODEL_ENDPOINT_ID_RE.test(e.id)).sort((a, b) => (a.id < b.id ? -1 : 1)).map((e) => ({ id: e.id, host: e.host, port: e.port, slots: Number.isInteger(e.slots) ? e.slots : null, triggers: named(e.id) }));
   const ids = new Set(rows.map((r) => r.id));
@@ -370,7 +373,7 @@ export function privateEndpointsView(declared, triggers, { triggersUnread = fals
       rows.push({ id, host: null, port: null, slots: null, triggers: named(id) });
     }
   }
-  return { unread: declared === null, ...(triggersUnread === true ? { triggersUnread: true } : {}), rows: rows.slice(0, 64), more: Math.max(0, rows.length - 64) };
+  return { unread: declared === null, ...(triggersUnread === true ? { triggersUnread: true, ...(triggersRefused === true ? { triggersRefused: true } : {}) } : {}), rows: rows.slice(0, 64), more: Math.max(0, rows.length - 64) };
 }
 
 /** Model context gets source key NAMES and counts, never manager variable names, paths, free doctor text or refs. */

@@ -196,7 +196,7 @@ test("trigger rows keep the full linked identity, human forge description and co
   assert.equal(rows[0].querySelector(".proj-trigger-desc").textContent, `pull request on gitlab → ${flow}`);
   assert.equal(rows[0].querySelector(".end").textContent, "999 runs");
   assert.equal(rows[1].querySelector(".proj-trigger-desc").textContent, "cron nightly");
-  assert.equal(rows[1].querySelector(".end").textContent, "1 runs");
+  assert.equal(rows[1].querySelector(".end").textContent, "1 run");
 });
 
 test("size preview carries the exact existing action fields and role/read-only gates behave independently", () => {

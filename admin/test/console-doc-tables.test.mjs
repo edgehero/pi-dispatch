@@ -789,7 +789,8 @@ test("docs/console.md's table of who reads what: each row is what the real page 
   const downParsed = parsePageQuery("trigger", "index=2");
   const downData = await loadPageData("trigger", downParsed.query, { now: () => PLANNER_NOW, env: {}, paths: { triggersPath: TRIGGER_GETS_PATH }, fs, fleet: { snapshot: async () => { throw new Error("down"); } }, hostLoads: async () => null, triggerEditor: () => ({}) }, { role: "operator" });
   const downWhole = String((await renderPage("trigger", { query: downParsed.query, session: { name: "someone", role: "operator" }, data: downData })).html);
-  expectRow("A page whose Valkey read failed", { whole: downWhole, card: panelOf(downWhole, "p-trigger-gets"), how: panelOf(downWhole, "p-trigger-gets-how") }, { form: true, word: `${W.fileSays} ${W.historyUnread}` });
+  expectRow("A page whose Valkey read failed", { whole: downWhole, card: panelOf(downWhole, "p-trigger-gets"), how: panelOf(downWhole, "p-trigger-gets-how") }, { form: false, word: `${W.fileSays} ${W.historyUnread}` });
+  assert.ok(textOf(panelOf(downWhole, "p-trigger-gets")).includes("Valkey could not be read, so this page offers no change."), "and the card says why it has no form");
   assert.ok(textOf(panelOf(downWhole, "p-trigger-change")).includes(straight(W.othersUnread)), "Before you change it says what is unread");
   // A file the worker refuses, and the page can still read: the card stays, so the row can be fixed, and the pills are unknown.
   const refused = await trigger({ fs: fileOnlyFs(getsFile({ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", maxTurns: "many" } })) });

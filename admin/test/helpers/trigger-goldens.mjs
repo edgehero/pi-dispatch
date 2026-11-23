@@ -76,7 +76,7 @@ export async function triggerGolden({
  * Issue #962: a trigger's page over a Valkey that does not answer, the snapshot and the hosts' doctor runs alike. The
  * row and its bundle come from the files; what only Valkey holds is said as not read, never as none.
  */
-async function triggerNoSnapshot() {
+async function triggerNoSnapshot(name = "trigger") {
   const entry = { on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/shop", flow: "tidy", task: "tidy up" } };
   const text = `${JSON.stringify({ triggers: [entry], secretBundles: { shop: { profile: "shop", ref: "shop/env", project: "shop" } } }, null, 2)}\n`;
   const down = async () => { throw new Error("Valkey does not answer"); };
@@ -86,16 +86,18 @@ async function triggerNoSnapshot() {
     settings: { path: "/deployment/settings.json", overlay: {} },
     schedulerStallMax: 2,
   });
-  const query = { index: 0 };
-  const data = await loadPageData("trigger", query, {
+  const query = name === "trigger" ? { index: 0 } : {};
+  const data = await loadPageData(name, query, {
     now: () => NOW, env: {}, fleet: noSnapshotFleet({ fileViews }), hostLoads: down,
     paths: { triggersPath: "/deployment/triggers.json" }, fs: { readFileSync: () => text },
     triggerEditor: () => ({ backends: [{ name: "local", serves: { liveTranscript: "yes", steering: "yes", recovery: "yes", sandboxShell: "yes" } }], forges: ["github"], flows: [{ name: "tidy", tier: "repository" }], defaults: { backend: "local", maxTurns: 30 } }),
   }, { role: "operator" });
-  return (await renderPage("trigger", { query, session: { name: "ops", role: "operator" }, data })).html;
+  return (await renderPage(name, { query, session: { name: "ops", role: "operator" }, data })).html;
 }
 export const TRIGGER_DRAW = {
   "trigger-no-snapshot.operator": () => triggerNoSnapshot(),
+  // Issue #988: the page that adds one, over the same deployment that could not be read: it offers no change.
+  "trigger-add-no-snapshot.operator": () => triggerNoSnapshot("trigger-add"),
   "trigger-editor-no-webhook.operator": () => triggerGolden({ editor: true, forges: [] }),
   // Issue #879: the first GitHub trigger of a receiver that started without a GitHub route.
   "trigger-editor-github-restart.operator": () => triggerGolden({ editor: true, forges: ["github", "gitlab"], githubRestart: true }),
