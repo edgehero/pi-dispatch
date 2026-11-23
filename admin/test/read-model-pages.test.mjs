@@ -2683,6 +2683,171 @@ test("createFleetReader on a real Valkey: one queue is paused and resumed alone,
   }
 });
 
+// Issue #986: the real reader, BullMQ and ioredis over a proxy that holds the bytes both ways and passes them on a thaw, as
+// `kill -STOP` and `kill -CONT` leave a Valkey. Each command's bound is shortened here (the console's is 5 s).
+const FREEZE_BOUND_MS = 400;
+
+/**
+ * A fleet reader over the freezing proxy: real queues through `makeQueue`, each under a name of this test's own (the
+ * reader sees the plain name), what every queue heard as an error, and a registry the test sets. `seed` puts one schedule
+ * into a host's queue past the proxy; `cleanup` disposes the reader and deletes this test's queue keys.
+ */
+async function readerOverProxy(tag) {
+  const { makeQueue } = await import("@edgehero/pi-dispatch/queue");
+  const { makeRedisClient, parseConnection } = await import("@edgehero/pi-dispatch/connection");
+  const { freezingProxy } = await import("../../worker/test/helpers/freezing-proxy.mjs");
+  const prefix = `pd986${tag}-${process.pid}-${Date.now()}-`;
+  const proxy = await freezingProxy(URL_);
+  const direct = makeRedisClient(URL_);
+  direct.on("error", () => {});
+  const logsDir = tempDir(`pd-986-${tag}-`);
+  writeFileSync(join(logsDir, "triggers.json"), '{ "triggers": [] }\n');
+  const queues = new Map();
+  const heard = [];
+  const built = [];
+  const asked = (connection, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    const queue = makeQueue(connection, { name: `${prefix}${name}` });
+    queue.removeAllListeners("error");
+    queue.on("error", (err) => heard.push(`${name}: ${err.message}`));
+    queues.set(name, queue);
+    built.push(name);
+    return new Proxy(queue, { get: (target, key) => (key === "name" ? name : typeof target[key] === "function" ? target[key].bind(target) : target[key]) });
+  };
+  const bounded = (options = {}) => ({ ...options, ...(options.commandTimeoutMs ? { commandTimeoutMs: FREEZE_BOUND_MS } : {}) });
+  const fleet = { registry: async () => ({ hosts: [] }) };
+  const reader = createFleetReader({ valkeyUrl: proxy.url, logsDir, triggersPath: join(logsDir, "triggers.json") }, {
+    makeQueueFn: asked,
+    parseConnectionFn: (url, options) => parseConnection(url, bounded(options)),
+    redisFn: (url, options) => makeRedisClient(url, bounded(options)),
+    readLiveHostsFn: () => fleet.registry(),
+    discoverHostQueuesFn: async () => ({ names: [] }),
+    nowFn: () => AT,
+    readOnly: true,
+  });
+  const seed = async (host, id) => {
+    const queue = makeQueue(parseConnection(URL_, { failFast: true }), { name: `${prefix}pi-jobs@${host}` });
+    try {
+      await queue.upsertJobScheduler(id, { pattern: "0 3 * * *" }, { name: "local", data: {} });
+    } finally {
+      await queue.close();
+    }
+  };
+  const cleanup = async () => {
+    proxy.thaw();
+    await reader.dispose();
+    let cursor = "0";
+    do {
+      const [next, keys] = await direct.scan(cursor, "MATCH", `bull:${prefix}*`, "COUNT", 500);
+      cursor = String(next);
+      if (keys.length > 0) await direct.del(...keys);
+    } while (cursor !== "0");
+    direct.disconnect();
+    proxy.close();
+  };
+  return { reader, proxy, direct, prefix, queues, heard, built, fleet, seed, cleanup };
+}
+
+/** Resolves once `seen()` is true; a failure of its own after `ms`. */
+async function soon(seen, ms = 5_000) {
+  const until = Date.now() + ms;
+  while (!seen()) {
+    assert.ok(Date.now() < until, "not seen within the test's own limit");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("createFleetReader on a real Valkey: a first snapshot that fell in a freeze rejects, and the next one answers once Valkey does, from the same queue (#986, VALKEY_TEST_URL)", { skip: live, timeout: 30_000 }, async () => {
+  const r = await readerOverProxy("first");
+  try {
+    // A console started on a Valkey that answers, which has drawn no page yet: its queue is connected and has read nothing.
+    await r.queues.get("pi-jobs").waitUntilReady();
+    r.proxy.freeze();
+    await assert.rejects(r.reader.snapshot(), /Command timed out/);
+    // The scheduler child's own INFO ended at the bound too: what kept every later snapshot rejecting.
+    await soon(() => r.heard.length > 0);
+    assert.deepEqual(r.heard, ["pi-jobs: Command timed out"]);
+    r.proxy.thaw();
+    const snap = await r.reader.snapshot();
+    assert.deepEqual([snap.schedulers, snap.schedulersReadInPart, snap.queueCounts.map((q) => q.queue)], [[], false, ["pi-jobs"]]);
+    assert.deepEqual(r.built, ["pi-jobs"], "the queue the reader was built with: its client never ended, so nothing replaced it");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("createFleetReader on a real Valkey: a host queue first read in a freeze lists its schedules once Valkey answers, where it read as none until a restart (#986, VALKEY_TEST_URL)", { skip: live, timeout: 30_000 }, async () => {
+  const r = await readerOverProxy("host");
+  const host = `h986-${process.pid}-${Date.now().toString(36)}`;
+  try {
+    await r.seed(host, "nightly-986");
+    // The shared queue has read its schedulers once, so its own child is past its INFO: only the host's queue is new.
+    assert.deepEqual((await r.reader.snapshot()).schedulers, []);
+    r.fleet.registry = async () => ({ hosts: [{ name: host, routes: true }] });
+    // The host's queue is built and connected by a read that asks it for no schedule.
+    await r.reader.waiting();
+    await r.queues.get(`pi-jobs@${host}`).waitUntilReady();
+    r.proxy.freeze();
+    await assert.rejects(r.reader.snapshot(), /Command timed out/);
+    await soon(() => r.heard.length > 0);
+    assert.deepEqual(r.heard, [`pi-jobs@${host}: Command timed out`], "the host queue's scheduler child, and no other");
+    r.proxy.thaw();
+    const snap = await r.reader.snapshot();
+    assert.deepEqual([snap.schedulers.map((s) => s.key), snap.schedulersReadInPart], [["nightly-986"], false]);
+    assert.deepEqual(r.built, ["pi-jobs", `pi-jobs@${host}`]);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("createFleetReader on a real Valkey: schedulersReadInPart while a host queue's schedules cannot be read or the registry was never read, and not on a list that is whole (#986, VALKEY_TEST_URL)", { skip: live, timeout: 30_000 }, async () => {
+  const { stateOf } = await import("../src/console/live.mjs");
+  const r = await readerOverProxy("short");
+  const host = `h986-${process.pid}-${Date.now().toString(36)}`;
+  const repeatKey = `bull:${r.prefix}pi-jobs@${host}:repeat`;
+  const short = (snap) => [snap.schedulers.map((s) => s.key), snap.schedulersReadInPart, stateOf(snap, "viewer", { now: AT }).schedulersReadInPart];
+  try {
+    await r.seed(host, "nightly-986");
+    // Never read: only the shared queue is known, so the host's schedule is not in the list and the list says so.
+    r.fleet.registry = async () => { throw new Error("WRONGTYPE"); };
+    const never = await r.reader.snapshot();
+    assert.deepEqual([...short(never), never.hostsReadAt, Boolean(never.queue.fleetDegraded)], [[], true, true, null, true]);
+    // Read: the host's queue is asked, and the list is whole.
+    r.fleet.registry = async () => ({ hosts: [{ name: host, routes: true }] });
+    assert.deepEqual(short(await r.reader.snapshot()), [["nightly-986"], false, false]);
+    // The host queue's scheduler read alone fails (Valkey answers it with an error): the rest of the snapshot is read.
+    await r.direct.rename(repeatKey, `${repeatKey}-aside`);
+    await r.direct.set(repeatKey, "not a sorted set");
+    const lost = await r.reader.snapshot();
+    assert.deepEqual([...short(lost), lost.queueCounts.map((q) => q.queue)], [[], true, true, ["pi-jobs", `pi-jobs@${host}`]]);
+    // And it answers again.
+    await r.direct.rename(`${repeatKey}-aside`, repeatKey);
+    assert.deepEqual(short(await r.reader.snapshot()), [["nightly-986"], false, false]);
+    // Read before and not now: the queues last seen are still asked, so the list is the fleet's as last seen.
+    r.fleet.registry = async () => { throw new Error("timeout"); };
+    const seen = await r.reader.snapshot();
+    assert.deepEqual([...short(seen), Boolean(seen.queue.fleetDegraded), seen.hostsReadAt], [["nightly-986"], false, false, true, AT]);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("createFleetReader on a real Valkey: the shared queue's scheduler read that fails fails the snapshot, never a list without its schedules (#986, VALKEY_TEST_URL)", { skip: live, timeout: 30_000 }, async () => {
+  const r = await readerOverProxy("shared");
+  const repeatKey = `bull:${r.prefix}pi-jobs:repeat`;
+  try {
+    assert.deepEqual((await r.reader.snapshot()).schedulers, []);
+    // Valkey answers the shared queue's scheduler read with an error. A host queue's is kept as not read; this one is not.
+    await r.direct.set(repeatKey, "not a sorted set");
+    await assert.rejects(r.reader.snapshot(), /WRONGTYPE/);
+    await r.direct.del(repeatKey);
+    const snap = await r.reader.snapshot();
+    assert.deepEqual([snap.schedulers, snap.schedulersReadInPart], [[], false]);
+  } finally {
+    await r.cleanup();
+  }
+});
+
 test("createFleetReader: one queue's pause over a registry that could not be read says a host's queue may be missing, never the client's words (#965)", async () => {
   const words = "connect ECONNREFUSED 10.9.8.7:6379";
   const { built, asked, mk } = switchQueues();

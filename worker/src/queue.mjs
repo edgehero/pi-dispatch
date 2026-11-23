@@ -133,22 +133,122 @@ export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeli
  * The constructor is the same class of fault at another address. `RedisConnection.close` removes every listener, and a
  * connect still in flight then fails into `emit("error")`, which with no listener throws out of a promise chain nothing can
  * reach, so a read that closed its queue at its own bound ended the process a moment after it answered. A queue that was
- * closed has nobody left to tell, so that one emit says nothing.
+ * closed has nobody left to tell, so that one emit says nothing (`quietOnceClosed`).
+ *
+ * The children fail in a way of their own (issue #986). Each getter builds its child once and keeps it for the queue's
+ * life (`_jobScheduler`, `_repeat`), and a child has a `RedisConnection` of its own over the queue's client, whose promise
+ * is one INFO, the version check. On a queue whose commands have a bound (`consoleQueueConnection`) that INFO ends at the
+ * bound when Valkey has stopped answering, and the child's promise stays rejected from then on: every later
+ * `getJobSchedulers` of that queue rejected at once, with Valkey long back and every other read of the same queue
+ * answering, until the process was restarted. So a child whose connection gave up is not kept (`#settled`): its slot is
+ * cleared and it is closed, the call that met it still rejects with the INFO's own error, and the next call builds a
+ * child and sends a new INFO. Not a retry in here, which would make one bound two for a caller that owes its answer
+ * within one. And not the reader's to do: it replaces a queue whose OWN client ended, which this queue's had not, and
+ * it never sees a host queue's schedule read fail.
+ *
+ * One call at a time enters each getter (`#child`). BullMQ's getter awaits the client inside its `if (!this._jobScheduler)`,
+ * so two first calls in one tick each built a child and the slot kept the second; the first stayed on the client, its
+ * three listeners with it, and nothing held it to close it.
+ *
+ * And `close` closes the scheduler child, which BullMQ's own close never does (it closes `_repeat` alone). A child is
+ * handed the queue's client as an instance, which BullMQ takes for a shared one: closing the child takes its three
+ * listeners off the client and sends no QUIT, and the queue goes on reading.
+ *
+ * A child closed with its promise still to reject is the constructor's fault again, so every close of a child goes
+ * through `closeChild`, which puts the constructor's guard on the child's connection first. There are three: `close`,
+ * for the children in their slots; `#settled`'s handler, for a child whose connection gave up; and `#settled` itself,
+ * for a child that arrives once the queue is closed, which nothing else would close. BullMQ's own close closes
+ * `_repeat` as well, and finds there only the child `close` closed a line earlier: `close` awaits nothing before it,
+ * and BullMQ's close reads the slot before its own first await (read at 5.80.4: without telemetry `trace` calls its
+ * callback at once). With an await between the two, a repeat child built meanwhile was closed by BullMQ with no guard on
+ * it, and on a client that had ended its promise rejects at once: `close()` and a first `getRepeatableJobs()` in one
+ * tick ended the process.
  */
 class SettledQueue extends Queue {
+	// The children `#settled` has seen, so each is watched once however many calls it is handed to.
+	#watched = new WeakSet();
+	// The getter call in flight for each slot, or null.
+	#building = { _jobScheduler: null, _repeat: null };
+	// True from the first `close` on: a child that arrives after it is closed as it arrives (`#settled`).
+	#closed = false;
+
 	constructor(name, options) {
 		super(name, options);
-		const { connection } = this;
-		const emit = connection.emit.bind(connection);
-		connection.emit = (event, ...args) => (event === "error" && connection.listenerCount("error") === 0 ? false : emit(event, ...args));
+		quietOnceClosed(this.connection);
 	}
 
 	get jobScheduler() {
-		return this.client.then(() => super.jobScheduler);
+		return this.#child("_jobScheduler", () => super.jobScheduler);
 	}
 
 	get repeat() {
-		return this.client.then(() => super.repeat);
+		return this.#child("_repeat", () => super.repeat);
+	}
+
+	// The slot's child through BullMQ's own getter (`build`), one call at a time. The promise handed out is the one that
+	// clears `#building`, so by the time a caller goes on the next call enters the getter again, and finds the slot filled.
+	#child(slot, build) {
+		this.#building[slot] ??= this.client
+			.then(build)
+			.then((child) => this.#settled(slot, child))
+			.finally(() => {
+				this.#building[slot] = null;
+			});
+		return this.#building[slot];
+	}
+
+	// Watches `child`'s own connection promise, once. Attached before the child is handed to any caller, so when a
+	// caller's await of that promise rejects the slot is already clear, and the child is closed.
+	#settled(slot, child) {
+		if (!this.#watched.has(child)) {
+			this.#watched.add(child);
+			child.waitUntilReady().catch(() => {
+				// Never false while one call at a time enters the getter (`#child`): a slot is filled only when it is empty,
+				// and only this handler empties it, so it still holds this child. Kept so that this handler is right by
+				// itself: without `#child`'s rule, clearing the slot for a child that lost a race would drop the one that won.
+				if (this[slot] === child) this[slot] = undefined;
+				closeChild(child);
+			});
+			if (this.#closed) closeChild(child);
+		}
+		return child;
+	}
+
+	// Nothing is awaited before BullMQ's close (the class comment says what an await there cost), and nothing after it
+	// needs one: a child's close ends within this call's microtasks, before the queue's own connection can have closed.
+	async close() {
+		this.#closed = true;
+		for (const child of [this._jobScheduler, this._repeat]) if (child) closeChild(child);
+		return super.close();
+	}
+}
+
+// The connections `quietOnceClosed` has wrapped, so a second call for one wraps nothing.
+const quieted = new WeakSet();
+
+/**
+ * From here on an "error" this BullMQ connection emits while nothing listens for it says nothing, where it threw.
+ * `RedisConnection`'s constructor chains `initializing.catch((err) => this.emit("error", err))` and its `close` ends
+ * with `removeAllListeners()`, so without this a connection closed before its promise rejected throws out of that chain
+ * (`SettledQueue` says what that costs). While anything listens the emit is BullMQ's own.
+ */
+function quietOnceClosed(connection) {
+	if (quieted.has(connection)) return;
+	quieted.add(connection);
+	const emit = connection.emit.bind(connection);
+	connection.emit = (event, ...args) => (event === "error" && connection.listenerCount("error") === 0 ? false : emit(event, ...args));
+}
+
+/**
+ * Close one child of a queue (`_jobScheduler`, `_repeat`): the one way `SettledQueue` closes a child. Never throws, and
+ * a second call for one child closes nothing again. Guarded first, since the close is what removes the listeners.
+ */
+async function closeChild(child) {
+	quietOnceClosed(child.connection);
+	try {
+		await child.close();
+	} catch {
+		// a child that cannot close has nothing left to close: its listeners came off in the close's own `finally`
 	}
 }
 

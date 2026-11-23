@@ -910,6 +910,10 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
         stalls: name === null || s.schedulerStalls?.[name] === null ? null : num(Number(s.schedulerStalls?.[name] ?? 0)) ?? 0,
       };
     }),
+    // True when the schedule list is not whole (issue #986): a host queue's schedules could not be read, or the host
+    // registry was never read. `schedulers` then holds what was read, and a schedule missing from it is "unknown",
+    // never "not scheduled".
+    schedulersReadInPart: Boolean(s.schedulersReadInPart),
     schedulerStallMax: num(s.schedulerStallMax),
     failed,
   };

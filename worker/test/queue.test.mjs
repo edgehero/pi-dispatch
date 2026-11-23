@@ -578,6 +578,46 @@ for (const [what, call] of [
 	});
 }
 
+// Issue #986 with no Valkey: a loopback listener that answers INFO with a version, a sorted set's range with no members and
+// anything else +OK, behind the proxy that holds the bytes both ways. Real BullMQ and real ioredis; the cases against a
+// real Valkey are in connection.test.mjs.
+test("a queue does not keep a scheduler child whose INFO got no answer within the bound: the same queue reads again once it is answered (#986)", { timeout: 8000 }, async () => {
+	const { createServer } = await import("node:net");
+	const { freezingProxy } = await import("./helpers/freezing-proxy.mjs");
+	const { makeQueue } = await import("../src/queue.mjs");
+	const sockets = new Set();
+	const info = "redis_version:7.2.4";
+	const listener = createServer((socket) => {
+		sockets.add(socket);
+		socket.on("error", () => {});
+		socket.on("data", (data) => {
+			for (const [, word] of String(data).matchAll(/\*\d+\r\n\$\d+\r\n([a-z]+)\r\n/gi)) socket.write(/^info$/i.test(word) ? `$${info.length}\r\n${info}\r\n` : /^z/i.test(word) ? "*0\r\n" : "+OK\r\n");
+		});
+	});
+	await new Promise((resolve) => listener.listen(0, "127.0.0.1", resolve));
+	const proxy = await freezingProxy(`redis://127.0.0.1:${listener.address().port}`);
+	const q = makeQueue(parseConnection(proxy.url, { failFast: true, commandTimeoutMs: 200, context: {}, judge: async () => ({ host: "127.0.0.1", servername: null, pinned: null }) }), { name: "qtest-child-gave-up" });
+	q.removeAllListeners("error");
+	q.on("error", () => {});
+	try {
+		const client = await q.waitUntilReady();
+		const listeners = client.listenerCount("error");
+		proxy.freeze();
+		await assert.rejects(q.getJobSchedulers(0, -1, true), /Command timed out/);
+		assert.equal(q._jobScheduler, undefined, "the child is not kept");
+		assert.equal(client.listenerCount("error"), listeners, "and was closed");
+		proxy.thaw();
+		assert.deepEqual(await q.getJobSchedulers(0, -1, true), []);
+		assert.equal(client.listenerCount("error"), listeners + 1, "a new child, on the same client");
+	} finally {
+		proxy.thaw();
+		await q.close().catch(() => {});
+		proxy.close();
+		for (const socket of sockets) socket.destroy();
+		listener.close();
+	}
+});
+
 // Integration against a real Valkey. Runs when VALKEY_TEST_URL is set (CI provides a service).
 const url = process.env.VALKEY_TEST_URL;
 const skip = url ? false : "VALKEY_TEST_URL not set; the queue integration test needs a Valkey";

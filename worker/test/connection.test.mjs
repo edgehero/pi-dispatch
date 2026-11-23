@@ -838,3 +838,165 @@ test("replyErrorCode: Valkey's error reply's code alone, a word for a reply with
 	assert.equal(replyErrorCode(Object.assign(new Error("WRONGTYPE x"), { name: "Error" })), null, "the name decides, never the text");
 	assert.equal(replyErrorCode(null), null);
 });
+
+// Issue #986: a queue's scheduler child and its repeat child each hold a connection promise of their own, one INFO over the
+// queue's client. Through the proxy that INFO meets a Valkey that stopped answering and ends at the queue's bound.
+const CHILD_READS = [
+	["_jobScheduler", "getJobSchedulers", (queue) => queue.getJobSchedulers(0, -1, true)],
+	["_repeat", "getRepeatableJobs", (queue) => queue.getRepeatableJobs(0, -1, true)],
+];
+
+/** A bounded queue through `makeQueue` at `url`, under a name of this test's own, and what removes its keys afterwards. */
+async function boundedQueueAt(url, tag) {
+	const { makeQueue } = await import("../src/queue.mjs");
+	const name = `pi-jobs-test-986-${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const queue = makeQueue(parseConnection(url, { failFast: true, commandTimeoutMs: 300, context: {}, judge: judgeHere }), { name });
+	// The queue's own line per error is not what these read: each keeps what the queue heard instead.
+	const heard = [];
+	queue.removeAllListeners("error");
+	queue.on("error", (err) => heard.push(err.message));
+	const remove = async () => {
+		const direct = makeQueue(parseConnection(process.env.VALKEY_TEST_URL, { failFast: true }), { name });
+		await direct.obliterate({ force: true }).catch(() => {});
+		await direct.close().catch(() => {});
+	};
+	return { queue, heard, remove };
+}
+
+for (const [slot, method, read] of CHILD_READS) {
+	test(`a bounded queue does not keep a child whose INFO ended at the bound: ${method} rejects with that error, and the same queue answers it once Valkey does (#986, VALKEY_TEST_URL)`, { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 20_000 }, async () => {
+		const proxy = await freezingProxy(process.env.VALKEY_TEST_URL);
+		const { queue, heard, remove } = await boundedQueueAt(proxy.url, slot);
+		try {
+			const client = await within(queue.waitUntilReady());
+			const listeners = () => [client.listenerCount("error"), client.listenerCount("close"), client.listenerCount("ready"), client.getMaxListeners()];
+			const before = listeners();
+			proxy.freeze();
+			const started = performance.now();
+			// Two calls in one tick: one child, and each caller is told.
+			const lost = await within(Promise.all([read(queue), read(queue)].map((call) => call.catch((err) => err))));
+			for (const err of lost) assert.deepEqual([err.message, err.code], ["Command timed out", "ETIMEDOUT"], "the INFO's own error");
+			assert.ok(performance.now() - started < 2000, "ended at the bound");
+			assert.deepEqual(heard, ["Command timed out"], "one child and one INFO, which the queue heard as before");
+			assert.equal(queue[slot], undefined, "the child is not kept");
+			assert.deepEqual(listeners(), before, "and it was closed: its listeners are off the queue's client");
+			assert.equal(client.status, "ready", "which was sent no QUIT");
+			proxy.thaw();
+			assert.deepEqual(await within(Promise.all([read(queue), read(queue)])), [[], []], "the SAME queue answers: a new child and a new INFO");
+			assert.deepEqual(listeners(), before.map((n, i) => n + (i === 3 ? 3 : 1)), "one child for two first calls in one tick");
+			assert.equal(await within(queue.isPaused()), false, "and the queue's own reads were never the child's to end");
+			assert.deepEqual(heard, ["Command timed out"]);
+		} finally {
+			proxy.thaw();
+			await queue.close().catch(() => {});
+			await remove();
+			proxy.close();
+		}
+	});
+
+	test(`a queue closed while its child's INFO is still out leaves nothing unhandled, and the call in flight ends with the INFO's error (${method}, #986, VALKEY_TEST_URL)`, { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 20_000 }, async () => {
+		const proxy = await freezingProxy(process.env.VALKEY_TEST_URL);
+		const { queue, remove } = await boundedQueueAt(proxy.url, `closing${slot}`);
+		const unhandled = [];
+		const note = (err) => unhandled.push(err);
+		process.on("unhandledRejection", note);
+		try {
+			await within(queue.waitUntilReady());
+			proxy.freeze();
+			const lost = read(queue).catch((err) => err);
+			// The child is in its slot once the getter ran, and its INFO has been out since its constructor.
+			const until = Date.now() + 2000;
+			while (queue[slot] === undefined && Date.now() < until) await new Promise((resolve) => setImmediate(resolve));
+			assert.ok(queue[slot], "the child was built");
+			// The close's own QUIT is not answered either and ends at the bound, after the INFO sent before it.
+			await within(queue.close().catch(() => {}));
+			assert.equal((await within(lost)).message, "Command timed out");
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			assert.deepEqual(unhandled, []);
+		} finally {
+			process.off("unhandledRejection", note);
+			proxy.thaw();
+			await remove();
+			proxy.close();
+		}
+	});
+}
+
+for (const [slot, method, read] of CHILD_READS) {
+	test(`a child built once its queue's close began is closed as it arrives, its INFO still out, and nothing goes unhandled (${method}, #986, VALKEY_TEST_URL)`, { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 20_000 }, async () => {
+		const proxy = await freezingProxy(process.env.VALKEY_TEST_URL);
+		const { queue, remove } = await boundedQueueAt(proxy.url, `late${slot}`);
+		const unhandled = [];
+		const note = (err) => unhandled.push(err);
+		process.on("unhandledRejection", note);
+		try {
+			const client = await within(queue.waitUntilReady());
+			proxy.freeze();
+			// The close's QUIT gets no answer and ends at the bound. The child is built while it waits.
+			const closed = queue.close().catch(() => {});
+			const lost = read(queue).catch((err) => err);
+			const until = Date.now() + 2000;
+			while (queue[slot] === undefined && Date.now() < until) await new Promise((resolve) => setImmediate(resolve));
+			const child = queue[slot];
+			assert.ok(child, "the child was built");
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.equal(child.closed, true, "closed as it arrived, long before its INFO ends");
+			assert.equal((await within(lost)).message, "Command timed out");
+			await within(closed);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			assert.deepEqual(unhandled, []);
+			assert.deepEqual([client.listenerCount("error"), client.listenerCount("close"), client.listenerCount("ready")], [0, 0, 0]);
+		} finally {
+			process.off("unhandledRejection", note);
+			proxy.thaw();
+			await remove();
+			proxy.close();
+		}
+	});
+}
+
+test("a queue closed in the tick of its first repeat call, over a client that has ended, leaves nothing unhandled (#986, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 20_000 }, async () => {
+	const proxy = await freezingProxy(process.env.VALKEY_TEST_URL);
+	const { queue, remove } = await boundedQueueAt(proxy.url, "closetick");
+	const unhandled = [];
+	const note = (err) => unhandled.push(err);
+	process.on("unhandledRejection", note);
+	try {
+		const client = await within(queue.waitUntilReady());
+		assert.deepEqual(await within(queue.getJobSchedulers(0, -1, true)), []);
+		// Valkey gone: nothing listens where the client dials, and a failFast client ends once its retries ran out.
+		proxy.close();
+		const until = Date.now() + 5000;
+		while (client.status !== "end" && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 20));
+		assert.equal(client.status, "end");
+		// In one tick: the close, which has the scheduler child to close, and the call that builds the repeat child. Over
+		// an ended client that child's own promise rejects at once.
+		const closed = queue.close().catch(() => {});
+		const lost = queue.getRepeatableJobs(0, -1, true).catch((err) => err);
+		await within(closed);
+		assert.match((await within(lost)).message, /Connection is closed/);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		assert.deepEqual(unhandled, []);
+	} finally {
+		process.off("unhandledRejection", note);
+		await remove();
+	}
+});
+
+test("closing a queue closes its scheduler child, which BullMQ's own close leaves listening on the client (#986, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 20_000 }, async () => {
+	const { queue, heard, remove } = await boundedQueueAt(process.env.VALKEY_TEST_URL, "close");
+	try {
+		const client = await within(queue.waitUntilReady());
+		const listeners = client.listenerCount("error");
+		for (const [, , read] of CHILD_READS) assert.deepEqual(await within(read(queue)), []);
+		const children = [queue._jobScheduler, queue._repeat];
+		assert.equal(client.listenerCount("error"), listeners + 2, "each child listens on the queue's client");
+		await within(queue.close());
+		assert.deepEqual(children.map((child) => child.closed), [true, true]);
+		assert.deepEqual([client.listenerCount("error"), client.listenerCount("close"), client.listenerCount("ready")], [0, 0, 0], "nothing of the queue or of a child is left on it");
+		assert.deepEqual(heard, []);
+	} finally {
+		await queue.close().catch(() => {});
+		await remove();
+	}
+});
