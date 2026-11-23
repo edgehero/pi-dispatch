@@ -282,8 +282,9 @@ const layoutIds = (items) => items.flatMap((it) => (typeof it === "string" ? [it
 const zeroTouchStateOf = (view) => zeroTouchView(view?.data?.zeroTouch, { role: view?.role, windowDays: view?.query?.days ?? 30, nowMs: view?.now ?? 0 }).state;
 function zeroTouchLayout(role, state) {
   // Tracking that has not started (issue #962) is said once, by the rate card alone: seven more cards would have
-  // nothing to hold but the same sentence, or a zero nobody counted.
-  if (state === "not-started") return [{ cls: "stack", items: ["p-zt-rate"] }];
+  // nothing to hold but the same sentence, or a zero nobody counted. So is a report that could not be read (issue
+  // #988), which seven cards each said in the same words.
+  if (state === "not-started" || state === "unavailable") return [{ cls: "stack", items: ["p-zt-rate"] }];
   if (role === "operator") return PAGE_LAYOUT["zero-touch"];
   return [PAGE_LAYOUT["zero-touch"][0], { cls: "cols zt-layout", items: [{ cls: "stack zt-main", items: ["p-zt-projects", "p-zt-questions", "p-zt-fixes"] }, { cls: "stack zt-side", items: ["p-zt-causes"] }] }];
 }

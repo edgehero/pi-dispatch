@@ -85,17 +85,31 @@ test("Triggers stylesheet is byte-identical to its published generator source", 
   assert.equal(TRIGGERS_CSS, pasted[1]);
 });
 
-test("empty incomplete history stays unknown while explicitly complete empty history is zero", async () => {
-  const incomplete = await triggerListGolden({ recordsOverride: [], complete: false });
-  const complete = await triggerListGolden({ recordsOverride: [], complete: true });
-  const partialRules = text(panel(incomplete, "p-tr-github"));
-  assert.match(partialRules, /unknown runs in 30 days.*unknown spend/);
-  assert.ok(!partialRules.includes("at least 0") && !partialRules.includes("$0"));
-  assert.match(text(panel(incomplete, "p-tr-spend")), /unknown/);
-  assert.ok(!text(panel(incomplete, "p-tr-spend")).includes("$0"));
-  assert.match(text(panel(complete, "p-tr-github")), /0 runs in 30 days/);
-  assert.match(text(panel(complete, "p-tr-spend")), /\$0/);
-  assert.ok(!text(panel(complete, "p-tr-spend")).includes("unknown"));
+test("an empty history: unknown where a side of it was not read, a floor where it was cut, and 0 where it was read (issue #988)", async () => {
+  // A side of the history unread: a rule's zero is not known, and neither is its spend.
+  const unread = await triggerListGolden({ recordsOverride: [], coverage: { partial: true } });
+  const unreadRules = text(panel(unread, "p-tr-github"));
+  assert.match(unreadRules, /Last run not known: the fleet's run records could not be read\. unknown runs in 30 days · unknown spend/);
+  assert.ok(!unreadRules.includes("at least 0") && !unreadRules.includes("$0") && !unreadRules.includes("No run in retained history"));
+  assert.match(text(panel(unread, "p-tr-spend")), /unknown attributed to these rules unknown run records since/);
+  assert.ok(!text(panel(unread, "p-tr-spend")).includes("$0"));
+  // Read, and cut at a bound: what was kept holds none, which is a floor and not a count.
+  const cut = await triggerListGolden({ recordsOverride: [], coverage: { truncated: true } });
+  assert.match(text(panel(cut, "p-tr-github")), /No run in retained history at least 0 runs in 30 days · \$0 \(retained or partially metered history\)/);
+  assert.match(text(panel(cut, "p-tr-spend")), /at least 0 run records since/);
+  // Read whole: a zero is 0. It said "unknown" on every deployment, an empty one too, since no caller could promise a
+  // whole fleet's history and the list asked for that promise.
+  for (const coverage of [{}, { complete: true }, { complete: false }]) {
+    const read = await triggerListGolden({ recordsOverride: [], coverage });
+    assert.match(text(panel(read, "p-tr-github")), /No run in retained history 0 runs in 30 days · \$0 this UTC week/, JSON.stringify(coverage));
+    assert.match(text(panel(read, "p-tr-spend")), /\$0 attributed to these rules 0 run records since/);
+    assert.ok(!/unknown|at least/.test(text(panel(read, "p-tr-spend"))), JSON.stringify(coverage));
+    assert.ok(!text(panel(read, "p-tr-count")).includes("lower bounds"), JSON.stringify(coverage));
+  }
+  // One run, and its noun agrees: "at least 1 run", never "1 runs".
+  const one = text(panel(await triggerListGolden(), "p-tr-github"));
+  assert.match(one, /at least 1 run in 30 days/);
+  assert.ok(!/\b1 runs\b/.test(one));
 });
 test("label conjunctions remain complete and PR selectors apply only to labeled deliveries", async () => {
   for (const type of ["label", "pull_request"]) {

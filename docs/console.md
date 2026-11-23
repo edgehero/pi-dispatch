@@ -1014,8 +1014,16 @@ A viewer and an agent's session see no form there, and a read-only console draws
 that failed beside others that worked: a Configuration tab shows no count for a file it could not read, Set up says
 Not known for the trigger and forge steps when the triggers file cannot be read, and Sandboxes offers no New sandbox
 button when its report was not read. And "could not be read" is said only of a read that failed: a pause-windows file
-that does not exist means no quiet windows, a triggers file that does not exist means no rules, and a host's page says
-there is no capacity history for it only when the host registry and the run mirror both answered. Fleet says the hosts could not
+that does not exist means no quiet windows, a triggers file that does not exist means no rules (Triggers counts 0,
+Parked and Watch show their empty state, and Sandboxes says there is no trigger to prepare a sandbox as), a projects
+file that does not exist means no project (a project's page is then not found, and Secrets says there is no projects
+file), and a host's page says
+there is no capacity history for it only when the host registry and the run mirror both answered. A file that is
+there has one of two words on Triggers, a project's page, Secrets and Configuration: it could not be read where
+nobody could read it, and it does not load where it was read and is refused. Triggers says a rule had 0 runs where
+the run history was read, and "unknown" only where a side of it was not. A refused run's page says its host has no
+live registry row, published no doctor result or has no queue listed where the hosts were read and that is so, and
+"could not be read" only of what was not read. Fleet says the hosts could not
 be read rather than that none is registered, and with the overview it says the running jobs are not known rather than
 that nothing is running; a schedule's stalls it did not read are "not known". When only some hosts' rows answered in
 time, the pages say the host registry was read in part rather than that it could not be read: a host whose row did not
@@ -1026,10 +1034,10 @@ Spend, the budget split's agreement (never "All hosts agree"), which hosts serve
 whether a queue a one-queue pause does not know belongs to such a host. Models says the waiting jobs and doctor's
 proposals are not known rather than that there are none. Meanwhile a live page's pill says Not live (its tooltip says
 the console could not read all it needs for the page), also when only a part was not read: the host registry, the
-running jobs or the parked runs on any page, and on Runs, a run's page, Sandboxes and a host's page whatever a card
-there says could not be read (the run history or its last 24 hours, a run's record, transcript, inbox or chat, the
-open shells or cleanup notices, a host's waiting jobs or doctor results). A page whose reads were cut short says Not
-live too. The pill does not follow what a host published about itself as unreadable, or a host's capacity history,
+running jobs or the parked runs on any page, and on each live page whatever a card there says could not be read (the
+waiting jobs, the failed jobs or the doctor results on the overview, Fleet, Set up and a host's page; the run history
+or its last 24 hours on Runs; a run's record, transcript, inbox or chat; the open shells or cleanup notices on
+Sandboxes; the answer rules on Parked). A page whose reads were cut short says Not live too. The pill does not follow what a host published about itself as unreadable, or a host's capacity history,
 which is read when the page loads. A page kept as last seen shows no Parked count until it is read again.
 Since 2026-11-21 (#962) the configuration pages follow it too: Secrets still lists the profiles and bundles the
 settings overlay, the triggers file and the `.env` declare, read-only, and says what runs received and which hosts serve
@@ -2541,7 +2549,7 @@ or a value you sent.
 |---|---|---|
 | 404 | no page at that address | Go to Runs, Go to Overview |
 | 404 | a run page (`/run?id=`) for an id that this host's run history, the fleet's run mirror, every queue (a stopped host's included, looked for again after you asked), the live transcript and the progress were each read for and found none of (when the console could not read one of those, or it did not answer in time, the run page itself answers 503 and says what it could not read); and a run's short link (`/run/acme/web/12`) that no run in the history or the queue answers, in its own words, or with status 503 when one of them could not be read ([A run's short link](#a-runs-short-link)) | the runs search filled with that id, or with the short link's issue (`acme/web#12`) (only one the search takes, and nowhere else on the page), Go to Runs, Go to Overview, with Runs marked as the page you are on |
-| 404 | Project not found: `/config/project?id=` names no project in a successfully read projects file; an unreadable file stays unavailable | Configuration and Runs, with Configuration current; existing records keep their project id |
+| 404 | Project not found: `/config/project?id=` names no project in the projects file, or there is no projects file; a file that could not be read or does not load stays unavailable | Configuration and Runs, with Configuration current; existing records keep their project id |
 | 405 | an address that takes requests from the console's own buttons, not a page | Go to Overview |
 | 400 | a page refused its address (a filter or a cursor it cannot use); the sentence names the parameter and its rule | that page without its query (Runs, for a run page), and Overview |
 | 403 | the audit log, for a viewer | Go to Overview |

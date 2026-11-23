@@ -14,7 +14,7 @@ import { fmtCost } from "../../panel.mjs";
 import { outcomeWord, recordReason, reasonWords } from "../../words.mjs";
 import { html as escapedHtml } from "../html.mjs";
 import * as ui from "../kit.mjs";
-import { timeHtml, ageText, shownPath, runLink } from "./common.mjs";
+import { timeHtml, ageText, plural, shownPath, runLink } from "./common.mjs";
 const html = (strings, ...values) =>
   escapedHtml(
     strings.map((s) => s.replace(/[ \t]*\n[ \t]*/g, "\n")),
@@ -67,12 +67,16 @@ const rowsOf = (v) => {
         (r) => r.trigger.type === (kind === "schedule" ? "cron" : kind),
       );
 };
-const countText = (number, incomplete = false) =>
-  number == null || (number === 0 && incomplete)
-    ? "unknown"
-    : `${incomplete ? "at least " : ""}${number}`;
+// A count from the run history and its noun, agreed (issue #988): "unknown runs" where there is none, or where it is 0
+// and a side of the history was not read (`stats.unread`); "at least 1 run" where the history was not read whole or
+// was cut at a bound; else "3 runs". A zero from a history that was read is 0: it said "unknown" on every deployment,
+// an empty one too.
+const countText = (number, stats, one, many = `${one}s`) =>
+  number == null || (number === 0 && stats?.unread === true)
+    ? `unknown ${many}`
+    : `${stats?.incomplete ? "at least " : ""}${plural(number, one, many)}`;
 const costText = (stats) =>
-  stats?.weekCost && !(stats.incomplete && stats.weekRuns === 0)
+  stats?.weekCost && !(stats.unread && stats.weekRuns === 0)
     ? `${fmtCost(stats.weekCost)}${stats.incomplete || stats.costIncomplete ? " (retained or partially metered history)" : ""}`
     : "unknown spend";
 const atOf = (r) => Date.parse(r?.endedAt ?? r?.startedAt ?? "");
@@ -160,13 +164,13 @@ export function triggersSpend(v) {
   return card(
     "Recorded this UTC week",
     html`${ui.kpi(
-        m?.stats?.weekCost && !(m.stats.incomplete && m.stats.weekRuns === 0)
+        m?.stats?.weekCost && !(m.stats.unread && m.stats.weekRuns === 0)
           ? fmtCost(m.stats.weekCost)
           : "unknown",
         "attributed to these rules",
       )}
       <p class="tr-kp">
-        ${countText(m?.stats?.weekRuns, m?.stats?.incomplete)} ${m?.stats?.weekRuns === 1 ? "run record" : "run records"} since
+        ${countText(m?.stats?.weekRuns, m?.stats, "run record")} since
         ${m?.weekStart == null
           ? "the start of this UTC week"
           : timeHtml(m.weekStart)}.
@@ -319,7 +323,7 @@ function ruleRow(v, r) {
         : html`<p class="tr-sub">
             ${r.stats.runs30d == null
               ? "Last run unavailable"
-              : modelOf(v)?.schedulersUnread
+              : r.stats.unread
                 ? "Last run not known: the fleet's run records could not be read."
                 : "No run in retained history"}
           </p>`}${next
@@ -335,7 +339,7 @@ function ruleRow(v, r) {
               : null}`
         : null}
       <p class="tr-sub">
-        ${countText(r.stats.runs30d, r.stats.incomplete)} runs in 30 days ·
+        ${countText(r.stats.runs30d, r.stats, "run")} in 30 days ·
         ${costText(r.stats)} this UTC week
       </p>
       ${r.unknown.map((p) => html`<p class="tr-problem">${p}</p>`)}

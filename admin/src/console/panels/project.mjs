@@ -51,7 +51,9 @@ export const PROJECT_HOLDS_PART = "Held money is not known: the host registry wa
 export const PROJECT_SIZING_PART = "The host registry was read in part: this size is judged against the hosts whose rows answered, and a host whose row did not answer may take more.";
 
 export const projectTitle = (view) => view?.project?.name || view?.id || "Project";
-export const projectDescription = (view) => view?.state === "ready" ? `${view.members.length} member${view.members.length === 1 ? "" : "s"}; id ${view.id} in ${view.file}.` : "Project configuration could not be read.";
+// One word per case (issue #988): under the title of a project whose file was read and is refused, the word its card
+// says, where both said "could not be read" beside "does not load".
+export const projectDescription = (view) => view?.state === "ready" ? `${view.members.length} member${view.members.length === 1 ? "" : "s"}; id ${view.id} in ${view.file}.` : /does not load/.test(String(view?.problem ?? "")) ? "Project configuration does not load." : "Project configuration could not be read.";
 
 export function projectSpend(v) {
   if (!ready(v)) return issue(v);

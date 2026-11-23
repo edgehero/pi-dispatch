@@ -35,8 +35,11 @@ const link = (id) => html`<a class="link code" href="${`/run?id=${encodeURICompo
 const fail = (m) => m.state === "unavailable" ? html`<p class="zt-note" role="status">${ZERO_TOUCH_WORDS.unavailable}</p>` : null;
 /** Said once, in the rate card: why the page's own read failed, and (issue #962) that tracking has not started, which is no failure. */
 const once = (m) => m.state === "not-started" ? html`<p class="zt-note" role="status">${ZERO_TOUCH_WORDS.notStarted}</p>` : m.state === "unavailable" && m.failure === "read-failed" ? html`<p class="zt-note" role="status">${ZERO_TOUCH_WORDS.readFailed}</p>` : null;
-/** A card of a page whose tracking has not started: its title alone. The page draws the rate card only (`zeroTouchLayout`). */
-const bare = (m, title) => m.state === "not-started" ? ui.card({ title, body: null }) : null;
+/**
+ * A card of a page whose tracking has not started, or whose report could not be read (issue #988): its title alone.
+ * The page then draws the rate card only (`zeroTouchLayout`), which says why once.
+ */
+const bare = (m, title) => m.state !== "ready" ? ui.card({ title, body: null }) : null;
 export function zeroTouchTabs(view) {
   const here = view?.page === "zero-touch";
   const sandboxes = view?.page === "sandboxes";
@@ -78,22 +81,23 @@ function compact(m) {
 }
 export function zeroTouchRate(view) {
   const m = model(view);
-  return ui.card({ title: `Touch rate, ${m.windowDays} days`, body: html`${fail(m)}${once(m)}${m.state === "ready" ? html`${ui.kpi(m.totals.runs ? pct(m.totals.rate) : "No runs", `${m.totals.touched} of ${m.totals.runs} runs needed a person`)}${spark(m)}<p class="zt-kp"><span class="zt-kt">${ui.icon("flag", { size: "sm" })}goal under 5%</span>${delta(m.totals.deltaPoints, m.totals.previousRate)}</p>${coverage(m)}<p class="zt-kps">${m.totals.stopped} stopped before they ran, outside the rate.${m.totals.stoppedUnattributed > 0 ? html` ${m.totals.stoppedUnattributed} stops have no recorded project or scope, so this selection may have more.` : null}</p><div class="zt-phone-summary">${compact(m)}</div>` : null}` });
+  return ui.card({ title: `Touch rate, ${m.windowDays} days`, body: html`${fail(m)}${once(m)}${m.state === "ready" ? html`${ui.kpi(m.totals.runs ? pct(m.totals.rate) : "No runs", `${m.totals.touched} of ${plural(m.totals.runs, "run")} needed a person`)}${spark(m)}<p class="zt-kp"><span class="zt-kt">${ui.icon("flag", { size: "sm" })}goal under 5%</span>${delta(m.totals.deltaPoints, m.totals.previousRate)}</p>${coverage(m)}<p class="zt-kps">${m.totals.stopped} stopped before they ran, outside the rate.${m.totals.stoppedUnattributed > 0 ? html` ${m.totals.stoppedUnattributed} stops have no recorded project or scope, so this selection may have more.` : null}</p><div class="zt-phone-summary">${compact(m)}</div>` : null}` });
 }
 export function zeroTouchStreak(view) {
   const m = model(view), best = longest(m);
   // "Not enough history" is a read's answer: under a read that failed, or tracking that has not started, it is not said.
-  if (m.state !== "ready") return ui.card({ title: "Zero-touch streak", body: fail(m) });
+  if (m.state !== "ready") return bare(m, "Zero-touch streak");
   return ui.card({ title: "Zero-touch streak", body: html`${fail(m)}${ui.kpi(best ? `${amount(best.streakDays)} ${best.streakDays === 1 ? "day" : "days"}` : "Not enough history", best ? `${best.name}, the longest now` : "30 days of observed activity establish a zero-touch project")}<p class="zt-kp">${m.projects.filter((p) => p !== best).sort((a, b) => (b.streakDays ?? -1) - (a.streakDays ?? -1)).map((p) => p.waitingNow ? ui.chip(`${p.name} waiting now`, { status: "parked", icon: "parked" }) : html`<span class="zt-kt">${p.name} ${p.streakDays === null ? "not known" : `${amount(p.streakDays)} ${p.streakDays === 1 ? "day" : "days"}`}</span>`)}</p>` });
 }
 export function zeroTouchWait(view) {
   const m = model(view);
-  if (m.state !== "ready") return ui.card({ title: "Waiting for a person", body: fail(m) });
+  if (m.state !== "ready") return bare(m, "Waiting for a person");
   return ui.card({ title: "Waiting for a person", body: html`${fail(m)}${ui.kpi(m.totals.waitingPartial ? "Not known" : `${amount(m.totals.waitingHours)}h`, `runs waited on a person in ${m.windowDays} days`)}<p class="zt-kps">Median wait for an answer <b>${span(m.totals.medianWaitMs)}</b></p>${waitingHistory(m)}<p class="zt-kp">${ui.chip(m.totals.waitingPartial ? "Pending count not known" : `${m.totals.pending} waiting now`, { status: "parked", icon: "parked" })}${m.waitingRuns.slice(0, 3).map((r) => html`<span>${link(r.runId)}, ${span(m.nowMs - r.parkedAt)}</span>`)}</p>` });
 }
 export function zeroTouchHandled(view) {
   const m = model(view);
-  return ui.card({ title: "Answered from a draft", body: m.state !== "ready" ? fail(m) : html`${ui.kpi(m.totals.draftAnswers, "runs answered in the covered interval")}<p class="zt-kps">${ZERO_TOUCH_WORDS.drafts}</p>${m.coverage.partial ? html`<p class="zt-kps" role="status">${ZERO_TOUCH_WORDS.draftsPartial}</p>` : null}` });
+  if (m.state !== "ready") return bare(m, "Answered from a draft");
+  return ui.card({ title: "Answered from a draft", body: html`${ui.kpi(m.totals.draftAnswers, "runs answered in the covered interval")}<p class="zt-kps">${ZERO_TOUCH_WORDS.drafts}</p>${m.coverage.partial ? html`<p class="zt-kps" role="status">${ZERO_TOUCH_WORDS.draftsPartial}</p>` : null}` });
 }
 function meter(row) {
   if (row.rate === null) return html`<span class="zt-m">Not enough history</span>`;
@@ -103,23 +107,23 @@ function meter(row) {
 }
 function rowContent(row, sub = false) {
   const c = causesByKey.get(row.topCause);
-  return html`<span class="zt-chev">${sub ? null : ui.icon("chev-r", { size: "sm" })}</span><span class="zt-name"><b>${row.name}</b><small>${sub ? `${row.runs} runs` : row.repositories.map((r) => r.name).join(" and ")}</small></span>${meter(row)}${delta(row.deltaPoints, row.previousRate)}<span class="zt-n"><b>${row.touched}</b> of ${row.runs} runs</span><span class="${`zt-st${row.waitingNow ? " tone-parked" : ""}`}">${ui.icon(row.waitingNow ? "parked" : "flag", { size: "sm" })}${row.waitingPartial ? "waiting history incomplete" : row.waitingNow ? "waiting now" : row.zeroTouch ? "zero touch, 30+ days" : row.streakDays === null ? "not enough history" : `${amount(row.streakDays)} ${row.streakDays === 1 ? "day" : "days"}`}</span><span class="zt-c">${c ? html`<span class="${`zt-cause tone-${c.tone}`}">${ui.icon(c.icon, { size: "sm" })}${c.short}</span>` : "No touches"}</span>`;
+  return html`<span class="zt-chev">${sub ? null : ui.icon("chev-r", { size: "sm" })}</span><span class="zt-name"><b>${row.name}</b><small>${sub ? plural(row.runs, "run") : row.repositories.map((r) => r.name).join(" and ")}</small></span>${meter(row)}${delta(row.deltaPoints, row.previousRate)}<span class="zt-n"><b>${row.touched}</b> of ${plural(row.runs, "run")}</span><span class="${`zt-st${row.waitingNow ? " tone-parked" : ""}`}">${ui.icon(row.waitingNow ? "parked" : "flag", { size: "sm" })}${row.waitingPartial ? "waiting history incomplete" : row.waitingNow ? "waiting now" : row.zeroTouch ? "zero touch, 30+ days" : row.streakDays === null ? "not enough history" : `${amount(row.streakDays)} ${row.streakDays === 1 ? "day" : "days"}`}</span><span class="zt-c">${c ? html`<span class="${`zt-cause tone-${c.tone}`}">${ui.icon(c.icon, { size: "sm" })}${c.short}</span>` : "No touches"}</span>`;
 }
 function phoneProjects(m, view) {
   const item = (row, repository = false) => {
     const c = causesByKey.get(row.topCause), tone = row.rate === null ? "idle" : row.rate < 5 ? "ok" : row.rate < 30 ? "attention" : "failed";
     const word = row.rate === null ? "Not known" : row.rate < 5 ? "Under goal" : row.rate < 30 ? "Above goal" : "High";
     const query = new URLSearchParams({ days: String(m.windowDays), ...(row.project ? { project: row.project } : {}), ...(repository && row.scopeId ? { scope: row.scopeId } : {}) });
-    return html`<li><a class="ztp-p" href="${`/runs/zero-touch?${query}`}" aria-label="${`${row.name}: ${pct(row.rate)}, open ${repository ? "repository" : "project"}`}"${repository ? html` data-repository` : null}><span class="ztp-p__n"><b>${row.name}</b><small>${row.touched} of ${row.runs} runs</small></span><span class="ztp-p__r"><b>${pct(row.rate)}</b><span class="${`zt-lv tone-${tone}`}">${ui.icon(tone === "ok" ? "done" : "attention", { size: "sm" })}${word}</span></span><span class="ztp-p__c">${c ? html`<span class="${`zt-cause tone-${c.tone}`}">${ui.icon(c.icon, { size: "sm" })}${c.short}</span>` : html`<span>No touches</span>`}${delta(row.deltaPoints, row.previousRate)}</span><span class="ztp-p__go">${ui.icon("chev-r", { size: "sm" })}</span></a></li>`;
+    return html`<li><a class="ztp-p" href="${`/runs/zero-touch?${query}`}" aria-label="${`${row.name}: ${pct(row.rate)}, open ${repository ? "repository" : "project"}`}"${repository ? html` data-repository` : null}><span class="ztp-p__n"><b>${row.name}</b><small>${row.touched} of ${plural(row.runs, "run")}</small></span><span class="ztp-p__r"><b>${pct(row.rate)}</b><span class="${`zt-lv tone-${tone}`}">${ui.icon(tone === "ok" ? "done" : "attention", { size: "sm" })}${word}</span></span><span class="ztp-p__c">${c ? html`<span class="${`zt-cause tone-${c.tone}`}">${ui.icon(c.icon, { size: "sm" })}${c.short}</span>` : html`<span>No touches</span>`}${delta(row.deltaPoints, row.previousRate)}</span><span class="ztp-p__go">${ui.icon("chev-r", { size: "sm" })}</span></a></li>`;
   };
   return html`<ul class="ztp-ps zt-phone-projects">${m.projects.map((p) => html`${item(p)}${view?.query?.project === p.project ? p.repositories.map((r) => item(r, true)) : null}`)}</ul>`;
 }
 export function zeroTouchProjects(view) {
   const m = model(view);
-  if (m.state !== "ready") return ui.card({ title: "By project", body: fail(m) });
+  if (m.state !== "ready") return bare(m, "By project");
   const head = html`<div class="zt-row zt-row--head" aria-hidden="true"><span></span><span>Project</span><span>Touch rate, goal tick at 5%</span><span>Against the previous interval</span><span>Needed a person</span><span>Since the last touch</span><span>Most often</span></div>`;
   const rows = m.projects.map((p) => html`<li><details class="zt-p"${view?.query?.project === p.project ? html` open` : null}><summary class="zt-row" aria-label="${`${p.name}: ${pct(p.rate)}, show its repositories or folders`}">${rowContent(p)}</summary><ul class="zt-subs">${p.repositories.map((r) => html`<li class="zt-row zt-row--sub">${rowContent(r, true)}</li>`)}</ul>${acts(view) && p.touchedRunIds.length ? html`<p class="zt-foot"><a class="link" href="${`/runs?${new URLSearchParams({ project: p.project ?? "", touched: "1", days: String(m.windowDays) })}`}">Open touched runs</a></p>` : null}</details></li>`);
-  return ui.card({ title: "By project", sub: `${m.totals.touched} of ${m.totals.runs} runs needed a person`, flush: true, body: html`${fail(m)}${m.projects.length ? html`<div class="zt-tbl zt-desktop-projects">${head}<ul class="zt-list">${rows}</ul></div>${phoneProjects(m, view)}<p class="zt-foot">${ui.icon("info", { size: "sm" })}<span>A row opens to its repositories or folders. A run counts once, however many interventions it received.</span></p>` : html`<p class="zt-note">${ZERO_TOUCH_WORDS.empty}</p>`}` });
+  return ui.card({ title: "By project", sub: `${m.totals.touched} of ${plural(m.totals.runs, "run")} needed a person`, flush: true, body: html`${fail(m)}${m.projects.length ? html`<div class="zt-tbl zt-desktop-projects">${head}<ul class="zt-list">${rows}</ul></div>${phoneProjects(m, view)}<p class="zt-foot">${ui.icon("info", { size: "sm" })}<span>A row opens to its repositories or folders. A run counts once, however many interventions it received.</span></p>` : html`<p class="zt-note">${ZERO_TOUCH_WORDS.empty}</p>`}` });
 }
 function causeCounts(values) { return ZERO_TOUCH_CAUSES.map((c) => ({ ...c, count: values.find((v) => v.cause === c.cause)?.count ?? 0 })); }
 // Percent geometry without a viewBox keeps labels at 12 CSS pixels on phones as well as desktops.
@@ -133,7 +137,7 @@ function causeBar(values, max, name) {
 }
 export function zeroTouchCauses(view) {
   const m = model(view), max = Math.max(1, ...m.projects.map((p) => Math.max(p.touched, causeCounts(p.causes).reduce((sum, row) => sum + row.count, 0))));
-  if (m.state !== "ready") return ui.card({ title: "What needed a person", body: fail(m) });
+  if (m.state !== "ready") return bare(m, "What needed a person");
   const bars = m.projects.map((p) => html`<li class="zt-cb"><span class="zt-cb__n"><b>${p.name}</b><small>${p.touched} of ${p.runs}</small></span>${causeBar(p.causes, max, p.name)}<p class="zt-cb__t">${causeCounts(p.causes).filter((c) => c.count).map((c) => `${c.short} ${c.count}`).join(" · ") || "No touches"}</p></li>`);
   const scopeLabel = view?.query?.scope ? "selected repository" : view?.query?.project ? "selected project" : "all projects";
   return ui.card({ title: "What needed a person", sub: html`<span class="zt-desktop-label">last ${m.windowDays} days, by project</span><span class="zt-phone-label">${m.windowDays} days, ${scopeLabel}</span>`, body: html`${fail(m)}<ul class="zt-bars zt-desktop-causes">${bars}</ul><div class="zt-phone-causes">${causeBar(m.causes, Math.max(1, m.totals.touched), scopeLabel === "all projects" ? "All projects" : scopeLabel)}</div><ul class="zt-whys">${causeCounts(m.causes).map((c) => html`<li class="zt-why">${ui.tile(c.tone === "running" ? "running" : c.tone === "idle" ? "idle" : c.tone, { icon: c.icon, sm: true })}<span><b>${c.label}</b><small>${c.detail}</small></span><span class="zt-why__n">${c.count}</span></li>`)}<li class="zt-why zt-why--sum"><span></span><span><b>Runs that needed a person</b></span><span class="zt-why__n">${m.totals.touched}</span></li></ul><p class="zt-merge">${ui.icon("pr", { size: "sm" })}<span>Merging is never a touch. <a class="link" href="#zt-counting">How touches are counted</a></span></p><details class="zt-counting" id="zt-counting"><summary>How touches are counted</summary><p class="zt-kps">The rate counts workload runs with a retained record that ended in the covered interval. Each run counts once. Bars assign it to its first successful human intervention; later interventions remain in history. Jobs stopped before starting are separate. Reads, sandbox opens, automatic starts and internal grouping jobs do not enter the touch count.</p></details>` });
@@ -154,7 +158,7 @@ function instructionForm(g, index) {
 export function zeroTouchQuestions(view) {
   if (view?.role !== "operator") return ui.collapsed({ icon: "parked", title: "Questions it keeps asking", body: "are for operators. Rates, causes, streaks and fixes are shown here." });
   const m = model(view);
-  if (m.state !== "ready") return ui.card({ title: "Questions it keeps asking", body: fail(m) });
+  if (m.state !== "ready") return bare(m, "Questions it keeps asking");
   const rows = m.groups.map((g, index) => html`<li class="zt-q"><div class="zt-q__h"><span class="zt-q__n" aria-label="${`asked ${g.count} times`}">${g.count}×</span><div><p class="${`zt-q__t${g.name ? "" : " zt-q__t--un"}`}">${g.name ?? `${g.count} similar questions, not named yet`}</p><p class="zt-q__s"><span class="code">${g.repo ?? g.project ?? "Repository not known"}</span>${g.status === "fixed" && g.fixedAt !== null ? html` · fixed ${date(g.fixedAt)} UTC` : null}${g.status === "fixed" && m.fixes.some((f) => f.groupId === g.id && f.afterCount === 0 && f.subsequentRuns > 0 && !f.partial && f.undoneAt === null) ? html` · none since` : null}</p></div><span class="zt-q__st">${ui.chip(g.status === "fixed" ? "Fixed" : g.status === "unassigned" ? "Unassigned" : "Open", { status: g.status === "fixed" ? "ok" : "parked", icon: g.status === "fixed" ? "done" : "parked" })}</span></div><p class="zt-said">${ui.icon("runs", { size: "sm" })}<span>Asked in ${g.runIds.slice(0, 8).map((id, at) => html`${at ? ", " : ""}${link(id)}`)}${g.runIds.length > 8 ? ` and ${g.runIds.length - 8} more` : null}.</span></p>${acts(view) ? html`<div class="zt-q__act">${nameForm(g, index)}${g.status !== "fixed" ? instructionForm(g, index) : html`<a class="link" href="#p-zt-fixes">See the fix</a>`}</div>` : null}</li>`);
   const phoneRows = m.groups.map((g, index) => html`<li class="ztp-q"><span class="zt-q__n" aria-label="${`asked ${g.count} times`}">${g.count}×</span><span class="ztp-q__t"><b>${g.runIds[0] ? html`<a class="zt-group-link" href="${`/run?id=${encodeURIComponent(g.runIds[0])}`}">${g.name ?? `${g.count} similar, not named yet`}</a>` : g.name ?? `${g.count} similar, not named yet`}</b><small>${g.repo ?? g.project ?? "Repository not known"}</small></span><span class="ztp-q__st">${ui.chip(g.status === "fixed" ? "Fixed" : g.status === "unassigned" ? "Unassigned" : "Open", { status: g.status === "fixed" ? "ok" : "parked", icon: g.status === "fixed" ? "done" : "parked" })}</span><span class="ztp-q__a">${acts(view) ? g.status === "fixed" ? html`<a class="link" href="#p-zt-fixes">See the fix</a>` : g.name ? instructionForm(g, `phone-${index}`) : nameForm(g, `phone-${index}`) : null}</span></li>`);
   const sources = m.grouping.sources.length ? m.grouping.sources : m.ungroupedRunIds.map((runId) => ({ runId, status: "unassigned" }));
@@ -173,7 +177,7 @@ function fixObservation(f) {
 function beforeAfter(label, value, max, tone = "attention") { return html`<p class="zt-ba"><span>${label}</span><svg class="${`pbar tone-${tone}`}" height="8" role="img" aria-label="${`${label}: ${value === null ? "not known" : value}`}"><rect class="pbar__bed" width="100%" height="8" rx="4"/>${value ? html`<rect class="pbar__fill" width="${`${ui.svgNum(value / max * 100, 0, 100)}%`}" height="8" rx="4"/>` : null}</svg><b>${value ?? "?"}</b></p>`; }
 export function zeroTouchFixes(view) {
   const m = model(view);
-  if (m.state === "not-started") return bare(m, "Fixes that worked");
+  if (m.state !== "ready") return bare(m, "Fixes that worked");
   // A change whose accounting did not finish and that the page's repair could not settle (issue #987) is said as what
   // it is: its file does not show it, so no reload settles it, and "Reload to retry" was untrue of it. Nothing is
   // promised of making the change again: the repair commits such a row the moment its file shows it, whoever wrote that.

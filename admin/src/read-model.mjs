@@ -5215,7 +5215,11 @@ export function createFleetReader(
   const watch = { ...watchStore,
     async listSources() {
       let config;
-      try { config = JSON.parse(fs.readFileSync(paths.triggersPath, "utf8")); } catch { throw new Error("watch configuration unreadable"); }
+      try { config = JSON.parse(fs.readFileSync(paths.triggersPath, "utf8")); } catch (err) {
+        // A triggers file that does not exist holds no source (issue #988), as it holds no rule (`listRules`).
+        if (err?.code === "ENOENT") return [];
+        throw new Error("watch configuration unreadable");
+      }
       const sources = config.watchSources ?? {};
       return Object.entries(sources).slice(0, 256).map(([id, source]) => ({ id, verify: source.verify, maxBodyBytes: source.maxBodyBytes, maxPerDay: source.maxPerDay }));
     },

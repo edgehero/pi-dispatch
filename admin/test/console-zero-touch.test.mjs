@@ -44,8 +44,13 @@ test("draft counts distinguish covered zero, partial retained counts and unavail
   }
   for (const raw of [null, { state: "unavailable", totals: { draftAnswers: 0 } }, { ...zeroTouchFixture(NOW), coverage: { partial: true, fromMs: NOW, reasons: ["touch-index-lost"] } }]) {
     const tile = String(zeroTouchHandled({ role: "operator", data: { zeroTouch: raw }, query: { days: 30 }, now: NOW }));
-    assert.ok(tile.includes(ZERO_TOUCH_WORDS.unavailable));
+    // A report that could not be read (issue #988): the card is its title alone, and the page says why once, in its
+    // rate card, where seven more cards said it again in the same words.
+    assert.equal(tile.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(), "Answered from a draft");
     assert.doesNotMatch(tile, /class="kpi"|<b>0<\/b>/, "lost evidence is not a known zero");
+    const page = String((await renderPage("zero-touch", { session: { name: "ops", role: "operator" }, data: { now: NOW, zeroTouch: raw }, query: { days: 30 } })).html);
+    assert.equal(page.split(ZERO_TOUCH_WORDS.unavailable).length - 1, 1, "said once on the page");
+    assert.deepEqual([...page.matchAll(/<section id="(p-zt-[a-z]+)" data-panel>/g)].map(([, id]) => id), ["p-zt-rate"], "the rate card alone is drawn");
   }
 });
 
@@ -91,7 +96,9 @@ test("desktop and phone show incomplete waiting history without suppressing the 
   assert.equal(projected.projects[0].zeroTouch, false);
   const rendered = String((await renderPage("zero-touch", { session: { name: "viewer", role: "viewer" }, data: { now: NOW, zeroTouch: report }, query: { days: 7 } })).html);
   assert.match(rendered, /100%/);
-  assert.match(rendered, /1 of 1 runs needed a person/);
+  // A count and its noun agree (issue #988), in the rate card, on the projects card and in a project's rows.
+  assert.equal(rendered.split("1 of 1 run needed a person").length - 1, 2);
+  assert.doesNotMatch(rendered.replace(/<[^>]+>/g, " "), /\b1 runs\b/);
   assert.match(rendered, /class="zt-phone-summary"[^]*Waiting history is incomplete/);
   assert.match(rendered, /Waiting for a person[^]*Pending count not known/);
   const phoneWait = rendered.match(/Waiting now<\/span>([^]*?)<\/li>/)?.[1];
@@ -280,12 +287,15 @@ test("a read that throws is caught and says what failed; a read that answered no
   assert.ok(!read.includes(ZERO_TOUCH_WORDS.readFailed) && !read.includes(ZERO_TOUCH_WORDS.unavailable));
 });
 
-test("the streak card says could not be read alone under a read that failed, and its own words only of a read that answered", async () => {
+test("the streak card is its title alone under a read that failed, the page saying why once, and says its own words only of a read that answered", async () => {
   const card = (zeroTouch) => String(zeroTouchStreak({ role: "operator", now: NOW, query: { days: 30 }, data: { zeroTouch } })).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   for (const unread of [null, { state: "unavailable" }, { state: "unavailable", failure: "read-failed" }]) {
-    assert.equal(card(unread), `Zero-touch streak ${ZERO_TOUCH_WORDS.unavailable}`, JSON.stringify(unread));
+    assert.equal(card(unread), "Zero-touch streak", JSON.stringify(unread));
   }
   const page = wordsOf(await ZERO_TOUCH_DRAW["zero-touch-unavailable.operator"]());
+  // Issue #988: one card, and the sentence once, where eight cards said "could not be read" seven times over.
+  assert.equal(page.split(ZERO_TOUCH_WORDS.unavailable).length - 1, 1);
+  assert.equal(page.split("could not be read").length - 1, 1);
   for (const said of ["Not enough history", "30 days of observed activity establish a zero-touch project"]) assert.ok(!page.includes(said), said);
   // The control: a read that answered with no streak yet keeps "Not enough history".
   const raw = zeroTouchFixture(NOW);

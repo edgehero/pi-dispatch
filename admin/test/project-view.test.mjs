@@ -170,22 +170,38 @@ test("unread deployment size metadata leaves unknown dimensions and cannot propo
 });
 
 test("not-found is distinct from an unreadable projects file and neither performs unrelated reads", async () => {
-  for (const [value, state] of [[{ projects: [] }, "missing"], [{ missing: true }, "unreadable"], [{ unset: true }, "unreadable"], [{ unreadable: "EACCES" }, "unreadable"], [{ invalid: "/secret/path token" }, "unreadable"]]) {
+  // One word per case (issue #988): a projects file that does not exist or is not configured holds no project, which
+  // is the page of a project that is not there; one nobody could read "could not be read"; one that was read and is
+  // refused "does not load". One sentence, "could not be read", said all four.
+  const COULD_NOT = "The projects file could not be read. Run pi-dispatch doctor for the reason.";
+  const DOES_NOT_LOAD = "The projects file does not load. Run pi-dispatch doctor for the reason.";
+  for (const [value, state, problem] of [[{ projects: [] }, "missing"], [{ missing: true }, "missing"], [{ unset: true }, "missing"], [{ unreadable: "EACCES" }, "unreadable", COULD_NOT], [null, "unreadable", COULD_NOT], [{}, "unreadable", COULD_NOT], [{ invalid: "/secret/path token" }, "unreadable", DOES_NOT_LOAD]]) {
     let historyReads = 0;
     const view = await readProjectView(input({ reads: { projects: () => value, scan: () => { historyReads++; return []; } } }));
-    assert.equal(view.state, state);
+    assert.equal(view.state, state, JSON.stringify(value));
+    assert.equal(view.problem, problem, JSON.stringify(value));
     assert.equal(historyReads, 0, "unavailable or known-absent projects perform no unrelated history read");
     assert.ok(!JSON.stringify(view).includes("/secret/path"));
   }
 });
 
-test("a real absent or unconfigured projects file is unavailable; only a loaded empty file proves not-found", async () => {
+test("a real projects file: absent or not configured is not-found, as a loaded file without the project is; unreadable could not be read; not JSON does not load (issue #988)", async () => {
   const dir = tempDir("pd-751-project-source-");
   const projectsFile = join(dir, "projects.json");
-  assert.equal((await readProjectView({ id: "billing", paths: { projectsFile }, now: NOW })).state, "unreadable");
-  assert.equal((await readProjectView({ id: "billing", paths: {}, now: NOW })).state, "unreadable");
+  const read = () => readProjectView({ id: "billing", paths: { projectsFile }, now: NOW });
+  assert.deepEqual(await read(), { id: "billing", state: "missing" }, "a file that does not exist holds no project");
+  assert.deepEqual(await readProjectView({ id: "billing", paths: {}, now: NOW }), { id: "billing", state: "missing" }, "no file is configured");
   fs.writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [] }));
-  assert.equal((await readProjectView({ id: "billing", paths: { projectsFile }, now: NOW })).state, "missing");
+  assert.equal((await read()).state, "missing");
+  fs.writeFileSync(projectsFile, "{ not json");
+  assert.deepEqual(await read(), { id: "billing", state: "unreadable", problem: "The projects file does not load. Run pi-dispatch doctor for the reason." });
+  fs.writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [] }));
+  fs.chmodSync(projectsFile, 0o000);
+  try {
+    assert.deepEqual(await read(), { id: "billing", state: "unreadable", problem: "The projects file could not be read. Run pi-dispatch doctor for the reason." });
+  } finally {
+    fs.chmodSync(projectsFile, 0o600);
+  }
 });
 
 test("size call conversion preserves exact edit/add fields and refuses counterexamples", () => {
