@@ -313,7 +313,7 @@ test("dataUnread: a failed read, or a snapshot read with the registry, the activ
  * The pill's marks by page (issue #988), each in the shape its reader gives it (console-pill.test.mjs holds every one
  * to the real readers and to the sentence a panel then draws): `[what, the mark over a page that is otherwise read]`.
  */
-const SNAP = Object.freeze({ queue: { fleetDegraded: null }, waiting: { rows: [] }, failed: { rows: [], more: 0 }, doctor: { hosts: [], more: 0 }, settings: { path: "settings.json", overlay: {} }, triggers: { triggers: [] }, parked: [] });
+const SNAP = Object.freeze({ queue: { fleetDegraded: null }, failures24h: 0, waiting: { rows: [] }, failed: { rows: [], more: 0 }, doctor: { hosts: [], more: 0 }, settings: { path: "settings.json", overlay: {} }, triggers: { triggers: [] }, parked: [] });
 const READ = Object.freeze({
   overview: { snapshot: SNAP },
   fleet: { snapshot: SNAP },
@@ -326,6 +326,8 @@ const READ = Object.freeze({
 });
 const REFUSED_RECORD = { jobId: "gh-2", outcome: "policy", reason: "job-image-missing", tokens: null, exitCode: null, budgetReserved: false };
 const PARKED_UNKNOWN = "This run asked a question, but whether it still waits for an answer cannot be told right now (the run history or the queue could not be read); try again.";
+/** Sandboxes opened for a kept workspace the report holds a row for: the card that says what its run loaded is that row's. */
+const KEPT = { sandboxPicked: { id: "gh-1", host: null }, sandboxes: { hosts: [{ name: "build3", rows: [{ id: "gh-1" }] }], sessions: [], sessionsUnavailable: false, noticesUnavailable: false } };
 /** A run that reported what it loaded, which its page holds against the hosts' doctor runs. */
 const LOADED_RECORD = { jobId: "gh-1", outcome: "completed", loaded: { runner: "reported", at: "end", sources: [] } };
 const PARKED_ROW = { jobId: "gh-3", kind: "github", target: "acme/web#14" };
@@ -337,6 +339,10 @@ const MARKS = Object.freeze({
     ["a settings overlay nobody could read", { snapshot: { ...SNAP, settings: { path: "settings.json", invalid: "settings file unreadable (EACCES)" } } }],
     ["a settings overlay that does not load, which the Caps card words the same", { snapshot: { ...SNAP, settings: { path: "settings.json", invalid: "settings file is not valid JSON" } } }],
     ["no view of the settings overlay", { snapshot: { ...SNAP, settings: null } }],
+    ["the day's failures, as the reader answers a fold that failed", { snapshot: { ...SNAP, failures24h: null } }],
+    ["the day's runs, of a fold that failed", { snapshot: { ...SNAP, runsDay: null } }],
+    ["the day's runs, folded without a side of the history (what an agent's copy of the data keeps of a mirror that did not answer)", { snapshot: { ...SNAP, runsDay: { runs: [], partial: true } } }],
+    ["the spend per hour, of a fold that failed", { snapshot: { ...SNAP, spendByHour: null } }],
   ],
   fleet: [
     ["the waiting jobs", { snapshot: { ...SNAP, waiting: { unreachable: true } } }],
@@ -357,6 +363,7 @@ const MARKS = Object.freeze({
   runs: [
     ["this host's run files unread", { runsPage: { ...READ.runs.runsPage, unreachable: "EACCES", mirror: "off" } }],
     ["a mirror that is on and did not answer", { runsPage: { ...READ.runs.runsPage, mirror: "unreachable (Command timed out)" } }],
+    ["the same in an agent's copy of the data", { runsPage: { ...READ.runs.runsPage, mirror: "unreachable" } }],
     ["no window of the day", { runsWindow: null }],
     ["a window folded without a side of the history", { runsWindow: { partial: true, floor: false } }],
   ],
@@ -371,8 +378,12 @@ const MARKS = Object.freeze({
     ["a chat that cannot tell whether its question waits", { chat: { mode: null, says: PARKED_UNKNOWN } }],
     ["the planner's check of a reply", { chatAnswer: { unreachable: true } }],
     ["the search for child runs", { childrenIncomplete: true }],
-    ["the open shells behind the Workspace row", { workspace: { shell: null, sessionsUnknown: true, unknown: true } }],
-    ["the browser sessions behind the Workspace row", { browserGateways: { enabledHosts: ["build3"], sessions: [], partial: true } }],
+    ["the open shells behind the Workspace row, as the sandbox service answers a read that failed", { workspace: { shell: null, sessionsUnknown: true, sessionsUnread: true, sessionsMore: 0, sessionsUnreadable: 0, unknown: true } }],
+    ["the open shells, as the page's catch keeps them", { workspace: { unknown: true, sessionsUnknown: true, sessionsUnread: true, sessionsMore: 0, sessionsUnreadable: 0 } }],
+    ["the open shells, of a list that says only that it is not whole", { workspace: { shell: null, sessionsUnknown: true, unknown: true } }],
+    ["the browser sessions behind the Workspace row", { browserGateways: { enabledHosts: ["build3"], sessions: [], partial: true, unread: true, more: 0, unreadable: 0 } }],
+    ["the browser sessions, of a view that says only that it is partial", { browserGateways: { enabledHosts: ["build3"], sessions: [], partial: true } }],
+    ["the open shells unread beside a browser list that is cut", { workspace: { shell: null, sessionsUnknown: true, sessionsUnread: true, sessionsMore: 0, sessionsUnreadable: 0 }, browserGateways: { enabledHosts: [], sessions: [], partial: true, unread: false, more: 3, unreadable: 0 } }],
     ["a refused run's inbox", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: SNAP, runsWindow: { partial: false }, inbox: { unreachable: true } }],
     ["a refused run's snapshot", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: null, runsWindow: { partial: false } }],
     ["a refused run's window", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: { queue: { fleetDegraded: null } }, runsWindow: null }],
@@ -381,11 +392,13 @@ const MARKS = Object.freeze({
   ],
   sandboxes: [
     ["the open shells", { sandboxes: { ...READ.sandboxes.sandboxes, sessionsUnavailable: true } }],
-    ["the cleanup notices", { sandboxes: { ...READ.sandboxes.sandboxes, noticesUnavailable: true } }],
-    ["the record of the run a kept workspace came from", { sandboxRunUnread: true }],
-    ["the hosts' doctor runs", { hostLoads: { unreachable: true, hosts: [], more: 0 } }],
-    ["the hosts' doctor runs, as the page's catch keeps them", { hostLoads: null, hostLoadsUnread: true }],
+    ["the cleanup notices, as their reader answers a read that failed", { sandboxes: { ...READ.sandboxes.sandboxes, noticesUnavailable: true, noticesUnread: true, noticesMore: false, noticesUnreadable: false } }],
+    ["the cleanup notices, of a report that says only that they are not whole", { sandboxes: { ...READ.sandboxes.sandboxes, noticesUnavailable: true } }],
+    ["the record of the run the kept workspace the page was opened for came from", { ...KEPT, sandboxRunUnread: true }],
+    ["the hosts' doctor runs, behind the card of a sandbox being prepared", { sandboxes: { ...READ.sandboxes.sandboxes, plan: { host: "build3" } }, hostLoads: { unreachable: true, hosts: [], more: 0 } }],
+    ["the hosts' doctor runs, as the page's catch keeps them", { sandboxes: { ...READ.sandboxes.sandboxes, plan: { host: "build3" } }, hostLoads: null, hostLoadsUnread: true }],
     ["the deployment's configuration", { sandboxes: { ...READ.sandboxes.sandboxes, options: [], refusal: "The triggers, projects or scoped limits could not be read. Fix the deployment configuration before preparing a sandbox." } }],
+    ["the browser terminals, as the gateway answers a read of its own that failed", { browserGateways: { enabledHosts: [], sessions: [], drivers: [], partial: true, unread: true, problem: "Browser-terminal authorization could not be read. No attachment was authorized; retry from Sandboxes." } }],
     ["the browser terminals", { browserGateways: { enabledHosts: [], sessions: [], problem: "Browser-terminal information could not be read. Use the native terminal route." } }],
   ],
   host: [
@@ -408,9 +421,24 @@ test("dataUnread, by page: each read a page makes beside its snapshot marks the 
   }
   // What answered and is not unread, where a careless rule would say so.
   const live = [
+    // A full list, or one with a registration that does not parse, is read (issue #988): it said "could not be read".
+    ["run", { workspace: { shell: null, sessionsUnknown: true, sessionsUnread: false, sessionsMore: 1, sessionsUnreadable: 0 } }, "more open shells than the list holds"],
+    ["run", { workspace: { shell: null, sessionsUnknown: true, sessionsUnread: false, sessionsMore: 0, sessionsUnreadable: 1 } }, "an open shell's registration that does not parse"],
+    ["run", { browserGateways: { enabledHosts: ["build3"], sessions: [], partial: true, unread: false, more: 1, unreadable: 0 } }, "more browser sessions than the view holds"],
+    ["sandboxes", { sandboxes: { ...READ.sandboxes.sandboxes, noticesUnavailable: true, noticesUnread: false, noticesMore: true, noticesUnreadable: false } }, "more cleanup notices than the list holds"],
+    ["sandboxes", { sandboxes: { ...READ.sandboxes.sandboxes, noticesUnavailable: true, noticesUnread: false, noticesMore: false, noticesUnreadable: true } }, "a cleanup notice that does not parse"],
+    // What no card of the page draws is not the page's to mark.
+    ["sandboxes", { sandboxRunUnread: true, sandboxPicked: { id: "gh-far", host: null } }, "the record of a run no kept workspace is of"],
+    ["sandboxes", { ...KEPT, sandboxPicked: { id: "gh-1", host: "build7" }, sandboxRunUnread: true }, "a workspace kept on another host than the one the page names"],
+    ["sandboxes", { hostLoads: { unreachable: true, hosts: [], more: 0 } }, "the hosts' doctor runs on a page that prepares no sandbox"],
+    ["sandboxes", { ...KEPT, hostLoads: { unreachable: true, hosts: [], more: 0 } }, "the hosts' doctor runs beside a kept workspace's card, which says the same of pi with them read and unread"],
+    // An agent's copy of the data holds a mirror that answered as "bounded".
+    ["runs", { runsPage: { ...READ.runs.runsPage, mirror: "bounded" } }, "an agent's copy of a mirror that answered"],
+    ["host", { hostHistory: { runs: [], records: [], mirror: "bounded" } }, "the same, on the page of a host no record names"],
     ["overview", { snapshot: { ...SNAP, settings: { path: "settings.json", overlay: {} } } }, "a settings file that does not exist: an empty overlay, read"],
     ["overview", { snapshot: { queue: { fleetDegraded: null } } }, "a snapshot that was asked for none of these parts"],
-    ["overview", { snapshot: { ...SNAP, runsDay: null, spendByHour: null, failures24h: null } }, "a day's fold that failed marks the parked runs with it, which every page is judged by"],
+    ["overview", { snapshot: { ...SNAP, runsDay: { runs: [], partial: false }, spendByHour: { hours: [], partial: true, floor: true } } }, "a day read whole, and hours that may be short, which its card says in other words"],
+    ["fleet", { snapshot: { ...SNAP, failures24h: null, runsDay: null, spendByHour: null } }, "the day's fold, which Fleet does not draw"],
     ["fleet", { snapshot: { ...SNAP, settings: { path: "settings.json", invalid: "settings file is not valid JSON" } } }, "a settings overlay Fleet does not draw"],
     ["setup", { snapshot: { ...SNAP, triggers: { invalid: "triggers file is not valid JSON" } } }, "a triggers file that does not load: read, and said so"],
     ["setup", { snapshot: { ...SNAP, triggers: { missing: true } } }, "a triggers file that does not exist"],

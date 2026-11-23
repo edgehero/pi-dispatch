@@ -168,8 +168,11 @@ export function mirroring(records, keys = HOST) {
     },
   };
 }
-/** The roles a page is drawn for: an operator's alone, or both. */
-export const rolesOf = (page) => (PAGES[page].auth === "operator" ? ["operator"] : ["operator", "viewer"]);
+/**
+ * The roles a page is drawn for: an operator's alone, or all three. An agent's session is loaded as the server loads
+ * it, so its page is drawn from the agent's copy of the data (`agentReadProjection`), whose words are not the readers'.
+ */
+export const rolesOf = (page) => (PAGES[page].auth === "operator" ? ["operator"] : ["operator", "viewer", "agent"]);
 /** That Valkey with `commands` taken and never answered inside their bound, as a client ends one. */
 export const failing = (client, commands) => new Proxy(client, { get: (target, key) => (commands.includes(key) ? () => Promise.reject(new Error("Command timed out")) : target[key]) });
 /** A pipeline whose commands are taken and whose `exec` is never answered inside its bound. */

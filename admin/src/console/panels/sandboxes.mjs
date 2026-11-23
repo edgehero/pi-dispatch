@@ -3,7 +3,7 @@ import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { sandboxLinks, sandboxBrowserLink, sandboxDriverLine } from "../sandbox-links.mjs";
-import { timeHtml, ageText, hostLoadsOf } from "./common.mjs";
+import { timeHtml, ageText, hostLoadsOf, noticesShort, SHELLS_SHOWN } from "./common.mjs";
 import { LOADED_WORDS, hostLoadsRow, hostPiFor, sandboxPreparedLine, sandboxRunLine } from "../../loaded-words.mjs";
 import { wordsHtml } from "./loaded-parts.mjs";
 import { sandboxFreshRows } from "../../trigger-gets-view.mjs";
@@ -81,6 +81,20 @@ export function sandboxNew(v) {
   return card("Without a run", html`${form}${preparation}<noscript><p class="card__sub">${SANDBOX_WORDS.noScript}</p></noscript>`, "a fresh clone with a trigger's image and a job's isolation");
 }
 
+/**
+ * Why the cleanup notices are not whole (issue #988, `noticesShort`): their read did not answer, or the list is cut at
+ * its cap, or a notice in it does not parse. One sentence, "could not be read", said all three.
+ */
+const NOTICES_NOTE = Object.freeze({
+  unread: "Some sandbox cleanup notices could not be read. Inspect the host if a terminal ended unexpectedly.",
+  cut: `More cleanup notices are kept than the first ${SHELLS_SHOWN} this list holds. Inspect the host if a terminal ended unexpectedly.`,
+  rows: "A cleanup notice does not parse and is left out. Inspect the host if a terminal ended unexpectedly.",
+});
+const noticesNote = (data) => {
+  const why = noticesShort(data);
+  return why === null ? null : html`<p role="status">${NOTICES_NOTE[why]}</p>`;
+};
+
 export function sandboxOpen(v) {
   if (!allowed(v)) return null;
   const data = report(v), sessions = (data?.sessions ?? []).filter((s) => !v.query?.gatewaySelect || s.host === v.query.host);
@@ -89,7 +103,7 @@ export function sandboxOpen(v) {
   // Issue #844: no report is no shell list, so neither "0 shown" nor "no shell was registered" is said of it.
   if (!data) return card("Open now", html`<p role="status">${SANDBOX_WORDS.unavailable}</p>`);
   if (v.query?.gatewaySelect && !v.data?.browserGateways?.enabledHosts?.includes(v.query.host)) return card("Open now", html`<p role="status">The browser gateway is not enabled for ${v.query.host}, so there is no shell to choose here. <a class="link" href="/runs/sandboxes">Return to Sandboxes</a>.</p>`);
-  return card("Open now", html`${v.query?.gatewaySelect ? html`<p class="sx-p">Choose an already-open shell on ${v.query.host}. Each browser opening needs your current operator token. <a class="link" href="/runs/sandboxes">Return to Sandboxes</a>.</p>` : null}${notices}${data?.noticesUnavailable ? html`<p role="status">Some sandbox cleanup notices could not be read. Inspect the host if a terminal ended unexpectedly.</p>` : null}${data?.sessionsMore > 0 || data?.sessionsUnreadable > 0 ? html`<p role="status">The registered shell list is incomplete: at least ${data.sessionsMore ?? 0} more and ${data.sessionsUnreadable ?? 0} unreadable registrations.</p>` : null}${data?.sessionsUnavailable ? html`<p role="status">Open shells could not be read. Reload to try again.</p>` : sessions.length ? html`<ul class="sx-opens">${sessions.map((s) => html`<li class="sx-open"><span class="dot tone-running"></span><div class="sx-open__b"><p class="sx-open__t"><span class="code">${s.id}</span>${ui.vtag(s.venue)}</p><p class="sx-open__s">${s.host}, opened by ${s.by ?? "the terminal operator"}. Open since ${stamp(s.since)}.</p>${sandboxDriverLine(v, s)}<div class="sx-open__a">${links(v, s, "attach", true)}${sandboxBrowserLink(v, s)}${acts(v) && !v.query?.gatewaySelect ? ui.actForm({ action: "sandbox-end", hidden: [["host", s.host], ["id", s.id], ["nonce", s.nonce], ["containerId", s.containerId]], label: "Preview End", kind: ["sm", "danger"], icon: "cancel" }) : null}</div></div></li>`)}</ul>` : html`<p>${data?.sessionsMore > 0 || data?.sessionsUnreadable > 0 ? "No readable shell is in this bounded view. The incomplete registrations above prevent an exact empty count." : SANDBOX_WORDS.noShells}</p>`}<p class="sx-small">${ui.icon("info", { size: "sm" })}<span>One shell per workspace at a time. End asks the terminal that opened it to close the shell and keeps the workspace. What you type is not recorded.</span></p>`, null, ui.badge(incomplete ? "attention" : "running", `${sessions.length} ${incomplete ? "shown" : "open"}`));
+  return card("Open now", html`${v.query?.gatewaySelect ? html`<p class="sx-p">Choose an already-open shell on ${v.query.host}. Each browser opening needs your current operator token. <a class="link" href="/runs/sandboxes">Return to Sandboxes</a>.</p>` : null}${notices}${noticesNote(data)}${data?.sessionsMore > 0 || data?.sessionsUnreadable > 0 ? html`<p role="status">The registered shell list is incomplete: at least ${data.sessionsMore ?? 0} more and ${data.sessionsUnreadable ?? 0} unreadable registrations.</p>` : null}${data?.sessionsUnavailable ? html`<p role="status">Open shells could not be read. Reload to try again.</p>` : sessions.length ? html`<ul class="sx-opens">${sessions.map((s) => html`<li class="sx-open"><span class="dot tone-running"></span><div class="sx-open__b"><p class="sx-open__t"><span class="code">${s.id}</span>${ui.vtag(s.venue)}</p><p class="sx-open__s">${s.host}, opened by ${s.by ?? "the terminal operator"}. Open since ${stamp(s.since)}.</p>${sandboxDriverLine(v, s)}<div class="sx-open__a">${links(v, s, "attach", true)}${sandboxBrowserLink(v, s)}${acts(v) && !v.query?.gatewaySelect ? ui.actForm({ action: "sandbox-end", hidden: [["host", s.host], ["id", s.id], ["nonce", s.nonce], ["containerId", s.containerId]], label: "Preview End", kind: ["sm", "danger"], icon: "cancel" }) : null}</div></div></li>`)}</ul>` : html`<p>${data?.sessionsMore > 0 || data?.sessionsUnreadable > 0 ? "No readable shell is in this bounded view. The incomplete registrations above prevent an exact empty count." : SANDBOX_WORDS.noShells}</p>`}<p class="sx-small">${ui.icon("info", { size: "sm" })}<span>One shell per workspace at a time. End asks the terminal that opened it to close the shell and keeps the workspace. What you type is not recorded.</span></p>`, null, ui.badge(incomplete ? "attention" : "running", `${sessions.length} ${incomplete ? "shown" : "open"}`));
 }
 
 export function sandboxKept(v) {

@@ -199,17 +199,20 @@ export function makeGatewayBroker({ redis, sessions, readTokens, findToken, read
         try { shells = await readSessions(); } catch { shells = { unreachable: true }; }
         const sessions = (shells?.sessions ?? []).slice(0, 256);
         let partial = Boolean(shells?.unreachable || shells?.more || shells?.unreadable || (shells?.sessions?.length ?? 0) > 256);
+        // Which way the view is partial (issue #988): a read that did not answer (`unread`: the shells', or a room's
+        // below), a list cut at its cap (`more`), or registrations that do not parse (`unreadable`).
+        let unread = Boolean(shells?.unreachable);
         const drivers = (await Promise.all(sessions.filter((s) => read.config.hosts[s.host]).map(async (s) => {
           try {
             const room = await protocol.readRoom(s);
             if (!room) return null;
             return { host: s.host, id: s.id, containerId: s.containerId, nonce: s.nonce, by: room.driverActor.name, ownerKey: digest(room.driverConnectionId), watching: room.enabled, watchers: Object.values(room.watchers).map((watcher) => ({ name: watcher.actor.name, state: watcher.state })) };
-          } catch { partial = true; return null; }
+          } catch { partial = true; unread = true; return null; }
         }))).filter(Boolean);
-        return { enabledHosts: Object.keys(read.config.hosts), sessions, drivers, partial };
+        return { enabledHosts: Object.keys(read.config.hosts), sessions, drivers, partial, unread, more: Math.max(shells?.more ?? 0, (shells?.sessions?.length ?? 0) - sessions.length), unreadable: shells?.unreadable ?? 0 };
       })();
       viewCache = { at, promise };
-      try { return await promise; } catch { if (viewCache?.promise === promise) viewCache = null; return { enabledHosts: [], sessions: [], drivers: [], partial: true, problem: GATEWAY_REFUSALS.unavailable }; }
+      try { return await promise; } catch { if (viewCache?.promise === promise) viewCache = null; return { enabledHosts: [], sessions: [], drivers: [], partial: true, unread: true, problem: GATEWAY_REFUSALS.unavailable }; }
     },
     tick,
     async close() {

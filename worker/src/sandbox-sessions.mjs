@@ -91,7 +91,9 @@ async function readNotices(redis, { now, timeoutMs, hosts }) {
 			return [{ host: n.host, id: n.id, at: n.at, reason: n.reason }];
 		} catch { unreadable = true; return []; }
 	});
-	return { notices, partial: members.length > SANDBOX_SESSION_MAX || unreadable };
+	// `more` and `unreadable` say which of the two made the list `partial` (issue #988): cut at its cap, or a notice
+	// that does not parse. Neither is a read that failed.
+	return { notices, partial: members.length > SANDBOX_SESSION_MAX || unreadable, more: members.length > SANDBOX_SESSION_MAX, unreadable };
 }
 
 /** The console reads only these bounded keys; an unreachable read is never an invented empty list. */
@@ -113,9 +115,17 @@ export async function readSandboxSessions(redis, { hosts = [], now = Date.now, t
 			// Key existence/TTL is the lease. Host and console clocks can disagree by more than its lifetime.
 			sessions.push(s);
 		}
-		let notices = [], noticesUnavailable = false;
-		try { const read = await readNotices(redis, { now: () => serverAt, timeoutMs, hosts }); notices = read.notices; noticesUnavailable = read.partial; } catch { noticesUnavailable = true; }
-		return { sessions: sessions.sort((a, b) => a.since - b.since), more: Math.max(0, raw.length - SANDBOX_SESSION_MAX, members.length - wanted.length), unreadable, notices, ...(noticesUnavailable ? { noticesUnavailable: true } : {}) };
+		// `noticesUnavailable` is every way the notices are not whole, as before. Beside it, which way (issue #988), so a
+		// reader need not call a list that is full, or one with a notice that does not parse, a read that failed:
+		// `noticesUnread` (the read did not answer), `noticesMore` (cut at the cap), `noticesUnreadable` (a notice that
+		// does not parse was left out).
+		let notices = [], noticesUnavailable = false, why = {};
+		try {
+			const read = await readNotices(redis, { now: () => serverAt, timeoutMs, hosts });
+			notices = read.notices; noticesUnavailable = read.partial;
+			why = { ...(read.more ? { noticesMore: true } : {}), ...(read.unreadable ? { noticesUnreadable: true } : {}) };
+		} catch { noticesUnavailable = true; why = { noticesUnread: true }; }
+		return { sessions: sessions.sort((a, b) => a.since - b.since), more: Math.max(0, raw.length - SANDBOX_SESSION_MAX, members.length - wanted.length), unreadable, notices, ...(noticesUnavailable ? { noticesUnavailable: true, ...why } : {}) };
 	} catch { return { sessions: [], unreachable: true }; }
 }
 

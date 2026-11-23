@@ -1037,7 +1037,9 @@ the console could not read all it needs for the page), also when only a part was
 running jobs or the parked runs on any page, and on each live page whatever a card there says could not be read (the
 waiting jobs, the failed jobs or the doctor results on the overview, Fleet, Set up and a host's page; the run history
 or its last 24 hours on Runs; a run's record, transcript, inbox or chat; the open shells or cleanup notices on
-Sandboxes; the answer rules on Parked). A page whose reads were cut short says Not live too. The pill does not follow what a host published about itself as unreadable, or a host's capacity history,
+Sandboxes; the answer rules on Parked). A page whose reads were cut short says Not live too. A list that is full is
+not one that could not be read: with more open shells or cleanup notices than the 256 a list holds, or with an entry
+that does not parse, the page says that and stays Live. The pill does not follow what a host published about itself as unreadable, or a host's capacity history,
 which is read when the page loads. A page kept as last seen shows no Parked count until it is read again.
 Since 2026-11-21 (#962) the configuration pages follow it too: Secrets still lists the profiles and bundles the
 settings overlay, the triggers file and the `.env` declare, read-only, and says what runs received and which hosts serve

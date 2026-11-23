@@ -7,7 +7,8 @@ import { readHostLoadsView } from "../src/host-loads-view.mjs";
 import { SANDBOX_CONFIG_UNREAD, SANDBOX_NO_TRIGGERS_FILE } from "../src/sandbox-data.mjs";
 import { TRIGGERS_FILE_ABSENT_TEXT } from "../src/trigger-list.mjs";
 import { downQueue, downRedis } from "./helpers/fleet-reader-fakes.mjs";
-import { consoleOn, doctorKeys, drawn, failing, failingQueue, healthy, HOST, iso, NOW, REFUSED, RUN, saysUnread, wordsOf } from "./helpers/real-console.mjs";
+import { readSandboxSessions, sandboxNoticeKey, sandboxSessionKey, sandboxSessionMember, SANDBOX_NOTICE_INDEX, SANDBOX_SESSION_INDEX, SANDBOX_SESSION_MAX } from "@edgehero/pi-dispatch/sandbox-sessions";
+import { consoleOn, doctorKeys, drawn, failing, failingQueue, healthy, HOST, iso, mirroring, NOW, REFUSED, RUN, saysUnread, wordsOf } from "./helpers/real-console.mjs";
 import { sandboxFixture, SANDBOX_HOSTS_FIXTURE } from "./helpers/sandbox-goldens.mjs";
 
 /**
@@ -73,6 +74,12 @@ test("a refused run's two cards say could not be read of a read that failed, and
     assert.deepEqual([got.pill, got.marked], [true, true], `${what}: Not live`);
     for (const absent of ["no live registry row", "no doctor result published"]) assert.ok(what === "read in part" || !`${got.why} ${got.host}`.includes(absent), `${what}: never "${absent}" of what was not read`);
   }
+  // The fleet's mirror did not answer: the count is of this host's runs alone, which is a floor, and says why. It was
+  // said bare, under a Not live pill, with nothing on the page to say what was not read.
+  const floor = await cards({ redis: failing(healthy(HOST), ["zrevrangebyscore"]), records: [RUN, REFUSED] });
+  assert.match(floor.why, /Same reason in the last 24 hours at least 1 : part of the run history could not be read Newest doctor result/);
+  assert.deepEqual([floor.data.runsWindow.partial, floor.pill, floor.marked], [true, true, true]);
+  assert.ok(!/at least/.test(`${whole.why} ${noRow.why} ${old.why}`), "a count over a window read whole is itself");
   // A viewer's page draws neither card.
   const viewer = await drawn("run", "id=gh-2", consoleOn({ redis: healthy(), records: [REFUSED] }), "viewer");
   assert.ok(!viewer.words.includes("Why it was refused") && !viewer.words.includes("Heartbeat"));
@@ -269,4 +276,132 @@ test("Sandboxes says the hosts' doctor runs could not be read where that read th
   assert.equal(none.marked, false);
   // A console that wires no such read holds null, which is not a read that failed.
   assert.equal(hostLoadsOf({ hostLoads: null }), null);
+
+  // The same two reads on a page with no card to say them (issue #988): the pill is the page's, so it stays Live.
+  const opened = async (search, { record = async () => ({ missing: true }), hostLoads = () => readHostLoadsView(healthy(HOST), { now: () => NOW }), prepares = false } = {}) => {
+    const query = parsePageQuery("sandboxes", new URLSearchParams(search)).query;
+    // The fixture's report holds a sandbox being prepared (`plan`); without one the page draws no card for a new one.
+    const report = () => { const { plan, ...rest } = sandboxFixture(); return prepares ? { ...rest, plan } : rest; };
+    const deps = { now: () => NOW, fleet: { parkedCount: async () => 1, runById: record }, sandboxes: { hosts: () => ({ config: SANDBOX_HOSTS_FIXTURE }), read: async () => report() }, hostLoads };
+    const data = await loadPageData("sandboxes", query, deps, { role: "operator", readOnly: false });
+    const out = await renderPage("sandboxes", { data, query, session: { role: "operator", name: "ops" }, readOnly: false });
+    return { data, words: wordsOf(out.html), marked: /<span id="live-status"[^>]* data-unread>/.test(String(out.html)) };
+  };
+  const unreadRecord = async () => ({ unreadable: "the fleet's run mirror could not be read" });
+  const downLoads = () => readHostLoadsView(downRedis(), { now: () => NOW });
+  // Opened for a kept workspace: its card says what was not read of the run it came from.
+  const kept = await opened("id=gh-9575&host=mini1", { record: unreadRecord });
+  assert.deepEqual([kept.data.sandboxPicked, kept.data.sandboxRunUnread], [{ id: "gh-9575", host: "mini1" }, true]);
+  assert.ok(kept.words.includes("itself loaded could not be read."), kept.words.match(/[^.]*itself loaded[^.]*\./g)?.join(" | "));
+  assert.equal(kept.marked, true);
+  // The hosts' doctor runs change nothing that card says (pi's version is one this page cannot name either way), so
+  // they are not its to mark.
+  const keptDown = await opened("id=gh-9575&host=mini1", { hostLoads: downLoads });
+  const keptUp = await opened("id=gh-9575&host=mini1");
+  const card = (words) => words.match(/pi and what it loads.{0,200}/)?.[0];
+  assert.ok(card(keptDown.words) !== undefined && card(keptDown.words) === card(keptUp.words) && !saysUnread(keptDown.words));
+  assert.deepEqual([keptDown.marked, keptUp.marked], [false, false]);
+  // A sandbox being prepared: its card says what was not read of the hosts.
+  const preparing = await opened("", { hostLoads: downLoads, prepares: true });
+  assert.ok(preparing.words.includes(UNREAD));
+  assert.equal(preparing.marked, true);
+  // Opened for a run no kept workspace is of, or for none, and preparing nothing: no card draws either read, and
+  // nothing on the page says so.
+  for (const search of ["id=gh-nokeep", "id=gh-9575&host=build9", ""]) {
+    const none = await opened(search, { record: unreadRecord, hostLoads: downLoads });
+    assert.deepEqual(none.words.match(/[^.]{0,90}could not be read[^.]{0,40}/g) ?? [], [], search);
+    assert.equal(none.marked, false, search);
+  }
+});
+
+test("a list that is full, or holds an entry that does not parse, is not a read that failed: the open shells on a run's page and the cleanup notices on Sandboxes say which, and only a read that did not answer says could not be read", async () => {
+  // The worker's own reader over a Valkey that holds the lists (issue #988): 257 open shells against a list of 256
+  // made every run's page say "Some shell or browser status could not be read", with a Not live pill, for as long as
+  // they stayed open; so did one registration that does not parse, and 257 cleanup notices on Sandboxes.
+  const shell = (n) => ({ v: 1, host: "build3", id: `gh-s${n}`, nonce: "a".repeat(32), containerId: "b".repeat(64), venue: "local", by: "ops", since: NOW - 30_000, at: NOW });
+  const listed = ({ shells = [], rawShells = {}, notices = [], rawNotices = {}, noticesDown = false }) => {
+    const keys = { ...HOST };
+    const index = { [SANDBOX_SESSION_INDEX]: [], [SANDBOX_NOTICE_INDEX]: [] };
+    for (const s of shells) { keys[sandboxSessionKey(s.host, s.id)] = JSON.stringify(s); index[SANDBOX_SESSION_INDEX].push(sandboxSessionMember(s.host, s.id)); }
+    for (const [id, raw] of Object.entries(rawShells)) { keys[sandboxSessionKey("build3", id)] = raw; index[SANDBOX_SESSION_INDEX].push(sandboxSessionMember("build3", id)); }
+    for (const id of notices) { keys[sandboxNoticeKey("build3", id)] = JSON.stringify({ host: "build3", id, at: NOW - 1000, reason: "network-kept" }); index[SANDBOX_NOTICE_INDEX].push(sandboxSessionMember("build3", id)); }
+    for (const [id, raw] of Object.entries(rawNotices)) { keys[sandboxNoticeKey("build3", id)] = raw; index[SANDBOX_NOTICE_INDEX].push(sandboxSessionMember("build3", id)); }
+    return {
+      ...healthy(keys),
+      async zrangebyscore(key, _min, _max, _limit, from, count) {
+        if (key === SANDBOX_NOTICE_INDEX && noticesDown) throw new Error("Command timed out");
+        return (index[key] ?? []).slice(Number(from) || 0, (Number(from) || 0) + (Number(count) || Infinity));
+      },
+    };
+  };
+  const many = (n) => Array.from({ length: n }, (_, i) => i);
+  const UNREAD = "Some shell or browser status could not be read; an absent watcher is not inferred.";
+  const CUT = "More shells are open than the first 256 this list holds; an absent watcher is not inferred.";
+  const ROWS = "A registration in the open shells' list does not parse and is left out; an absent watcher is not inferred.";
+  const run = (redis) => drawn("run", "id=gh-1", consoleOn({ redis, records: [RUN] }), "operator");
+
+  // The reader's own answers first: one word for "not whole" as before, and beside it which way.
+  const full = await readSandboxSessions(listed({ shells: many(SANDBOX_SESSION_MAX + 1).map(shell), notices: many(SANDBOX_SESSION_MAX + 1).map((n) => `gh-n${n}`) }), { now: () => NOW });
+  assert.deepEqual([full.sessions.length, full.more, full.unreadable, full.unreachable, full.notices.length], [SANDBOX_SESSION_MAX, 1, 0, undefined, SANDBOX_SESSION_MAX]);
+  assert.deepEqual([full.noticesUnavailable, full.noticesMore, full.noticesUnreadable, full.noticesUnread], [true, true, undefined, undefined]);
+  const odd = await readSandboxSessions(listed({ shells: [shell(1)], rawShells: { "gh-odd": "{ not json" }, notices: ["gh-n1"], rawNotices: { "gh-odd": "{ not json" } }), { now: () => NOW });
+  assert.deepEqual([odd.sessions.length, odd.more, odd.unreadable, odd.noticesUnavailable, odd.noticesMore, odd.noticesUnreadable, odd.noticesUnread], [1, 0, 1, true, undefined, true, undefined]);
+  const noNotices = await readSandboxSessions(listed({ shells: [shell(1)], noticesDown: true }), { now: () => NOW });
+  assert.deepEqual([noNotices.sessions.length, noNotices.noticesUnavailable, noNotices.noticesUnread, noNotices.noticesMore, noNotices.noticesUnreadable], [1, true, true, undefined, undefined]);
+  const whole = await readSandboxSessions(listed({ shells: [shell(1)], notices: ["gh-n1"] }), { now: () => NOW });
+  assert.deepEqual([whole.more, whole.unreadable, Object.hasOwn(whole, "noticesUnavailable"), Object.hasOwn(whole, "noticesUnread")], [0, 0, false, false]);
+
+  // A run's page. More shells than the list holds: read, and said as that, with a Live pill.
+  const cut = await run(listed({ shells: many(SANDBOX_SESSION_MAX + 1).map(shell) }));
+  assert.deepEqual([cut.data.workspace.sessionsUnknown, cut.data.workspace.sessionsUnread, cut.data.workspace.sessionsMore], [true, false, 1]);
+  assert.ok(cut.words.includes(CUT) && !cut.words.includes(UNREAD) && !saysUnread(cut.words));
+  assert.deepEqual([cut.pill, cut.marked], [false, false]);
+  // A registration that does not parse: the same.
+  const rows = await run(listed({ shells: [shell(1)], rawShells: { "gh-odd": "{ not json" } }));
+  assert.deepEqual([rows.data.workspace.sessionsUnknown, rows.data.workspace.sessionsUnread, rows.data.workspace.sessionsUnreadable], [true, false, 1]);
+  assert.ok(rows.words.includes(ROWS) && !rows.words.includes(UNREAD) && !saysUnread(rows.words));
+  assert.deepEqual([rows.pill, rows.marked], [false, false]);
+  // The read did not answer: could not be read, and Not live.
+  const unread = await run(failing(listed({ shells: [shell(1)] }), ["time"]));
+  assert.deepEqual([unread.data.workspace.sessionsUnknown, unread.data.workspace.sessionsUnread], [true, true]);
+  assert.ok(unread.words.includes(UNREAD) && !unread.words.includes(CUT) && !unread.words.includes(ROWS));
+  assert.deepEqual([unread.pill, unread.marked], [true, true]);
+  // A list that is whole says none of the three.
+  const calm = await run(listed({ shells: [shell(1)] }));
+  assert.ok(![UNREAD, CUT, ROWS].some((line) => calm.words.includes(line)));
+
+  // Sandboxes, its cleanup notices.
+  const N_UNREAD = "Some sandbox cleanup notices could not be read.", N_CUT = "More cleanup notices are kept than the first 256 this list holds.", N_ROWS = "A cleanup notice does not parse and is left out.";
+  const sandboxes = (redis) => drawn("sandboxes", "", consoleOn({ redis, records: [RUN] }), "operator");
+  for (const [what, redis, said, live] of [
+    ["more than the list holds", listed({ notices: many(SANDBOX_SESSION_MAX + 1).map((n) => `gh-n${n}`) }), N_CUT, true],
+    ["one that does not parse", listed({ notices: ["gh-n1"], rawNotices: { "gh-odd": "{ not json" } }), N_ROWS, true],
+    ["a read that did not answer", listed({ noticesDown: true }), N_UNREAD, false],
+    ["a list that is whole", listed({ notices: ["gh-n1"] }), null, true],
+  ]) {
+    const got = await sandboxes(redis);
+    for (const line of [N_UNREAD, N_CUT, N_ROWS]) assert.equal(got.words.includes(line), line === said, `${what}: ${line}`);
+    assert.deepEqual([got.pill, got.marked, saysUnread(got.words)], [!live, !live, !live], what);
+  }
+});
+
+test("an agent's session over a healthy mirror: /runs and the page of a host no record names say nothing unread and are Live, as for a person", async () => {
+  // An agent's copy of the data holds a mirror that answered as "bounded" (`agentReadProjection`), a word the rule
+  // took for unread (issue #988): its `/runs` said other hosts' runs could not be read, Not live, for good.
+  const far = { ...RUN, jobId: "gh-9", host: "build7", startedAt: iso(300_000), endedAt: iso(240_000) };
+  const fleet = () => consoleOn({ redis: mirroring([far]), records: [RUN] });
+  for (const role of ["agent", "viewer", "operator"]) {
+    const runs = await drawn("runs", "", fleet(), role);
+    assert.equal(runs.data.runsPage.mirror, role === "agent" ? "bounded" : "ok", role);
+    assert.ok(!runs.words.includes("Other hosts' runs could not be read") && !saysUnread(runs.words), role);
+    assert.deepEqual([runs.pill, runs.marked], [false, false], role);
+    const ghost = await drawn("host", "name=ghost", fleet(), role);
+    assert.ok(ghost.words.includes("No retained run record names this host.") && !saysUnread(ghost.words), role);
+    assert.deepEqual([ghost.pill, ghost.marked], [false, false], role);
+  }
+  // A mirror that did not answer is unread in an agent's copy too, where its word is "unreachable".
+  const down = await drawn("runs", "", consoleOn({ redis: failing(mirroring([far]), ["zrevrangebyscore"]), records: [RUN] }), "agent");
+  assert.equal(down.data.runsPage.mirror, "unreachable");
+  assert.ok(down.words.includes("Other hosts' runs could not be read"));
+  assert.deepEqual([down.pill, down.marked], [true, true]);
 });
