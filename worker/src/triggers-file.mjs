@@ -988,7 +988,10 @@ export function makeCheckQuotaReserve({ triggersPath, fs = nodeFs } = {}) {
  * `on.id`, `on.forge`, folder, command and worker; a forge job by its matched index through `isForgeTriggerOf`; a cron
  * job, and one `pi-dispatch run --trigger` fired by hand, by its cron id, folder, flow, command and task. Null for no
  * path, no file, a file the shared validator refuses or a newer pi-dispatch wrote, a job with no trigger, and no entry
- * that is the job's (deleted, or edited since the job was queued). Never throws. Cached by mtime and size.
+ * that is the job's (deleted, or edited since the job was queued). Never throws.
+ *
+ * Cached by the file's mtime and size, so the live read goes by those two: an edit that changes neither (the same
+ * length, with the time put back) is not seen by this worker until a later edit changes one of them, or it restarts.
  */
 function makeLiveTriggerEntry({ triggersPath, fs = nodeFs } = {}) {
 	let cache = null; // { mtimeMs, size, entries }
@@ -1042,8 +1045,10 @@ function makeLiveTriggerEntry({ triggersPath, fs = nodeFs } = {}) {
  *   - a job with no trigger: one a person queued with `pi-dispatch run` and a folder, which belongs to no entry;
  *   - a job that is not the trigger's own local command run: any forge job, a local flow, a chained child (an
  *     agent's request, with a flow and a task of its own), a fork, a recovery, a watch rule's job;
- *   - no entry that is the job's: the trigger was deleted, or its folder, command or worker was edited since the
- *     job was queued, or it runs a flow now;
+ *   - no entry that is the job's: the trigger was deleted, or it runs a flow now, or it was edited since the job was
+ *     queued in what the job is found by. That is a cron trigger's folder or command, and a forge event listener's
+ *     id, forge, folder, command or worker. A cron job is NOT found by its worker: a cron trigger whose `run.worker`
+ *     was edited is still the job's trigger, and its flag is followed;
  *   - an entry that says `true`, or nothing.
  * A run a person fires by hand from the trigger (`pi-dispatch run --trigger`) IS the trigger's run and follows its
  * flag, as does every retry of a job. Never throws.

@@ -43,7 +43,10 @@ import { sandboxShellRefusal } from "./read-model.mjs";
 export function sandboxRetentionOf(paths, jobId, { now = Date.now, env = {}, venuePolicy = "env" } = {}) {
   if (!paths?.sandboxRetentionHours) return { retained: false, why: "retention-off", reason: "retention off" };
   const manifest = readManifest({ sandboxDir: paths.sandboxDir, jobId });
-  if (!manifest) return { retained: false, why: "swept", reason: "swept" };
+  // No manifest is a run the sweep removed, and also a run that never kept a sandbox because its trigger says so
+  // (issue #1023, `run.retainSandbox: false`). Nothing on disk tells the two apart, so the pane's words say both. The
+  // token stays `swept`: the surfaces that key their own sentence on it word that sentence themselves.
+  if (!manifest) return { retained: false, why: "swept", reason: "swept, or never kept" };
   // Issue #446: the same `id-mismatch` refusal `resolveSandbox` makes, so `b` is not offered for a directory that holds
   // another run (two ids that differ only in characters a file name cannot hold share one).
   if (typeof manifest.jobId === "string" && manifest.jobId !== String(jobId)) return { retained: false, why: "id-mismatch", reason: "not reopenable (another run holds its directory)" };

@@ -7,7 +7,7 @@ import { localRunData } from "../src/local-job.mjs";
 import { makeCleanup } from "../src/prepare.mjs";
 import { runJob } from "../src/processor.mjs";
 import { makeSandboxReaper, sandboxEntryName, SANDBOX_MANIFEST } from "../src/sandbox-store.mjs";
-import { parseTriggers, TRIGGERS_FILE_VERSION } from "../src/triggers.mjs";
+import { parseTriggers, TRIGGERS_FILE_VERSION, triggersFileVersionFor } from "../src/triggers.mjs";
 import { checkTriggersText } from "../src/triggers-check.mjs";
 import { makeCheckQuotaReserve, makeCheckRetainSandbox } from "../src/triggers-file.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -67,11 +67,45 @@ test("run.retainSandbox is refused, by key and with the reason, on every trigger
 
 test("a local command run can be none of the things that need a kept directory later (#1023)", () => {
 	// The flag keeps nothing on any outcome, which is only sound because such a run can never be resumed, recovered,
-	// steered through its trigger, parked for an answer or held for an approval. Each is refused by its own rule; if one
-	// of those rules is ever relaxed, this is where the flag has to be thought through again.
-	for (const [key, value] of [["resume", true], ["recover", true], ["steer", true], ["awaitInput", true], ["gates", ["merge"]]]) {
-		assert.throws(() => load(cronCommand(false, { [key]: value })), `a cron command with run.${key}`);
-		assert.throws(() => load(localEvent(false, { [key]: value })), `a local event command with run.${key}`);
+	// steered through its trigger, parked for an answer or held for an approval. Each is refused by its own rule, in
+	// that rule's own words; if one of those rules is ever relaxed, this is where the flag has to be thought through again.
+	const refusals = [
+		["resume", true, /combining run\.command and run\.resume is not yet covered/],
+		["recover", true, /run\.recover is only available on a forge trigger/],
+		["steer", true, /run\.steer cannot be set beside run\.command/],
+		["awaitInput", true, /run\.awaitInput needs run\.resume: true beside it/],
+		["gates", ["deploy"], /run\.gates requires a resumable forge flow/],
+	];
+	for (const [key, value, sentence] of refusals) {
+		assert.throws(() => load(cronCommand(false, { [key]: value })), sentence, `a cron command with run.${key}`);
+		assert.throws(() => load(localEvent(false, { [key]: value })), sentence, `a local event command with run.${key}`);
+	}
+});
+
+test("a run key the loader does not know is dropped on a cron trigger and on a local event, and refused on a watch rule (#1023)", () => {
+	// What "needs no version" rests on, held on today's loader: a release from before the field met it as exactly such
+	// a key. It loads the file where the field may be written and leaves the key out of what it normalizes, so that
+	// worker keeps the sandbox, the default. The one kind that refuses an unknown key is the one this field is refused on.
+	const unknown = { someLaterField: false };
+	for (const entry of [cronCommand(undefined, unknown), localEvent(undefined, unknown)]) {
+		const [trigger] = load(entry);
+		assert.equal(Object.hasOwn(trigger.run, "someLaterField"), false, `${entry.on.type}: dropped`);
+		assert.deepEqual(trigger, load({ ...entry, run: { ...entry.run, someLaterField: undefined } })[0], "and the entry is what it is without the key");
+	}
+	assert.throws(() => load({ ...watchRule(), run: { ...watchRule().run, ...unknown } }, WATCH_SOURCES), /^Error: watch: unsupported run field/);
+	// And the field raises no version: a file needs for it what it needs without it, so the same older loaders read it.
+	assert.equal(triggersFileVersionFor({ triggers: [cronCommand(false)] }), 1);
+	assert.equal(triggersFileVersionFor({ triggers: [localEvent(false)] }), triggersFileVersionFor({ triggers: [localEvent()] }));
+	// The same rule is why a key in the wrong place, or misspelled, loads and does nothing: the sandbox is kept.
+	const misplaced = [
+		{ ...cronCommand(), on: { ...cronCommand().on, retainSandbox: false } },
+		cronCommand(undefined, { retainsandbox: false }),
+		cronCommand(undefined, { retainSandboxes: false }),
+		{ ...cronCommand(), retainSandbox: false },
+	];
+	for (const entry of misplaced) {
+		assert.doesNotThrow(() => load(entry), JSON.stringify(entry));
+		assert.equal(makeCheckRetainSandbox({ triggersPath: triggersFile([entry]) })(cronJob()), true, `kept: ${JSON.stringify(entry)}`);
 	}
 });
 
@@ -85,6 +119,15 @@ test("pi-dispatch triggers check takes the flag where it belongs and reports a m
 	assert.equal(bad.refusals.length, 1, "one refusal, said once for every reader");
 	assert.ok(bad.refusals[0].readers.includes("worker") && bad.refusals[0].readers.includes("receiver"), "the worker and the receiver both refuse the file");
 	assert.match(bad.refusals[0].reason, /trigger at index 1: run\.retainSandbox is only available on a local command trigger/);
+	// A key in the wrong place, or misspelled, is not the field but a key the file does not know: the check answers
+	// what it answers for the file without it, word for word. The trigger's page is where its absence shows.
+	const plain = judge([here(cronCommand())]);
+	assert.deepEqual([plain.ok, plain.refusals, plain.notes], [true, [], []]);
+	const stray = [{ on: { retainSandbox: false } }, { run: { retainsandbox: false } }, { run: { retainSandboxes: false } }, { retainSandbox: false }];
+	for (const { on = {}, run = {}, ...beside } of stray) {
+		const entry = here(cronCommand());
+		assert.deepEqual(judge([{ ...entry, ...beside, on: { ...entry.on, ...on }, run: { ...entry.run, ...run } }]), plain, JSON.stringify({ on, run, ...beside }));
+	}
 });
 
 // ── the worker's read when a run ends ───────────────────────────────────────────────────────────────────────────────
@@ -159,6 +202,9 @@ test("a trigger that is gone, edited or no longer a local command keeps the sand
 	assert.equal(keeps([localEvent(false)], job), true, "the trigger was deleted");
 	assert.equal(keeps([], job), true, "the file has no trigger at all");
 	for (const [key, value] of [["folder", "/srv/other"], ["command", "sync all"]]) assert.equal(keeps([cronCommand(false, { [key]: value })], job), true, `its ${key} was edited since the job was queued`);
+	// A cron job is found by its trigger's id, folder and command, not by its worker: with the worker changed it is
+	// still that trigger's run and follows its flag. (A forge event's listener is found by its worker too, below.)
+	assert.equal(keeps([cronCommand(false, { worker: "another-host" })], job), false, "the same cron trigger, on another worker now");
 	assert.equal(keeps([{ ...cronCommand(false), on: { ...cronCommand().on, id: "sync-2" } }], job), true, "another trigger with its folder and command");
 	// The id now names a flow: the kind changed, and a flow may not carry the flag at all.
 	assert.equal(keeps([{ on: cronCommand().on, run: { kind: "local", folder: "/srv/app", flow: "fix", task: "Fix" } }], job), true, "it runs a flow now");
@@ -172,6 +218,20 @@ test("a trigger that is gone, edited or no longer a local command keeps the sand
 	assert.equal(keeps([localEvent(false)], event), false);
 	assert.equal(keeps([{ ...localEvent(false), on: { ...localEvent().on, forge: "forgejo" } }], event), true, "the same on.id on another forge");
 	for (const [key, value] of [["folder", "/srv/other"], ["command", "maintain-all"], ["worker", "another-host"]]) assert.equal(keeps([localEvent(false, { [key]: value })], event), true, `local event ${key}`);
+});
+
+test("two forge event listeners that share forge, folder, command and worker are told apart by their id, in either file order (#1023)", () => {
+	// The identity that guards against losing a sandbox: one listener keeps none, and its twin, which differs only in
+	// its id and in what it listens to, keeps its own. Found by the first match on the rest, the unflagged listener's
+	// run would lose its sandbox whenever the flagged one came first in the file.
+	const flagged = { on: { type: "issue", forge: "github", id: "cleanup", action: ["closed"] }, run: { ...localEvent(false).run } };
+	const plain = localEvent();
+	assert.deepEqual([flagged.run.folder, flagged.run.command, flagged.run.worker, flagged.on.forge], [plain.run.folder, plain.run.command, plain.run.worker, plain.on.forge]);
+	for (const [order, list] of [["the flagged one first", [flagged, plain]], ["the flagged one last", [plain, flagged]]]) {
+		assert.doesNotThrow(() => parseTriggers(JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: list }), "/t.json"), order);
+		assert.equal(keeps(list, eventJob(plain)), true, `${order}: the unflagged listener's run is kept`);
+		assert.equal(keeps(list, eventJob(flagged)), false, `${order}: the flagged listener's run is not`);
+	}
 });
 
 test("only the trigger's own local command run follows the flag: every other job keeps its sandbox (#1023)", () => {
@@ -276,6 +336,17 @@ test("every doubt keeps the run: a reader that throws, an answer that is not exa
 	assert.deepEqual([none.logs, none.asked], [[], []]);
 });
 
+test("a job directory that will not go is not said to be gone: the removal rejects, and no line is written (#1023)", async () => {
+	// The line is written after the removal, never before it. Here the removal cannot succeed on any host or account:
+	// no path holds a NUL, so `rm` rejects. The cleanup rejects with it, as it does with the window at 0 (the
+	// processor swallows that), and the log says nothing of the run.
+	const r = retention({ retains: () => false });
+	const run = { ...preparedRun(), jobDir: join(tempDir("retain-sandbox-stuck-"), "job\u0000dir") };
+	await assert.rejects(r.cleanup(run, { job: cronJob() }), { code: "ERR_INVALID_ARG_VALUE" });
+	assert.deepEqual(r.logs, [], "not sandbox_not_kept, and nothing else");
+	assert.deepEqual(r.kept(), [], "and nothing was kept in its place");
+});
+
 // ── the processor ───────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** The least a local job needs to run through `runJob`, with the real cleanup over a real triggers file. */
@@ -327,7 +398,9 @@ test("the processor hands the cleanup its job, so a flagged trigger's run keeps 
 
 test("the sweep meets nothing of a run that was not kept, and a kept run whose directories are gone is swept like any other (#1023)", async () => {
 	const job = cronJob();
-	const sweepOf = (sandboxDir, at) => makeSandboxReaper({ sandboxDir, retentionHours: 24, now: () => at, sleep: async () => {} });
+	// The pass's own clock is a fixed one. Its result says how long the pass took (`ms`), and on the real clock that is
+	// 0 or 1 by how busy the machine is: compared whole, it failed a run in twelve beside eight busy processes.
+	const sweepOf = (sandboxDir, at) => makeSandboxReaper({ sandboxDir, retentionHours: 24, now: () => at, clock: () => 0, sleep: async () => {} });
 	// Not kept: the retention root holds no entry for the run. On a host whose every run is such a run it does not
 	// even exist. A pass finds nothing, says nothing is left, and never throws.
 	const gone = retention({ retains: () => false });

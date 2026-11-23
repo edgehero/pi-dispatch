@@ -349,28 +349,42 @@ trigger can say its runs keep none:
 - **What it does.** When a run of this trigger ends, the worker removes the run's job directory where it would have
   kept it, and writes `sandbox_not_kept` with the job id to its log. That holds on every outcome: a run that
   completed, failed, timed out or was stopped keeps nothing. To look at a failing command, take the flag off, or set
-  it to `true`, and let it run again.
+  it to `true`, and let it run again. If the directory cannot be removed, the line is not written and the directory
+  stays under `PI_JOBS_DIR`. Nothing removes it while the worker runs. The worker's next start does, with the job
+  folders a crashed worker left behind ([job limits](job-limits.md#claims-and-cleanup-follow-the-job)): once the
+  folder has been still for long enough, and only if it can be removed then (`job_dir_sweep_failed` in the log when
+  it cannot, and it stays).
 - **When to use it.** On a short local command that runs often and that you never reopen.
-- **What you lose.** `pi-dispatch sandbox <job id>` has nothing to reopen for these runs, and a run's page says its
-  workspace is not kept. What stays is everything that is not in that directory: the run's record and its page, the
-  worker's log lines, the live transcript and progress for as long as they are kept, and any artifacts the run
-  saved. Your folder is your own and is never touched either way.
+- **What you lose.** `pi-dispatch sandbox <job id>` has nothing to reopen for these runs, and says so. Nothing on
+  the host tells such a run from one whose sandbox was swept, so the views name both: the panel (`/dispatch`) shows
+  `sandbox  swept, or never kept` for the run, and the Sandbox section of the run's page in the console says its
+  workspace was swept after its retention window, or never kept. The Workspace card on that page says "Workspace
+  gone." What stays is everything that is not in that directory: the run's record and its page, the worker's log
+  lines, the live transcript and progress for as long as they are kept, and any artifacts the run saved. Your folder
+  is your own and is never touched either way.
 - **Where it is allowed.** Only on a local command trigger: `"kind": "local"` with `"command"`, on a cron trigger
   or on [a forge event that starts a local command](#a-forge-event-running-a-local-command). The file refuses it
   everywhere else when it loads (a flow on a schedule, a forge job, a watch rule), because a kept sandbox is what
   lets those runs be reopened and continued. It is `true` or `false`; anything else, such as `"false"`, is refused.
   Absent and `true` both mean the default: kept.
+- **Check that it took.** A key in the wrong place or misspelled (`retainSandbox` under `on` or beside `run`,
+  `retainsandbox`, `retainSandboxes`) is ignored like any key the file does not know: the file loads,
+  `pi-dispatch triggers check` says nothing, and the sandbox is kept. So look at the trigger's page for the line
+  "Sandbox: not kept after a run".
 - **When it is read.** When the run ends, by the worker that ran it, from its own triggers file (`PI_TRIGGERS_FILE`,
   else `./triggers.json` where it runs). So an edit takes effect for every run that ends after it, one that was
-  already queued or running included.
+  already queued or running included. The worker sees an edit by the file's modification time and size: one that
+  changes neither is not seen until a later edit does, or the worker restarts.
 - **When in doubt the worker keeps the sandbox.** That is: the file cannot be read or does not load, the trigger is
-  gone, or its folder, command or worker changed after the job was queued. A kept directory is swept at the end of
-  its window, and a removed one cannot be brought back.
+  gone, or it changed after the job was queued in what the worker finds it by. That is the folder or command of a
+  trigger on a schedule, and the id, forge, folder, command or worker of one a forge event starts. A trigger on a
+  schedule whose `worker` changed is still the same trigger, and its flag is followed. A kept directory is swept at
+  the end of its window, and a removed one cannot be brought back.
 - **Which runs follow it.** The trigger's own: each scheduled or event-started run, every retry of one, and a run
   you fire by hand with `pi-dispatch run --trigger`. A job you queue with `pi-dispatch run <folder>` belongs to no
   trigger and is kept, and so is a job that a run chains through its outbox.
-- **Versions.** It needs no `version`, and no receiver reads it. A worker from before this release ignores it and
-  keeps the sandbox ([upgrading](upgrading.md)).
+- **Versions.** It needs no `version` and does not raise the file's, and no receiver reads it. A worker from before
+  this release that can read the file ignores the key and keeps the sandbox ([upgrading](upgrading.md)).
 - **No tool can set it.** `dispatch_trigger_add` refuses a call that carries it and `dispatch_trigger_edit` leaves
   it as it is. The trigger's page shows "Sandbox: not kept after a run" and has no field for it. Write it in the
   file by hand.

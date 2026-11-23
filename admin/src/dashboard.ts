@@ -4713,7 +4713,9 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
     // control byte in it is latent rather than live -- but it was the one raw interpolation left in a
     // framed record pane, beside a sibling that is scrubbed, on the line this round rewrote for a
     // different reason. "One field with a belt beside one without" is the defect #367 reports.
-    const state = sandbox.retained ? `retained${sandbox.expiresIn ? ` · ${show(sandbox.expiresIn)} left` : ""}` : show(sandbox.reason ?? "swept");
+    // With no reason given, the words of a run that has no kept directory (issue #1023): swept, or never kept
+    // because its trigger keeps no sandbox. The pane cannot know which.
+    const state = sandbox.retained ? `retained${sandbox.expiresIn ? ` · ${show(sandbox.expiresIn)} left` : ""}` : show(sandbox.reason ?? "swept, or never kept");
     out.push(kv("sandbox", state, sandbox.retained ? "success" : "dim"));
     // WHAT `b` WOULD GIVE THIS SHELL, and that it is this shell's (#337). The panel resolves PI_EGRESS
     // from its OWN process, because that is what `openSandbox` uses when the key is pressed, and it
