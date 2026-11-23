@@ -137,7 +137,7 @@ function consoleDeliveryId(random = randomBytes) {
  * step that writes may read it as "may or may not have been made".
  */
 async function openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs }) {
-  const { names, blind, hosts, incomplete } = await readFleetQueues({ url, redisFn, timeoutMs });
+  const { names, blind, blindPartial, hosts, incomplete } = await readFleetQueues({ url, redisFn, timeoutMs });
   const opened = new Map();
   const queueOf = (name) => {
     if (!opened.has(name)) opened.set(name, queueFn(consoleQueueConnection(url, parseConnectionFn), { name }));
@@ -146,6 +146,8 @@ async function openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs }
   return {
     names,
     blind,
+    // Whether `blind` is a registry read in part (issue #1062): some host rows not read in time, the rest read.
+    blindPartial: blindPartial === true,
     // Whether the keyspace scan behind `names` did not finish (`readFleetQueues`): a host queue may be missing from them.
     incomplete: incomplete ?? null,
     hosts,
@@ -170,12 +172,14 @@ async function openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs }
 }
 
 /**
- * The words for a job no fleet queue knows, naming a blind registry when there is one. The registry read's own error is
- * never in them: it is a client's, which can name a host, and this sentence reaches a page and the audit.
+ * The words for a job no fleet queue knows, naming a blind registry when there is one, or one read in part (issue
+ * #1062, `blindPartial`). The registry read's own error is never in them: it is a client's, which can name a host, and
+ * this sentence reaches a page and the audit.
  */
 function notInFleet(jobId, fleet, action = null) {
-  if (action !== null) return `${action}: no job in ${fleet.names.length} ${fleet.names.length === 1 ? "queue" : "queues"}${fleet.blind ? " (the host registry could not be read; a host that is not registered may still hold it)" : ""}; job ${jobId}`;
-  return `no job ${jobId} in ${fleet.names.length} ${fleet.names.length === 1 ? "queue" : "queues"}${fleet.blind ? " (the host registry could not be read; a host that is not registered may still hold it)" : ""}`;
+  const blind = !fleet.blind ? "" : fleet.blindPartial ? " (the host registry was read in part; a host whose row was not read may still hold it)" : " (the host registry could not be read; a host that is not registered may still hold it)";
+  if (action !== null) return `${action}: no job in ${fleet.names.length} ${fleet.names.length === 1 ? "queue" : "queues"}${blind}; job ${jobId}`;
+  return `no job ${jobId} in ${fleet.names.length} ${fleet.names.length === 1 ? "queue" : "queues"}${blind}`;
 }
 
 /** A failed job's identity for a preview and a re-check: the attempts made and the finish instant. */

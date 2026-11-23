@@ -47,19 +47,23 @@ export function waitingForAgent(read) {
 }
 
 /**
- * The hosts (`snapshot.hostBudgets`, `hostRowOf`'s rows), in three states. Read now: `{ unavailable: false, readAt,
- * hosts }`. The registry unread now after a good read, which only a reader kept across reads can see (the registered
- * tool builds one per call): the rows as last seen, `unavailable` true and `readAt` the old read's instant. Never read:
- * `{ unavailable: true, readAt: null, hosts: null }`, never `[]`, which says no host exists.
- * A row carries no beat instant, so `beat` is the read's instant less the row's age at it (`beatAgeOf`), or null. A host's
- * `jobs` and `kept` are null where its row says the list is not known, never `[]`.
+ * The hosts (`snapshot.hostBudgets`, `hostRowOf`'s rows), in four states. Read now: `{ unavailable: false, readAt,
+ * hosts }`. Read in part now (issue #1062): the same with `readInPart: true`, a host whose row did not answer marked
+ * `notRead` with its last row and no beat. The registry unread now after a good read, which only a reader kept across
+ * reads can see (the registered tool builds one per call): the rows as last seen, `unavailable` true and `readAt` the
+ * old read's instant. Never read: `{ unavailable: true, readAt: null, hosts: null }`, never `[]`, which says no host
+ * exists. A row carries no beat instant, so `beat` is the read's instant less the row's age at it (`beatAgeOf`), or
+ * null. A host's `jobs` and `kept` are null where its row says the list is not known, never `[]`.
  */
 export function hostsForAgent(snapshot) {
   if (hostsUnread(snapshot) || !Array.isArray(snapshot.hostBudgets)) return { unavailable: true, readAt: null, hosts: null };
   const doctors = doctorHostsOf(snapshot);
   const readAt = n(snapshot.hostsReadAt);
-  return { unavailable: Boolean(snapshot.queue?.fleetDegraded), readAt, hosts: snapshot.hostBudgets.map((h) => ({
-    name: id(h.name, 64), version: id(h.version, 64), beat: readAt !== null && beatAgeOf(h) !== null ? readAt - beatAgeOf(h) : null, beatAgeMs: beatAgeOf(h), noExpiry: h.noExpiry === true, skewMs: Number.isFinite(h.skewMs) ? h.skewMs : null,
+  // A registry read in part (issue #1062) is read, not unavailable: `readInPart` says some rows did not answer, and
+  // each of those rows (`notRead`, its last one read) has no beat, since `readAt` is not the instant it was read.
+  const part = Boolean(snapshot.queue?.fleetDegraded) && snapshot.queue?.registryReadInPart === true;
+  return { unavailable: Boolean(snapshot.queue?.fleetDegraded) && !part, ...(part ? { readInPart: true } : {}), readAt, hosts: snapshot.hostBudgets.map((h) => ({
+    name: id(h.name, 64), version: id(h.version, 64), ...(h.notRead === true ? { notRead: true } : {}), beat: readAt !== null && h.notRead !== true && beatAgeOf(h) !== null ? readAt - beatAgeOf(h) : null, beatAgeMs: beatAgeOf(h), noExpiry: h.noExpiry === true, skewMs: Number.isFinite(h.skewMs) ? h.skewMs : null,
     capacity: fields(h, ["concurrency", "budgetMemMiB", "budgetCpuCenti", "budgetRunning", "usedMemMiB", "usedCpuCenti", "heldMemMiB", "heldCpuCenti", "waiters", "jobsMore"]),
     // A live job row names its venue as `v` (the worker's `liveJobsOf`, an orphan's alone), a known venue name or nothing.
     jobs: Array.isArray(h.jobs) ? h.jobs.map((j) => ({ jobId: id(j.id), backend: BACKEND_NAMES.includes(j.v) ? j.v : null, orphan: j.o === true, ...fields(j, ["m", "c", "h", "ha", "s"]) })) : null,
@@ -96,7 +100,11 @@ export async function readOperationalTool(kind, { paths, env = {}, now = Date.no
     // on every call and a SCAN finds any meta key a writer plants. The set is whole when the registry was read, the scan
     // finished and the bound cut nothing.
     const snapshot = await fleet.snapshot(kind === "waiting" ? { waiting: true } : kind === "failed" ? { switchQueues: true, switchLookupBound: true } : {});
-    if (kind === "failed") return failedForAgent(snapshot.failed, { whole: !snapshot.queue?.fleetDegraded && snapshot.switchTruncated === false && snapshot.switchIncomplete === null });
+    // A queue that read's paused state or counts Valkey answered with an error (issue #1053, `switchErrored`) is in no
+    // count, so the failed total leaves its failed jobs out: how many more there are is not known, and the set is not
+    // whole, though its failed list may still be among the rows.
+    const errored = Array.isArray(snapshot.switchErrored) && snapshot.switchErrored.length > 0;
+    if (kind === "failed") return failedForAgent(errored && snapshot.failed && !snapshot.failed.unreachable ? { ...snapshot.failed, more: null } : snapshot.failed, { whole: !errored && !snapshot.queue?.fleetDegraded && snapshot.switchTruncated === false && snapshot.switchIncomplete === null });
     if (kind === "waiting") return waitingForAgent(snapshot.waiting);
     if (kind === "hosts") return hostsForAgent(snapshot);
     if (kind === "setup") return setupForAgent(snapshot);

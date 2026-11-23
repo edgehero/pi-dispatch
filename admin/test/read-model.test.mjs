@@ -64,6 +64,7 @@ import {
   forgeRepoTargets,
   readHosts,
   readSubscriptionStatusOf,
+  fleetQueuesOn,
   resolveWorkerCount,
   mergedRunsOn,
   listRunsMerged,
@@ -595,6 +596,22 @@ test("a scheduler's id and job name are read in the cron id charset and at most 
     assert.equal(res.length, raw.length, "a refused id keeps its entry: a schedule is there");
     assert.deepEqual([res[0].pattern, res[0].next, res[0].overdueMs], ["0 3 * * *", now - 5000, 5000], "with its pattern, its next fire and its overdue time");
   }
+});
+
+test("readSchedulers over a host registry read in part says so, and its rendering says a host's schedulers may be missing (#1062)", async () => {
+  const { renderSchedulers } = await import("../src/render.mjs");
+  const now = Date.UTC(2026, 9, 26, 12, 0);
+  const asked = [];
+  const makeQueueFn = (_c, { name }) => (asked.push(name), { async getJobSchedulers() { return name === "pi-jobs@mini1" ? [{ key: "nightly", name: "local", pattern: "0 3 * * *", next: now + 5000 }] : []; }, async close() {} });
+  const part = () => ({ smembers: async () => ["mini1", "mini2"], hgetall: (key) => (key === "host:h:mini2" ? new Promise(() => {}) : Promise.resolve({ name: "mini1", routes: "true" })), srem: async () => 0, disconnect() {} });
+  const read = await readSchedulers({ url: "redis://x", makeQueueFn, parseConnectionFn: () => ({}), redisFn: part, now: () => now, timeoutMs: 600 });
+  assert.deepEqual([read.map((s) => s.key), read.hostsReadInPart, asked], [["nightly"], "1 of 2 host rows not read", ["pi-jobs", "pi-jobs@mini1"]]);
+  assert.match(renderSchedulers(read), /\n {2}the host registry was read in part \(1 of 2 host rows not read\), so a host's schedulers may be missing$/);
+  const none = Object.assign([], { hostsReadInPart: "1 of 1 host rows not read" });
+  assert.match(renderSchedulers(none), /^Schedulers:\n {2}\(none read\)\n/, "none read over a registry read in part is not none configured");
+  const whole = await readSchedulers({ url: "redis://x", makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => ({ ...part(), smembers: async () => ["mini1"] }), now: () => now, timeoutMs: 600 });
+  assert.equal(Object.hasOwn(whole, "hostsReadInPart"), false);
+  assert.doesNotMatch(renderSchedulers(whole), /read in part/);
 });
 
 test("readSchedulers returns { unreachable } on a connection error", async () => {
@@ -2594,6 +2611,92 @@ test("readHosts lists the fleet, and keeps 'none' distinct from 'could not ask'"
   assert.equal(dead.hosts, undefined);
 });
 
+// Issue #1062: a registry whose rows were not all read in time is neither "no hosts" nor "could not ask".
+test("readHosts and fleetQueuesOn keep a listing whose rows were not all read in time apart: the rows read, and the registry's degradation said (#1062)", async () => {
+  const held = () => ({ ...fakeFleetRedis(["mini1", "mini2"])(), hgetall: (key) => (key === "host:h:mini2" ? new Promise(() => {}) : fakeFleetRedis(["mini1", "mini2"])().hgetall(key)) });
+  const part = await readHosts({ url: "redis://x", redisFn: held, timeoutMs: 400 });
+  assert.deepEqual([part.hosts.map((h) => h.name), part.incomplete, part.unreachable], [["mini1"], "1 of 2 host rows not read", undefined]);
+  const fleet = await fleetQueuesOn(held(), { timeoutMs: 400, discoverFn: async () => ({ names: [], incomplete: null }) });
+  assert.deepEqual([fleet.names, fleet.blind, fleet.blindPartial, fleet.incomplete], [["pi-jobs", "pi-jobs@mini1"], "1 of 2 host rows not read", true, null], "a host whose row was not read may have a queue this set lacks");
+  const whole = await fleetQueuesOn(fakeFleetRedis(["mini1"])(), { timeoutMs: 400, discoverFn: async () => ({ names: [], incomplete: null }) });
+  assert.deepEqual([whole.blind, Object.hasOwn(whole, "blindPartial")], [null, false]);
+  const down = await fleetQueuesOn({ ...fakeFleetRedis(["mini1"])(), async smembers() { throw new Error("ECONNREFUSED"); } }, { timeoutMs: 400, discoverFn: async () => ({ names: [], incomplete: null }) });
+  assert.deepEqual([down.blind, Object.hasOwn(down, "blindPartial")], ["ECONNREFUSED", false], "a registry that could not be read is not one read in part");
+});
+
+test("a registry read in part keeps only the rows that did not answer: a host whose row answered empty is gone, as a whole read says; a queue it does not know is refused as read in part (#1062)", async () => {
+  const logsDir = tempDir("pd-1062-gone-");
+  const h = (name) => ({ name, routes: "true", beatAt: "1" });
+  let answer = { hosts: [h("A"), h("B")] };
+  const queue = (_c, opts) => ({ name: opts?.name ?? "pi-jobs", async isPaused() { return false; }, async getJobCounts() { return { waiting: 0 }; }, async getWorkers() { return []; }, async getJobSchedulers() { return []; }, async getActive() { return []; }, async getFailed() { return []; }, async pause() {}, client: Promise.resolve({}), async close() {} });
+  const redis = { on() {}, async get() { return null; }, async mget(...keys) { return keys.map(() => null); }, async smembers() { return []; }, async hgetall() { return {}; }, async zrevrangebyscore() { return []; }, async exists() { return 0; }, async scan() { return ["0", []]; }, disconnect() {} };
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 }, { makeQueueFn: queue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => answer, discoverHostQueuesFn: async () => ({ names: [], incomplete: null }), dollarEnvFn: () => ({ PI_SECRET_PROFILES: "prod:/opt/secret/p" }) });
+  const rowsOf = (s) => s.hostBudgets.map((x) => `${x.name}${x.notRead ? "*" : ""}`);
+  try {
+    await reader.snapshot();
+    answer = { hosts: [h("A")], incomplete: "1 of 2 host rows not read", unreadHosts: ["B"] };
+    const one = await reader.snapshot();
+    assert.deepEqual([rowsOf(one), one.queueCounts.map((q) => q.queue)], [["A", "B*"], ["pi-jobs", "pi-jobs@A", "pi-jobs@B"]]);
+    // The secrets view is handed the rows read alone (A), said as read in part, never as a registry it could not read.
+    assert.deepEqual([one.secretProfiles.hostsSeen, one.secretProfiles.hostsUnreadable, one.secretProfiles.hostsReadInPart], [1, false, true]);
+    // C is new, A did not answer, and B's row answered empty (pruned: gone). B is dropped, as a whole read drops it.
+    answer = { hosts: [h("C")], incomplete: "1 of 2 host rows not read", unreadHosts: ["A"] };
+    const two = await reader.snapshot();
+    assert.deepEqual([rowsOf(two), two.queueCounts.map((q) => q.queue)], [["A*", "C"], ["pi-jobs", "pi-jobs@A", "pi-jobs@C"]]);
+    // A queue the set does not hold is refused, and the sentence says the registry was read in part.
+    const refused = await reader.pauseQueue({ queue: "pi-jobs@Z", paused: true });
+    assert.match(refused.invalid, /^"pi-jobs@Z" is not a queue this deployment drains \(pi-jobs, pi-jobs@A, pi-jobs@C\); the host registry was read in part, so the queue of a host whose row did not answer may be missing from that list\. Nothing was changed$/);
+    assert.doesNotMatch(refused.invalid, /could not be read/);
+    // A registry that then could not be read at all hands it no rows: the hosts are not known, never "no live host".
+    answer = { unreachable: "registry unreadable" };
+    const blind = await reader.snapshot();
+    assert.deepEqual([blind.hostBudgets.length > 0, blind.secretProfiles.hostsSeen, blind.secretProfiles.hostsUnreadable, Object.hasOwn(blind.secretProfiles, "hostsReadInPart")], [true, null, true, false]);
+  } finally {
+    await reader.dispose();
+  }
+});
+
+test("the fleet reader's registry read in part joins the rows it read to the last set, keeps the rows it did not read, and says the registry was read in part; its switch reaches every host it read (#1062)", async () => {
+  const logsDir = tempDir("pd-1062-tick-");
+  let clock = 1_000;
+  // A consumer that reports failed, so a row's health read now is "failed" and one kept from before is "unknown".
+  const failing = (name) => ({ name, routes: "true", beatAt: "1", startedAt: "5", staleMs: 1_000, consumers: JSON.stringify({ v: 1, startedAt: 5, rows: [{ role: "shared", state: "failed", connection: "ended", active: 0, rateLimited: false, lastFetchAt: null, lastSuccessAt: null, lastTakenAt: null, fetchAgeMs: null, successAgeMs: null }, { role: "sandbox", state: "failed", connection: "ended", active: 0, rateLimited: false, lastFetchAt: null, lastSuccessAt: null, lastTakenAt: null, fetchAgeMs: null, successAgeMs: null }, { role: "host", state: "failed", connection: "ended", active: 0, rateLimited: false, lastFetchAt: null, lastSuccessAt: null, lastTakenAt: null, fetchAgeMs: null, successAgeMs: null }] }) });
+  let answer = { hosts: [failing("mini1")], incomplete: "1 of 2 host rows not read" };
+  const flipped = [];
+  const queue = (_c, opts) => ({ name: opts?.name ?? "pi-jobs", async isPaused() { return false; }, async getJobCounts() { return { waiting: 0 }; }, async getWorkers() { return []; }, async getJobSchedulers() { return []; }, async getActive() { return []; }, async getFailed() { return []; }, async pause() { flipped.push(opts?.name ?? "pi-jobs"); }, async close() {} });
+  const redis = { on() {}, async get() { return null; }, async mget(...keys) { return keys.map(() => null); }, async smembers() { return []; }, async hgetall() { return {}; }, async zrevrangebyscore() { return []; }, async exists() { return 0; }, async scan() { return ["0", []]; }, async eval() { return null; }, pipeline() { return { hmget() { return this; }, async exec() { return []; } }; }, disconnect() {} };
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 }, { makeQueueFn: queue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => answer, discoverHostQueuesFn: async () => ({ names: [], incomplete: "the queue scan ran out of time" }), nowFn: () => clock });
+  try {
+    // A first read in part: mini2's row did not answer, and the scan did not finish. mini1's queue is in the set.
+    const first = await reader.snapshot();
+    assert.deepEqual([first.queue.fleetDegraded, first.queue.registryReadInPart], ["1 of 2 host rows not read", true], "the registry is said to be read in part");
+    assert.equal(first.hostsReadAt, 1_000, "a read in part dates the rows it read: hostsReadAt is that read's instant, never null");
+    assert.deepEqual(first.queueCounts.map((q) => q.queue), ["pi-jobs", "pi-jobs@mini1"]);
+    assert.deepEqual(first.hostBudgets.map((h) => [h.name, h.notRead === true]), [["mini1", false]], "the row that was read is kept, not marked");
+    const paused = await reader.pause();
+    assert.deepEqual([...new Set(flipped)].sort(), ["pi-jobs", "pi-jobs@mini1"], "the switch reaches the host it read, as the CLI's does");
+    assert.equal(paused.results[0].res.blind, "1 of 2 host rows not read", "and says its list may be short");
+    // A whole read, then one in part where mini1's row did not answer: mini1 keeps its last row and queue, its health
+    // unknown and the row marked not read; mini2's is fresh. hostsReadAt is the later read's.
+    clock = 2_000;
+    answer = { hosts: [failing("mini1"), failing("mini2")] };
+    const whole = await reader.snapshot();
+    assert.deepEqual([whole.queue.fleetDegraded, Object.hasOwn(whole.queue, "registryReadInPart"), whole.queueCounts.map((q) => q.queue)], [null, false, ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2"]]);
+    assert.equal(whole.hostBudgets.find((h) => h.name === "mini1").consumerHealth.state, "failed", "read now: its consumer's own state");
+    clock = 3_000;
+    answer = { hosts: [failing("mini2")], incomplete: "1 of 2 host rows not read" };
+    const again = await reader.snapshot();
+    assert.equal(again.queue.fleetDegraded, "1 of 2 host rows not read");
+    assert.equal(again.hostsReadAt, 3_000);
+    assert.deepEqual(again.queueCounts.map((q) => q.queue), ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2"], "mini1's queue is not dropped for a row that was not read");
+    const kept = again.hostBudgets.find((h) => h.name === "mini1");
+    assert.deepEqual([kept.notRead, kept.consumerHealth.state], [true, "unknown"], "the kept row is marked not read, and its last health is not passed off as now");
+    assert.deepEqual([again.hostBudgets.find((h) => h.name === "mini2").notRead, again.hostBudgets.find((h) => h.name === "mini2").consumerHealth.state], [undefined, "failed"]);
+  } finally {
+    await reader.dispose();
+  }
+});
+
 test("resolveWorkerCount prefers the registry, because getWorkers rests on CLIENT SETNAME", () => {
   assert.deepEqual(resolveWorkerCount({ hosts: [{ name: "b", routes: "true" }, { name: "a", routes: "true" }], workerCount: 9 }), { count: 2, names: ["a", "b"] });
   assert.deepEqual(resolveWorkerCount({ hosts: [], workerCount: 2 }), { count: 2, names: [] }, "an unnamed fleet still counts");
@@ -2844,6 +2947,53 @@ test("the console's own switch, through a real Valkey whose queue's meta key hol
     assert.deepEqual([await direct.llen(key("pi-jobs@hostb", "paused")), await direct.llen(key("pi-jobs@hostb", "wait"))], [1, 0], "the job moved, so part of the pause applied, as said");
     // One queue's pause of it says the same in its own sentence.
     assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@hostb", paused: true }), { invalid: queueSwitchErrored("pi-jobs@hostb", true, "unknown"), partial: true });
+  } finally {
+    await reader.dispose();
+    let cursor = "0";
+    do {
+      const [next, keys] = await direct.scan(cursor, "MATCH", `bull:${prefix}*`, "COUNT", 500);
+      cursor = String(next);
+      if (keys.length > 0) await direct.del(...keys);
+    } while (cursor !== "0");
+    direct.disconnect();
+  }
+});
+
+test("a switch preview's snapshot, through a real Valkey where one queue's meta key holds a string, names that queue as answered with WRONGTYPE and reads the rest (#1053, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
+  const { makeQueue } = await import("@edgehero/pi-dispatch/queue");
+  const { makeRedisClient, parseConnection } = await import("@edgehero/pi-dispatch/connection");
+  const url = process.env.VALKEY_TEST_URL;
+  const prefix = `pd1053-${process.pid}-${Date.now()}-`;
+  const direct = makeRedisClient(url);
+  direct.on("error", () => {});
+  const logsDir = tempDir("pd-1053-snapshot-");
+  const triggersPath = join(logsDir, "triggers.json");
+  writeFileSync(triggersPath, '{ "triggers": [] }\n');
+  const asked = (connection, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    const queue = makeQueue(connection, { name: `${prefix}${name}` });
+    return new Proxy(queue, { get: (target, key) => (key === "name" ? name : typeof target[key] === "function" ? target[key].bind(target) : target[key]) });
+  };
+  const reader = createFleetReader({ valkeyUrl: url, logsDir, triggersPath }, {
+    makeQueueFn: asked,
+    readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => ({ names: ["pi-jobs@hosta", "pi-jobs@hostb"] }), readOnly: true,
+  });
+  const key = (name, part) => `bull:${prefix}${name}:${part}`;
+  try {
+    for (const name of ["pi-jobs@hosta", "pi-jobs@hostb"]) {
+      const seed = makeQueue(parseConnection(url), { name: `${prefix}${name}` });
+      await seed.add("seed", { kind: "local" }, { jobId: `seed-1053-${name.slice(-1)}` });
+      await seed.close();
+    }
+    await direct.del(key("pi-jobs@hostb", "meta"));
+    await direct.set(key("pi-jobs@hostb", "meta"), "not a hash");
+    const s = await reader.snapshot({ switchQueues: true });
+    assert.deepEqual(s.switchErrored, [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }]);
+    assert.deepEqual(s.queueCounts.map((q) => q.queue), ["pi-jobs", "pi-jobs@hosta"], "every other queue is read");
+    assert.equal(s.queueCounts.find((q) => q.queue === "pi-jobs@hosta").counts.waiting, 1);
+    assert.ok(!JSON.stringify(s).includes("Operation against"), "the reply's code alone");
+    const one = await reader.snapshot({ switchQueues: true, queue: "pi-jobs@hostb" });
+    assert.deepEqual(one.switchErrored, [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }], "the one-queue read names it too");
   } finally {
     await reader.dispose();
     let cursor = "0";

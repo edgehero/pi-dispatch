@@ -136,6 +136,8 @@ export async function runSteer({ positionals = [], later = false, withdraw = fal
 			discover(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }),
 		]);
 		const blind = fleet?.unreachable ?? null;
+		// The registry's rows not read in time (issue #1062): a host whose row was not read may hold the job too.
+		const registryShort = blind === null ? fleet?.incomplete ?? null : null;
 		const names = unionNames(fleetNames(fleet?.hosts), existing);
 		let job = null;
 		for (const name of names) {
@@ -144,7 +146,7 @@ export async function runSteer({ positionals = [], later = false, withdraw = fal
 			job = await q.getJob(jobId);
 			if (job) break;
 		}
-		if (!job) return fail(`no job ${jobId} in ${names.length} queue(s)${blind ? ` [registry unreadable: ${blind}; a host that is not registered may still hold it]` : ""}`);
+		if (!job) return fail(`no job ${jobId} in ${names.length} queue(s)${blind ? ` [registry unreadable: ${blind}; a host that is not registered may still hold it]` : ""}${registryShort ? ` [registry incomplete: ${registryShort}; a host whose row was not read may still hold it]` : ""}`);
 		const runId = runIdOf(job);
 
 		if (withdraw) {

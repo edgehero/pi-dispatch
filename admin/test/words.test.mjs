@@ -493,8 +493,8 @@ test("capitalised keeps an id joined by a full stop with no space after it, as w
 });
 
 test("a kill switch over a set of queues that may be short says one sentence on every surface, the CLI's word for word (issue #964)", () => {
-  assert.equal(switchShortNote(true), "the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not paused. Pause the fleet again once Valkey answers");
-  assert.equal(switchShortNote(false), "the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not resumed. Resume the fleet again once Valkey answers");
+  assert.equal(switchShortNote(true), "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers");
+  assert.equal(switchShortNote(false), "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not resumed. Resume the fleet again once Valkey answers");
   for (const paused of [true, false]) assert.equal(killSwitchShortNote(paused), switchShortNote(paused));
   // "Once Valkey answers": a page can stay unread after Valkey answers while the switch works (issue #986).
   assert.doesNotMatch(switchShortNote(true), /Fleet reads|once .* reads/);

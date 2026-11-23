@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { defaultWorkerName, loadConfig, sanitizeWorkerName, WORKER_NAME_RE } from "../src/config.mjs";
-import { HOST_BEAT_MS, HOST_SET, HOST_SKEW_CLAIM_MS, HOST_TTL_MS, hostKey, makeHostRegistry, readLiveHosts } from "../src/host-registry.mjs";
+import { HOST_BEAT_MS, HOST_SET, HOST_SKEW_CLAIM_MS, HOST_TTL_MS, hostKey, liveHostNamesOf, makeHostRegistry, readLiveHosts } from "../src/host-registry.mjs";
 
 // A fake Valkey: a Map of hashes plus one set, recording every call so the ORDER and the SHAPE of what
 // the registry writes can be asserted, not just its end state. Same hand-rolled style as the wait-state
@@ -618,4 +618,112 @@ test("parseHostBackends (#712) re-checks a peer's row: shapes kept, anything els
 	assert.deepEqual(got.floor, { egress: "enforced" }, "the first of a twice-named property, words from the three only");
 	assert.deepEqual(got.openshell, { engine: "unknown", gateway: "unknown", modes: [] });
 	assert.deepEqual(parseHostBackends("blessed="), { blessed: [], default: null, floor: {}, openshell: null });
+});
+
+// Issue #1062: the rows were read one after another, each under a full bound, so three hosts behind a stalled scan cost
+// three bounds, and a row that did not answer was dropped with nothing saying the listing was short.
+/** Rows for `names` in a `fakeRedis`, each indexed, each a live routing host's. */
+function rowsFor(redis, names) {
+	for (const name of names) {
+		redis.sets.set(HOST_SET, new Set([...(redis.sets.get(HOST_SET) ?? []), name]));
+		redis.hashes.set(hostKey(name), { name, routes: "true", beatAt: String(NOW) });
+	}
+}
+
+test("the registry read ends within its one bound however many rows do not answer, and says the listing is not whole (#1062)", async () => {
+	const redis = fakeRedis();
+	rowsFor(redis, ["hosta", "hostb", "hostc"]);
+	const hgetall = redis.hgetall;
+	// The index answers; every row is held, as behind a scan that stalled on the same connection.
+	redis.hgetall = () => new Promise(() => {});
+	const started = performance.now();
+	const read = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
+	const ms = performance.now() - started;
+	assert.ok(ms < 600, `one bound, not one per row (took ${Math.round(ms)} ms)`);
+	assert.deepEqual(read, { hosts: [], incomplete: "3 of 3 host rows not read", unreadHosts: ["hosta", "hostb", "hostc"] }, "each row that did not answer is named");
+	assert.deepEqual([...redis.sets.get(HOST_SET)].sort(), ["hosta", "hostb", "hostc"], "a row that was not read is never pruned");
+	// One row held, two answered: those two are listed, and the listing still says it is not whole.
+	redis.hgetall = (key) => (key === hostKey("hostb") ? new Promise(() => {}) : hgetall.call(redis, key));
+	const part = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
+	assert.deepEqual([part.hosts.map((h) => h.name), part.incomplete, part.unreadHosts], [["hosta", "hostc"], "1 of 3 host rows not read", ["hostb"]]);
+	// A row whose connection failed is no answer either.
+	redis.hgetall = (key) => (key === hostKey("hosta") ? Promise.reject(new Error("Connection is closed.")) : hgetall.call(redis, key));
+	assert.equal((await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 })).incomplete, "1 of 3 host rows not read");
+	// Every row read: no such field, as before.
+	redis.hgetall = hgetall;
+	assert.equal(Object.hasOwn(await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 }), "incomplete"), false);
+});
+
+test("a row Valkey answers with an error degrades that row alone: the listing stays whole and the member is not pruned (#1062)", async () => {
+	const redis = fakeRedis();
+	rowsFor(redis, ["hosta", "hostb"]);
+	const hgetall = redis.hgetall;
+	redis.hgetall = (key) => (key === hostKey("hostb") ? Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" })) : hgetall.call(redis, key));
+	const read = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
+	assert.deepEqual(read.hosts.map((h) => h.name), ["hosta"]);
+	assert.equal(Object.hasOwn(read, "incomplete"), false, "Valkey answered about that key: no host's self-description, not a host it could not read");
+	assert.deepEqual([...redis.sets.get(HOST_SET)].sort(), ["hosta", "hostb"], "never pruned: only a row Valkey answered as empty is stale");
+});
+
+test("a stale member found late in the bound is pruned within what is left of it, and the read still ends by the bound (#1062)", async () => {
+	const redis = fakeRedis();
+	rowsFor(redis, ["hosta"]);
+	redis.sets.set(HOST_SET, new Set(["hosta", "ghost"]));
+	const srem = redis.srem;
+	let pruned = null;
+	// The ghost's empty row answers after 200 ms of a 300 ms bound, and its SREM never answers: the read waits only what
+	// is left, not a fresh bound for the write.
+	const hgetall = redis.hgetall;
+	redis.hgetall = async (key) => (key === hostKey("ghost") ? new Promise((resolve) => setTimeout(resolve, 200, {})) : hgetall.call(redis, key));
+	redis.srem = (key, member) => ((pruned = member), new Promise(() => {}));
+	const started = performance.now();
+	const read = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
+	const ms = performance.now() - started;
+	redis.srem = srem;
+	assert.equal(pruned, "ghost", "the empty row's member is pruned");
+	assert.ok(ms < 420, `within the one bound (took ${Math.round(ms)} ms)`);
+	assert.deepEqual([read.hosts.map((h) => h.name), Object.hasOwn(read, "incomplete")], [["hosta"], false]);
+});
+
+test("liveHostNamesOf: a listing that is not whole is not known, never a fleet without the hosts it could not read (#1062)", () => {
+	assert.deepEqual([...liveHostNamesOf({ hosts: [{ name: "Mini1" }, { name: "mini2" }] }, (n) => n.toLowerCase())], ["mini1", "mini2"]);
+	assert.equal(liveHostNamesOf({ hosts: [{ name: "mini1" }], incomplete: "1 of 2 host rows not read" }), null);
+	assert.equal(liveHostNamesOf({ unreachable: "ECONNREFUSED" }), null);
+	assert.equal(liveHostNamesOf({}), null);
+	assert.equal(liveHostNamesOf(null), null);
+});
+
+test("livePeers keeps the listing's incompleteness: a peer it could not read may disagree (#1062)", async () => {
+	const redis = fakeRedis();
+	rowsFor(redis, ["mini1", "mini2", "mini3"]);
+	const hgetall = redis.hgetall;
+	redis.hgetall = (key) => (key === hostKey("mini3") ? new Promise(() => {}) : hgetall.call(redis, key));
+	const peers = await makeHostRegistry({ redis, name: "mini1", now: () => NOW, timeoutMs: 200 }).livePeers();
+	assert.deepEqual([peers.hosts.map((h) => h.name), peers.incomplete], [["mini2"], "1 of 3 host rows not read"]);
+});
+
+test("the rows get what is left of the bound after the index: an index that answers late still ends the read by the bound (#1062)", async () => {
+	const redis = fakeRedis();
+	rowsFor(redis, ["hosta", "hostb"]);
+	const smembers = redis.smembers;
+	// The index answers 200 ms into a 300 ms bound, then every row hangs.
+	redis.smembers = (key) => new Promise((resolve) => setTimeout(() => resolve(smembers.call(redis, key)), 200));
+	redis.hgetall = () => new Promise(() => {});
+	const started = performance.now();
+	const read = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
+	const ms = performance.now() - started;
+	assert.ok(ms < 420, `the rows had the 100 ms left, not a fresh 300 (took ${Math.round(ms)} ms)`);
+	assert.equal(read.incomplete, "2 of 2 host rows not read");
+});
+
+test("a row whose HGETALL fails at once leaves no PTTL bound running once the read has ended (#1062)", async () => {
+	const redis = fakeRedis();
+	rowsFor(redis, ["hosta"]);
+	redis.hgetall = () => Promise.reject(new Error("Connection is closed."));
+	redis.pttl = () => new Promise(() => {});
+	const timers = () => process.getActiveResourcesInfo().filter((kind) => kind === "Timeout").length;
+	const before = timers();
+	const read = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 5_000 });
+	assert.equal(read.incomplete, "1 of 1 host rows not read");
+	assert.equal(timers(), before, "the PTTL's five-second bound was cleared, so it holds nothing open");
 });

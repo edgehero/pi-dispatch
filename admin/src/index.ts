@@ -611,7 +611,7 @@ function registerTools(pi: ExtensionAPI): void {
     name: "dispatch_status",
     label: "pi-dispatch status",
     description:
-      "Read-only. Reports pi-dispatch queue/worker state: paused flag, job counts, connected workers, today's budget use, schedulers, runtime settings overlay.",
+      "Read-only. Reports pi-dispatch queue/worker state: paused flag, job counts, connected workers, today's budget use, schedulers, runtime settings overlay. schedulersReadInPart true means the host registry was read in part, so the schedulers of a host whose row did not answer may be missing from the list.",
     parameters: Type.Object({}),
     async execute() {
       const paths = resolvePaths(deploymentEnv());
@@ -623,7 +623,10 @@ function registerTools(pi: ExtensionAPI): void {
       // The operator-only overlay keys (`secretProfiles`, `secretBundles`: resolver paths the worker executes) are left
       // out of what the model reads (issue #704 review): no tool can set them, and none needs to see them.
       const settings = withoutOperatorOnly(readSettingsView({ settingsFile: paths.settingsFile }));
-      return toolText(JSON.stringify({ queue, budget, settings, schedulers }));
+      // Issue #1062: a scheduler list read over a host registry read in part says so (`readSchedulers`' own property,
+      // which JSON leaves out of the list itself), as a yes the agent can act on.
+      const schedulersReadInPart = Array.isArray(schedulers) && typeof (schedulers as any).hostsReadInPart === "string";
+      return toolText(JSON.stringify({ queue, budget, settings, schedulers, ...(schedulersReadInPart ? { schedulersReadInPart: true } : {}) }));
     },
   });
 
@@ -717,7 +720,7 @@ function registerTools(pi: ExtensionAPI): void {
     label: "pi-dispatch pause",
     description:
       "Durably pauses pi-dispatch job processing: NEW jobs stop starting; running containers finish; jobs still enqueue. Survives worker restart. Reversible via dispatch_resume. " +
-      "queuesMayBeShort true in the answer means the host registry or the look for queues could not be read, so other queues may exist and were not paused: pause again once Valkey answers.",
+      "queuesMayBeShort true in the answer means the host registry or the look for queues could not be read whole, so other queues may exist and were not paused: pause again once Valkey answers.",
     executionMode: "sequential",
     parameters: Type.Object({ queue: Type.Optional(Type.String()) }),
   });
@@ -727,7 +730,7 @@ function registerTools(pi: ExtensionAPI): void {
     label: "pi-dispatch resume",
     description:
       "Re-enables PAID job processing after a pause. Only call when the user explicitly asks to resume. " +
-      "queuesMayBeShort true in the answer means the host registry or the look for queues could not be read, so other queues may exist and were not resumed.",
+      "queuesMayBeShort true in the answer means the host registry or the look for queues could not be read whole, so other queues may exist and were not resumed.",
     executionMode: "sequential",
     parameters: Type.Object({ queue: Type.Optional(Type.String()) }),
   });
@@ -758,7 +761,8 @@ function registerTools(pi: ExtensionAPI): void {
       "records plus the jobs running now. `text` is the plain report; `report` is the capacity report v1 (integers: " +
       "milliseconds, and ratios per mille). Jobs only: a machine busy with other work reads as idle. Time before a " +
       "host's history starts is reported as missing (`missingMs`, `coverage`), never as idle; a host that is new, or " +
-      "was down, inside history that is there reads as idle for that time.",
+      "was down, inside history that is there reads as idle for that time. registryReadInPart true means the host " +
+      "registry was read in part: the jobs running now on a host whose row did not answer are not counted.",
     parameters: Type.Object({ window: Type.Optional(Type.String()), host: Type.Optional(Type.String()) }),
     async execute(_toolCallId, params) {
       const paths = resolvePaths(deploymentEnv());
@@ -766,7 +770,8 @@ function registerTools(pi: ExtensionAPI): void {
       if (!Object.hasOwn(CAPACITY_WINDOWS, window)) throw publicToolRefusal(`window must be one of ${Object.keys(CAPACITY_WINDOWS).join(", ")} (got ${JSON.stringify(window)})`);
       const res: any = await readCapacity({ url: paths.valkeyUrl, env: deploymentEnv(), window, host: params.host });
       if (res.error) throw new Error(res.error);
-      return toolText(JSON.stringify({ window, text: res.text, report: res.report }));
+      // Issue #1062: a registry read in part, as a yes beside the report, which says it only in its sentences.
+      return toolText(JSON.stringify({ window, text: res.text, report: res.report, ...(res.registryReadInPart === true ? { registryReadInPart: true } : {}) }));
     },
   });
 
@@ -1315,7 +1320,7 @@ function registerTools(pi: ExtensionAPI): void {
   const unreadWords: Record<string, string> = {
     failed: " `jobs` is null when the failed jobs could not be read; `complete` is true only when every queue was read and no failed job is past the list.",
     waiting: " `jobs` is null when the waiting jobs could not be read; `complete` is true only when every queue was read and none was cut.",
-    hosts: " `hosts` is null and `unavailable` true when the host registry could not be read; `readAt` is when the rows were read.",
+    hosts: " `hosts` is null and `unavailable` true when the host registry could not be read; `readAt` is when the rows were read. `readInPart` true when some hosts' rows did not answer: those rows are marked `notRead`, their last row, with no beat.",
   };
   for (const [name, kind] of [["dispatch_failed", "failed"], ["dispatch_waiting", "waiting"], ["dispatch_setup", "setup"], ["dispatch_hosts", "hosts"]]) {
     registerTool({ name, label: `pi-dispatch ${kind}`, description: `Read-only machine facts. Never raw failure, operator or job text.${unreadWords[kind] ?? ""}`, parameters: Type.Object({}),

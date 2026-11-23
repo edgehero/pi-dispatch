@@ -241,6 +241,12 @@ export function spendControls(v) {
  * The Today card's held row's label: for how many running jobs money is held, or, where the hosts could not be read
  * (`heldJobs` null, issue #962), that the count is not known. Never "0 running jobs" for a registry nobody read.
  */
+/** The Today card's note over a host registry read in part (issue #1062, `spend.today.hostsReadInPart`). */
+export const HELD_PART_TEXT = "Held money is not known: the host registry was read in part, so the money held for jobs on a host whose row did not answer is not counted.";
+
+/** The Budget split's envelope check over a host registry read in part (issue #1062, `hostsReadInPart`). */
+export const SPLIT_HOSTS_PART_TEXT = "The host registry was read in part, so a host whose row did not answer is not in this check.";
+
 export function heldLabel(heldJobs) {
   if (number(heldJobs) === null)
     return "Held for running jobs (how many is not known)";
@@ -317,7 +323,7 @@ export function spendToday(v) {
             ]
           : []),
       ],
-    )}${s?.unknownHosts?.length ? note(`Holds not published by: ${s.unknownHosts.join(", ")}. Those jobs are not counted as zero.`) : null}${notionalOf(s) !== null ? note(BILLED_ONLY_TEXT) : null}<details class="sp-provenance"><summary>Cost and counter details</summary>${chargedDiffers ? note("Readable record cost includes work outside dollar windows or cost that is not fully known. Charged to dollar windows is the recorded window charge, not the cost of all readable work.") : null}${note(
+    )}${s?.hostsReadInPart === true ? note(HELD_PART_TEXT) : null}${s?.unknownHosts?.length ? note(`Holds not published by: ${s.unknownHosts.join(", ")}. Those jobs are not counted as zero.`) : null}${notionalOf(s) !== null ? note(BILLED_ONLY_TEXT) : null}<details class="sp-provenance"><summary>Cost and counter details</summary>${chargedDiffers ? note("Readable record cost includes work outside dollar windows or cost that is not fully known. Charged to dollar windows is the recorded window charge, not the cost of all readable work.") : null}${note(
       capped
         ? "The counter remainder is not explained by readable window charges and published holds. It can include records this host cannot read, such as another host's on an unshared PI_LOGS_DIR. Held money is reported by running jobs, never inferred from the counter."
         : uncapped
@@ -863,6 +869,9 @@ export function splitRows(v) {
       "No split can be drawn until the envelope and queue can be read.",
     );
   const hosts = p.hosts ?? payload(v).hosts ?? [];
+  // Issue #1062: over a registry read in part the hosts listed are only those whose rows answered, so no agreement is
+  // claimed for the fleet.
+  const hostsPart = payload(v).hostsReadInPart === true;
   return card(
     "Budget split",
     html`<p class="al-env">${ui.icon("pie")}<span><b>${usd(a.totalMicros)} per ${a.window ?? "unknown window"}</b>, delegation ${a.delegation ? "on" : "off"}</span><span class="al-env__h">Unallocated <b>${usd(a.state?.unallocated)}</b>; deployment spent <b>${usd(a.deploymentSpent)}</b></span></p>${ui.facts(
@@ -882,6 +891,7 @@ export function splitRows(v) {
         ],
         [
           "Envelope",
+          !hostsPart &&
           hosts.length &&
           p.digest &&
           hosts.every((h) => h.fpEnvelope === p.digest)
@@ -889,7 +899,7 @@ export function splitRows(v) {
             : statusBadge("attention", "Not confirmed"),
         ],
       ],
-    )}${hosts.some((h) => h.fpEnvelope !== p.digest || !h.fpEnvelope) ? note(hosts.map((h) => `${h.name}: ${!h.fpEnvelope ? "Envelope digest not published" : h.fpEnvelope !== p.digest ? "Different envelope" : "Same envelope"}`).join("; ")) : null}
+    )}${hostsPart ? note(SPLIT_HOSTS_PART_TEXT) : null}${hosts.some((h) => h.fpEnvelope !== p.digest || !h.fpEnvelope) ? note(hosts.map((h) => `${h.name}: ${!h.fpEnvelope ? "Envelope digest not published" : h.fpEnvelope !== p.digest ? "Different envelope" : "Same envelope"}`).join("; ")) : null}
       <ul class="al-rows">
         ${a.rows
           .filter((r) => !v.query?.project || r.id === v.query.project)

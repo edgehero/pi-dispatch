@@ -1047,6 +1047,9 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       read = null;
     }
     if (!Array.isArray(read?.hosts)) return refuse("The live hosts could not be read, so nothing says each reads what this change needs. Nothing was written; try again.", 503);
+    // A listing whose rows were not all read in time (issue #1062) is "unknown" too: the host whose row was not read
+    // may read less, and the gate would pass the change over it.
+    if (read.incomplete) return refuse(`Not every live host could be read (${read.incomplete}), so nothing says each reads what this change needs. Nothing was written; try again.`, 503);
     const hosts = read.hosts.filter((host) => typeof host?.name === "string");
     const silent = hosts.filter((host) => wanted.some(([field]) => host[field] === undefined || host[field] === null || host[field] === ""));
     const older = hosts.filter((host) => !silent.includes(host) && wanted.some(([field, version]) => !(Number.isSafeInteger(Number(host[field])) && Number(host[field]) >= version)));

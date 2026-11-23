@@ -240,9 +240,12 @@ const NO_DOCTOR_YET = (what) => [`No doctor result yet. A worker runs doctor a m
 /**
  * How long ago a host row last beat: Valkey's measure (`ttlAgeMs`, the row's TTL minus its PTTL, on Valkey's clock as a
  * duration) where the reader had it, since every beat refreshes the row's expiry; else the console's clock minus the
- * host's `beatAt` (`staleMs`), which a host clock out of step makes wrong. Null when neither is known.
+ * host's `beatAt` (`staleMs`), which a host clock out of step makes wrong. Null when neither is known, and for a row a
+ * registry read in part did not reach (`notRead`, issue #1062): its age is frozen at the read that last reached it, so
+ * no surface may count it, date it or draw it as a beat of now.
  */
 export function beatAgeOf(h) {
+  if (h?.notRead === true) return null;
   if (Number.isSafeInteger(h?.ttlAgeMs) && h.ttlAgeMs >= 0) return h.ttlAgeMs;
   return Number.isSafeInteger(h?.staleMs) ? h.staleMs : null;
 }
@@ -321,9 +324,12 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
   // 4. A worker: a registry row that beats, or a worker BullMQ sees (a worker from before the registry).
   const workerCommands = [FIRST_RUN_COMMANDS.service, FIRST_RUN_COMMANDS.worker];
   const connected = Number.isSafeInteger(s?.queue?.workers) && s.queue.workers > 0 ? s.queue.workers : 0;
-  const fresh = hosts.filter((h) => { const age = beatAgeOf(h); return age !== null && age <= freshMs; });
+  // A row a registry read in part did not reach (`notRead`, issue #1062) is the last one read, so it shows no beat now.
+  const fresh = hosts.filter((h) => { const age = beatAgeOf(h); return h?.notRead !== true && age !== null && age <= freshMs; });
+  const readInPart = Boolean(s?.queue?.fleetDegraded) && s?.queue?.registryReadInPart === true;
   if (s === null) steps.push(unread("worker", ["Valkey could not be read, so nothing here says whether a worker runs."], { commands: workerCommands }));
-  else if (s?.queue?.fleetDegraded) steps.push(step("worker", "check", ["The host registry could not be read, so whether a worker runs is not known."], { commands: workerCommands }));
+  // Over a registry read in part, a row it read that beats says a worker runs; else whether one does is not known.
+  else if (s?.queue?.fleetDegraded && !(readInPart && fresh.length > 0)) steps.push(step("worker", "check", [readInPart ? "The host registry was read in part, so whether a worker runs is not known." : "The host registry could not be read, so whether a worker runs is not known."], { commands: workerCommands }));
   else if (fresh.length > 0) steps.push(step("worker", "ready", fresh.length === 1 ? [{ b: fresh[0].name }, " beats."] : [`${fresh.length} hosts beat, `, { b: fresh[0].name }, " among them."]));
   else if (hosts.length > 0) {
     const newest = hosts.reduce((a, h) => (beatAgeOf(h) !== null && (a === null || beatAgeOf(h) < beatAgeOf(a)) ? h : a), null);

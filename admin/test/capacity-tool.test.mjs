@@ -118,3 +118,17 @@ test("readCapacity reads the mirror at the deployment's PI_RUN_MIRROR_MAX_RUNS: 
   assert.equal(raised.report.coverage.truncated, false, "under a raised cap it was not, so the window is read whole");
   assert.equal(raised.report.window.fromMs, NOW - 24 * H);
 });
+
+test("readCapacity over a registry read in part says so in its coverage and names the registry as not read (#1062)", async () => {
+  const { env, records, rows } = fixture();
+  // mini2's row never answers: the registry read ends at its bound with mini1 read and mini2 not.
+  const valkey = { ...fakeValkey(records, rows), hgetall: (key) => (key === "host:h:mini2" ? new Promise(() => {}) : Promise.resolve(rows[0])) };
+  const res = await readCapacity({ url: "redis://127.0.0.1:6399", env, window: "24h", now: () => NOW, redisFn: () => valkey, timeoutMs: 300 });
+  assert.equal(res.error, undefined);
+  assert.match(res.report.coverage.reason, /host registry incomplete \(1 of 3 host rows not read\)/);
+  assert.deepEqual(res.unread, ["registry"], "a caller that would say no such host must know the registry was not read whole");
+  assert.equal(res.registryReadInPart, true, "said as a yes too, which the agent's read keeps");
+  const whole = await readCapacity({ url: "redis://127.0.0.1:6399", env, window: "24h", now: () => NOW, redisFn: () => fakeValkey(records, rows), timeoutMs: 300 });
+  assert.deepEqual(whole.unread, []);
+  assert.equal(Object.hasOwn(whole, "registryReadInPart"), false);
+});

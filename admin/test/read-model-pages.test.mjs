@@ -1362,6 +1362,48 @@ test("createFleetReader: a cut switch preview reads the shared queue and the reg
   }
 });
 
+// Issue #1053: one queue's read that Valkey answered with an error failed the switch preview's snapshot for the fleet.
+test("createFleetReader: a switch preview's read names a queue whose read Valkey answered with an error, by the reply's code alone, and reads every other; a per-tick read and any other failure still fail it (#1053)", async () => {
+  const redis = { on() {}, async get() { return null; }, async mget(...keys) { return keys.map(() => null); }, async smembers() { return []; }, async hgetall() { return {}; }, async zrevrangebyscore() { return []; }, async exists() { return 0; }, disconnect() {} };
+  const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+  let failing = { "pi-jobs@hostb": { paused: () => Promise.reject(reply("WRONGTYPE Operation against a key holding the wrong kind of value")) } };
+  const queue = (_c, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    return {
+      name,
+      isPaused: () => (failing[name]?.paused ? failing[name].paused() : Promise.resolve(name === "pi-jobs@hosta")),
+      getJobCounts: () => (failing[name]?.counts ? failing[name].counts() : Promise.resolve({ waiting: 1, paused: name === "pi-jobs@hosta" ? 2 : 0 })),
+      async getWorkers() { return []; }, async getJobSchedulers() { return []; }, async getActive() { return []; }, async getFailed() { return []; }, async close() {},
+    };
+  };
+  const logsDir = tempDir("pd-1053-switch-errored-");
+  let hosts = [];
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 }, { makeQueueFn: queue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts }), discoverHostQueuesFn: async () => ({ names: ["pi-jobs@hosta", "pi-jobs@hostb"], incomplete: null }), nowFn: () => AT });
+  try {
+    const s = await reader.snapshot({ switchQueues: true });
+    assert.deepEqual(s.switchErrored, [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }]);
+    assert.deepEqual(s.queueCounts.map((q) => [q.queue, q.paused, q.counts.waiting]), [["pi-jobs", false, 1], ["pi-jobs@hosta", true, 1]], "the errored queue is in no row and no sum");
+    assert.deepEqual([s.queue.counts.waiting, s.switchTotal], [2, 3]);
+    assert.ok(!JSON.stringify(s).includes("Operation against"), "the reply's code alone");
+    // Its counts answered with the error instead: the same.
+    failing = { "pi-jobs@hostb": { counts: () => Promise.reject(reply("ERR Error running script (call to f_x): @user_script:7: WRONGTYPE")) } };
+    assert.deepEqual((await reader.snapshot({ switchQueues: true })).switchErrored, [{ queue: "pi-jobs@hostb", error: "ERR" }]);
+    // A whole read names none.
+    failing = {};
+    assert.deepEqual((await reader.snapshot({ switchQueues: true })).switchErrored, []);
+    // A failure that is no reply still fails the snapshot, as before: the fleet was not read.
+    failing = { "pi-jobs@hostb": { paused: () => Promise.reject(new Error("Connection is closed.")) } };
+    await assert.rejects(reader.snapshot({ switchQueues: true }), /Connection is closed/);
+    // The per-tick read, every page's, still fails on it loudly: its rows are every queue it reads, and a page would
+    // not say one was missing.
+    hosts = [{ name: "hostb", routes: "true" }];
+    failing = { "pi-jobs@hostb": { paused: () => Promise.reject(reply("WRONGTYPE Operation against a key holding the wrong kind of value")) } };
+    await assert.rejects(reader.snapshot(), /WRONGTYPE/);
+  } finally {
+    await reader.dispose();
+  }
+});
+
 /**
  * A fleet reader over queues that each hold the jobs `held` names for them (`{ [queue]: { [jobId]: state } }`).
  * `hosts` is the registry's rows or a function that reads them now, `now` the reader's clock, `redis` what the Valkey

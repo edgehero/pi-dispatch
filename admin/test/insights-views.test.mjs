@@ -119,6 +119,25 @@ test("tokens never enter the job soft hold band", async () => {
   assert.equal(view.tokens.state, "ok");
 });
 
+test("a host registry read in part makes held money unknown and says so as read in part, in each view that reads the hosts (#1062)", async () => {
+  const part = { hosts: [{ name: "mini1", jobsMore: "0", jobs: JSON.stringify([{ id: "gh-live", at: NOW - 1000, h: 2_000_000, ha: NOW - 1000 }]), concurrency: "2", backends: "blessed=local" }], incomplete: "1 of 2 host rows not read" };
+  const { reads } = readsFixture();
+  reads.hosts = async () => part;
+  reads.budget = async () => ({ dollars: { windows: [{ ledger: "deployment", window: "day", counterMicros: 100, capMicros: 200 }] } });
+  const spend = await assembleInsightsView({}, "7d", { pricing, nowMs: NOW, envFn: () => ({}), reads });
+  assert.deepEqual([spend.hostsReadInPart, spend.hostsUnreadable, spend.spend.today.heldMicros, spend.spend.today.heldJobs, spend.spend.today.hostsReadInPart, spend.spend.today.hostsUnreadable], [true, undefined, null, null, true, undefined], "the hosts not read may hold money: not known, and said read in part");
+  assert.equal(spend.spend.daily.find((d) => d.today).heldMicros, null, "the chart's held money today is not known either, never the read host's $2 alone");
+  reads.hosts = async () => ({ hosts: part.hosts });
+  const whole = await assembleInsightsView({}, "7d", { pricing, nowMs: NOW, envFn: () => ({}), reads });
+  assert.equal(whole.spend.daily.find((d) => d.today).heldMicros, 2_000_000, "the control: read whole, the chart holds it");
+  reads.hosts = async () => part;
+  const split = await assembleInsightsView({}, "7d", { view: "budget-split", pricing, nowMs: NOW, envFn: () => ({}), reads });
+  assert.deepEqual([split.hostsReadInPart, split.hostsUnreadable, split.hosts.map((h) => h.name)], [true, undefined, ["mini1"]]);
+  reads.capacity = async () => ({ hosts: [{ name: "mini1" }, { name: "mini2" }], fleet: {} });
+  const capacity = await assembleInsightsView({}, "7d", { view: "capacity", pricing, nowMs: NOW, envFn: () => ({}), reads });
+  assert.deepEqual([capacity.capacity.venuesReadInPart, capacity.capacity.venuesUnreadable, capacity.capacity.hosts.map((h) => h.venues), capacity.capacity.totalSlots], [true, false, [["local"], null], null], "a host not read has no venues and the fleet's slots are not known");
+});
+
 test("an unread host registry makes both held money and its reconciliation unknown", async () => {
   const { reads } = readsFixture();
   reads.hosts = async () => ({ unreachable: "not answering" });

@@ -38,7 +38,7 @@ import { ARTIFACT_DROP_REASONS, ARTIFACT_DROP_TEXT, artifactSizeText } from "@ed
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { STEER_MAX_MESSAGES, STEER_TOTAL_MAX_BYTES } from "@edgehero/pi-dispatch/steer-inbox";
-import { SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread } from "./common.mjs";
+import { SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread, registryReadInPart } from "./common.mjs";
 
 const titled = (title, body) => ui.card({ title, body });
 const facts = (pairs) => ui.facts(pairs.filter(([, value]) => value !== null && value !== undefined));
@@ -1168,7 +1168,7 @@ export function runHost(view) {
   const age = beatAgeOf(host), fail = doctorProblems(doctor).find((p) => p.level === "fail");
   const queues = Array.isArray(view.data?.snapshot?.queueCounts) ? view.data.snapshot.queueCounts : [];
   const queue = queues.find((q) => q.queue === host?.queue || q.queue === `pi-jobs@${r.host}`);
-  return titled("The host", html`${facts([["Host", r.host], [VENUE_LABEL, r.backend ?? UNATTRIBUTED_BACKEND], ["Heartbeat", Number.isFinite(age) ? `${ageText(age)} ago` : "could not be read"], ["Newest failing doctor check", fail ? fail.label : doctor && !doctor.unreadable ? "none in its newest result" : "could not be read"], ["Queue waiting", queue ? count(queue.counts?.waiting) : "could not be read"], ["Queue running", queue ? count(queue.counts?.active) : "could not be read"]])}<a href="/fleet">Open Fleet for this host's queues and doctor checks</a>`);
+  return titled("The host", html`${facts([["Host", r.host], [VENUE_LABEL, r.backend ?? UNATTRIBUTED_BACKEND], ["Heartbeat", Number.isFinite(age) ? `${ageText(age)} ago` : registryReadInPart(view.data?.snapshot) && (!host || host.notRead === true) ? "not read this time: the host registry was read in part" : "could not be read"], ["Newest failing doctor check", fail ? fail.label : doctor && !doctor.unreadable ? "none in its newest result" : "could not be read"], ["Queue waiting", queue ? count(queue.counts?.waiting) : "could not be read"], ["Queue running", queue ? count(queue.counts?.active) : "could not be read"]])}<a href="/fleet">Open Fleet for this host's queues and doctor checks</a>`);
 }
 
 export function runViewer(view) {

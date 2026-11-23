@@ -38,6 +38,17 @@ export function scrubValkeyError(err) {
 }
 
 /**
+ * The code of Valkey's error reply (issue #1053): the reply's first word (`WRONGTYPE`, `ERR`, `NOSCRIPT`), "error" for
+ * a reply that opens with none, and null for an error that is no reply (a connection that failed, a bound that fired).
+ * Never the rest of the reply, which past the code can carry a script's name and line: a line or a page that names a
+ * queue it could not read says what Valkey answered and nothing a client added.
+ */
+export function replyErrorCode(error) {
+	if (error?.name !== "ReplyError") return null;
+	return /^([A-Z][A-Z0-9_]{0,31})(?=\s|$)/.exec(String(error.message ?? ""))?.[1] ?? "error";
+}
+
+/**
  * WHERE the scrub runs (PR #475's review, round 2 corrected the first version of this comment, which claimed the emit
  * hook alone covered every path). ioredis hands an error to three kinds of consumer, and a failed AUTH reaches all
  * three with the password in `command.args`:

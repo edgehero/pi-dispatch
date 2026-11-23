@@ -123,6 +123,24 @@ test("Unseen env, unread registry and old capability rows remain unknown; confli
   assert.equal(outage.profileState.hostsUnreadable, true);
   assert.deepEqual(outage.profiles.find((p) => p.name === "prod").hosts, [], "last-known host budgets cannot prove a host still serves a profile");
   assert.ok(!outage.problems.some((p) => p.key.startsWith("unserved-")), "an unread registry cannot prove no host serves it either");
+  // Issue #1062: a registry read in part names the hosts it read that serve the profile, says another may, and proves
+  // no host unserved; a row it did not read is not among the hosts.
+  actualShape.snapshot.queue = { fleetDegraded: "1 of 2 host rows not read", registryReadInPart: true };
+  const part = secretsView(actualShape);
+  assert.deepEqual([part.profileState.hostsUnreadable, part.profileState.hostsReadInPart], [false, true]);
+  assert.deepEqual(part.profiles.find((p) => p.name === "prod").hosts, ["mini1"]);
+  assert.ok(!part.problems.some((p) => p.key.startsWith("unserved-")), "a host whose row did not answer may serve it");
+  const drawn = String(secretsProfiles(ctxOf(part)));
+  assert.match(drawn, /mini1 \(the host registry was read in part, so a host whose row did not answer may serve it too\)/);
+  assert.doesNotMatch(drawn, /could not be read/);
+  actualShape.snapshot.hostBudgets = actualShape.snapshot.hostBudgets.map((h) => ({ ...h, notRead: true }));
+  const unservedRead = secretsView(actualShape);
+  assert.deepEqual(unservedRead.profiles.find((p) => p.name === "prod").hosts, [], "a row not read is not a host that serves it now");
+  assert.ok(unservedRead.profiles.find((p) => p.name === "prod").triggers.length > 0, "a profile a trigger uses (vacuous otherwise)");
+  assert.ok(!unservedRead.problems.some((p) => p.key === "unserved-prod"), "no host read serves it, and one whose row did not answer may");
+  actualShape.snapshot.queue = {};
+  actualShape.snapshot.hostBudgets = [];
+  assert.ok(secretsView(actualShape).problems.some((p) => p.key === "unserved-prod"), "the control: read whole and empty, it is unserved");
 });
 
 test("Role separation, trigger/project/run links and bundle facts are server-side and truthful", () => {

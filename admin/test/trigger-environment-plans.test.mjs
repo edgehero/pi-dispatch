@@ -2394,6 +2394,11 @@ test("an unreadable registry refuses, since unknown is not every host", async ()
   }
   const unwired = fixture({ deps: { versionTables: tables } });
   assert.equal((await unwired.service.preview(ask(unwired, { packages: false }), operator)).status, 503, "wired to nothing fails closed");
+  // Issue #1062: a listing whose rows were not all read in time is unknown too: a host whose row was not read may
+  // read less.
+  const partial = fixture({ deps: { versionTables: tables, readHosts: async () => ({ hosts: [host("a", "2")], incomplete: "1 of 2 host rows not read" }) } });
+  const cut = await partial.service.preview(ask(partial, { packages: false }), operator);
+  assert.deepEqual([cut.refusal, cut.status], ["Not every live host could be read (1 of 2 host rows not read), so nothing says each reads what this change needs. Nothing was written; try again.", 503]);
 });
 
 test("every host at or above the need passes, with the stamp said out loud and written", async () => {

@@ -232,3 +232,11 @@ test("a message withdrawn before the relay wrote it exits 0 and says so", { skip
 	assert.equal(await runSteer({ positionals: ["j1", TEXT] }, "redis://x", w.seams), 0);
 	assert.equal(w.out.join(""), `message ${MSG} for j1: withdrawn before it was written\n`);
 });
+
+test("a job no queue holds names registry rows that were not read in time: such a host may still hold it (#1062)", { skip: needsDeps }, async () => {
+	const w = world();
+	w.seams.queueFn = (_conn, { name } = {}) => ({ async getJob() { return null; }, async close() { w.closed.push(name); } });
+	w.seams.readLiveHostsFn = async () => ({ hosts: [], incomplete: "2 of 2 host rows not read" });
+	assert.equal(await runSteer({ positionals: ["j1", "hello"] }, "redis://x", w.seams), 1);
+	assert.equal(w.err.join(""), "error: no job j1 in 1 queue(s) [registry incomplete: 2 of 2 host rows not read; a host whose row was not read may still hold it]\n");
+});

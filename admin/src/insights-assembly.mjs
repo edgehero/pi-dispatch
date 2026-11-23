@@ -354,8 +354,11 @@ export async function assembleAllocationView(paths, counts, { fullPaths = false,
 export async function assembleSizingView(paths, nowMs, { readHostsFn = readHosts, envFn = processEnv } = {}) {
   const read = await readHostsFn({ url: paths.valkeyUrl });
   const rows = Array.isArray(read?.hosts) ? read.hosts : [];
-  const hosts = read?.unreachable ? { unreachable: String(read.unreachable) } : { rows: rows.map((h) => ({ name: h?.name, budgetMemMiB: h?.budgetMemMiB, budgetCpuCenti: h?.budgetCpuCenti, usedMemMiB: h?.usedMemMiB, usedCpuCenti: h?.usedCpuCenti })) };
-  const sizing = projectSizing(paths, { hostBudgets: read?.unreachable ? null : hostBudgetsOf(rows), nowMs, withSeries: true, envFn });
+  // A registry read in part (issue #1062): the rows that answered are drawn, `readInPart` says how many did not, and a
+  // raise offers no call, as over an unread registry, since the host it would fit on may be one not read.
+  const part = !read?.unreachable && typeof read?.incomplete === "string" && read.incomplete !== "" ? read.incomplete : null;
+  const hosts = read?.unreachable ? { unreachable: String(read.unreachable) } : { rows: rows.map((h) => ({ name: h?.name, budgetMemMiB: h?.budgetMemMiB, budgetCpuCenti: h?.budgetCpuCenti, usedMemMiB: h?.usedMemMiB, usedCpuCenti: h?.usedCpuCenti })), ...(part ? { readInPart: part } : {}) };
+  const sizing = projectSizing(paths, { hostBudgets: read?.unreachable || part ? null : hostBudgetsOf(rows), nowMs, withSeries: true, envFn });
   return { hosts, ...sizing, windowDays: SUGGEST_WINDOW_DAYS };
 }
 
@@ -713,6 +716,9 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
       host.defaultVenue = backends?.default ?? null;
     }
     out.capacity.venuesUnreadable = Boolean(registry?.unreachable) || live === null;
+    // A registry read in part (issue #1062): the venues of the hosts it read are drawn, the others not known, and the
+    // fleet's current slots are not known either (a host not read has no slot count here).
+    if (!out.capacity.venuesUnreadable && registry?.incomplete) out.capacity.venuesReadInPart = true;
     // Slot context is a current registry fact, not a sum of separately timed recorded capacities.
     const slots = reportHosts.map((host) => Number(byName.get(host.name)?.concurrency));
     out.capacity.totalSlots = !out.capacity.venuesUnreadable && slots.length > 0 && slots.every((n) => Number.isSafeInteger(n) && n > 0) && Number.isSafeInteger(slots.reduce((sum, n) => sum + n, 0)) ? slots.reduce((sum, n) => sum + n, 0) : null;
@@ -733,6 +739,8 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
     const hosts = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs });
     out.hosts = Array.isArray(hosts?.hosts) ? hosts.hosts : [];
     if (hosts?.unreachable) out.hostsUnreadable = true;
+    // Issue #1062: the hosts it lists are the rows that answered; a host whose row did not is not among them.
+    else if (hosts?.incomplete) out.hostsReadInPart = true;
     const sinceMs = costsSinceMs(out.allocation.window === "day" ? "24h" : out.allocation.window === "week" ? "week" : "mtd", nowMs);
     const start = out.allocation.window === "day" ? Math.floor(nowMs / INSIGHTS_DAY_MS) * INSIGHTS_DAY_MS : sinceMs;
     const records = io.scan({ logsDir: paths.logsDir, sinceMs: start, nowMs });
@@ -771,6 +779,8 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
   const hosts = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs });
   out.hosts = Array.isArray(hosts?.hosts) ? hosts.hosts : [];
   if (hosts?.unreachable) out.hostsUnreadable = true;
+  // Issue #1062: read in part, the money held is that of the hosts whose rows answered, so its total is not known.
+  else if (hosts?.incomplete) out.hostsReadInPart = true;
   const settings = io.settings({ settingsFile: paths.settingsFile });
   const overlay = settings?.overlay ?? {};
   const { jobCapMicros } = deploymentDollarCaps(overlay, env);
@@ -792,18 +802,20 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
   // headline falls back to: the charts and the recent fold beside it follow the project filter.
   const newerSkipped = Array.isArray(scannedAll) ? newerInScope(scannedAll, { nowMs, project: project || null }) : 0;
   if (newerSkipped > 0) out.spend.newerSkipped = newerSkipped;
-  if (hosts?.unreachable) {
+  if (hosts?.unreachable || hosts?.incomplete) {
     out.spend.today.heldMicros = null;
     // The count of jobs money is held for is read off the same rows (issue #962): 0 would say no job holds any.
     out.spend.today.heldJobs = null;
     out.spend.today.unattributedMicros = null;
     out.spend.today.reconciliationMismatch = false;
-    out.spend.today.hostsUnreadable = true;
+    // Read in part (issue #1062) is said so: some hosts' rows did not answer, so what they hold is not known.
+    if (hosts?.unreachable) out.spend.today.hostsUnreadable = true;
+    else out.spend.today.hostsReadInPart = true;
   }
   const recent = Array.isArray(scanned) ? inProject(scanned.filter((r) => recordInstant(r) >= nowMs - INSIGHTS_DAY_MS && recordInstant(r) <= nowMs), project) : [];
   out.recent24h = Array.isArray(scanned) ? foldCosts({ records: recent, subscriptions: subs?.subscriptions ?? [], pricing, nowMs, piAiPin: pricing.piAiVersion(), sinceMs: nowMs - INSIGHTS_DAY_MS }) : null;
   // The chart follows the project filter even when the headline falls back to deployment windows.
-  const chartHeld = hosts?.unreachable ? null : heldMoneyOf(out.hosts, { nowMs, project }).heldMicros;
+  const chartHeld = hosts?.unreachable || hosts?.incomplete ? null : heldMoneyOf(out.hosts, { nowMs, project }).heldMicros;
   Object.assign(out.spend, spendChartsOf({ records: costs?.records, sinceMs: costsSinceMs(window, nowMs), nowMs, jobCapMicros, subscriptions, pricing, heldMicros: chartHeld }));
   const choices = new Map();
   const choice = (provider, model) => {

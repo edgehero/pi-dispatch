@@ -89,17 +89,22 @@ export const HOST_SKEW_CLAIM_MS = 30_000;
  */
 const REGISTRY_OP_TIMEOUT_MS = 2_000;
 
-/** Reject rather than wait forever. See REGISTRY_OP_TIMEOUT_MS for why this is not optional here. */
-function bounded(promise, ms = REGISTRY_OP_TIMEOUT_MS) {
+/**
+ * Reject rather than wait forever. See REGISTRY_OP_TIMEOUT_MS for why this is not optional here. `armed`, when given,
+ * is a Set that holds the timer while it runs, so a caller that stops waiting on the bound (`readLiveHosts`, once its
+ * read has ended) can clear it rather than leave it holding the process for the rest of the bound.
+ */
+function bounded(promise, ms = REGISTRY_OP_TIMEOUT_MS, armed = null) {
 	return new Promise((resolve, reject) => {
 		// NOT unref'd, deliberately. An unref'd timer does not fire when nothing else is holding the event
 		// loop, so the bound would silently stop existing in exactly the situation it is for -- a shutdown
 		// where the hung command is the last thing running. The cost is that a pending call can delay exit
 		// by at most this timeout, which is the point: bounded, and short.
-		const t = setTimeout(() => reject(new Error("registry timeout")), ms);
+		const t = setTimeout(() => (armed?.delete(t), reject(new Error("registry timeout"))), ms);
+		armed?.add(t);
 		Promise.resolve(promise).then(
-			(v) => (clearTimeout(t), resolve(v)),
-			(e) => (clearTimeout(t), reject(e)),
+			(v) => (clearTimeout(t), armed?.delete(t), resolve(v)),
+			(e) => (clearTimeout(t), armed?.delete(t), reject(e)),
 		);
 	});
 }
@@ -233,7 +238,8 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 		async livePeers() {
 			const res = await readLiveHosts(redis, { now, timeoutMs });
 			if (res.unreachable) return res;
-			return { hosts: res.hosts.filter((h) => h.name !== name) };
+			// A listing that is not whole stays so (issue #1062): the peers it could not read may disagree.
+			return { hosts: res.hosts.filter((h) => h.name !== name), ...(res.incomplete ? { incomplete: res.incomplete } : {}) };
 		},
 
 		/**
@@ -291,7 +297,8 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
  *
  * `{ unreachable }` and `[]` are DIFFERENT ANSWERS and must never be collapsed by a caller, even where
  * one treats them alike: "there are no other hosts" and "I could not find out" differ, and a panel that
- * renders the second as the first tells an operator their fleet is gone when Valkey merely blinked.
+ * renders the second as the first tells an operator their fleet is gone when Valkey merely blinked. A third, since
+ * issue #1062: `{ hosts, incomplete }`, the rows that were read while others were not, which is neither.
  *
  * Each row also carries three fields read off the key's `PTTL` (issue #737), all null where the client has no `pttl`,
  * where the PTTL failed or timed out, or where the key went between the two reads (-2):
@@ -306,8 +313,20 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
  *     when the process died between that HSET and its PEXPIRE.
  * The PTTL goes out beside the HGETALL, in the same tick and each under its own bound, so it costs no round trip; a
  * failed PTTL costs these three fields and never the row.
+ *
+ * `timeoutMs` BOUNDS THE WHOLE READ (issue #1062), not each command: the rows are read side by side, every one under
+ * what is left of the bound once the index answered, so a stalled Valkey costs the caller one bound however many hosts
+ * are listed. Read one after another, each under a full bound, three hosts behind a stalled scan cost six seconds: a
+ * resume's five-second deadline was gone before its write, so it sent nothing and blamed the connection. A row that did
+ * not answer in time, or whose connection failed, may be a live host's, so the listing then carries `incomplete` ("2 of
+ * 3 host rows not read") and `unreadHosts` (those members' names), and every caller that says its list of hosts or
+ * queues may be short says that too; such a row is never pruned. A row Valkey answered with an error (a key that is
+ * not a hash) is no host's self-description: it degrades that row alone, as before, and is not pruned either.
  */
 export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs = REGISTRY_OP_TIMEOUT_MS, prune = true, ttlMs = HOST_TTL_MS } = {}) {
+	// On the monotonic clock: a wall clock stepped mid-read must not widen or cut the bound.
+	const deadline = performance.now() + timeoutMs;
+	const left = () => Math.max(1, Math.round(deadline - performance.now()));
 	let names;
 	try {
 		names = await bounded(redis.smembers(HOST_SET), timeoutMs);
@@ -317,29 +336,33 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 	} catch (err) {
 		return { unreachable: err?.message ?? "registry unreadable" };
 	}
-	const hosts = [];
 	const withTtl = typeof redis?.pttl === "function";
-	for (const member of names ?? []) {
-		// A name outside the worker name charset (`WORKER_NAME_RE`: a letter or a digit, then letters, digits, `.`, `_` and
-		// `-`, at most 64 in all) is no host's: anything with the Valkey's URL can SADD one, and a reader that took it would
-		// print it wherever rows are drawn (a 3,000-character member widened the console's page to 43,000 px). The charset
-		// alone, looser than the boot rule, which also refuses a `.json` or `.log` tail on `PI_WORKER_NAME` (`config.mjs`).
-		// Skipped before its row is even read, and never pruned: removing what someone else wrote is not a reader's call,
-		// and the member costs only its place in the set.
-		if (typeof member !== "string" || !WORKER_NAME_RE.test(member)) continue;
+	// A name outside the worker name charset (`WORKER_NAME_RE`: a letter or a digit, then letters, digits, `.`, `_` and
+	// `-`, at most 64 in all) is no host's: anything with the Valkey's URL can SADD one, and a reader that took it would
+	// print it wherever rows are drawn (a 3,000-character member widened the console's page to 43,000 px). The charset
+	// alone, looser than the boot rule, which also refuses a `.json` or `.log` tail on `PI_WORKER_NAME` (`config.mjs`).
+	// Skipped before its row is even read, and never pruned: removing what someone else wrote is not a reader's call,
+	// and the member costs only its place in the set.
+	const members = (names ?? []).filter((member) => typeof member === "string" && WORKER_NAME_RE.test(member));
+	const unread = Symbol("row not read");
+	const rowMs = left();
+	// Every row's bounds, cleared once the read ends: a row whose HGETALL failed at once stops waiting on its PTTL, whose
+	// bound would otherwise hold the process for the rest of it.
+	const armed = new Set();
+	const read = await Promise.all(members.map(async (member) => {
 		try {
 			const key = hostKey(member);
 			// Both issued before either is awaited. The PTTL's own failure (a throw, a rejection, a hang past its bound)
 			// is null here, so only the HGETALL decides whether the row is read at all.
 			const [row, pttl] = await Promise.all([
-				bounded(redis.hgetall(key), timeoutMs),
-				withTtl ? bounded((async () => redis.pttl(key))(), timeoutMs).catch(() => null) : null,
+				bounded(redis.hgetall(key), rowMs, armed),
+				withTtl ? bounded((async () => redis.pttl(key))(), rowMs, armed).catch(() => null) : null,
 			]);
 			if (!row || Object.keys(row).length === 0) {
 				// `prune: false` for a reader that promises to write nothing (the capacity report, issue #599): the stale member
-				// is skipped the same, and left for the next pruning reader.
-				if (prune) await bounded(redis.srem(HOST_SET, member), timeoutMs).catch(() => {});
-				continue;
+				// is skipped the same, and left for the next pruning reader. Only a row Valkey answered as empty is stale.
+				if (prune) await bounded(redis.srem(HOST_SET, member), left()).catch(() => {});
+				return null;
 			}
 			const beatAt = typeof row.beatAt === "string" && row.beatAt.trim() !== "" ? Number(row.beatAt) : NaN;
 			const nowMs = now();
@@ -348,10 +371,10 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 			// counted, so it joins `jobsMore` rather than vanishing.
 			// The row's own `name` stands for the member only when it holds to the same rule, else the row is no host's.
 			const name = row.name || member;
-			if (typeof name !== "string" || !WORKER_NAME_RE.test(name)) continue;
+			if (typeof name !== "string" || !WORKER_NAME_RE.test(name)) return null;
 			const live = parseLiveJobs(row.jobs);
 			const more = parseJobsMore(row.jobsMore);
-			hosts.push({
+			return {
 				...row,
 				jobs: live.jobs,
 				jobsMore: live.jobs === null ? more : (more ?? 0) + live.dropped,
@@ -364,13 +387,32 @@ export async function readLiveHosts(redis, { now = () => Date.now(), timeoutMs =
 				// skew between two machines, which is its own signal and not this field's to report (`skewMs` is).
 				staleMs: Number.isFinite(beatAt) ? Math.max(0, nowMs - beatAt) : null,
 				...expiryFields(pttl, { ttlMs, beatAt, nowMs }),
-			});
-		} catch {
-			// One unreadable row degrades that row, never the listing.
+			};
+		} catch (err) {
+			// Valkey's error reply about the key degrades that row, never the listing. No answer in time (the bound's own
+			// error) or a failed connection says nothing about the host, so the listing is not whole.
+			return err?.name === "ReplyError" ? null : unread;
 		}
-	}
+	})).finally(() => {
+		for (const t of armed) clearTimeout(t);
+	});
+	const hosts = read.filter((row) => row !== null && row !== unread);
 	hosts.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-	return { hosts };
+	// The members whose rows did not answer (`unreadHosts`), so a reader that keeps rows across reads keeps only theirs:
+	// a row that answered empty was pruned and its host is gone, as a whole read says.
+	const unreadHosts = members.filter((_, i) => read[i] === unread).sort();
+	return unreadHosts.length > 0 ? { hosts, incomplete: `${unreadHosts.length} of ${members.length} host rows not read`, unreadHosts } : { hosts };
+}
+
+/**
+ * The names in a `readLiveHosts` listing, each through `normalize`, as a Set, or null when the listing cannot vouch for
+ * every live host: unreachable, not a list, or `incomplete` (issue #1062). For a caller that acts on a host being
+ * ABSENT (the host-lost sweep fails a recovery whose host is gone): a row that was not read in time may be a live
+ * host's, so a listing that is not whole is "not known", never a fleet without that host.
+ */
+export function liveHostNamesOf(read, normalize = (name) => name) {
+	if (read?.unreachable || read?.incomplete || !Array.isArray(read?.hosts)) return null;
+	return new Set(read.hosts.map((h) => normalize(h.name)));
 }
 
 /** `readLiveHosts`'s three PTTL fields (see there). `pttl` is the reply, or null where none was read. */

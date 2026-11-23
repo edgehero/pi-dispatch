@@ -40,8 +40,11 @@ From any terminal:
   did not name it, on a connection of its own, so a look for queues that stalls does not hold it up. When that look fails too
   (no answer, or an error from Valkey), the report names the queue as not resumed and the command exits 1. When the shell sets another name, or sets one the
   `.env` does not, or the `.env` cannot be read, the line says so (`[this host's queue not added: ...]`) and leaves that queue out. When the registry or the look could not be read
-  (`[registry unreadable: ...]`, `[queue scan incomplete]`), a second line says the list of queues may be short and to pause (or resume)
-  again once Valkey answers; the exit code stays 0.
+  (`[registry unreadable: ...]`, `[queue scan incomplete]`), or some of the registry's host rows were not read in time
+  (`[registry incomplete: 2 of 3 host rows not read]`), a second line says the list of queues may be short and to pause (or resume)
+  again once Valkey answers; the exit code stays 0. The registry's rows are read side by side within one bound, so a
+  Valkey that holds them costs that bound once, however many hosts are registered, and leaves the rest of the five
+  seconds for the writes.
   Both wait about five seconds on a Valkey, as `status` does. When a queue is not confirmed, the command exits 1
   and says of each queue whether it was paused (or resumed), sent but not confirmed, refused by Valkey before the write
   ran (unchanged: an ACL that denies it, a read-only replica, a Valkey still loading or busy), answered with another
@@ -51,7 +54,7 @@ From any terminal:
   and says whether it is paused or running now, or that it may have partly applied when that read does not tell.
   "nothing changed" is said only when no write was sent or every one was refused before it ran. A pause goes to every
   queue at once; a resume goes one queue after another and sends none after one that is not confirmed, since a resume
-  that lands later starts jobs. When the host registry or the look for queues could not be read too, the report's first
+  that lands later starts jobs. When the host registry or the look for queues could not be read whole too, the report's first
   line names it and the report says the list of queues may be short. Then run `pi-dispatch status` (once Valkey
   answers, when it did not) to see each queue, put right what Valkey refused or failed on, and run the same command
   again: pausing a paused queue or resuming a running one is harmless.
@@ -91,20 +94,26 @@ From any terminal:
 connection and answers nothing (a frozen server, a stopped container behind a live port) no longer holds the command
 open. Every read ends by then; a port that takes no connection at all can hold the command up to a second and a half
 longer while the connection's own reachability check ends. A queue whose paused state or counts did not answer in time
-is named in `unavailableQueues`, with `partial: true`. Counts that did not answer are left out of the sums, never read as zero (with no
+is named in `unavailableQueues`, with `partial: true`. So is a queue one of whose reads Valkey answered with an error
+(its `bull:<queue>:meta` key holding a string fails its paused state, say): `queueErrors` names it with Valkey's error
+code alone, such as `{"pi-jobs@hostb":"WRONGTYPE"}`, the read that got the error is left out while its other read
+(its counts, here) is still summed, the `error:` line says Valkey answered a read with an error, the line under it
+names the queue with that code, and every other queue is read and summed as usual. Counts that did not answer are left out of the sums, never read as zero (with no
 queue answering there are no count fields at all), and `pausedState` is `null` when the queues that answered are all
 paused, since the one that did not may be running. The line is still printed, then an `error:` line naming what it
 leaves out of each such queue (its paused state, its counts, or both), with the connection's own error where one was
-seen, such as "nothing answers VALKEY_URL (127.0.0.1:6379)", and "is it running?" only when nothing answered at all.
+seen, such as "nothing answers VALKEY_URL (127.0.0.1:6379)", and "could not reach Valkey" with "is it running?" only
+when nothing answered at all.
 The exit code is then 1, as for a Valkey that refuses the connection. The other parts say what they could not read in
 their own words: `fleet` for the registry, `waitingDetails.partial`, `pollers.complete: false`, and a consumer whose
 queue's demand did not answer is never called stalled. With two Valkeys (this shell's and the `.env`'s disagree), each
 gets its own five seconds. `status --target` waits the same way; a queue that did not answer is in its own
 `unavailableQueues` with `complete: false`, and its exit code stays 0.
 
-When the host registry or the look for queues could not be read, the list of queues may be short: a queue it did not
+When the host registry or the look for queues could not be read whole, the list of queues may be short: a queue it did not
 find is in none of the sums. The line then has `queuesMayBeShort: true`, and a `warning:` line under it says so and to run
-`pi-dispatch status` again once Valkey answers. That alone does not change the exit code; a queue it found that did not
+`pi-dispatch status` again once Valkey answers. Registry rows that were not read in time count the same, and the line
+names them in `fleetIncomplete` ("2 of 3 host rows not read"), as `fleet` names a registry that could not be read. That alone does not change the exit code; a queue it found that did not
 answer still does. `status --target` says the same.
 
 `waitingDetails.rows` explains a bounded sample of delayed entries. A row contains `jobId`, `queue`, `dueAt`,

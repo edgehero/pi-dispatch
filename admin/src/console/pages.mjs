@@ -48,7 +48,7 @@ import { triggerListOf, TRIGGER_LIST_KINDS } from "../trigger-list.mjs";
 import { loadWatchData, parseWatchQuery, watchPanel, watchBoardPanel } from "./watch.mjs";
 import { readForkPoints } from "../run-fork.mjs";
 import { readTriggerEditor, secretBundlesView, triggerDetailOf, TRANSCRIPT_ID_RE } from "../read-model.mjs";
-import { ageText, beatAgeOf, hostsUnread } from "./panels/common.mjs";
+import { ageText, beatAgeOf, hostsUnread, registryReadInPart } from "./panels/common.mjs";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { BACKEND_NAMES, BACKENDS } from "@edgehero/pi-dispatch/backends";
 import { RECOVERY_CAP } from "@edgehero/pi-dispatch/recovery-queue";
@@ -223,6 +223,8 @@ function hostHeadline(view) {
   const host = view.data?.host ?? view.data?.snapshot?.hostBudgets?.find((h) => h.name === view.query?.name);
   // Issue #844: no row because nothing was read is not a host without one.
   if (!host && hostsUnread(view.data?.snapshot)) return html`Not known: the hosts could not be read, so nothing here says whether ${view.query?.name ?? "this host"} is live.`;
+  // Issue #1062: a host with no row over a registry read in part may be one whose row did not answer in time.
+  if (!host && registryReadInPart(view.data?.snapshot)) return html`Not known: the host registry was read in part, so nothing here says whether ${view.query?.name ?? "this host"} is live.`;
   if (!host) return html`No live registry row for ${view.query?.name ?? "this host"}.`;
   const venues = host.backends?.blessed ?? [];
   const jobs = host.jobs;

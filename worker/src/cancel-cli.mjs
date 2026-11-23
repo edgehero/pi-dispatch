@@ -174,6 +174,8 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 			discover(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }),
 		]);
 		const blind = fleet?.unreachable ?? null;
+		// The registry's rows not read in time (issue #1062): a host whose row was not read may hold the job too.
+		const registryShort = blind === null ? fleet?.incomplete ?? null : null;
 		const names = unionNames(fleetNames(fleet?.hosts), existing);
 
 		// Constructed INSIDE the try (the pause loop's leak posture); first queue that knows the id wins.
@@ -196,6 +198,9 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 			}
 		}
 		if (!job) {
+			// Registry rows not read in time (issue #1062) are said apart from a registry that could not be read at all: the
+			// two never come together, since `registryShort` is only taken from a registry that answered.
+			if (registryShort) return fail(`no job ${jobId} in ${names.length} queue(s) [registry incomplete: ${registryShort}; a host whose row was not read may still hold it]`);
 			return fail(`no job ${jobId} in ${names.length} queue(s)${blind ? ` [registry unreadable: ${boundedText(blind)} — a host that is not registered may still hold it]` : ""}`);
 		}
 

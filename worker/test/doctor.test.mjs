@@ -6287,6 +6287,19 @@ test("an unreadable registry is SAID, never silently absent", async () => {
 	assert.equal(c.ok, true, "not knowing is not a fault of this host");
 });
 
+test("a registry read in part is SAID: the hosts whose rows were not read are in none of the fleet's checks (#1062)", async () => {
+	const checks = await collectChecks(
+		{ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" },
+		fleetSeams([], { readHosts: async () => ({ hosts: [{ name: "mini2", tz: Intl.DateTimeFormat().resolvedOptions().timeZone }], incomplete: "1 of 3 host rows not read" }) }),
+	);
+	const c = checks.find((c) => /read in part/.test(c.label));
+	assert.ok(c, JSON.stringify(checks.map((x) => x.label).filter((l) => /Fleet/.test(l))));
+	assert.equal(c.label, "Fleet: the host registry was read in part (1 of 3 host rows not read); the fleet's checks leave those hosts out");
+	assert.equal(c.ok, true, "not knowing is not a fault of this host");
+	const whole = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, fleetSeams([{ name: "mini2", tz: Intl.DateTimeFormat().resolvedOptions().timeZone }]));
+	assert.ok(!whole.some((x) => /read in part/.test(x.label)), "a whole listing adds no line");
+});
+
 // ── issue #501 part 6: the fleet's dollar caps, and the round's doctor lines about models ───────────────
 
 // A settings file that does not exist, so no test reads the developer's own overlay.

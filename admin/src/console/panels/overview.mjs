@@ -55,7 +55,7 @@ import { NO_EXPLANATION, docsHref } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { TIMELINE_DEFAULTS, TIMELINE_ROWS, TIMELINE_WAIT_WORDS, TIMELINE_ZOOMS, timelineHtml, timelineLegend, timelineModel } from "../timeline.mjs";
-import { BEAT_FRESH_MS, HOSTS_UNREAD_TEXT, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, hostsUnread, moneyHtml, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
+import { BEAT_FRESH_MS, HOSTS_UNREAD_TEXT, NO_BEAT_READ, REGISTRY_PART_TEXT, registryReadInPart, rowLastSeen, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, hostsUnread, moneyHtml, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
 
 // ---- the sentences -----------------------------------------------------------------------------------------------------
 
@@ -175,6 +175,9 @@ const UNREAD = Object.freeze({
   doctor: "The doctor results could not be read, so failing doctors are not counted.",
   registry: "The host registry could not be read, so failing doctors are not counted.",
   registryNoWorker: "The host registry could not be read and the queue sees no worker connected, so failing doctors are not counted and whether a worker is online is not known.",
+  // Issue #1062: a registry that answered with some hosts' rows not read in time.
+  registryPart: "The host registry was read in part, so failing doctors are not counted.",
+  registryPartNoWorker: "The host registry was read in part and the queue sees no worker connected, so failing doctors are not counted and whether a worker is online is not known.",
   day: "The run history could not be read, so the day's failures are not counted.",
   waiting: "The waiting jobs could not be read.",
   active: "The running jobs could not be read, so what runs is not known.",
@@ -359,7 +362,7 @@ function needsOf(s) {
   const read = unread.length === 0;
   const noWorker = workers.none;
   const clear = read && !noWorker && questions.length === 0 && fix === 0 && day.read && !day.floor && day.failed === 0 && day.refused === 0;
-  return { questions, answering, failedRows, failedJobs, superseded, failingHosts, fix, unread, questionsKnown: parkedRead, fixKnown: failedRead && doctorRead && registryRead, read, day, noWorker, workerKnown: workers.online !== null || workers.connected > 0, clear };
+  return { questions, answering, failedRows, failedJobs, superseded, failingHosts, fix, unread, questionsKnown: parkedRead, fixKnown: failedRead && doctorRead && registryRead, read, day, noWorker, workerKnown: (workers.online !== null && !(workers.atLeast === true && workers.online === 0)) || workers.connected > 0, clear };
 }
 
 /** Whether a queue's active list could not be read (the snapshot's `activeUnreachable`, issue #962). */
@@ -401,8 +404,11 @@ export function overviewHeadline(view) {
   // With no worker online the line leads with it: nothing in line runs until one starts, which needs the person first.
   const lead = `${need.noWorker ? `${NO_WORKER_TEXT} ` : ""}${parts.length > 0 ? `Needs you: ${parts.join(" and ")}. ` : ""}`;
   if (!need.read) {
-    const nouns = NEEDS_READS.filter(([key]) => need.unread.includes(key)).map(([, noun]) => noun);
-    return html`${lead}${capFirst(andList(nouns))} could not be read, so ${parts.length > 0 ? "more may need you" : "what needs you is not known"}. ${capFirst(running)}.`;
+    // A registry read in part (issue #1062) is said so, never among the reads that could not be read.
+    const part = registryReadInPart(s) && need.unread.includes("registry");
+    const nouns = NEEDS_READS.filter(([key]) => need.unread.includes(key) && !(part && key === "registry")).map(([, noun]) => noun);
+    const said = [...(nouns.length > 0 ? [`${capFirst(andList(nouns))} could not be read`] : []), ...(part ? [`${nouns.length > 0 ? "the" : "The"} host registry was read in part`] : [])].join(" and ");
+    return html`${lead}${said}, so ${parts.length > 0 ? "more may need you" : "what needs you is not known"}. ${capFirst(running)}.`;
   }
   return lead !== "" ? html`${lead}${capFirst(running)}.` : html`Nothing needs you. ${capFirst(running)}.`;
 }
@@ -477,7 +483,8 @@ export const overviewNeeds = overviewPanel("Needs you", (s, view) => {
     : html`<div class="bigpair">${needsBig(need.questionsKnown, need.questions.length, { one: "question", many: "questions", status: "parked", href: hrefTo(view, "parked") })}${needsBig(need.fixKnown, need.fix, { one: "to fix", many: "to fix", status: "failed", href: hrefTo(view, "fleet") })}</div>`;
   // An unread registry says, beside the doctors it leaves uncounted, that whether a worker is online is not known either
   // where the queue sees none connected (BullMQ's list answers that alone).
-  const unreadText = (key) => (key === "registry" && !need.workerKnown ? UNREAD.registryNoWorker : UNREAD[key]);
+  const part = registryReadInPart(s);
+  const unreadText = (key) => (key === "registry" ? UNREAD[`${part ? "registryPart" : "registry"}${need.workerKnown ? "" : "NoWorker"}`] : UNREAD[key]);
   const notes = [...(need.noWorker ? [NO_WORKER_TEXT] : []), ...need.unread.map(unreadText), ...(shown.some((r) => r.tagless) ? [NEEDS_UNKNOWN_PROJECT_TEXT] : [])];
   const body = html`${head}${shown.length > 0 ? html`<ul class="rows">${shown.map((r) => r.pill)}</ul>` : null}${more}${answering}${superseded}${need.clear ? ui.empty({ status: "ok", icon: "done", title: "All clear", body: NEEDS_EMPTY.body }) : null}${notes.map((n) => html`<p class="card__sub">${n}</p>`)}${dayLine(need.day, view)}${zero ? null : html`<p class="card__sub">${NEEDS_DEFINITION}</p>`}`;
   return ui.card({ title: "Needs you", body });
@@ -623,14 +630,15 @@ function runningLabel(n, slots) {
 export const overviewActive = overviewPanel("Running", (s) => {
   const n = Array.isArray(s.active) ? s.active.length : 0;
   const lastSeen = Boolean(s.queue?.fleetDegraded);
-  const slots = hostsOf(s).map((h) => ({ h, sl: slotsOf(h, lastSeen) }));
+  // Per row (issue #1062): over a registry read in part, a row it read is current and draws its slots.
+  const slots = hostsOf(s).map((h) => ({ h, sl: slotsOf(h, rowLastSeen(s, h)) }));
   const rows = slots.map(({ h, sl }) =>
     ui.rowPill({ items: [html`<b title="${h.name}">${h.name}</b>`, slotDots(h.name, sl)], end: slotsEnd(sl) }),
   );
   const live = n > 0 ? ui.chip("live", { status: "running", icon: "running" }) : null;
   // A registry that could not be read says so, under the rows last seen or in their place, never that no host is
   // registered; one never read says that nothing is known of the hosts, since there is no "last seen" to show.
-  const note = hostsUnread(s) ? HOSTS_UNREAD_TEXT : lastSeen ? REGISTRY_UNREAD_TEXT : rows.length === 0 ? HOSTS_EMPTY.body : null;
+  const note = hostsUnread(s) ? HOSTS_UNREAD_TEXT : lastSeen ? (registryReadInPart(s) ? REGISTRY_PART_TEXT : REGISTRY_UNREAD_TEXT) : rows.length === 0 ? HOSTS_EMPTY.body : null;
   // An active list that could not be read (issue #962): no 0 and no "nothing is running"; what the queues that
   // answered hold is a floor.
   const unread = activeUnread(s);
@@ -1145,6 +1153,8 @@ function pausedText(s) {
  */
 function workersText(s, w) {
   if (w.online === null) return "as last seen";
+  // A registry read in part (issue #1062): the rows it read that beat, a floor.
+  if (w.atLeast === true) return w.online > 0 ? `at least ${count(w.online)} beating` : NO_BEAT_READ;
   // The registry's rows as `workersOnline` and `resolveWorkerCount` count them (`count` is their number when there are any).
   const rows = Array.isArray(s.hostBudgets) ? s.hostBudgets.length : 0;
   if (rows === 0) return Number.isSafeInteger(s.queue?.workers) && s.queue.workers >= 0 ? `${count(s.queue.workers)} connected` : "none registered";
@@ -1173,9 +1183,11 @@ export const overviewHosts = overviewPanel("Hosts", (s, view) => {
       ? ui.banner({ status: "attention", icon: "beat", sm: true, title: STALE_BEATS_TEXT })
       : null;
   // A registry never read has no rows "as last seen": it says the hosts are not known (issue #962).
-  const degraded = q.fleetDegraded ? ui.banner({ status: "attention", icon: "fleet", sm: true, title: hostsUnread(s) ? HOSTS_UNREAD_TEXT : REGISTRY_UNREAD_TEXT }) : null;
-  const lastSeen = Boolean(q.fleetDegraded);
+  const degraded = q.fleetDegraded ? ui.banner({ status: "attention", icon: "fleet", sm: true, title: hostsUnread(s) ? HOSTS_UNREAD_TEXT : registryReadInPart(s) ? REGISTRY_PART_TEXT : REGISTRY_UNREAD_TEXT }) : null;
   const rows = hosts.map((h) => {
+    // Per row (issue #1062): every row while the registry could not be read, and over one read in part only a row it
+    // did not reach, is as last seen; a row it read is drawn as current, its beat judged and its slots drawn.
+    const lastSeen = rowLastSeen(s, h);
     const stale = !beatFresh(h);
     const age = beatAgeOf(h);
     // Running's rule for the slots, so the two cards never disagree: none drawn free from a registry not read this tick.

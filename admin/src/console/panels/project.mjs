@@ -44,6 +44,12 @@ export const PROJECT_RUNS_UNREAD = "Not known: the run history could not be read
 /** The spend card where the hosts were not read at all (`spend.heldUnread`): no amount is "known from the hosts that reported it". */
 export const PROJECT_HOLDS_UNREAD = "Held money is not known: the hosts could not be read.";
 
+/** The same over a host registry read in part (issue #1062, `spend.heldReadInPart`): some rows did not answer. */
+export const PROJECT_HOLDS_PART = "Held money is not known: the host registry was read in part.";
+
+/** The Job size card over a host registry read in part (issue #1062, `sizingReadInPart`): judged on the rows read. */
+export const PROJECT_SIZING_PART = "The host registry was read in part: this size is judged against the hosts whose rows answered, and a host whose row did not answer may take more.";
+
 export const projectTitle = (view) => view?.project?.name || view?.id || "Project";
 export const projectDescription = (view) => view?.state === "ready" ? `${view.members.length} member${view.members.length === 1 ? "" : "s"}; id ${view.id} in ${view.file}.` : "Project configuration could not be read.";
 
@@ -54,7 +60,7 @@ export function projectSpend(v) {
   const totalKnown = Number.isFinite(s.usedMicros);
   const headline = splitKnown ? s.settledMicros : totalKnown ? s.usedMicros : s.settledMicros;
   const pct = totalKnown && s.shareMicros > 0 ? (s.usedMicros / s.shareMicros) * 100 : null;
-  return card(`Spend this ${s.window}`, html`<div class="proj-kv"><b>${s.floor ? "at least " : ""}${money(headline)}</b><span>${splitKnown ? html`+ ${money(s.heldMicros)} held` : totalKnown ? "spent and held" : "spent; held amount unknown"}${s.envelope ? html`, of a ${money(s.shareMicros)} share` : "; no envelope, so no share"}</span></div>${pct === null ? null : html`${ui.meter({ value: s.usedMicros, max: s.shareMicros, label: "Spent and held against the project's allocation share" })}<p class="proj-meter-label">${money(s.usedMicros)} / ${money(s.shareMicros)}</p>`}${!splitKnown && totalKnown ? note("The split between spent and held is unknown.") : null}${s.heldIncomplete && !totalKnown ? note(s.heldUnread ? PROJECT_HOLDS_UNREAD : html`Held money is incomplete; ${money(s.heldKnownMicros)} is known from the hosts that reported it.`) : null}${s.problem ? note(s.problem) : null}`);
+  return card(`Spend this ${s.window}`, html`<div class="proj-kv"><b>${s.floor ? "at least " : ""}${money(headline)}</b><span>${splitKnown ? html`+ ${money(s.heldMicros)} held` : totalKnown ? "spent and held" : "spent; held amount unknown"}${s.envelope ? html`, of a ${money(s.shareMicros)} share` : "; no envelope, so no share"}</span></div>${pct === null ? null : html`${ui.meter({ value: s.usedMicros, max: s.shareMicros, label: "Spent and held against the project's allocation share" })}<p class="proj-meter-label">${money(s.usedMicros)} / ${money(s.shareMicros)}</p>`}${!splitKnown && totalKnown ? note("The split between spent and held is unknown.") : null}${s.heldIncomplete && !totalKnown ? note(s.heldUnread ? (s.heldReadInPart === true ? PROJECT_HOLDS_PART : PROJECT_HOLDS_UNREAD) : html`Held money is incomplete; ${money(s.heldKnownMicros)} is known from the hosts that reported it.`) : null}${s.problem ? note(s.problem) : null}`);
 }
 
 export function projectRuns(v) {
@@ -135,7 +141,7 @@ export function projectSizing(v) {
   const p = data(v); const s = p.sizing;
   const dim = (label, d, words) => html`<p class="proj-verdict"><b>${label}: ${d?.suggested ? `suggest ${label === "Memory" ? gibText(d.suggested) : formatCpus(d.suggested) + " CPUs"}` : d?.reason === "not-enough-runs" ? "not enough runs" : d?.reason ?? "unknown"}.</b> ${(label === "Memory" ? memoryWords(words) : words) ?? "No suggestion could be read."}</p>`;
   const action = s?.action;
-  return card("Job size", html`${projectSizingChart(p)}${s ? html`${dim("Memory", s.memory, s.words?.memory)}${dim("CPUs", s.cpu, s.words?.cpu)}${[memoryWords(s.words?.memoryHeld), s.words?.memoryFact, s.words?.cpuFact, memoryWords(s.words?.refusal), s.words?.memoryCeiling].filter(Boolean).map(note)}` : note("No size suggestion could be read.")}${p.sizingUnreadable ? note("The measurements or scoped limits could not be read completely.") : null}${note("Measured inside the jobs, so advisory.")}${s?.call && canAct(v) ? html`<p class="proj-sub">The exact call</p><div class="cmd"><code>${s.call}</code><button class="btn btn--sm" type="button" data-copy hidden>Copy</button></div>${action ? note(action.row === null ? `Adds a scoped-limits row for project:${p.id}.` : `Applies to scoped-limits row ${action.row}, project:${p.id}.`) : null}${canAct(v) && action ? actForm(action.action, { hidden: [...(action.index === undefined ? [] : [["index", action.index, "int"]]), ["limit", JSON.stringify(action.limit), "json"]], label: "Preview this size" }) : null}` : null}`, "peak memory per run, last 30 days");
+  return card("Job size", html`${projectSizingChart(p)}${s ? html`${dim("Memory", s.memory, s.words?.memory)}${dim("CPUs", s.cpu, s.words?.cpu)}${[memoryWords(s.words?.memoryHeld), s.words?.memoryFact, s.words?.cpuFact, memoryWords(s.words?.refusal), s.words?.memoryCeiling].filter(Boolean).map(note)}` : note("No size suggestion could be read.")}${p.sizingUnreadable ? note("The measurements or scoped limits could not be read completely.") : null}${p.sizingReadInPart === true ? note(PROJECT_SIZING_PART) : null}${note("Measured inside the jobs, so advisory.")}${s?.call && canAct(v) ? html`<p class="proj-sub">The exact call</p><div class="cmd"><code>${s.call}</code><button class="btn btn--sm" type="button" data-copy hidden>Copy</button></div>${action ? note(action.row === null ? `Adds a scoped-limits row for project:${p.id}.` : `Applies to scoped-limits row ${action.row}, project:${p.id}.`) : null}${canAct(v) && action ? actForm(action.action, { hidden: [...(action.index === undefined ? [] : [["index", action.index, "int"]]), ["limit", JSON.stringify(action.limit), "json"]], label: "Preview this size" }) : null}` : null}`, "peak memory per run, last 30 days");
 }
 
 export function projectRecent(v) {

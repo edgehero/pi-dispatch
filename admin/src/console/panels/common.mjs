@@ -140,9 +140,30 @@ export const HOSTS_UNREAD_TEXT = "The hosts could not be read, so what they hold
 /**
  * Whether NOTHING was read about the hosts: no snapshot at all, or one whose registry read failed before any had
  * succeeded (`queue.fleetDegraded` with `hostsReadAt` null). A degraded read after a good one still shows the rows as
- * they were last seen, which the panels say in their own sentence, so that is not this.
+ * they were last seen, which the panels say in their own sentence, so that is not this; nor is a registry read in part
+ * (issue #1062, `registryReadInPart`), whose rows that answered are shown, and whose `hostsReadAt` is that read's.
  */
-export const hostsUnread = (snapshot) => !snapshot || (Boolean(snapshot.queue?.fleetDegraded) && snapshot.hostsReadAt === null);
+export const hostsUnread = (snapshot) => !snapshot || (Boolean(snapshot.queue?.fleetDegraded) && snapshot.queue?.registryReadInPart !== true && snapshot.hostsReadAt === null);
+
+/** Whether the snapshot's registry was read in part (issue #1062): it answered, some hosts' rows did not in time. */
+export const registryReadInPart = (snapshot) => Boolean(snapshot?.queue?.fleetDegraded) && snapshot?.queue?.registryReadInPart === true;
+
+/**
+ * Whether a host row is drawn "as last seen", its beat and slots not judged: every row while the registry could not be
+ * read, and over a registry read in part (issue #1062) only a row that read did not reach (`notRead`); a row it read is
+ * current and is drawn as such.
+ */
+/** A beat count over a registry read in part (issue #1062) whose floor is 0: no "at least 0". */
+export const NO_BEAT_READ = "no host's beat was read";
+
+export const rowLastSeen = (snapshot, h) => Boolean(snapshot?.queue?.fleetDegraded) && (snapshot?.queue?.registryReadInPart !== true || h?.notRead === true);
+
+/**
+ * What a panel says over a registry read in part (issue #1062), where it says "could not be read" of one that did not
+ * answer at all: the rows that answered are this read's, and a host whose row did not (`notRead` on its row) is as it
+ * was last seen.
+ */
+export const REGISTRY_PART_TEXT = "The host registry was read in part: some hosts' rows did not answer in time, so those hosts are as they were last seen.";
 
 /**
  * Whether a page's data holds something the console could not read (issue #962), the one rule of the live pill's Not
@@ -335,6 +356,9 @@ export function workersOnline(s) {
   const hosts = Array.isArray(s?.hostBudgets) ? s.hostBudgets : [];
   const { count: n } = resolveWorkerCount({ hosts, workerCount: q.workers });
   const connected = Number.isSafeInteger(q.workers) && q.workers > 0 ? q.workers : 0;
+  // Read in part (issue #1062): the rows it read that beat are a floor (`atLeast`), a row it did not reach has no beat
+  // of now (`beatAgeOf`), and neither "no worker" nor stale beats is claimed. Wholly unread: not known.
+  if (q.fleetDegraded && q.registryReadInPart === true) return { count: n, online: hosts.filter((h) => beatFresh(h)).length, atLeast: true, connected, staleBeats: false, none: false };
   if (q.fleetDegraded) return { count: n, online: null, connected, staleBeats: false, none: false };
   if (hosts.length === 0) return { count: n, online: connected, connected, staleBeats: false, none: connected === 0 };
   const online = hosts.filter((h) => beatFresh(h)).length;

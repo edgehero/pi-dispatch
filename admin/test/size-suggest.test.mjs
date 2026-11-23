@@ -493,6 +493,13 @@ test("assembleSizingView reads the registry through its seam and caps a raise pe
   assert.equal(view.projects.shop.call, 'dispatch_limit_add {"scope":"project:shop","memory":"5g"}');
   const down = await indexMod.assembleSizingView(paths, NOW, { readHostsFn: async () => ({ unreachable: "timed out" }) });
   assert.deepEqual([down.hosts, down.projects.shop.memory.suggested, down.projects.shop.memory.held, down.projects.shop.call], [{ unreachable: "timed out" }, null, "no-cap", null]);
+  // Issue #1062: a registry read in part draws the rows that answered, says so, and offers no call: the host a raise
+  // would fit on may be one whose row was not read.
+  const part = await indexMod.assembleSizingView(paths, NOW, { readHostsFn: async () => ({ hosts: rows.slice(0, 1), incomplete: "1 of 2 host rows not read" }) });
+  assert.deepEqual([part.hosts, part.projects.shop.memory.held, part.projects.shop.call], [{ rows: rows.slice(0, 1), readInPart: "1 of 2 host rows not read" }, "no-cap", null]);
+  const drawn = String(insightsBody({ sizing: part }, NOW));
+  assert.match(drawn, /host budgets read in part: 1 of 2 host rows not read; a raise offers no call/);
+  assert.doesNotMatch(drawn, /host budgets not read/);
   // the real reader on an unparseable URL degrades at once, without a connection
   const real = await indexMod.assembleSizingView(paths, NOW);
   assert.ok(typeof real.hosts.unreachable === "string");

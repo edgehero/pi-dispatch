@@ -6867,6 +6867,14 @@ test("issue #645: the host-lost sweep is built over the recovery queues and the 
 	// the read cannot be answered: null, which extends a deadline, never an empty fleet, which would fail the run.
 	assert.equal(typeof built[0].liveHosts, "function");
 	assert.equal(await built[0].liveHosts(), null);
+	// Issue #1062: a registry read in part is not known either. h2's row does not answer within the read's bound, and h2
+	// may be the recovery's host, still beating: null extends its deadline, where a fleet of h1 alone would fail the run.
+	const registry = out.captured.redis;
+	const row = (name) => ({ name, beatAt: String(DURABLE_NOW) });
+	Object.assign(registry, { smembers: async () => ["h1", "h2"], hgetall: (key) => (key === "host:h:h2" ? new Promise(() => {}) : Promise.resolve(row("h1"))), pttl: async () => 60_000 });
+	assert.equal(await built[0].liveHosts(), null, "a listing that is not whole is never a fleet without the host it could not read");
+	registry.hgetall = async (key) => row(key.slice("host:h:".length));
+	assert.deepEqual([...(await built[0].liveHosts())].sort(), ["h1", "h2"], "a whole listing names its hosts");
 	await settleDurable();
 	assert.equal(swept, 1, "run once at boot");
 	await handed.reapers.find((r) => r.name === "recovery_host_lost").reap();
