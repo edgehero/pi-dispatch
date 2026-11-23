@@ -1643,7 +1643,7 @@ test("createFleetReader: a cut switch preview reads the shared queue and the reg
 });
 
 // Issue #1053: one queue's read that Valkey answered with an error failed the switch preview's snapshot for the fleet.
-test("createFleetReader: a switch preview's read names a queue whose read Valkey answered with an error, by the reply's code alone, and reads every other; a per-tick read and any other failure still fail it (#1053)", async () => {
+test("createFleetReader: a read names a queue whose read Valkey answered with an error, by the reply's code alone, and reads every other, on a switch preview and on the per-tick read; any other failure still fails it (#1053, #1064)", async () => {
   const redis = { on() {}, async get() { return null; }, async mget(...keys) { return keys.map(() => null); }, async smembers() { return []; }, async hgetall() { return {}; }, async zrevrangebyscore() { return []; }, async exists() { return 0; }, disconnect() {} };
   const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
   let failing = { "pi-jobs@hostb": { paused: () => Promise.reject(reply("WRONGTYPE Operation against a key holding the wrong kind of value")) } };
@@ -1661,27 +1661,193 @@ test("createFleetReader: a switch preview's read names a queue whose read Valkey
   const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 }, { makeQueueFn: queue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts }), discoverHostQueuesFn: async () => ({ names: ["pi-jobs@hosta", "pi-jobs@hostb"], incomplete: null }), nowFn: () => AT });
   try {
     const s = await reader.snapshot({ switchQueues: true });
-    assert.deepEqual(s.switchErrored, [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }]);
+    assert.deepEqual(s.queueErrors, { "pi-jobs@hostb": "WRONGTYPE" });
+    assert.equal(Object.hasOwn(s, "switchErrored"), false, "one name for it, the CLI's");
     assert.deepEqual(s.queueCounts.map((q) => [q.queue, q.paused, q.counts.waiting]), [["pi-jobs", false, 1], ["pi-jobs@hosta", true, 1]], "the errored queue is in no row and no sum");
     assert.deepEqual([s.queue.counts.waiting, s.switchTotal], [2, 3]);
     assert.ok(!JSON.stringify(s).includes("Operation against"), "the reply's code alone");
     // Its counts answered with the error instead: the same.
     failing = { "pi-jobs@hostb": { counts: () => Promise.reject(reply("ERR Error running script (call to f_x): @user_script:7: WRONGTYPE")) } };
-    assert.deepEqual((await reader.snapshot({ switchQueues: true })).switchErrored, [{ queue: "pi-jobs@hostb", error: "ERR" }]);
+    assert.deepEqual((await reader.snapshot({ switchQueues: true })).queueErrors, { "pi-jobs@hostb": "ERR" });
     // A whole read names none.
     failing = {};
-    assert.deepEqual((await reader.snapshot({ switchQueues: true })).switchErrored, []);
+    assert.deepEqual((await reader.snapshot({ switchQueues: true })).queueErrors, {});
     // A failure that is no reply still fails the snapshot, as before: the fleet was not read.
     failing = { "pi-jobs@hostb": { paused: () => Promise.reject(new Error("Connection is closed.")) } };
     await assert.rejects(reader.snapshot({ switchQueues: true }), /Connection is closed/);
-    // The per-tick read, every page's, still fails on it loudly: its rows are every queue it reads, and a page would
-    // not say one was missing.
-    hosts = [{ name: "hostb", routes: "true" }];
+    // The per-tick read, every page's, names it the same way (issue #1064): it failed whole, so every page of a
+    // deployment with one such key said Valkey could not be read.
+    hosts = [{ name: "hosta", routes: "true" }, { name: "hostb", routes: "true" }];
     failing = { "pi-jobs@hostb": { paused: () => Promise.reject(reply("WRONGTYPE Operation against a key holding the wrong kind of value")) } };
-    await assert.rejects(reader.snapshot(), /WRONGTYPE/);
+    const tick = await reader.snapshot();
+    assert.deepEqual([tick.queueErrors, tick.queueCounts.map((q) => q.queue), tick.queue.queues, tick.queue.counts.waiting, Object.hasOwn(tick, "switchTotal")], [{ "pi-jobs@hostb": "WRONGTYPE" }, ["pi-jobs", "pi-jobs@hosta"], 3, 2, false]);
+    assert.ok(!JSON.stringify(tick).includes("Operation against"), "the reply's code alone");
+    failing = { "pi-jobs@hostb": { counts: () => Promise.reject(reply("NOPERM this user has no permissions to run the 'eval' command")) } };
+    assert.deepEqual((await reader.snapshot()).queueErrors, { "pi-jobs@hostb": "NOPERM" }, "its counts answered with the error instead: the same");
+    failing = {};
+    assert.deepEqual((await reader.snapshot()).queueErrors, {}, "and a whole read carries an empty map");
+    // A failure that is no reply is no answer about any queue: the per-tick read still fails on it, as before.
+    failing = { "pi-jobs@hostb": { paused: () => Promise.reject(new Error("Connection is closed.")) } };
+    await assert.rejects(reader.snapshot(), /Connection is closed/);
+    failing = { "pi-jobs@hostb": { counts: () => Promise.reject(Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" })) } };
+    await assert.rejects(reader.snapshot(), /Command timed out/);
   } finally {
     await reader.dispose();
   }
+});
+
+/**
+ * A fleet of three queues for the reads of issue #1064, as both the admin's readers and `pi-dispatch status` build it:
+ * `state` says what each queue's reads answer (true: paused, false: running, "errored": the paused read is answered
+ * with WRONGTYPE, "uncounted": the counts are, "both": both are, "lost": the connection failed with no answer), looked up at each read, so
+ * a reader that keeps its queues reads what `state` says now. `probe` is the client that names them: an empty registry
+ * and a scan that finds the host queues.
+ */
+function fleetOf1064(state) {
+  const reply = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+  const lost = () => Promise.reject(new Error("Connection is closed."));
+  const names = Object.keys(state);
+  return {
+    names,
+    probe: () => ({ on() {}, disconnect() {}, async smembers() { return []; }, async scan() { return ["0", names.filter((n) => n !== "pi-jobs").map((n) => `bull:${n}:meta`)]; } }),
+    queue: (_c, opts) => {
+      const name = opts?.name ?? "pi-jobs";
+      return {
+        name, client: { async zrange() { return []; } },
+        isPaused: () => (state[name] === "errored" || state[name] === "both" ? reply() : state[name] === "lost" ? lost() : Promise.resolve(state[name] === true)),
+        getJobCounts: () => (state[name] === "uncounted" || state[name] === "both" ? reply() : state[name] === "lost" ? lost() : Promise.resolve({ waiting: 2, active: 1, paused: state[name] === true ? 3 : 0, delayed: 0, failed: 0 })),
+        async getWorkers() { return []; }, async getJobSchedulers() { return []; }, async getActive() { return []; }, async getFailed() { return []; }, async close() {},
+      };
+    },
+  };
+}
+
+// Issue #1064: with a queue left out, "every queue that was read is paused" read as a fleet wholly paused.
+test("createFleetReader: over a queue Valkey answered with an error the fleet is never wholly paused, and partly paused only when a queue that was read is (#1064)", async () => {
+  const redis = { on() {}, async get() { return null; }, async mget(...keys) { return keys.map(() => null); }, async smembers() { return []; }, async hgetall() { return {}; }, async zrevrangebyscore() { return []; }, async exists() { return 0; }, disconnect() {} };
+  const logsDir = tempDir("pd-1064-paused-");
+  const state = {};
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 }, { makeQueueFn: fleetOf1064(state).queue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts: [{ name: "hosta", routes: "true" }, { name: "hostb", routes: "true" }] }), discoverHostQueuesFn: async () => ({ names: [], incomplete: null }), nowFn: () => AT });
+  const read = async (next) => {
+    Object.assign(state, next);
+    const s = await reader.snapshot();
+    return [s.queue.pausedState, s.queue.pausedPartial, s.queueCounts.map((q) => q.queue), s.queue.queues, s.queueErrors];
+  };
+  try {
+    assert.deepEqual(await read({ "pi-jobs": true, "pi-jobs@hosta": true, "pi-jobs@hostb": "errored" }), [false, true, ["pi-jobs", "pi-jobs@hosta"], 3, { "pi-jobs@hostb": "WRONGTYPE" }], "every queue that was read is paused: partly, never wholly, since hostb may be running");
+    assert.deepEqual(await read({ "pi-jobs": false, "pi-jobs@hosta": false, "pi-jobs@hostb": "uncounted" }), [false, false, ["pi-jobs", "pi-jobs@hosta"], 3, { "pi-jobs@hostb": "WRONGTYPE" }], "no queue that was read is paused: a queue nobody read is no evidence of a paused one");
+    assert.deepEqual(await read({ "pi-jobs": true, "pi-jobs@hosta": false, "pi-jobs@hostb": "errored" }), [false, true, ["pi-jobs", "pi-jobs@hosta"], 3, { "pi-jobs@hostb": "WRONGTYPE" }]);
+    assert.deepEqual(await read({ "pi-jobs": "errored", "pi-jobs@hosta": "errored", "pi-jobs@hostb": "uncounted" }), [false, false, [], 3, { "pi-jobs": "WRONGTYPE", "pi-jobs@hosta": "WRONGTYPE", "pi-jobs@hostb": "WRONGTYPE" }], "none was read: neither paused nor partly, and `queue.queues` still counts all three");
+    assert.deepEqual(await read({ "pi-jobs": true, "pi-jobs@hosta": true, "pi-jobs@hostb": true }), [true, false, ["pi-jobs", "pi-jobs@hosta", "pi-jobs@hostb"], 3, {}], "the control: read whole and all paused is wholly paused");
+  } finally {
+    await reader.dispose();
+  }
+});
+
+// Issue #1064: a fleet whose every queue that was read is paused reads "partly paused" beside a queue nobody read. The
+// pages offered Resume for a paused or partly paused fleet, and must still offer it for this one.
+test("a fleet whose every read queue is paused beside one Valkey answered with an error is still offered Resume on the overview and on Fleet (#1064)", async () => {
+  const { pagePanels } = await import("../src/console/pages.mjs");
+  const redis = { on() {}, async get() { return null; }, async mget(...keys) { return keys.map(() => null); }, async smembers() { return []; }, async hgetall() { return {}; }, async zrevrangebyscore() { return []; }, async exists() { return 0; }, disconnect() {} };
+  const logsDir = tempDir("pd-1064-resume-");
+  // A deployment with a trigger and hosts, so the overview draws its own panels and not the first run's checklist.
+  const triggersPath = join(logsDir, "triggers.json");
+  writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "triage" } }] }));
+  const state = { "pi-jobs": true, "pi-jobs@hosta": true, "pi-jobs@hostb": "errored" };
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath, schedulerStallMax: 2 }, { makeQueueFn: fleetOf1064(state).queue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts: [{ name: "hosta", routes: "true" }, { name: "hostb", routes: "true" }] }), discoverHostQueuesFn: async () => ({ names: [], incomplete: null }), nowFn: () => AT });
+  // Which fleet switches a page's panel offers an operator, by the action each form posts.
+  const offered = async (page, id) => {
+    const snapshot = await reader.snapshot();
+    const panels = await pagePanels(page, { query: {}, session: { name: "ops", role: "operator" }, data: { page, now: AT, env: {}, snapshot }, readOnly: false });
+    const markup = panels.find((p) => p.id === id).html;
+    return ["fleet-pause", "fleet-resume"].filter((action) => markup.includes(action));
+  };
+  try {
+    assert.deepEqual([(await reader.snapshot()).queue.pausedState, (await reader.snapshot()).queue.pausedPartial], [false, true]);
+    assert.deepEqual(await offered("overview", "p-hosts"), ["fleet-pause", "fleet-resume"], "the overview: resume what is paused, and pause the queue nobody read");
+    assert.ok((await offered("fleet", "p-fleetbar")).includes("fleet-resume"), "Fleet's bar");
+    // The control: read whole and all paused, Resume alone, as before.
+    state["pi-jobs@hostb"] = true;
+    assert.deepEqual(await offered("overview", "p-hosts"), ["fleet-resume"]);
+    assert.deepEqual(await offered("fleet", "p-fleetbar"), ["fleet-resume"]);
+  } finally {
+    await reader.dispose();
+  }
+});
+
+// Issue #1064: the status read took one queue's error reply for the whole deployment's, as a Valkey not reached.
+test("readQueueState settles each queue by itself: one answered with an error is named under the CLI's keys and left out of the counts, and only a read nothing answered is unreachable (#1064)", async () => {
+  const read = (state) => {
+    const fleet = fleetOf1064(state);
+    return readQueueState({ url: "redis://unused", makeQueueFn: fleet.queue, parseConnectionFn: () => ({}), redisFn: fleet.probe });
+  };
+  // Its paused state answered with the error: named, by the reply's code alone, and in none of the sums.
+  const one = await read({ "pi-jobs": false, "pi-jobs@hosta": true, "pi-jobs@hostb": "errored" });
+  assert.deepEqual([one.unreachable, one.partial, one.unavailableQueues, one.queueErrors], [undefined, true, ["pi-jobs@hostb"], { "pi-jobs@hostb": "WRONGTYPE" }]);
+  assert.deepEqual([one.counts.waiting, one.counts.paused, one.queues, one.pausedState, one.pausedPartial], [4, 3, 3, false, true], "the other two are read and summed; `queues` counts all three");
+  assert.ok(!JSON.stringify(one).includes("Operation against"), "the reply's code alone");
+  // Its counts answered with it instead: the same queue, the same keys.
+  const counts = await read({ "pi-jobs": true, "pi-jobs@hosta": true, "pi-jobs@hostb": "uncounted" });
+  assert.deepEqual([counts.unavailableQueues, counts.queueErrors, counts.counts.waiting, counts.pausedState, counts.pausedPartial], [["pi-jobs@hostb"], { "pi-jobs@hostb": "WRONGTYPE" }, 4, false, true], "every queue that was read is paused: partly, never wholly");
+  // Every queue answered with an error: Valkey answered, so the read is partial, never unreachable.
+  const all = await read({ "pi-jobs": "errored", "pi-jobs@hosta": "uncounted" });
+  assert.deepEqual([all.unreachable, all.partial, all.unavailableQueues, all.queueErrors, all.counts, all.queues, all.pausedState, Object.hasOwn(all, "pausedPartial")], [undefined, true, ["pi-jobs", "pi-jobs@hosta"], { "pi-jobs": "WRONGTYPE", "pi-jobs@hosta": "WRONGTYPE" }, {}, 2, false, false]);
+  // And so when no read gave a value at all: an error reply is an answer, so this is not a Valkey that could not be reached.
+  const none = await read({ "pi-jobs": "both", "pi-jobs@hosta": "both" });
+  assert.deepEqual([none.unreachable, none.partial, none.unavailableQueues, none.queueErrors, none.counts], [undefined, true, ["pi-jobs", "pi-jobs@hosta"], { "pi-jobs": "WRONGTYPE", "pi-jobs@hosta": "WRONGTYPE" }, {}]);
+  // A failure that is no reply, beside a queue that answered: one more queue not read, with no code.
+  const lost = await read({ "pi-jobs": false, "pi-jobs@hosta": "lost", "pi-jobs@hostb": "errored" });
+  assert.deepEqual([lost.unreachable, lost.partial, lost.unavailableQueues, lost.queueErrors, lost.counts.waiting], [undefined, true, ["pi-jobs@hosta", "pi-jobs@hostb"], { "pi-jobs@hostb": "WRONGTYPE" }, 2]);
+  const lostAlone = await read({ "pi-jobs": false, "pi-jobs@hosta": "lost" });
+  assert.deepEqual([lostAlone.partial, lostAlone.unavailableQueues, Object.hasOwn(lostAlone, "queueErrors")], [true, ["pi-jobs@hosta"], false], "no code where Valkey gave none");
+  // Nothing answered at all: unreachable, in the failure's words, as before.
+  assert.deepEqual(await read({ "pi-jobs": "lost", "pi-jobs@hosta": "lost" }), { unreachable: "Connection is closed." });
+  // Read whole: none of the three keys.
+  const whole = await read({ "pi-jobs": true, "pi-jobs@hosta": true });
+  assert.deepEqual([whole.pausedState, Object.hasOwn(whole, "partial"), Object.hasOwn(whole, "unavailableQueues"), Object.hasOwn(whole, "queueErrors"), whole.queues], [true, false, false, false, 2]);
+});
+
+// Issue #1064: `/dispatch status`, `dispatch_status` and `pi-dispatch status` say one deployment state under one set
+// of keys. Held equal here, over the same queues and the same client, so neither grows a second name for it.
+test("readQueueState and `pi-dispatch status` name the queues they did not read under the same keys with the same values (#1064)", { timeout: 30_000 }, async () => {
+  const { main } = await import("../../worker/src/cli.mjs");
+  const SHARED = ["partial", "unavailableQueues", "queueErrors", "queuesMayBeShort", "hostErrors"];
+  const cwd = tempDir("pd-1064-parity-");
+  const both = async (state) => {
+    const fleet = fleetOf1064(state);
+    let out = "";
+    const errs = [];
+    const origErr = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+    let code;
+    try {
+      code = await main(["status", "--valkey-url", "redis://valkey.invalid:1"], { VALKEY_URL: "redis://valkey.invalid:1" }, {
+        now: () => new Date(AT), statusDeadlineMs: 2000, cwd, write: (text) => { out += text; }, writeErr: (text) => errs.push(String(text)),
+        valkeyRefusal: async () => null, controlClients: { makeRedisClient: fleet.probe, makeQueue: fleet.queue },
+      });
+    } finally {
+      process.stderr.write = origErr;
+    }
+    const cli = JSON.parse(out);
+    const admin = await readQueueState({ url: "redis://valkey.invalid:1", makeQueueFn: fleet.queue, parseConnectionFn: () => ({}), redisFn: fleet.probe });
+    const shared = (o) => Object.fromEntries(SHARED.filter((k) => Object.hasOwn(o, k)).map((k) => [k, o[k]]));
+    return { code, cli: shared(cli), admin: shared(admin) };
+  };
+  const errored = await both({ "pi-jobs": false, "pi-jobs@hosta": true, "pi-jobs@hostb": "errored" });
+  assert.deepEqual(errored.admin, { partial: true, unavailableQueues: ["pi-jobs@hostb"], queueErrors: { "pi-jobs@hostb": "WRONGTYPE" } });
+  assert.deepEqual([errored.cli, errored.code], [errored.admin, 1]);
+  const uncounted = await both({ "pi-jobs": "uncounted", "pi-jobs@hosta": "errored" });
+  assert.deepEqual(uncounted.admin, { partial: true, unavailableQueues: ["pi-jobs", "pi-jobs@hosta"], queueErrors: { "pi-jobs": "WRONGTYPE", "pi-jobs@hosta": "WRONGTYPE" } });
+  assert.deepEqual(uncounted.cli, uncounted.admin);
+  const lost = await both({ "pi-jobs": false, "pi-jobs@hosta": "lost", "pi-jobs@hostb": "errored" });
+  assert.deepEqual(lost.admin, { partial: true, unavailableQueues: ["pi-jobs@hosta", "pi-jobs@hostb"], queueErrors: { "pi-jobs@hostb": "WRONGTYPE" } });
+  assert.deepEqual(lost.cli, lost.admin);
+  // No read gave a value and every one was answered with an error: both say so, neither says unreachable.
+  const none = await both({ "pi-jobs": "both", "pi-jobs@hosta": "both" });
+  assert.deepEqual(none.admin, { partial: true, unavailableQueues: ["pi-jobs", "pi-jobs@hosta"], queueErrors: { "pi-jobs": "WRONGTYPE", "pi-jobs@hosta": "WRONGTYPE" } });
+  assert.deepEqual(none.cli, none.admin);
+  const whole = await both({ "pi-jobs": false, "pi-jobs@hosta": true });
+  assert.deepEqual([whole.cli, whole.admin, whole.code], [{}, {}, 0], "read whole, neither says any of them");
 });
 
 /**

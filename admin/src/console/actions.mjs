@@ -71,7 +71,7 @@ import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { PAUSE_WINDOW_FIELDS, heldPauseWindows, parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
 import { AGENT_REFUSED, AGENT_UNCONFIRMED, auditedWrite } from "../audited-write.mjs";
 import { pauseWindowsNewerRefusal } from "../newer-release.mjs";
-import { fieldNamed, NO_EXPLANATION, SWITCH_ERRORED_READS, switchErroredQueue, switchShortNote, UNNAMED_FIELD } from "../words.mjs";
+import { fieldNamed, NO_EXPLANATION, queueErrorsLead, queueErrorsOf, SWITCH_ERRORED_READS, switchErroredQueue, switchShortNote, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
 import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, REFUSAL_STATES, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
 import { bindingFailure } from "./device-trust.mjs";
@@ -391,7 +391,7 @@ export async function readSetupExposure(ctx) {
     const got = await snapshotOf(ctx, { switchQueues: true, waiting: true, freshWaiting: true });
     const s = got.snapshot;
     const waiting = s?.waiting;
-    if (!s || switchShortOf(s).length || switchErroredOf(s).length || s.queue?.fleetDegraded || !Array.isArray(s.queueCounts) || !waiting || waiting.unreachable || waiting.truncated || !Array.isArray(waiting.rows) || !Array.isArray(waiting.scheduled)) return { complete: false, at };
+    if (!s || switchShortOf(s).length || queueErrorsOf(s).length || s.queue?.fleetDegraded || !Array.isArray(s.queueCounts) || !waiting || waiting.unreachable || waiting.truncated || !Array.isArray(waiting.rows) || !Array.isArray(waiting.scheduled)) return { complete: false, at };
     const jobs = [...waiting.rows, ...waiting.scheduled];
     // Queue-data reads are keyed by job ID. A duplicate across queues cannot be priced independently here.
     if (jobs.length > 100 || new Set(jobs.map(row => row.queue)).size > 32 || new Set(jobs.map(row => row.jobId)).size !== jobs.length) return { complete: false, at };
@@ -1776,19 +1776,12 @@ function switchShortLines(snapshot, keys) {
 export const queueUnreadRefusal = (queue) => `${JSON.stringify(queue)} is not among the queues this preview read, and it did not read every queue, so whether this deployment drains it is not known here; nothing was changed`;
 
 /**
- * The queues a switch preview's read got an error reply for (issue #1053, the reader's `switchErrored`): `{ queue,
- * error }` with a queue name and the reply's code, anything else left out, so no client's words reach a page or the
- * audit.
+ * A fleet switch preview's line for the queues its read got an error reply for (issue #1053; since issue #1064 the
+ * snapshot's `queueErrors`, read through `queueErrorsOf`): named, with what Valkey answered, as left out of the counts
+ * (`queueErrorsLead`, the start every surface shares). The switch is still sent to each, and its answer says what each
+ * reads after it (issue #1041).
  */
-function switchErroredOf(snapshot) {
-  return (Array.isArray(snapshot?.switchErrored) ? snapshot.switchErrored : []).filter((e) => typeof e?.queue === "string" && typeof e?.error === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(e.error)).map((e) => ({ queue: e.queue, error: e.error }));
-}
-
-/**
- * A fleet switch preview's line for those queues (issue #1053): named, with what Valkey answered, as left out of the
- * counts. The switch is still sent to each, and its answer says what each reads after it (issue #1041).
- */
-export const SWITCH_ERRORED_LINE = (errored) => `Not read, so not in these counts: ${queuesNamed(errored.map((e) => `${e.queue} (Valkey answered ${e.error})`))}; the switch is still sent to ${errored.length === 1 ? "it" : "them"}`;
+export const SWITCH_ERRORED_LINE = (errored) => `${queueErrorsLead(errored)}; the switch is still sent to ${errored.length === 1 ? "it" : "them"}`;
 
 /**
  * A one-queue switch's refusal for its own queue when Valkey answered that queue's read with an error (issue #1053):
@@ -1866,7 +1859,7 @@ function fleetSwitch({ name, kind, paused }) {
           // read it would write its meta key), so it is named, and named as left out of the counts.
           const unread = Array.isArray(s.snapshot.switchUnread) ? s.snapshot.switchUnread.map(String) : [];
           // Issue #1053: a queue Valkey answered with an error is listed too, and named as left out of the counts.
-          const errored = switchErroredOf(s.snapshot);
+          const errored = queueErrorsOf(s.snapshot);
           const listed = [...all.map((row) => String(row.queue)), ...unread, ...errored.map((e) => e.queue)];
           switchLines = [...Array.from({ length: Math.ceil(listed.length / 20) }, (_, i) => `Queues: ${listed.slice(i * 20, (i + 1) * 20).join(", ")}`), ...(unread.length > 0 ? [SWITCH_OWN_UNREAD(unread)] : []), ...(errored.length > 0 ? [SWITCH_ERRORED_LINE(errored)] : []), `${plural(sum("active"), "running job")} ${sum("active") === 1 ? "keeps" : "keep"} running`, `${plural(sum("delayed"), "delayed job")} and ${s.snapshot.held?.unreachable || !Array.isArray(s.snapshot.held?.rows) ? "an unknown number of" : `${s.snapshot.held.truncated ? "at least " : ""}${s.snapshot.held.rows.length + (Number.isSafeInteger(s.snapshot.held.more) ? s.snapshot.held.more : 0)}`} held ${s.snapshot.held?.rows?.length === 1 && !s.snapshot.held?.truncated && !s.snapshot.held?.more ? "job waits" : "jobs wait"} until a resume`, "Audited as fleet-pause"];
         } else switchLines = [SWITCH_UNREAD_LINES.pause, "Audited as fleet-pause", "Undo: Resume the fleet"];
@@ -1880,7 +1873,7 @@ function fleetSwitch({ name, kind, paused }) {
           shortLines = switchShortLines(s.snapshot, short);
           // Issue #1053: a queue Valkey answered with an error may be paused and hold jobs, so the count is a floor and
           // the Undo is not exact, as for a short read; the line names it.
-          const errored = switchErroredOf(s.snapshot);
+          const errored = queueErrorsOf(s.snapshot);
           if (errored.length > 0) shortLines = [...shortLines, SWITCH_ERRORED_LINE(errored)];
           waiting = resumeWaiting(rows, "the paused queues", { floor: short.length > 0 || errored.length > 0 });
           pausedBefore = Array.isArray(s.snapshot.queueCounts) ? { queues: all.length, paused: rows.map((q) => String(q?.queue ?? "-")), ...(short.length > 0 || errored.length > 0 ? { short: true } : {}) } : null;
@@ -2006,7 +1999,7 @@ function queueSwitch({ name, kind, paused }) {
       const rows = Array.isArray(s.snapshot.queueCounts) ? s.snapshot.queueCounts : [];
       const row = rows.find((q) => q?.queue === queue);
       // Issue #1053: this queue's own read answered with an error. Another queue's is no reason to refuse this one.
-      const errored = switchErroredOf(s.snapshot).find((e) => e.queue === queue);
+      const errored = queueErrorsOf(s.snapshot).find((e) => e.queue === queue);
       if (!row && errored) return { refusal: queueErroredRefusal(queue, errored.error) };
       // A read that was short (`switchShortOf`) cannot say a queue it did not read does not exist: it says why instead.
       if (!row && switchShortOf(s.snapshot).length > 0) return { refusal: queueUnreadRefusal(queue) };

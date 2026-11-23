@@ -26,7 +26,7 @@ import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { CONFIRM_SLOT_ID, doneBannerHtml, PARTIAL_NOTE } from "../src/console/confirm-view.mjs";
 import { html } from "../src/console/html.mjs";
-import { fieldNamed, switchShortNote, UNNAMED_FIELD } from "../src/words.mjs";
+import { fieldNamed, QUEUE_ERRORS_NAMED, queueErrorsLead, queueErrorsLine, switchShortNote, UNNAMED_FIELD } from "../src/words.mjs";
 import { keyedRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
 import { FLASH_MAX_BYTES, makeSessionStore } from "../src/console/sessions.mjs";
 import { makeLoginLimiter } from "../src/console/guards.mjs";
@@ -2623,7 +2623,7 @@ test("a switch read that Valkey answered with an error for one queue names it: t
   let errored = [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }];
   const acted = [];
   const fleet = {
-    snapshot: async () => ({ queueCounts: [{ queue: "pi-jobs", paused: false, counts: { waiting: 1 } }, { queue: "pi-jobs@hosta", paused: true, counts: { paused: 2 } }], switchErrored: errored }),
+    snapshot: async () => ({ queueCounts: [{ queue: "pi-jobs", paused: false, counts: { waiting: 1 } }, { queue: "pi-jobs@hosta", paused: true, counts: { paused: 2 } }], queueErrors: Object.fromEntries(errored.map((e) => [e.queue, e.error])) }),
     pause: async () => (acted.push("pause"), { results: [{ shown: "redis://h/0", res: { ok: true, queues: ["pi-jobs", "pi-jobs@hosta", "pi-jobs@hostb"] } }] }),
     resume: async () => (acted.push("resume"), { results: [{ shown: "redis://h/0", res: { ok: true, queues: ["pi-jobs", "pi-jobs@hosta", "pi-jobs@hostb"] } }] }),
     pauseQueue: async ({ queue, paused }) => (acted.push(`${paused ? "pause" : "resume"} ${queue}`), { ok: true }),
@@ -2659,6 +2659,64 @@ test("a switch read that Valkey answered with an error for one queue names it: t
   const two = await c.act("fleet-pause", {});
   assert.ok(two.json().summary.includes("Not read, so not in these counts: pi-jobs@hostb (Valkey answered WRONGTYPE), pi-jobs@hostc (Valkey answered NOSCRIPT); the switch is still sent to them"), two.text);
   assert.ok(!two.text.includes("Operation against"));
+  // The line is the start every surface shares and the switch's own end (issue #1064); a page says the same start and
+  // that the paused state is not known. One bound for the names, the previews' own.
+  const three = [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }];
+  assert.equal(SWITCH_ERRORED_LINE(three), `${queueErrorsLead(three)}; the switch is still sent to it`);
+  assert.equal(queueErrorsLine(three), `${queueErrorsLead(three)}; whether it is paused is not known`);
+  assert.equal(QUEUE_ERRORS_NAMED, SWITCH_QUEUES_NAMED);
+  const many = Array.from({ length: SWITCH_QUEUES_NAMED + 2 }, (_, i) => ({ queue: `pi-jobs@h${i}`, error: "ERR" }));
+  assert.ok(SWITCH_ERRORED_LINE(many).endsWith("pi-jobs@h19 (Valkey answered ERR), and 2 more; the switch is still sent to them"), SWITCH_ERRORED_LINE(many));
+});
+
+// Issue #1064: with a queue left out the fleet reads "partly paused" at most, never "paused". A fleet whose every queue
+// that was read IS paused must stay resumable: the snapshot here is the real reader's over a queue whose paused read
+// Valkey answers with an error.
+test("a fleet whose every read queue is paused beside one Valkey answered with an error is still resumed: the previews say what they said and the confirm resumes (#1064)", async () => {
+  const { paths } = deployment();
+  const wrongtype = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+  const make = quietQueue();
+  const reader = RM.createFleetReader({ valkeyUrl: "redis://unused", logsDir: paths.logsDir, triggersPath: paths.triggersPath }, {
+    makeQueueFn: (c, opts) => {
+      const q = make(c, opts);
+      return q.name === "pi-jobs@hostb" ? { ...q, isPaused: wrongtype } : { ...q, async isPaused() { return true; }, async getJobCounts() { return { waiting: 0, active: 0, paused: 2, delayed: 0, failed: 0 }; } };
+    },
+    parseConnectionFn: () => ({}), redisFn: () => keyedRedis({}), nowFn: () => T0,
+    readLiveHostsFn: async () => ({ hosts: [{ name: "hosta", routes: "true" }, { name: "hostb", routes: "true" }] }), discoverHostQueuesFn: async () => ({ names: [], incomplete: null }),
+  });
+  const acted = [];
+  const all = ["pi-jobs", "pi-jobs@hosta", "pi-jobs@hostb"];
+  const fleet = {
+    snapshot: (opts) => reader.snapshot(opts),
+    pause: async () => (acted.push("pause"), { results: [{ shown: "redis://h/0", res: { ok: true, queues: all } }] }),
+    resume: async () => (acted.push("resume"), { results: [{ shown: "redis://h/0", res: { ok: true, queues: all } }] }),
+    pauseQueue: async ({ queue, paused }) => (acted.push(`${paused ? "pause" : "resume"} ${queue}`), { ok: true }),
+  };
+  const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
+  try {
+    const s = await reader.snapshot({ switchQueues: true });
+    assert.deepEqual([s.queue.pausedState, s.queue.pausedPartial, s.queueErrors, s.queueCounts.map((q) => [q.queue, q.paused])], [false, true, { "pi-jobs@hostb": "WRONGTYPE" }, [["pi-jobs", true], ["pi-jobs@hosta", true]]]);
+    const line = SWITCH_ERRORED_LINE([{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }]);
+    // The fleet's resume: previewed with the queue named as not counted, its count a floor, and made.
+    const resume = await c.both("fleet-resume", {});
+    assert.ok(resume.preview.summary.includes(line), JSON.stringify(resume.preview.summary));
+    assert.ok(resume.preview.summary.some((one) => one.startsWith("At least 4 jobs wait to start in the paused queues (pi-jobs, pi-jobs@hosta)")), JSON.stringify(resume.preview.summary));
+    assert.equal(resume.confirm.status, 200, resume.confirm.text);
+    assert.deepEqual([resume.confirm.json().change.inverse, resume.confirm.json().change.undo], [null, UNDO_SENTENCES.resumeShort]);
+    // One paused queue that was read is resumed by itself; the errored one still refuses by its name and code.
+    const one = await c.both("queue-resume", { queue: "pi-jobs@hosta" });
+    assert.equal(one.confirm.status, 200, one.confirm.text);
+    const own = await c.act("queue-resume", { queue: "pi-jobs@hostb" });
+    assert.deepEqual([own.status, own.json().error], [400, queueErroredRefusal("pi-jobs@hostb", "WRONGTYPE")]);
+    // And the fleet's pause is still offered and made: the queue nobody read may be running.
+    const pause = await c.both("fleet-pause", {});
+    assert.ok(pause.preview.summary.includes("Queues: pi-jobs, pi-jobs@hosta, pi-jobs@hostb"), JSON.stringify(pause.preview.summary));
+    assert.ok(pause.preview.summary.includes(line), JSON.stringify(pause.preview.summary));
+    assert.equal(pause.confirm.status, 200, pause.confirm.text);
+    assert.deepEqual(acted, ["resume", "resume pi-jobs@hosta", "pause"]);
+  } finally {
+    await reader.dispose();
+  }
 });
 
 // Issue #737: the switch's queues as one preview read them can be short: a keyspace scan that did not finish

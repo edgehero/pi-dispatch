@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { stripAnsi } from "../src/style.mjs";
-import { DOCS_ROOT, capitalised, listed, HELD_LABEL, NO_EXPLANATION, NO_REASON_FAILED, OUTCOME_KEYS, OUTCOME_KEY_WORDS, RECORD_REASON_RE, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, UNNAMED_FIELD, VENUE_LABEL, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence, switchListShort, switchShortNote } from "../src/words.mjs";
+import { DOCS_ROOT, capitalised, listed, QUEUE_ERRORS_NAMED, queueErrorsLead, queueErrorsLine, queueErrorsOf, HELD_LABEL, NO_EXPLANATION, NO_REASON_FAILED, OUTCOME_KEYS, OUTCOME_KEY_WORDS, RECORD_REASON_RE, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, UNNAMED_FIELD, VENUE_LABEL, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence, switchListShort, switchShortNote } from "../src/words.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { NESTED_REASONS, REASONS, explainReason } from "../../worker/src/reason-catalog.mjs";
 import { RECOVERY_COMMENTS } from "../../worker/src/comment-tables.mjs";
@@ -499,4 +499,33 @@ test("a kill switch over a set of queues that may be short says one sentence on 
   // "Once Valkey answers": a page can stay unread after Valkey answers while the switch works (issue #986).
   assert.doesNotMatch(switchShortNote(true), /Fleet reads|once .* reads/);
   assert.deepEqual([{ blind: "x" }, { incomplete: "y" }, { ok: true }, null].map(switchListShort), [true, true, false, false]);
+});
+
+// Issue #1064: a queue Valkey answered with an error is carried under one name and said in one sentence.
+test("queueErrorsOf reads the one map every read carries, as a queue and the reply's code alone (#1064)", () => {
+  assert.deepEqual(queueErrorsOf({ queueErrors: { "pi-jobs@hostb": "WRONGTYPE", "pi-jobs": "ERR" } }), [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }, { queue: "pi-jobs", error: "ERR" }], "the map's order");
+  assert.deepEqual(queueErrorsOf({ queueErrors: {} }), []);
+  for (const none of [null, undefined, {}, { queueErrors: null }, { queueErrors: "WRONGTYPE" }]) assert.deepEqual(queueErrorsOf(none), []);
+  // The list an earlier snapshot carried under another name is not read, in either place.
+  assert.deepEqual(queueErrorsOf({ switchErrored: [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }] }), []);
+  assert.deepEqual(queueErrorsOf({ queueErrors: [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }] }), []);
+  // A code is one word of Valkey's: a reply's sentence, a number or an empty name is left out, never passed on.
+  assert.deepEqual(queueErrorsOf({ queueErrors: { a: "WRONGTYPE Operation against a key", b: 7, c: "", "": "ERR", d: "x".repeat(33), e: "NOPERM", f: "1ERR", g: null } }), [{ queue: "e", error: "NOPERM" }]);
+});
+
+test("queueErrorsLine says which queues, what Valkey answered, that they are in no count and that their paused state is not known (#1064)", () => {
+  const one = [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }];
+  assert.equal(queueErrorsLead(one), "Not read, so not in these counts: pi-jobs@hostb (Valkey answered WRONGTYPE)");
+  assert.equal(queueErrorsLine(one), "Not read, so not in these counts: pi-jobs@hostb (Valkey answered WRONGTYPE); whether it is paused is not known");
+  assert.equal(queueErrorsLine([...one, { queue: "pi-jobs", error: "ERR" }]), "Not read, so not in these counts: pi-jobs@hostb (Valkey answered WRONGTYPE), pi-jobs (Valkey answered ERR); whether they are paused is not known");
+  // A queue whose read got no answer at all is named beside them, as the status line has it.
+  assert.equal(queueErrorsLine([...one, { queue: "pi-jobs@hostc", error: null }]), "Not read, so not in these counts: pi-jobs@hostb (Valkey answered WRONGTYPE), pi-jobs@hostc (no answer); whether they are paused is not known");
+  // Bounded: the first twenty by name, the rest counted.
+  const many = Array.from({ length: QUEUE_ERRORS_NAMED + 3 }, (_, i) => ({ queue: `pi-jobs@h${i}`, error: "WRONGTYPE" }));
+  const line = queueErrorsLine(many);
+  assert.equal(QUEUE_ERRORS_NAMED, 20);
+  assert.ok(line.includes("pi-jobs@h19 (Valkey answered WRONGTYPE), and 3 more; whether they are paused is not known"), line);
+  assert.ok(!line.includes("pi-jobs@h20"), line);
+  // It promises nothing about waiting: the key stays as it is until it is repaired.
+  assert.doesNotMatch(line, /try again|wait|next read|soon/i);
 });

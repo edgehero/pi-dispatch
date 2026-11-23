@@ -2565,7 +2565,11 @@ not steer-armed or its inbox could not be read). A part the console could not re
 a short `error` sentence. Beside `fleetDegraded`, `registryReadInPart` says the host registry answered and some hosts' rows were not read, and
 `unreadHosts` names those hosts, each with the code of Valkey's error reply for its row (`WRONGTYPE` for a key that is not a hash) or null
 for a row that got no answer; `fleetError` is that code for the registry itself. A row with a code is not read by waiting: its key has to be
-removed or repaired.
+removed or repaired. `queueErrors` names each queue whose paused state or counts Valkey answered with an error, with that reply's code, such as
+`{"pi-jobs@hostb":"WRONGTYPE"}` for a queue whose `bull:<queue>:meta` key is not a hash, and is `{}` when there is none. Such a queue is in
+neither `queues` nor `counts`, and whether it is paused is not known: `paused.state` is false while `queueErrors` is not empty, and
+`paused.partial` is true only when a queue that was read is paused. The key and its shape are those of `pi-dispatch status`
+([service](service.md)). One such queue used to fail the whole read with a `503`; now only a read that gets no answer does.
 
 Sign in once with a token and keep the session in a cookie file. Never put the token on a command line, where the
 process list and your shell history can see it: read it into a variable and send it on standard input instead. The

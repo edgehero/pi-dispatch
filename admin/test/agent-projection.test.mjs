@@ -100,3 +100,26 @@ test("a cost-cap record's why reaches an agent by name for every rule of the cos
   for (const why of ["unboundable", "external", "over-cap", "final-payload", "turn"]) assert.deepEqual(agentReadProjection({ run: { reason: "cost-cap", why } }), { run: { reason: "cost-cap", why } }, why);
   assert.deepEqual(agentReadProjection({ run: { reason: "cost-cap", why: "qwen2.5:3b" } }), { run: { reason: "cost-cap", why: null } }, "anything else is no why");
 });
+
+// Issue #1064: a map of names to an error reply's code arrived as `{}`, since its fields are names the table does not know.
+test("an agent's copy keeps the queues and hosts Valkey answered with an error, each by name and the reply's code, and the queues a read left out (#1064, #1036)", async () => {
+  const { readQueueState } = await import("../src/read-model.mjs");
+  const reply = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+  // The real status read over a queue whose paused read Valkey answers with an error, as `dispatch_status` projects it.
+  const queue = await readQueueState({
+    url: "redis://unused", parseConnectionFn: () => ({}),
+    redisFn: () => ({ on() {}, disconnect() {}, async smembers() { return []; }, async scan() { return ["0", ["bull:pi-jobs@hostb:meta"]]; } }),
+    makeQueueFn: (_c, opts) => ({ isPaused: () => (opts?.name === "pi-jobs@hostb" ? reply() : Promise.resolve(false)), async getJobCounts() { return { waiting: 1 }; }, async getWorkers() { return []; }, async close() {} }),
+  });
+  const out = agentReadProjection({ queue });
+  assert.deepEqual([out.queue.partial, out.queue.unavailableQueues, out.queue.queueErrors, out.queue.queues], [true, ["pi-jobs@hostb"], { "pi-jobs@hostb": "WRONGTYPE" }, 2]);
+  // A host's row likewise; a reply's sentence, a name that is no id and a value that is no string are left out.
+  assert.deepEqual(agentReadProjection({ queue: { hostErrors: { hostw: "WRONGTYPE" } } }).queue.hostErrors, { hostw: "WRONGTYPE" });
+  assert.deepEqual(agentReadProjection({ queueErrors: { a: "WRONGTYPE Operation against a key", "two words": "ERR", b: 7, c: { d: "ERR" }, e: "NOPERM" } }).queueErrors, { e: "NOPERM" });
+  assert.deepEqual(agentReadProjection({ queueErrors: {} }), { queueErrors: {} });
+  // Only under those two keys: any other map of names stays withheld.
+  assert.deepEqual(agentReadProjection({ otherErrors: { hostw: "WRONGTYPE" } }), { otherErrors: {} });
+  // The state API's copy for an agent session carries the same map.
+  const state = agentReadProjection(stateOf({ queueErrors: { "pi-jobs@hostb": "WRONGTYPE" } }, "viewer", { now: NOW }));
+  assert.deepEqual(state.queueErrors, { "pi-jobs@hostb": "WRONGTYPE" });
+});

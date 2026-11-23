@@ -46,6 +46,39 @@ test("renderStatus reports paused and unreachable", () => {
   assert.match(renderStatus({ unreachable: "down" }), /unreachable \(down\)/);
 });
 
+// Issue #1064: `/dispatch status` over a queue Valkey answers with an error said the whole queue was unreachable.
+test("renderStatus over a status read that left a queue out names it under the counts, and never calls a fleet nobody read running (#1064)", async () => {
+  const { readQueueState } = await import("../src/read-model.mjs");
+  const reply = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+  const lost = () => Promise.reject(new Error("Connection is closed."));
+  // The real status read over queues whose reads answer as `state` says: paused or not, the paused read answered with
+  // an error, or a connection that failed.
+  const status = async (state) => renderStatus(await readQueueState({
+    url: "redis://unused", parseConnectionFn: () => ({}),
+    redisFn: () => ({ on() {}, disconnect() {}, async smembers() { return []; }, async scan() { return ["0", Object.keys(state).filter((n) => n !== "pi-jobs").map((n) => `bull:${n}:meta`)]; } }),
+    makeQueueFn: (_c, opts) => {
+      const kind = state[opts?.name ?? "pi-jobs"];
+      return {
+        isPaused: () => (kind === "errored" ? reply() : kind === "lost" ? lost() : Promise.resolve(kind === true)),
+        getJobCounts: () => (kind === "lost" ? lost() : Promise.resolve({ waiting: 2, active: 1, paused: kind === true ? 3 : 0, delayed: 0, failed: 0 })),
+        async getWorkers() { return [{}]; }, async close() {},
+      };
+    },
+  }));
+  const LINE = "  Not read, so not in these counts: pi-jobs@hostb (Valkey answered WRONGTYPE); whether it is paused is not known";
+  assert.equal(await status({ "pi-jobs": true, "pi-jobs@hostb": "errored" }), `Queue: PARTIALLY paused\n  waiting 2  active 1  paused 3  delayed 0  failed 0\n${LINE}\n  workers: 1`, "every queue that was read is paused: partly, never wholly");
+  assert.equal(await status({ "pi-jobs": false, "pi-jobs@hostb": "errored" }), `Queue: running\n  waiting 2  active 1  paused 0  delayed 0  failed 0\n${LINE}\n  workers: 1`, "the queue that was read runs, and the line says which one was not");
+  // A queue whose read got no answer, beside one that answered, is named in the same sentence.
+  assert.equal(await status({ "pi-jobs": false, "pi-jobs@hosta": "lost", "pi-jobs@hostb": "errored" }), "Queue: running\n  waiting 2  active 1  paused 0  delayed 0  failed 0\n  Not read, so not in these counts: pi-jobs@hostb (Valkey answered WRONGTYPE), pi-jobs@hosta (no answer); whether they are paused is not known\n  workers: 1");
+  // No queue was read: nothing here read a queue that runs.
+  assert.equal(await status({ "pi-jobs": "errored", "pi-jobs@hostb": "errored" }), "Queue: not known\n  waiting 0  active 0  paused 0  delayed 0  failed 0\n  Not read, so not in these counts: pi-jobs (Valkey answered WRONGTYPE), pi-jobs@hostb (Valkey answered WRONGTYPE); whether they are paused is not known\n  workers: 1");
+  // Read whole, the text is as it was, byte for byte; and nothing answered is still the one unreachable line.
+  assert.equal(await status({ "pi-jobs": true, "pi-jobs@hostb": true }), "Queue: paused\n  waiting 4  active 2  paused 6  delayed 0  failed 0\n  workers: 1");
+  assert.equal(await status({ "pi-jobs": "lost", "pi-jobs@hostb": "lost" }), "Queue: unreachable (Connection is closed.)");
+  // A queue's name is scrubbed like every other cell.
+  assert.doesNotMatch(renderStatus({ pausedState: false, counts: {}, workers: 1, queues: 2, partial: true, unavailableQueues: ["pi-jobs@h\u001b[31mx"], queueErrors: { "pi-jobs@h\u001b[31mx": "ERR" } }), /\u001b/);
+});
+
 test("renderStatus names the delayed parts only when handed them -- absent stays byte-identical (issue #289)", () => {
   const queue = { pausedState: false, counts: { waiting: 2, active: 1, paused: 0, delayed: 4, failed: 3 }, workers: 1 };
   // The EXACT pre-#289 output, pinned: the second argument absent must change nothing.

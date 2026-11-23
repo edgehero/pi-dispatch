@@ -402,9 +402,9 @@ test("complete exposure uses real trigger validation and reserve estimates; part
   snapshot = { ...whole, switchIncomplete: "unreadable" };
   assert.equal((await readSetupExposure(ctx)).complete, false);
   // Issue #1053: a queue whose read Valkey answered with an error is in no row, so the read is not whole either.
-  snapshot = { ...whole, switchErrored: [] };
-  assert.equal((await readSetupExposure(ctx)).complete, true, "an empty list is a whole read");
-  snapshot = { ...whole, switchErrored: [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }] };
+  snapshot = { ...whole, queueErrors: {} };
+  assert.equal((await readSetupExposure(ctx)).complete, true, "an empty map is a whole read");
+  snapshot = { ...whole, queueErrors: { "pi-jobs@hostb": "WRONGTYPE" } };
   assert.equal((await readSetupExposure(ctx)).complete, false);
   snapshot = { ...snapshot, switchIncomplete: null };
   a.readJobsData = async () => new Map();

@@ -1723,7 +1723,7 @@ test("stateOf: the day's refusals beside its failures, each listed reason held t
 test("stateOf: the named fields only, numbers as numbers, no error text, no host path, and failedReason for an operator alone", () => {
   const op = stateOf(SNAPSHOT, "operator", { now: T0 });
   const viewer = stateOf(SNAPSHOT, "viewer", { now: T0 });
-  assert.deepEqual(Object.keys(op).sort(), ["active", "activeUnknown", "at", "budget", "counts", "dollars", "failed", "failures24h", "failures24hFloor", "fleetDegraded", "fleetError", "hosts", "parked", "parkedUnknown", "paused", "queues", "refusals24h", "registryReadInPart", "role", "schedulerStallMax", "schedulers", "schedulersReadInPart", "unreadHosts", "unreadHostsMore", "version", "workers"]);
+  assert.deepEqual(Object.keys(op).sort(), ["active", "activeUnknown", "at", "budget", "counts", "dollars", "failed", "failures24h", "failures24hFloor", "fleetDegraded", "fleetError", "hosts", "parked", "parkedUnknown", "paused", "queueErrors", "queues", "refusals24h", "registryReadInPart", "role", "schedulerStallMax", "schedulers", "schedulersReadInPart", "unreadHosts", "unreadHostsMore", "version", "workers"]);
   assert.equal(op.version, 1, "the scripts' interface carries its version");
   assert.deepEqual(op.paused, { state: false, partial: true });
   assert.deepEqual(op.counts, { waiting: 3, active: 1, paused: 0, delayed: 2, failed: 4 });
@@ -1753,6 +1753,44 @@ test("stateOf: the named fields only, numbers as numbers, no error text, no host
   assert.equal(stateOf(null, "viewer").counts.waiting, 0, "an empty snapshot is an empty state, not a throw");
   const hostile = stateOf({ active: [{ jobId: "j\u001b[31m‮1" }] }, "viewer");
   assert.equal(/[\u0000-\u001f‮]/.test(hostile.active[0].jobId), false, "control and bidi bytes are scrubbed");
+});
+
+// Issue #1064: the state API carries the queues Valkey answered with an error under `pi-dispatch status`' name and shape.
+test("stateOf carries queueErrors, a queue to the reply's code, off a real reader over a queue Valkey answers with an error, and an empty map when none (#1064)", async () => {
+  const { createFleetReader } = await import("../src/read-model.mjs");
+  const { emptyRedis, quietQueue } = await import("./helpers/fleet-reader-fakes.mjs");
+  const { tempDir } = await import("./helpers/temp-dir.mjs");
+  const { join } = await import("node:path");
+  const logsDir = tempDir("pd-1064-state-");
+  const wrongtype = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+  let broken = true;
+  const make = quietQueue();
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") }, {
+    makeQueueFn: (c, opts) => {
+      const q = make(c, opts);
+      return q.name === "pi-jobs@hostb" ? { ...q, isPaused: () => (broken ? wrongtype() : Promise.resolve(true)) } : { ...q, async isPaused() { return true; } };
+    },
+    parseConnectionFn: () => ({}), redisFn: () => emptyRedis(), nowFn: () => T0,
+    readLiveHostsFn: async () => ({ hosts: [{ name: "hosta", routes: "true" }, { name: "hostb", routes: "true" }] }), discoverHostQueuesFn: async () => ({ names: [], incomplete: null }),
+  });
+  try {
+    const state = stateOf(await reader.snapshot(), "viewer", { now: T0 });
+    assert.deepEqual(state.queueErrors, { "pi-jobs@hostb": "WRONGTYPE" });
+    assert.deepEqual(state.queues.map((q) => q.queue), ["pi-jobs", "pi-jobs@hosta"], "it is in no row");
+    assert.deepEqual(state.paused, { state: false, partial: true }, "every queue that was read is paused: partly, never wholly");
+    assert.ok(!JSON.stringify(state).includes("Operation against"), "the reply's code alone");
+    assert.equal(Object.hasOwn(state, "switchErrored"), false);
+    broken = false;
+    const whole = stateOf(await reader.snapshot(), "viewer", { now: T0 });
+    assert.deepEqual([whole.queueErrors, whole.paused], [{}, { state: true, partial: false }]);
+  } finally {
+    await reader.dispose();
+  }
+  // Anything that is not a queue name to one word of Valkey's is left out, and a name is scrubbed like every other.
+  const hostile = stateOf({ queueErrors: { "pi-jobs@h\u001b[31mx": "ERR", a: "WRONGTYPE Operation against a key", b: 7 } }, "operator").queueErrors;
+  assert.deepEqual([Object.values(hostile), Object.keys(hostile).map((name) => /[\u0000-\u001f]/.test(name))], [["ERR"], [false]]);
+  assert.deepEqual(stateOf({ queueErrors: [{ queue: "pi-jobs", error: "ERR" }] }, "operator").queueErrors, {});
+  assert.deepEqual(stateOf(null, "viewer").queueErrors, {});
 });
 
 // ---- over real HTTP, with the real session store ----

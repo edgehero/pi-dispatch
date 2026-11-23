@@ -4,8 +4,8 @@ import { beatAgeOf, doctorHostsOf, firstRunState, FIRST_RUN_COMMANDS } from "./d
 import { hostsUnread } from "./console/panels/common.mjs";
 import { servesOf, declarationOf, PROPERTIES, BACKEND_NAMES } from "@edgehero/pi-dispatch/backends";
 import { heldMoneyOf } from "./insights-assembly.mjs";
-import { recordReason } from "./words.mjs";
-import { agentReasonToken } from "./agent-read.mjs";
+import { queueErrorsOf, recordReason } from "./words.mjs";
+import { agentReadProjection, agentReasonToken } from "./agent-read.mjs";
 
 let testReads = {};
 /** TEST ONLY: process-local I/O injection, never a model tool parameter. */
@@ -97,6 +97,27 @@ export function setupForAgent(snapshot, { deployment = null } = {}) {
   })) };
 }
 
+/**
+ * THE RULE for a read tool whose answer rests on the queues' own reads, over a queue Valkey answered with an error
+ * (issue #1064): the answer names the queue and says it is not whole. `queueErrors`, the snapshot's map as a model's
+ * copy carries it (`agentReadProjection`'s rule: a name that passes as an id to a code of one word), is added, present
+ * only when a queue was left out, and `complete` is false. Before, the snapshot failed whole over such a queue and
+ * these tools threw; once it answered, an answer without this would be a queue silently missing: unread drawn as read.
+ *
+ * Which tools rest on those reads: `dispatch_failed`, whose count past the list is the queues' failed counts, and
+ * `dispatch_waiting`, where why a job in the wait list or the prioritized set waits depends on whether its queue is
+ * paused, which is not known for such a queue. `dispatch_status` says the same of its own read (`readQueueState`:
+ * `partial`, `unavailableQueues`, `queueErrors`). The other read tools that build a reader answer from the host
+ * registry's rows, the files, the run records and Valkey's own counters, none of which a queue's paused state or
+ * counts enters, so they answer as over any other fleet and add nothing (a test holds the list to the registered
+ * read tools, each against a live key of the wrong type).
+ */
+function overQueueErrors(answer, snapshot) {
+  const errored = queueErrorsOf(snapshot);
+  if (errored.length === 0) return answer;
+  return { ...answer, complete: false, queueErrors: agentReadProjection({ queueErrors: Object.fromEntries(errored.map((e) => [e.queue, e.error])) }).queueErrors };
+}
+
 export async function readOperationalTool(kind, { paths, env = {}, now = Date.now, fleet: provided, reads = {} } = {}) {
   reads = { ...testReads, ...reads };
   if (kind === "failed" && reads.failed) return failedForAgent(await reads.failed({ url: paths.valkeyUrl }));
@@ -108,12 +129,12 @@ export async function readOperationalTool(kind, { paths, env = {}, now = Date.no
     // on every call and a SCAN finds any meta key a writer plants. The set is whole when the registry was read, the scan
     // finished and the bound cut nothing.
     const snapshot = await fleet.snapshot(kind === "waiting" ? { waiting: true } : kind === "failed" ? { switchQueues: true, switchLookupBound: true } : {});
-    // A queue that read's paused state or counts Valkey answered with an error (issue #1053, `switchErrored`) is in no
-    // count, so the failed total leaves its failed jobs out: how many more there are is not known, and the set is not
-    // whole, though its failed list may still be among the rows.
-    const errored = Array.isArray(snapshot.switchErrored) && snapshot.switchErrored.length > 0;
-    if (kind === "failed") return failedForAgent(errored && snapshot.failed && !snapshot.failed.unreachable ? { ...snapshot.failed, more: null } : snapshot.failed, { whole: !errored && !snapshot.queue?.fleetDegraded && snapshot.switchTruncated === false && snapshot.switchIncomplete === null });
-    if (kind === "waiting") return waitingForAgent(snapshot.waiting);
+    // A queue that read's paused state or counts Valkey answered with an error (issue #1053; the snapshot's
+    // `queueErrors` since issue #1064) is in no count, so the failed total leaves its failed jobs out: how many more
+    // there are is not known, and the set is not whole, though its failed list may still be among the rows.
+    const errored = queueErrorsOf(snapshot).length > 0;
+    if (kind === "failed") return overQueueErrors(failedForAgent(errored && snapshot.failed && !snapshot.failed.unreachable ? { ...snapshot.failed, more: null } : snapshot.failed, { whole: !errored && !snapshot.queue?.fleetDegraded && snapshot.switchTruncated === false && snapshot.switchIncomplete === null }), snapshot);
+    if (kind === "waiting") return overQueueErrors(waitingForAgent(snapshot.waiting), snapshot);
     if (kind === "hosts") return hostsForAgent(snapshot);
     if (kind === "setup") return setupForAgent(snapshot);
     throw new RangeError("unknown operational tool");

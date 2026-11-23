@@ -276,7 +276,11 @@ One command puts a live terminal view over the whole deployment:
   The bundled `operate-pi-dispatch` skill explains each action mark and refusal.
 - **Agent reads expose operational facts.** Failed jobs, all waiting jobs, hosts and setup have dedicated
   read tools. A read tool writes nothing to Valkey: it creates no queue key and removes no stale entry, which
-  the panel, `/dispatch status` and the worker still do. Runs report local retention when known; hosts report budgets, holds, CPU reserve, orphans,
+  the panel, `/dispatch status` and the worker still do. A queue Valkey answers with an error is left out of
+  `dispatch_status`' counts and named: `partial`, `unavailableQueues` and `queueErrors` (the queue to the reply's
+  code), the keys `pi-dispatch status` prints. `dispatch_failed` and `dispatch_waiting` name it in `queueErrors` too
+  and are then not `complete`; the other read tools hold nothing of a queue's paused state or counts and answer as
+  usual. Runs report local retention when known; hosts report budgets, holds, CPU reserve, orphans,
   kept sandboxes, doctor counts and qualified venue declarations. Costs include running holds and bounded
   what-if estimates. Model results omit private job/operator text, question and draft content, variable
   names, host paths and what a run loaded. Setup suggestions come from the trusted command catalogue.
