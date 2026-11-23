@@ -30,6 +30,8 @@ import { APPROVAL_NOT_PENDING, CONNECT_ENDED, dispatchRunAlready, enqueueUnconfi
 import { enqueueTriggerFire, FIRE_UNCONFIRMED, planTriggerFire } from "../src/trigger-fire.mjs";
 import { readUpdates } from "../src/updates-view.mjs";
 import { GROUP_STATUS_UNANSWERED, GROUP_UNCONFIRMED, makeZeroTouchService } from "../src/zero-touch-data.mjs";
+import { GROUP_PENDING_LINE } from "../src/zero-touch-actions.mjs";
+import { makeQuestionGroupRuntime } from "@edgehero/pi-dispatch/question-group-runtime";
 
 const VALKEY = process.env.VALKEY_TEST_URL;
 // CI sets this, which turns a missing URL into a failure rather than a quiet skip.
@@ -347,13 +349,47 @@ test("the hour's count is one script: its expiry is set with the first count and
     proxy.thaw();
     await sleep(400);
     assert.ok(["2", "3"].includes(await s.redis.get(key)), "used or not, never twice");
-    // A Valkey that answers no connection: the count was never sent, so nothing can have been used.
+    // A Valkey that answers no connection: the count was never sent, so nothing can have been used. The count's client
+    // connects first (issue #987), so what it says is its connect's failure, with no word of a start that may be used.
+    const counted = await s.redis.get(key);
     proxy.freeze();
     const unsent = await clocked(checkDispatchRun(deps(proxy.url)));
-    assert.deepEqual(unsent.res, { unreachable: "Command timed out" });
+    assert.deepEqual(Object.keys(unsent.res), ["unreachable"], JSON.stringify(unsent.res));
     assert.ok(unsent.ms < BOUND + 2000, `${unsent.ms} ms`);
+    proxy.thaw();
+    await sleep(300);
+    assert.equal(await s.redis.get(key), counted, "and nothing was counted for it, then or once Valkey answered");
   } finally {
     proxy.close();
+    await s.done();
+  }
+});
+
+test("a dispatch run on a Valkey that refuses the connection says so at once, at its preview's read and at its confirm, and nothing is counted or queued (#987)", live, async () => {
+  const s = await scene("t987");
+  // A proxy in front of the real Valkey, closed: its port refuses, and nothing reaches the Valkey behind it.
+  const proxy = await trippingProxy(s.url);
+  proxy.close();
+  const root = realpathSync(tempDir("pd-987-refused-"));
+  const folder = join(root, "repo");
+  mkdirSync(folder);
+  // An hour of this test's own, far from any other test's clock.
+  const at = Date.UTC(2040 + Math.floor(Math.random() * 40), Math.floor(Math.random() * 12), 1 + Math.floor(Math.random() * 27), Math.floor(Math.random() * 24));
+  const key = `dispatch-run:${new Date(at).toISOString().slice(0, 13).replace("T", "-")}`;
+  s.own(key);
+  // The console's own clients and bounds: nothing here is shortened, so the 5 second command bound is the real one.
+  const deps = { folder, flow: "fix", env: { VALKEY_URL: proxy.url, PI_DISPATCH_RUN_ROOTS: root, PI_DISPATCH_RUN_PER_HOUR: "9", PI_WORKER_NAME: s.tag }, gitDirtyFn: () => false, localRepoProblemFn: () => null, revParseHeadFn: () => "deadbeef", readFlowGateFn: async () => ({ gate: "allow" }), now: () => at };
+  try {
+    const read = await clocked(checkDispatchRun({ ...deps, consumeRate: false }));
+    assert.deepEqual(Object.keys(read.res), ["unreachable"], JSON.stringify(read.res));
+    assert.ok(read.ms < 1500, `${read.ms} ms`);
+    // The confirm: unreachable, which the console answers 503. It took the count's whole command bound, 5.1 seconds.
+    const run = await clocked(enqueueDispatchRun({ ...deps, task: "t", aiInvoked: true }));
+    assert.deepEqual(Object.keys(run.res), ["unreachable"], JSON.stringify(run.res));
+    assert.ok(run.ms < 1500, `${run.ms} ms`);
+    assert.equal(await s.redis.get(key), null, "no start was counted against the hour");
+    assert.equal(await s.jobs(), 0, "and no run was queued");
+  } finally {
     await s.done();
   }
 });
@@ -737,14 +773,13 @@ test("the zero touch grouping job is one job per confirm, says may or may not wh
   // this database.
   s.own("zero-touch:*", "bull:pi-jobs:*");
   s.onDone(async () => {
-    for (const n of [1, 2, 3, 4, 9]) await (await jobOf(ticket(n)))?.remove().catch(() => {});
+    for (const n of [1, 2, 3, 4, 5, 9]) await (await jobOf(ticket(n)))?.remove().catch(() => {});
   });
   try {
     const captured = await makeQuestionGroupStore({ redis: s.redis, now }).capture({ runId, scopeId: "a".repeat(64), project: "web", repo: "acme/web", at: T0 - 1000, text: "a private question", redact: (text) => text, triggerIndex: 0 });
     assert.equal(captured.ok, true, JSON.stringify(captured));
     const service = makeZeroTouchService({ paths, now, redisFn: clientHere, parseConnectionFn: boundedHere, stepTimeoutMs: CONNECT });
-    const PENDING_LINE = /A previous grouping is pending or its result could not be confirmed\. Confirming this request can pay for another classification\./;
-    const warned = async (id = runId) => PENDING_LINE.test((await service.preview("zero-touch-group", { runId: id })).plan.summary.join("\n"));
+    const warned = async (id = runId) => (await service.preview("zero-touch-group", { runId: id })).plan.summary.includes(GROUP_PENDING_LINE);
     assert.equal(await warned(), false, "nothing was asked for yet");
     // A second question, for the add Valkey refuses: its status is put back, so its preview warns of nothing.
     const refusedRun = `gh-${s.tag}-refused`;
@@ -764,8 +799,25 @@ test("the zero touch grouping job is one job per confirm, says may or may not wh
     assert.deepEqual(queued, { ok: true, jobId: `question-group-${ticket(1)}` });
     const twice = await service.apply("zero-touch-group", first);
     assert.equal(twice.jobId, queued.jobId);
-    const before = await s.jobs("pi-jobs");
     assert.ok(await jobOf(ticket(1)));
+    // What the mark means and how long it stays (issue #987), by the worker's own grouping runtime over the same store.
+    // It is written before the add, so a grouping that is queued reads as pending.
+    const workerRun = `gh-${s.tag}-worker`;
+    assert.equal((await makeQuestionGroupStore({ redis: s.redis, now }).capture({ runId: workerRun, scopeId: "a".repeat(64), project: "web", repo: "acme/web", at: T0 - 850, text: "a question the worker is asked to group", redact: (text) => text, triggerIndex: 0 })).ok, true);
+    const workerPlan = (await service.preview("zero-touch-group", { runId: workerRun })).plan;
+    assert.equal((await service.apply("zero-touch-group", { payload: { params: { runId: workerRun }, configDigest: workerPlan.configDigest, digest: workerPlan.digest }, ticketDigest: ticket(5) })).ok, true);
+    assert.equal(await warned(workerRun), true, "one is queued");
+    const runtime = makeQuestionGroupRuntime({ store: makeQuestionGroupStore({ redis: s.redis, now }), triggersPath: paths.triggersPath, getSettings: () => ({ provider: "classifier", model: "small" }) });
+    const ref = { runId: workerRun, digest: workerPlan.digest, configDigest: workerPlan.configDigest };
+    // A grouping the worker refuses before it starts (here its configuration changed since the confirm) writes no
+    // status: the job has ended, and the mark is still there. "Until a grouping finishes" was not true of it.
+    const refusedEarly = await runtime.resolve({ kind: "question-grouping", questionGrouping: { ...ref, configDigest: "0".repeat(64) } }, "job-refused");
+    assert.deepEqual(refusedEarly.result, { outcome: "policy", reason: "question-group-config-changed", budgetReserved: false });
+    assert.equal(await warned(workerRun), true, "it ended without recording a result");
+    // A grouping that records its result replaces the mark, whatever the result is.
+    assert.deepEqual(await runtime.collect({ job: { questionGrouping: ref }, prepared: { outboxDir: dir }, completed: false }), { status: "failed" });
+    assert.equal(await warned(workerRun), false, "a result was recorded");
+    const before = await s.jobs("pi-jobs");
     // Stopped at the add.
     // A question nobody asked to group yet, so its status is its own: the lost add below is what makes it pending.
     const lostRun = `gh-${s.tag}-lost`;
@@ -794,7 +846,8 @@ test("the zero touch grouping job is one job per confirm, says may or may not wh
     const unanswered = await clocked(service.apply("zero-touch-group", { payload: { params: { runId: statusRun }, configDigest: statusPlan.configDigest, digest: statusPlan.digest }, ticketDigest: ticket(4) }));
     assert.equal(await stoppedAt(atStatus), "stopped", "Valkey stopped answering at the status write");
     assert.deepEqual(unanswered.res, { invalid: GROUP_STATUS_UNANSWERED, partial: true });
-    assert.equal(GROUP_STATUS_UNANSWERED, "Nothing was queued: the question's grouping status write was not answered, so it may read as pending.");
+    assert.equal(GROUP_STATUS_UNANSWERED, "Nothing was queued: the question's grouping status write was not answered, so it may read as pending until a grouping records a result or its record expires.");
+    assert.ok([...GROUP_STATUS_UNANSWERED].length <= 200, "an audit row keeps the whole sentence");
     assert.ok(unanswered.ms < 4000, `${unanswered.ms} ms`);
     proxy.thaw();
     await sleep(400);
@@ -808,11 +861,22 @@ test("the zero touch grouping job is one job per confirm, says may or may not wh
     // The page's read and a preview end at their bound on a Valkey that answers nothing, on a client that is dropped.
     proxy.freeze();
     const short = makeZeroTouchService({ paths, now, redisFn: clientHere, parseConnectionFn: boundedHere, readTimeoutMs: CONNECT, stepTimeoutMs: CONNECT });
-    for (const reading of [() => short.read({}), () => short.preview("zero-touch-group", { runId })]) {
+    // What the preview throws is marked as a Valkey read that got no answer (issue #987), which the console answers as
+    // Valkey unreachable. The page's read is not: it repairs before it reads, so its timer cannot say nothing was sent.
+    for (const [reading, marked] of [[() => short.read({}), undefined], [() => short.preview("zero-touch-group", { runId }), true]]) {
       const got = await clocked(reading());
       assert.ok(got.res.thrown instanceof Error, JSON.stringify(got.res));
+      assert.equal(got.res.thrown.valkeyNotSent, marked);
+      assert.equal(got.res.thrown.valkeyMayStillRun, undefined);
       assert.ok(got.ms < CONNECT + 2000, `${got.ms} ms`);
     }
+    // With the console's own bounds (a 5 second command bound, a 6 second step) the store's own timer ends the read
+    // first, after 2 seconds, with an error that names no Valkey: marked all the same, since the mark is set where the
+    // read is asked.
+    const stored = await clocked(makeZeroTouchService({ paths, now }).preview("zero-touch-group", { runId }));
+    assert.equal(stored.res.thrown?.message, "question-store-timeout", JSON.stringify(stored.res));
+    assert.equal(stored.res.thrown.valkeyNotSent, true);
+    assert.ok(stored.ms < 3500, `${stored.ms} ms`);
   } finally {
     proxy.thaw();
     proxy.close();

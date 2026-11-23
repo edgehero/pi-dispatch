@@ -494,9 +494,9 @@ test("the split slice carries what a budget write whose answer was lost leaves, 
   const earlier = { at: "2026-10-04T06:00:00.000Z", host: "h1", writer: "operator-session", outcome: "applied", reason: null, planId: "3f9a0c1d2e4b5a67", weights: { shop: 1 } };
   const own = { at: state.appliedAt, host: "h1", writer: "operator-revert", outcome: "reverted", reason: null, planId: null, weights: { shop: 1, _other: 0 } };
   const stray = "0123456789abcdef";
-  const view = async ({ log, expected, nowMs, options = {} }) => {
+  const view = async ({ log, expected, nowMs, options = {}, applied = state }) => {
     const redis = fakeAllocRedis();
-    redis.store.set("t987:plan", JSON.stringify(state));
+    redis.store.set("t987:plan", JSON.stringify(applied));
     if (expected) redis.store.set("t987:envelope:expected", expected);
     redis.lists.set("t987:log", log.map((r) => JSON.stringify(r)));
     ia._setAllocationSeamsForTests({ redisFn: () => redis, prefix: "t987", now: () => new Date(nowMs) });
@@ -529,6 +529,23 @@ test("the split slice carries what a budget write whose answer was lost leaves, 
   assert.ok(!calm.includes("alloc:envelope:expected names envelope") && !calm.includes("has no row in this history"));
   // A split written a moment ago is not said to lack its row: the push follows the write by milliseconds.
   assert.equal((await view({ log: [earlier], expected: digest, nowMs: APPLIED + 5_000 })).historyBehind, null);
+  // The rule is told how many rows were READ, the same number the reader was asked for. Twenty refusals pushed after
+  // the split's own row fill the list, so the row may lie further back and nothing is said; nineteen leave an older
+  // change in it that is not the split's, and the notice stands. A larger number handed to the rule read twenty full
+  // rows as the whole history and said the notice of a split whose row is there.
+  const refusals = (n) => Array.from({ length: n }, (_, i) => ({ at: new Date(APPLIED + (n - i) * 60_000).toISOString(), host: "h1", writer: "portfolio-job", outcome: "refused", reason: "plan-too-soon", planId: null }));
+  const later = APPLIED + 30 * 60_000;
+  assert.equal((await view({ log: [...refusals(20), own, earlier], expected: digest, nowMs: later })).historyBehind, null, "the split's row is past what was read");
+  assert.equal((await view({ log: [...refusals(20), earlier], expected: digest, nowMs: later })).historyBehind, null, "a full list with no change in it says nothing either way");
+  assert.deepEqual((await view({ log: [...refusals(19), earlier], expected: digest, nowMs: later })).historyBehind, { writer: "operator-revert", at: "10-05 06:00" });
+  assert.equal((await view({ log: [...refusals(19), own, earlier], expected: digest, nowMs: later })).historyBehind, null);
+  // The key's notice is told the SPLIT's envelope, never this host's own for it: while this host's file is not the
+  // split's envelope the page says the mismatch, and the key naming a third digest is that mismatch's business. Handed
+  // this host's digest there, the notice was said beside the mismatch.
+  const elsewhere = { ...state, envelopeDigest: "fedcba9876543210" };
+  const differs = await view({ log: [own, earlier], expected: stray, nowMs: APPLIED + 60_000, applied: elsewhere });
+  assert.deepEqual([differs.mismatch, differs.expectedOther], [true, null]);
+  assert.deepEqual((await view({ log: [own, earlier], expected: stray, nowMs: APPLIED + 60_000 })).expectedOther, { expected: "01234567", file: digest.slice(0, 8) }, "said where this host's file is the split's envelope");
   // The normalizer bounds what it is handed: a digest that is not one is no notice, a writer that is no word is "?".
   assert.equal(html.normAllocation({ ...lost, expectedOther: { expected: "<b>", file: "01234567" } }).expectedOther, null);
   assert.deepEqual(html.normAllocation({ ...lost, historyBehind: { writer: "<b>", at: "junk" } }).historyBehind, { writer: "?", at: "?" });

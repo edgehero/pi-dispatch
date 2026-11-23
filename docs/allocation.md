@@ -246,12 +246,15 @@ naming the conflict. An envelope that already does not load does not block them.
 
 Valkey can take a write and stop answering before it says so (a frozen host, a dropped link). The console then
 cannot know whether the write happened, says so once, and the write may still land when Valkey answers again. What
-it leaves is shown on the Budget split page, under Other states, until it is put right.
+it leaves is shown on the Budget split page, under Other states: the key's notice for as long as the key holds that
+digest, the history's until a later change of the split writes its row (below). The page may show a view up to about
+30 seconds old.
 
 **An envelope change.** The confirm says: "If alloc:envelope:expected holds <digest>, set it back by hand to the
 digest doctor prints (docs/allocation.md): Valkey did not confirm that write, and the envelope file was not
 written". If the record landed, the key names an envelope no file has. Nothing refuses jobs for that: a host
-compares its own file with the applied split and reads the key only when the two differ. But a file with that digest,
+compares its own file with the applied split, and goes by what the key holds only when the two differ (it reads the
+key every time). But a file with that digest,
 on any host, would re-base the fleet with no confirm. The page says "alloc:envelope:expected names envelope
 <digest>, not this host's (<digest>)", and the next preview of an envelope change says what the key holds. Either
 confirm the change again (the preview says "already holds this envelope's digest", and confirming writes the file),
@@ -263,12 +266,21 @@ valkey-cli SET alloc:envelope:expected <the digest doctor prints>
 ```
 
 **A priorities plan or a revert.** One that stopped before it wrote anything says that Valkey could not be reached
-and nothing was changed. One that stopped at its write says the change may or may not have been made. If it landed,
+and nothing was changed. One that stopped at its write says the change may or may not have been made, and so does one
+whose connection was lost after it had written something else (a first split, the end of an expired plan, its lock). If it landed,
 the split is the plan's or the revert's and the history has no row of it, because the row is pushed after the
 write is answered. The page then says "The applied split (written by <writer> at <time>) has no row in this history".
 The row is in the allocations file of the host that wrote it (`PI_LOGS_DIR/allocations/`), unless the write was the
-first neutral split of a fleet, which writes its row afterwards. Nothing needs repair: the split shown is the split
-in force, and the next plan or revert writes its own row. To undo it, revert to the row you want.
+first neutral split of a fleet, or the one that ends a plan past its last day or with delegation turned off: those
+write their row afterwards, so a lost one leaves none anywhere. Nothing needs repair: the split shown is the split
+in force, and the next plan or revert writes its own row, which ends the notice. It is also no longer said once
+twenty newer rows that change no split (refusals) have filled the history the page reads; with nineteen it still is.
+To undo the change, revert to the row you want.
+
+A plan or a revert can also stop at a write it makes on the way, before the change itself: its lock, the first split
+of a fleet, the end of an expired plan, or the record of the fleet's envelope in `alloc:envelope:expected` when that
+key is absent. Each says the change may or may not have been made, though the change you asked for was not: look at
+the split, then try again.
 
 ## The panel
 

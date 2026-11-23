@@ -10,15 +10,17 @@ import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connecti
 import { loadSchedules } from "@edgehero/pi-dispatch/schedules";
 import { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 import { withJobDataVersion } from "@edgehero/pi-dispatch/job-data-version";
-import { checkDispatchRun, QUEUE_CLOSE_TIMEOUT_MS } from "./read-model.mjs";
+import { ALLOWANCE_UNREAD, checkDispatchRun, QUEUE_CLOSE_TIMEOUT_MS } from "./read-model.mjs";
 import { ALREADY_MATCH, boundedClient, connectedQueue, CONFIRM_READ_TIMEOUT_MS, LOOK_FIRST, PAID_PLAN_TIMEOUT_MS, queuedAlready, within } from "./job-actions.mjs";
 
 const digest = (s) => createHash("sha256").update(s).digest("hex");
 const changed = "The triggers file changed since the preview. Preview Fire now again. Nothing was queued.";
 
-/** What a Fire now says when its queue or its allowance did not answer before anything was sent. */
+/**
+ * What a Fire now says when its queue did not answer before anything was sent. For its allowance the sentence is the
+ * read model's `ALLOWANCE_UNREAD` (issue #987), which the console's `run-enqueue` preview says too.
+ */
 const QUEUE_UNREAD = "The deployment's queue could not be read. Nothing was queued.";
-const ALLOWANCE_UNREAD = "The dispatch_run hourly allowance could not be read. Nothing was queued.";
 /** What it says once the hour's allowance has counted this fire and a later step sent nothing: the count is not given back. */
 const ALLOWANCE_USED = "One start of this hour's dispatch_run allowance was used.";
 /**
@@ -28,6 +30,14 @@ const ALLOWANCE_USED = "One start of this hour's dispatch_run allowance was used
 // Spelled whole, not built from `LOOK_FIRST`: this module can be read before `job-actions.mjs` has run (they import
 // each other through the read model), and a test holds the two to the same words.
 export const FIRE_UNCONFIRMED = "A run may have been queued and one start of this hour was used: Fire now got no queue acknowledgement. Preview it again first: the preview says when one is already queued or running";
+/**
+ * The same for an extension canary (issue #987), which is queued through this module with one more field and said
+ * "Fire now got no queue acknowledgement" of an action its person never named. Every answer below that names who was
+ * stopped after the allowance was counted names the canary for one (`firedAs`); Fire now's own words are unchanged.
+ */
+export const CANARY_UNCONFIRMED = "A run may have been queued and one start of this hour was used: the canary got no queue acknowledgement. Preview it again first: the preview says when one is already queued or running";
+/** Who an answer names: `[the name that starts a clause, the name after "this minute's"]`. */
+const firedAs = (canary) => (canary ? ["the canary", "canary"] : ["Fire now", "Fire now"]);
 
 /**
  * `{ plan } | { refusal } | { unreachable }`; no hourly counter is changed by this read.
@@ -132,6 +142,9 @@ export async function enqueueTriggerFire(plan, options = {}) {
   let admitted = false;
   let latching = false;
   let sent = false;
+  // A canary (issue #796) has an identity of its own, so a hand fire in the same minute cannot swallow it, nor it the fire: they are different jobs with different code.
+  const canary = options.packageCanary ?? null;
+  const [who, minutes] = firedAs(canary);
   try {
     const admission = await admissionFn({ folder: current.schedule.data.folder, flow: current.schedule.data.flow, aiInvoked: true, consumeRate: true, env: { ...grantsEnv, VALKEY_URL: url }, now });
     if (admission.allowanceMayBeUsed) return { invalid: "Nothing was queued and one start of this hour may have been used: the dispatch_run hourly allowance was sent this fire and did not answer.", partial: true };
@@ -145,8 +158,6 @@ export async function enqueueTriggerFire(plan, options = {}) {
     // two console/tool fires from racing even after a person cancels/removes the first job. Keep the
     // latch on infrastructure failure: releasing it could double-start an enqueue whose reply was lost.
     const instant = new Date(now());
-    // A canary (issue #796) has an identity of its own, so a hand fire in the same minute cannot swallow it, nor it the fire: they are different jobs with different code.
-    const canary = options.packageCanary ?? null;
     const id = (canary ? manualCanaryJobId : manualTriggerJobId)({ triggerId: current.schedulerId, now: instant });
     redis = boundedClient(redisFn, url);
     latching = true;
@@ -156,15 +167,15 @@ export async function enqueueTriggerFire(plan, options = {}) {
     const schedule = canary ? { ...current.schedule, data: withJobDataVersion({ ...current.schedule.data, packageCanary: canary }) } : current.schedule;
     sent = true;
     const { id: jobId, existing } = await enqueueTriggerRunReporting(queue, schedule, { now: instant, ...(canary ? { jobId: id } : {}) });
-    if (existing === undefined) return { invalid: `A run may have been queued and one start of this hour was used: Fire now could not verify the queued job. ${LOOK_FIRST}`, partial: true, jobId, queue: current.queue };
+    if (existing === undefined) return { invalid: `A run may have been queued and one start of this hour was used: ${who} could not verify the queued job. ${LOOK_FIRST}`, partial: true, jobId, queue: current.queue };
     if (existing) return { refusal: `${swallowedRunSentence(jobId, existing)} ${ALLOWANCE_USED}`, deduplicated: true, jobId };
     return { ok: true, jobId, queue: current.queue };
   } catch (err) {
-    if (sent) return { invalid: FIRE_UNCONFIRMED, partial: true };
+    if (sent) return { invalid: canary ? CANARY_UNCONFIRMED : FIRE_UNCONFIRMED, partial: true };
     // The latch's SET was sent and not answered: nothing was queued, and the minute may be taken now or when Valkey wakes.
-    if (latching && err?.valkeyMayStillRun === true) return { invalid: "Nothing was queued, one start of this hour was used, and this minute's Fire now may be taken: its latch was sent and did not answer. Try again next minute.", partial: true };
-    if (latching) return { invalid: "Nothing was queued and one start of this hour was used: Fire now's latch for this minute could not be set.", partial: true };
-    if (admitted) return { invalid: "Nothing was queued and one start of this hour was used: Fire now stopped before it queued anything.", partial: true };
+    if (latching && err?.valkeyMayStillRun === true) return { invalid: `Nothing was queued, one start of this hour was used, and this minute's ${minutes} may be taken: its latch was sent and did not answer. Try again next minute.`, partial: true };
+    if (latching) return { invalid: `Nothing was queued and one start of this hour was used: ${who}'s latch for this minute could not be set.`, partial: true };
+    if (admitted) return { invalid: `Nothing was queued and one start of this hour was used: ${who} stopped before it queued anything.`, partial: true };
     return { unreachable: QUEUE_UNREAD };
   } finally {
     // Started, never awaited: the answer does not wait for a QUIT.

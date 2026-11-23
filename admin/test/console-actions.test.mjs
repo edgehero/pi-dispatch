@@ -36,6 +36,7 @@ import { createConsoleServer } from "../src/console/server.mjs";
 import * as RM from "../src/read-model.mjs";
 import * as WP from "../src/write-plans.mjs";
 import { makeZeroTouchService } from "../src/zero-touch-data.mjs";
+import { makeAnswererService } from "../src/answerer-data.mjs";
 import { makeQuestionGroupStore } from "@edgehero/pi-dispatch/question-groups";
 import { makeTouchStore } from "@edgehero/pi-dispatch/touch-state";
 import { createModelRoleActions, MODEL_ROLE_EDIT_FIELDS } from "../src/model-role-plans.mjs";
@@ -1661,6 +1662,145 @@ test("a preview that throws answers 500 with its own sentence and nothing was ch
   assert.equal(res.json().error, "the preview failed; the console's log has the reason; nothing was changed");
   assert.ok(res.json().html.includes('<p class="banner__t">The preview failed</p>') && res.json().html.includes("The preview failed; the console&#39;s log has the reason; nothing was changed.</p>"), res.json().html);
   assert.equal(res.json().html.match(/nothing was changed/gi).length, 1);
+});
+
+test("a preview whose Valkey read got no answer says Valkey could not be reached, with Try again and no audit row, over the real zero touch, answerer and sandbox services; any other throw keeps the 500 and its log line (#987)", async () => {
+  const { dir, paths } = deployment();
+  paths.projectsPath = paths.projectsFile;
+  writeFileSync(paths.triggersPath, `${JSON.stringify({ triggers: [], zeroTouch: { capture: true, model: "classifier/small", maxCostUsd: "0.01", names: {} } }, null, 2)}\n`);
+  const never = () => new Promise(() => {});
+  // What a client's read fails with when Valkey does not answer: a command its bound ended before it left, one that
+  // left and was lost, and a connection that was refused.
+  const timedOut = () => Promise.reject(Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" }));
+  const lost = () => Promise.reject(lostWrite());
+  const refusedConnect = () => Promise.reject(Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1"), { code: "ECONNREFUSED" }));
+  const client = (get) => () => ({ on() {}, get, disconnect() {} });
+  const unreachable = async (c, name, body, label) => {
+    const rows = c.audit.rows.length;
+    const res = await c.act(name, body);
+    assert.equal(res.status, 503, `${label}: ${res.text}`);
+    assert.equal(res.json().error, VALKEY_UNREACHABLE, label);
+    assert.equal(res.json().ticket, undefined, label);
+    // Valkey's own bar, with Try again: it was "The preview failed", with Close and the console's log as the reason.
+    assert.ok(res.json().html.includes('<p class="banner__t">The deployment&#39;s Valkey could not be reached</p>') && /data-again[^>]*>\s*Try again/.test(res.json().html), `${label}: ${res.json().html}`);
+    assert.equal(res.json().html.match(/nothing was changed/gi).length, 1, label);
+    assert.equal(c.audit.rows.length, rows, `${label}: a preview writes no audit row`);
+  };
+  const failed = async (c, name, body, label) => {
+    const logs = seen.logs.length;
+    const res = await c.act(name, body);
+    assert.equal(res.status, 500, `${label}: ${res.text}`);
+    assert.equal(res.json().error, "the preview failed; the console's log has the reason; nothing was changed", label);
+    assert.ok(res.json().html.includes('<p class="banner__t">The preview failed</p>'), label);
+    assert.ok(seen.logs.slice(logs).some((line) => line.startsWith(`console: the ${name} preview failed (`)), `${label}: ${JSON.stringify(seen.logs.slice(logs))}`);
+  };
+  const run = { runId: "gh-question" };
+  const fix = { fixId: "f".repeat(32) };
+  const draft = { runId: "gh-source", draftRunId: "gh-draft", digest: "b".repeat(64) };
+  // Zero touch: the grouping's read of the question and the Undo's read of the fix, each through its store.
+  for (const [label, get] of [["a command the client's bound ended", timedOut], ["a read that was sent and lost", lost], ["a refused connection", refusedConnect]]) {
+    const c = await start({ paths, a: { zeroTouch: makeZeroTouchService({ paths, now: () => T0, redisFn: client(get) }) } });
+    await unreachable(c, "zero-touch-group", run, `zero-touch-group, ${label}`);
+    await unreachable(c, "zero-touch-undo", fix, `zero-touch-undo, ${label}`);
+    const a = await start({ paths, a: { answerer: makeAnswererService({ paths, now: () => T0, redisFn: client(get) }) } });
+    await unreachable(a, "answer-draft-drop", draft, `answer-draft-drop, ${label}`);
+  }
+  // A read that never answers ends at the service's own step, whose error is Valkey's too.
+  const slow = await start({ paths, a: { zeroTouch: makeZeroTouchService({ paths, now: () => T0, redisFn: client(never), stepTimeoutMs: 60 }), answerer: makeAnswererService({ paths, now: () => T0, redisFn: client(never), readTimeoutMs: 60 }) } });
+  await unreachable(slow, "zero-touch-group", run, "zero-touch-group, no answer within the step");
+  await unreachable(slow, "answer-draft-drop", draft, "answer-draft-drop, no answer within the read's bound");
+  // The sandbox End, prepare and pin read the kept workspaces first; the host target's preview reads no Valkey.
+  const inv = sandboxFixture(T0), shell = inv.sessions[0];
+  const sandboxes = (sandboxInventory) => makeSandboxService({ paths, deploymentDir: dir, fleet: { sandboxInventory, sandboxSessions: async () => ({ sessions: inv.sessions }) }, now: () => T0 });
+  const end = { host: shell.host, id: shell.id, nonce: shell.nonce, containerId: shell.containerId };
+  const down = await start({ paths, a: { sandboxes: sandboxes(async () => ({ unreachable: true })) } });
+  await unreachable(down, "sandbox-end", end, "sandbox-end");
+  await unreachable(down, "sandbox-pin", { host: shell.host, id: shell.id }, "sandbox-pin");
+  await unreachable(down, "sandbox-prepare", { repo: "acme/web", index: 0, ref: "HEAD", host: shell.host }, "sandbox-prepare");
+  // A pin's confirm previews again before it asks for anything: Valkey gone by then is its 503 too, with nothing asked.
+  let reads = 0;
+  let asked = 0;
+  const flaky = makeSandboxService({ paths, deploymentDir: dir, fleet: { sandboxInventory: async () => ((reads += 1) === 1 ? { hosts: inv.hosts } : { unreachable: true }), sandboxSessions: async () => ({ sessions: inv.sessions }), sandboxPrepare: async () => ((asked += 1), { id: "x", state: "pending" }) }, now: () => T0 });
+  const pinning = await start({ paths, a: { sandboxes: flaky } });
+  const pin = await pinning.both("sandbox-pin", { host: shell.host, id: shell.id });
+  assert.equal(pin.confirm.status, 503, pin.confirm.text);
+  assert.equal(pin.confirm.json().error, VALKEY_UNREACHABLE);
+  assert.equal(asked, 0);
+  assert.deepEqual(lastTwo(pinning), [["write", "ok", null], ["write", "failed", "the write threw (error); Valkey could not be reached, so nothing was changed"]]);
+  // A preview that reads through a client of its own throws that client's error. One that was sent and lost carries
+  // the client's own mark, which a confirm words as a change that may have been made: here nothing is written, so it
+  // is Valkey's refusal too.
+  await unreachable(await start({ paths, a: { rm: { ...RM, planFailedBulk: async () => { throw lostWrite(); } } } }), "retry-failed", { jobId: "gh-z" }, "a preview's own read, sent and lost");
+  // Any other throw keeps the 500 and its line in the console's log, which is where its reason is.
+  await failed(await start({ paths, a: { sandboxes: sandboxes(async () => { throw Object.assign(new Error("boom"), { code: "EBOOM" }); }) } }), "sandbox-end", end, "a fleet read that throws");
+  // Valkey's own reply to a read is an answer, and an error the language raised is a fault of the code: neither is
+  // Valkey out of reach.
+  const replied = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+  await failed(await start({ paths, a: { zeroTouch: makeZeroTouchService({ paths, now: () => T0, redisFn: client(replied) }) } }), "zero-touch-group", run, "Valkey's own error reply");
+  await failed(await start({ paths, a: { answerer: makeAnswererService({ paths, now: () => T0, redisFn: client(() => Promise.reject(new TypeError("not a function"))) }) } }), "answer-draft-drop", draft, "a fault of the code");
+  // A triggers file that does not parse fails the grouping's preview before any read of Valkey.
+  const broken = deployment();
+  writeFileSync(broken.paths.triggersPath, "{ not json");
+  await failed(await start({ paths: broken.paths, a: { zeroTouch: makeZeroTouchService({ paths: broken.paths, now: () => T0, redisFn: client(async () => null) }) } }), "zero-touch-group", run, "a triggers file that does not parse");
+});
+
+test("the run-enqueue preview says the hourly allowance could not be read, as Fire now does, with Valkey's bar and Try again (#987)", async () => {
+  const { paths } = deployment();
+  const grants = { grantsEnv: { PI_DISPATCH_RUN_ROOTS: "/srv/repos", PI_DISPATCH_RUN_PER_HOUR: "3" } };
+  const input = { folder: "/srv/repos/example", flow: "triage", task: "run the tests" };
+  const previewed = async (admission) => (await start({ paths, a: { ...grants, rm: { ...RM, checkDispatchRun: async () => admission, dispatchRunAlready: async () => null } } })).act("run-enqueue", input);
+  const unread = await previewed({ unreachable: "Connection is closed." });
+  assert.equal(unread.status, 503, unread.text);
+  assert.equal(unread.json().error, "The dispatch_run hourly allowance could not be read. Nothing was queued.");
+  assert.equal(unread.json().error, RM.ALLOWANCE_UNREAD, "one sentence, the read model's");
+  assert.ok(unread.json().html.includes('<p class="banner__t">The deployment&#39;s Valkey could not be reached</p>') && /data-again[^>]*>\s*Try again/.test(unread.json().html), unread.json().html);
+  // It said "The paid-start allowance could not be read." as a change refused, with no word of what had not answered.
+  assert.doesNotMatch(unread.text, /paid-start allowance/);
+  // A refusal of the run itself is still the change refused.
+  const refused = await previewed({ refused: "folder not under PI_DISPATCH_RUN_ROOTS" });
+  assert.equal(refused.status, 400, refused.text);
+  assert.equal(refused.json().error, "folder not under PI_DISPATCH_RUN_ROOTS");
+});
+
+test("a dispatch run and an agent's re-run whose add was not confirmed say the start of this hour was used, within an audit row's field (#987)", async () => {
+  const { paths } = deployment();
+  const grants = { grantsEnv: { PI_DISPATCH_RUN_ROOTS: "/srv/repos", PI_DISPATCH_RUN_PER_HOUR: "3" } };
+  const lostQueue = () => ({ add: async () => { throw lostWrite(); }, getJob: async () => undefined, close: async () => {}, disconnect() {} });
+  const counter = () => ({ on() {}, eval: async () => 1, get: async () => "0", disconnect() {} });
+  const local = { gitDirtyFn: () => false, localRepoProblemFn: () => null, revParseHeadFn: () => "deadbeef", readFlowGateFn: async () => ({ gate: "allow" }) };
+  // The real enqueue, on a folder that exists: the hour's count answered, then an add that was sent and not answered.
+  const root = nodeFs.realpathSync(paths.logsDir);
+  const rm = { ...RM, checkDispatchRun: async () => ({}), dispatchRunAlready: async () => null, enqueueDispatchRun: (args) => RM.enqueueDispatchRun({ ...args, ...local, env: { ...args.env, PI_DISPATCH_RUN_ROOTS: root }, folder: root, makeQueueFn: lostQueue, parseConnectionFn: () => ({}), redisFn: counter }) };
+  const c = await start({ paths, a: { ...grants, rm } });
+  const out = await c.both("run-enqueue", { folder: "/srv/repos/example", flow: "triage", task: "run the tests" });
+  const counted = "the run may or may not have been queued and one start of this hour was used: the queue did not confirm it. Preview it again first: the preview says when one is already queued or running";
+  assert.equal(out.confirm.status, 409, out.confirm.text);
+  assert.equal(out.confirm.json().error, counted);
+  assert.ok([...counted].length <= 200, `${[...counted].length} code points`);
+  assert.deepEqual(lastTwo(c), [["write", "ok", null], ["write", "failed", counted]], "the row keeps the whole sentence, the start it used included");
+  assert.ok(out.confirm.json().html.includes("The change did not finish"), out.confirm.json().html);
+  // An agent's re-run is counted against the same hour before its add, and its confirm hands that on to the enqueue.
+  const plan = { kind: "local", jobId: "local-r", queue: "pi-jobs", job: { folder: "/srv/repos/example", flow: "fix", task: "t" }, reserve: null };
+  const asked = [];
+  const rerun = { ...RM, planRerun: async () => ({ plan }), checkDispatchRun: async () => ({}), enqueueRerun: async (p, options) => { asked.push(options.counted ?? false); return RM.enqueueRerun(p, { ...options, ...local, queueFn: lostQueue, parseConnectionFn: () => ({}) }); } };
+  const r = await start({ paths, a: { ...grants, rm: rerun } });
+  const agent = await r.cookieFor(AGENT_TOKEN);
+  const p = await r.act("rerun", { jobId: "local-r" }, agent);
+  assert.equal(p.status, 200, p.text);
+  const lost = await r.confirm("rerun", p.json().ticket, agent);
+  assert.equal(lost.status, 409, lost.text);
+  assert.deepEqual(asked, [true]);
+  assert.deepEqual([r.audit.rows.at(-1).outcome, r.audit.rows.at(-1).reason], ["failed", "action-unconfirmed"]);
+  // What the enqueue answers for it: the start right after what may have been queued, so a cut at 200 keeps it.
+  const said = await RM.enqueueRerun(plan, { url: "redis://x", ...local, queueFn: lostQueue, parseConnectionFn: () => ({}), counted: true });
+  assert.deepEqual(said, { invalid: "the re-run of local-r may or may not have been queued and one start of this hour was used: the queue did not confirm it. Preview it again first: the preview says when one is already queued or running", partial: true });
+  assert.ok([...said.invalid].slice(0, 200).join("").includes("one start of this hour was used"));
+  // A person's re-run counts nothing against the hour and says nothing of a start.
+  const person = await start({ paths, a: { ...grants, rm: rerun } });
+  const mine = await person.both("rerun", { jobId: "local-r" });
+  assert.equal(mine.confirm.status, 409, mine.confirm.text);
+  assert.equal(mine.confirm.json().error, "the re-run of local-r may or may not have been queued: the queue did not confirm it. Preview it again first: the preview says when one is already queued or running");
+  assert.deepEqual(asked, [true, false]);
 });
 
 test("the previewing skeleton's message state draws its own icon: the hourglass only while busy, the attention mark once the script says why", async () => {
@@ -4867,9 +5007,10 @@ test("the envelope preview says in one line what alloc:envelope:expected holds w
     assert.equal(typeof p.json().ticket, "string", "a preview, whatever the key holds");
     return p.json().summary.filter((line) => line.includes("alloc:envelope:expected"));
   };
-  // No key: nothing to say. One bounded read of one row, with no envelope, so no spend is read for it.
+  // No key: nothing to say. One bounded read of one row on a client that fails fast, with no envelope, so no spend is
+  // read for it.
   assert.deepEqual(await lines(), []);
-  assert.deepEqual(asked[0], { url: paths.valkeyUrl, limit: 1, timeoutMs: 2500 });
+  assert.deepEqual(asked[0], { url: paths.valkeyUrl, limit: 1, timeoutMs: 2500, failFast: true });
   // This change's digests, as its confirm's audit row records them.
   const out = await c.both("envelope-set", input);
   assert.equal(out.confirm.status, 200, out.confirm.text);
@@ -4894,13 +5035,14 @@ test("the envelope preview says in one line what alloc:envelope:expected holds w
     assert.deepEqual(await lines(), ["Whether alloc:envelope:expected holds another digest could not be read from Valkey."]);
   }
   assert.deepEqual([ENVELOPE_EXPECTED_LINES.same, ENVELOPE_EXPECTED_LINES.unread].map((line) => typeof line), ["string", "string"]);
-  // The real reader on an address that refuses the connect: the preview is there at the read's one bound, and says so.
+  // The real reader on an address that refuses the connect: the preview is there at once, as the confirm's refusal is,
+  // and says so. On a client that keeps its offline queue it waited out the read's whole bound, 2.5 seconds.
   const refused = await start({ paths });
   const t0 = Date.now();
   const p = await refused.act("envelope-set", input);
   assert.equal(p.status, 200, p.text);
   assert.ok(p.json().summary.includes(ENVELOPE_EXPECTED_LINES.unread), JSON.stringify(p.json().summary));
-  assert.ok(Date.now() - t0 < 4500, `${Date.now() - t0} ms`);
+  assert.ok(Date.now() - t0 < 1500, `${Date.now() - t0} ms`);
 });
 
 test("an envelope write whose Valkey connect got no answer says the deployment's Valkey could not be reached, as a priorities plan does, and writes nothing (#965)", async () => {

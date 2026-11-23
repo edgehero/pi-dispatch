@@ -24,7 +24,13 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
   const hosts = () => readSandboxHosts(hostFile, { fs });
   async function inventory() {
     const [kept, open] = await Promise.all([fleet.sandboxInventory(), fleet.sandboxSessions()]);
-    if (kept?.unreachable) throw new Error("sandbox inventory unreadable");
+    // Marked `valkeyNotSent` (issue #987): the fleet's read of the kept workspaces got no usable answer from Valkey, and
+    // this read writes nothing. A preview that needs it (End, prepare, pin) then answers Valkey unreachable with Try
+    // again, where it said the preview failed and to read the console's log; so do the prepare's and the pin's
+    // confirms, which preview again before they ask for anything. The page's read throws the same error and shows what
+    // it showed. The reader answers `unreachable` for a read that timed out, one its client refused and one Valkey
+    // answered with an error alike, and does not say which.
+    if (kept?.unreachable) throw Object.assign(new Error("sandbox inventory unreadable"), { valkeyNotSent: true });
     return { hosts: kept?.hosts ?? [], sessions: open?.sessions ?? [], sessionsUnavailable: Boolean(open?.unreachable), sessionsMore: open?.more ?? 0, sessionsUnreadable: open?.unreadable ?? 0, notices: open?.notices ?? [], noticesUnavailable: Boolean(open?.noticesUnavailable), more: kept?.more ?? 0 };
   }
   function configuration() {

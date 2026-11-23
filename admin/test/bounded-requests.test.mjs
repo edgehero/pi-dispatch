@@ -658,11 +658,14 @@ test("a priorities plan or a revert whose client never connects throws no mark w
 
 // ---- issue #987: a budget write says what it sent, and a lost one stays visible ----------------------------------------
 
-/** The allocation fake with every command that reaches it named in `sent`, and `lose(name, nth)` losing that one's answer. */
+/**
+ * The allocation fake with every command that reaches it named in `sent`. `lose(name, nth)` loses that one's answer;
+ * `refuse(name, nth)` rejects it as a client does a command it never wrote to a socket (no mark).
+ */
 function recordingAlloc() {
   const fake = fakeAllocRedis();
   const sent = [];
-  const losing = [];
+  const failing = [];
   const client = new Proxy(fake, {
     get(target, name) {
       const value = target[name];
@@ -670,13 +673,16 @@ function recordingAlloc() {
       return (...args) => {
         sent.push(name);
         const seen = sent.filter((n) => n === name).length;
-        if (losing.some(([n, nth]) => n === name && nth === seen)) return Promise.reject(lostAnswer());
+        const hit = failing.find(([n, nth]) => n === name && nth === seen);
+        if (hit) return Promise.reject(hit[2]());
         return value.apply(target, args);
       };
     },
   });
-  return { fake, sent, client, lose: (name, nth = 1) => losing.push([name, nth]) };
+  return { fake, sent, client, lose: (name, nth = 1) => failing.push([name, nth, lostAnswer]), refuse: (name, nth = 1) => failing.push([name, nth, neverWritten]) };
 }
+/** What ioredis rejects a command with when its connection is gone and it has no offline queue: it never left. */
+const neverWritten = () => new Error("Stream isn't writeable and enableOfflineQueue options is false");
 
 const ALLOC_PROJECTS = [{ id: "shop", name: null, members: ["github:acme/web"] }, { id: "platform", name: null, members: ["github:acme/infra"] }];
 const allocEnvelope = (over = {}) => parseEnvelope(JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", platform: "10", _other: "0" }, defaultWeights: { shop: 1, platform: 1, _other: 0 }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 }, ...over }), "/e/envelope.json", { projects: ALLOC_PROJECTS, limits: [], maxCostMicros: 2_000_000 });
@@ -768,6 +774,105 @@ test("a priorities plan stopped at a read says nothing was sent, and after a los
   assert.equal(atRelease.sent.at(-1), "eval", "the read back never reached the client");
 });
 
+test("the tracking write client stops asking Valkey only after a lost answer: Valkey's own error reply, and a command that never left, leave it open (#987)", async () => {
+  const sent = [];
+  const errors = { 0: refusal(), 1: neverWritten(), 2: lostAnswer() };
+  const t = writeTracking({
+    async get(key) {
+      sent.push(`get ${key}`);
+      return null;
+    },
+    eval(n) {
+      sent.push(`eval ${n}`);
+      return Object.hasOwn(errors, n) ? Promise.reject(errors[n]) : Promise.resolve(1);
+    },
+  });
+  // Valkey answered, with an error: nothing was lost, so the next command is asked.
+  await assert.rejects(t.redis.eval(0), (error) => error === errors[0]);
+  assert.equal(await t.redis.get("a"), null);
+  // Refused before it reached a socket: nothing was lost either.
+  await assert.rejects(t.redis.eval(1), (error) => error === errors[1]);
+  assert.equal(await t.redis.get("b"), null);
+  // Sent, and its answer lost: every later command is refused with that same error and never reaches the client.
+  await assert.rejects(t.redis.eval(2), (error) => error === errors[2]);
+  await assert.rejects(t.redis.get("c"), (error) => error === errors[2]);
+  await assert.rejects(t.redis.eval(3), (error) => error === errors[2]);
+  assert.deepEqual(sent, ["eval 0", "get a", "eval 1", "get b", "eval 2"]);
+});
+
+test("a budget write refused before it left says nothing was changed only when no other write of the call had left: after a seed or a lock it says may or may not (#987)", async () => {
+  const files = allocationFiles("pd-987-unsent-");
+  const read = readEnvelope({ envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000 });
+  const common = { url: "redis://127.0.0.1:1", envelope: read.envelope, digest: read.digest, projects: read.projects, host: "h1", logsDir: files.logs, now: new Date(NOW), connectTimeoutMs: BOUND };
+  const plan = { projects: [{ id: "shop", weight: 3 }, { id: "platform", weight: 1 }] };
+  const over = (r) => () => Object.assign(r.client, { status: "ready" });
+  const thrown = (promise) => promise.then((value) => ({ value }), (error) => ({ error }));
+  const seeded = async () => {
+    const r = recordingAlloc();
+    await makeAllocationState({ redis: r.fake, host: "h1", audit: memoryAudit() }).reconcile({ envelope: read.envelope, digest: read.digest, now: NOW - 60_000 });
+    return r;
+  };
+  const marks = (got) => [got.error?.valkeyNotSent, got.error?.valkeyMayStillRun, got.error?.message];
+  const words = "Stream isn't writeable and enableOfflineQueue options is false";
+  // The call's FIRST write, the lock, refused before it left (the connection died between the reads and it): nothing
+  // of the call was written. It was thrown on with no mark, which the confirm answered as a write that threw.
+  for (const [name, write] of [["a plan", (redisFn) => applyPriorities({ ...common, plan, keepOther: true, redisFn })], ["a revert", (redisFn) => revertAllocation({ ...common, target: { planId: null, weights: { shop: 1, platform: 1, _other: 0 } }, redisFn })]]) {
+    const atLock = await seeded();
+    const before = atLock.fake.ops.length;
+    atLock.refuse("set", 1);
+    assert.deepEqual(marks(await thrown(write(over(atLock)))), [true, undefined, words], name);
+    assert.deepEqual([atLock.fake.store.has(ALLOC_LOCK_KEY), atLock.fake.ops.length], [false, before], `${name}: nothing was written`);
+    // The compare-and-set refused that way AFTER the lock was answered: a write of this call landed, so "nothing was
+    // changed" is not known to be true, and the confirm has to say may or may not.
+    const atCas = await seeded();
+    const applied = atCas.fake.store.get(ALLOC_PLAN_KEY);
+    atCas.refuse("eval", 1);
+    assert.deepEqual(marks(await thrown(write(over(atCas)))), [undefined, true, words], name);
+    assert.equal(atCas.fake.store.get(ALLOC_PLAN_KEY), applied, `${name}: the split itself is as it was`);
+    assert.ok(atCas.sent.indexOf("set") < atCas.sent.indexOf("eval"), `${name}: the lock had left`);
+  }
+  // A split that does not exist yet: the reconcile seeds it, and a read refused after that seed leaves the seed there.
+  const fresh = recordingAlloc();
+  fresh.refuse("get", 2);
+  const afterSeed = await thrown(applyPriorities({ ...common, plan, keepOther: true, redisFn: over(fresh) }));
+  assert.deepEqual(marks(afterSeed), [undefined, true, words]);
+  assert.ok(fresh.fake.store.has(ALLOC_PLAN_KEY), "the seed landed, so something was changed");
+  assert.deepEqual(fresh.sent.slice(0, 2), ["get", "eval"], "the plan's read, then the seed");
+  // Valkey's own reply to a write is an answer, and is thrown on as it is.
+  const replied = await seeded();
+  replied.fake.set = () => Promise.reject(refusal());
+  const answered = await thrown(applyPriorities({ ...common, plan, keepOther: true, redisFn: over(replied) }));
+  assert.deepEqual([answered.error?.name, answered.error?.valkeyNotSent, answered.error?.valkeyMayStillRun], ["ReplyError", undefined, undefined]);
+});
+
+test("the split's reader asked to fail fast connects first on the budget writes' client: a refused connection answers at once, and the connect and the reads share the one bound (#987)", async () => {
+  // As the `envelope-set` preview asks it. The plain client keeps an offline queue, and the reads waited there for the
+  // whole bound on a Valkey that refused the connection.
+  const made = [];
+  const answering = writeFake(made, { get: async () => null, lrange: async () => [] });
+  assert.deepEqual(await readAllocations({ url: "redis://127.0.0.1:1", redisFn: answering, limit: 1, failFast: true }), { state: null, expected: null, log: [] });
+  assert.deepEqual(made[0], { failFast: true, lazyConnect: true, commandTimeoutMs: 5000, disconnectTimeoutMs: 0 });
+  assert.equal(made.dropped, 1);
+  // Every other caller keeps the client it had.
+  const plain = [];
+  await readAllocations({ url: "redis://127.0.0.1:1", redisFn: (_url, options) => (plain.push(options), { on() {}, get: async () => null, lrange: async () => [], disconnect() {} }), limit: 1 });
+  assert.deepEqual(plain, [undefined]);
+  // A connect that fails is the read's unreachable, with no read asked.
+  let asked = 0;
+  const refused = await timed(readAllocations({ url: "redis://127.0.0.1:1", redisFn: writeFake([], { connect: () => Promise.reject(new Error("Connection is closed.")), get: async () => ((asked += 1), null) }), limit: 1, failFast: true, timeoutMs: 2500 }));
+  assert.deepEqual(refused.res, { unreachable: "Connection is closed." });
+  assert.ok(refused.ms < 500, `${refused.ms} ms`);
+  assert.equal(asked, 0);
+  // One bound for the connect and the reads: a connect that never answers ends there, and so do reads that never
+  // answer after a connect that used part of it.
+  const stuck = await timed(readAllocations({ url: "redis://127.0.0.1:1", redisFn: writeFake([], { connect: neverAnswers }), limit: 1, failFast: true, timeoutMs: 200 }));
+  assert.deepEqual(stuck.res, { unreachable: "Valkey did not connect within 0.2 seconds" });
+  assert.ok(stuck.ms < 600, `${stuck.ms} ms`);
+  const slow = await timed(readAllocations({ url: "redis://127.0.0.1:1", redisFn: writeFake([], { connect: () => sleep(250), get: neverAnswers, lrange: neverAnswers }), limit: 1, failFast: true, timeoutMs: 400 }));
+  assert.deepEqual(slow.res, { unreachable: "timed out reaching the queue" });
+  assert.ok(slow.ms >= 350 && slow.ms < 600, `${slow.ms} ms: the reads had what the connect left of 400, never 400 more`);
+});
+
 test("the envelope's stray digest: with only the key moved every host keeps running, and a file that has that digest re-bases the fleet with no confirm (#987)", async () => {
   // What the sentence must not promise, and what the notice does say, by the worker's own reconcile.
   const envelope = allocEnvelope();
@@ -779,7 +884,7 @@ test("the envelope's stray digest: with only the key moved every host keeps runn
   // An envelope write's record landed and its file was never written.
   fake.store.set(ALLOC_EXPECTED_KEY, envelopeDigest(next));
   const still = await state.reconcile({ envelope, digest, now: NOW + 1000 });
-  assert.deepEqual([still.mismatch, still.state.envelopeDigest], [false, digest], "a host whose file is the split's does not read the key");
+  assert.deepEqual([still.mismatch, still.state.envelopeDigest], [false, digest], "a host whose file is the split's does not go by the key");
   assert.deepEqual(expectedOther({ expected: envelopeDigest(next), fileDigest: digest, splitDigest: digest }), { expected: envelopeDigest(next).slice(0, 8), file: digest.slice(0, 8) });
   // A host that has a file with that digest: the fleet is re-based onto it, by a compare-and-set nobody confirmed.
   const moved = await makeAllocationState({ redis: fake, host: "h2", audit: memoryAudit() }).reconcile({ envelope: next, digest: envelopeDigest(next), now: NOW + 2000 });

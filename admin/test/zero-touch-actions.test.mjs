@@ -4,9 +4,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { planZeroTouchName, planZeroTouchGroup, planZeroTouchInstruction, planZeroTouchInstructionUndo, applyZeroTouchFilePlan } from "../src/zero-touch-actions.mjs";
+import { planZeroTouchName, planZeroTouchGroup, planZeroTouchInstruction, planZeroTouchInstructionUndo, applyZeroTouchFilePlan, GROUP_PENDING_LINE } from "../src/zero-touch-actions.mjs";
 import { checkTriggerFixSource } from "../src/job-actions.mjs";
-import { makeZeroTouchService } from "../src/zero-touch-data.mjs";
+import { GROUP_STATUS_UNANSWERED, makeZeroTouchService } from "../src/zero-touch-data.mjs";
 const config = { capture: true, model: "test/classifier", maxCostUsd: "0.05", names: {} };
 const groupId = "a".repeat(32), scopeId = "b".repeat(64);
 function fixture() {
@@ -131,6 +131,14 @@ test("grouping plan refuses absent capture, invalid source and tool calls; previ
   assert.equal(plan.model, "test/classifier"); assert.equal(plan.maxCostUsd, "0.05");
   for (const status of ["failed", "stale", "refused"]) assert.ok(planZeroTouchGroup({ ...args, meta: { ...args.meta, status } }).plan, status);
   assert.match(planZeroTouchGroup({ ...args, meta: { ...args.meta, status: "pending" } }).plan.summary.join(" "), /pay for another classification/);
+  // What a pending status means and how long it stays (issue #987): the last line of that preview and of no other, and
+  // the confirm's sentence for a status write that was not answered, which ends the same way. It said "a previous
+  // grouping is pending or its result could not be confirmed", and nothing of when that ends.
+  assert.equal(GROUP_PENDING_LINE, "A grouping of this question is marked pending: one is queued or running, an earlier request or its status write was not confirmed, or an earlier grouping ended without recording a result. The mark stays until a grouping records a result or the question's record expires. Confirming this request can pay for another classification.");
+  assert.equal(planZeroTouchGroup({ ...args, meta: { ...args.meta, status: "pending" } }).plan.summary.at(-1), GROUP_PENDING_LINE);
+  for (const status of ["unassigned", "failed", "stale", "refused"]) assert.ok(!planZeroTouchGroup({ ...args, meta: { ...args.meta, status } }).plan.summary.includes(GROUP_PENDING_LINE), status);
+  assert.equal(GROUP_STATUS_UNANSWERED, "Nothing was queued: the question's grouping status write was not answered, so it may read as pending until a grouping records a result or its record expires.");
+  assert.ok([...GROUP_STATUS_UNANSWERED].length <= 200, "an audit row keeps the whole sentence");
 });
 
 test("source identity checks retained trigger type, label and flow before accepting a same-kind array position", async () => {

@@ -576,7 +576,8 @@ The bar's other states:
 - **Refused at the preview**, with Close: the console's reason, and that nothing was changed. Fix the form and try
   again. A preview that could not read what it needed offers Try again instead: titled for Valkey when the read failed,
   or "The fleet did not answer in time" when the fleet did not answer within 10 seconds, which says only that, since a
-  slow first read is as likely as a Valkey that stopped answering.
+  slow first read is as likely as a Valkey that stopped answering. A preview that fails for any other reason says
+  "The preview failed", with Close, and the console's log has the reason.
 - **Refused at the confirm**: Preview again (the confirmation expired, was used, or belongs to another sign-in), Look
   again (the file or the job changed since the preview; it reloads the page), Try again (Valkey could not be
   reached), or Close (the audit log could not be written, so nothing was; or the write failed, and the console's log
@@ -1059,7 +1060,9 @@ its log says each queue's error once a minute, and an outage after Valkey came b
 A re-run, an answer to a parked run, a started run, Fire now and a zero touch grouping job do not wait on such a Valkey
 either (2026-11-21, #961). Each connects its queue first, within 6 seconds, and says nothing was queued when it could not.
 Once the job was sent, an answer that did not come back says the run "may or may not have been queued" (Fire now and a
-canary: "A run may have been queued and one start of this hour was used") and to preview it again first. An answer to a
+canary: "A run may have been queued and one start of this hour was used", a canary's naming the canary; a started run:
+"the run may or may not have been queued and one start of this hour was used", since 2026-11-23, #987) and to preview
+it again first. An answer to a
 parked run, a re-run of a forge run and a fork say that only once they started to send the job (2026-11-23, #987).
 Before that nothing was queued, and the bar says why: Valkey could not be reached, with Try again, when the queue of
 the host that owns an approval did not connect (it gets 6 seconds of its own, counted after the first queue connected
@@ -1074,19 +1077,31 @@ every waiting job: Runs lists a run only once it has ended, the overview names t
 and Fleet counts them. So the next preview looks for a run like it and says when one is already queued or running, with
 the job's id and when it was queued. Confirming then asks for another: the queue refuses it while it takes it as a
 duplicate (a refused start or Fire now still uses a start of the hour), and queues a second run after that. A cron
-trigger's next scheduled run is not counted as one. A grouping job's preview says a grouping is pending or could not be
-confirmed. A start or a
+trigger's next scheduled run is not counted as one. A grouping job's preview says when a grouping of the question is
+marked pending: one is queued or running, an earlier request or its status write was not confirmed, or an earlier
+grouping ended without recording a result. The mark stays until a grouping records a result or the question's record
+expires, and confirming can pay for another classification. A start or a
 Fire now whose count against the hour was sent and not answered says one start of the hour may have been used, and a
-Fire now whose latch was lost says the minute may be taken. The trigger page checks Fire now when it loads, within 2.5
-seconds, and says so when it could not. Adopt refuses when a host's applied state or a canary's facts could not be read,
+Fire now whose latch was lost says the minute may be taken. On a Valkey that refuses the connection, a started run, Fire
+now, a canary and an agent's re-run say at once that the hourly allowance could not be read and that nothing was
+queued, where a started run's confirm took 5 seconds (2026-11-23, #987). A preview that could not read Valkey says
+"the deployment's Valkey could not be reached, so nothing was changed; try again", with Try again: a zero touch
+grouping or its Undo, dropping an answer draft, a sandbox End, prepare or pin, and a started run's allowance ("The
+dispatch_run hourly allowance could not be read. Nothing was queued."). It said that the preview failed and that the
+console's log had the reason, which is still what a preview says of anything else that goes wrong. The trigger page
+checks Fire now when it loads, within 2.5 seconds, and says so when it could not. Adopt refuses when a host's applied state or a canary's facts could not be read,
 and says a canary's result is not known when the recent runs could not be, instead of asking for a canary that may have
 run. An envelope, a priorities plan or an allocation revert whose write was sent and not answered says it may or may not
 have been made. One that Valkey stopped answering before it wrote anything says that Valkey could not be reached and
 nothing was changed (2026-11-23, #987), and a revert stopped at its write answers after one 5 second wait, where it took
-two. An envelope's answer says first what to do: set `alloc:envelope:expected` back by hand if it holds the new digest
-([Allocation](allocation.md#a-write-whose-answer-was-lost)). What such a write leaves stays on the Budget split page,
-under Other states, until it is put right: the expected key naming an envelope that is not this host's, or an applied
-split with no row in the history. The next preview of an envelope change says in one line what the key holds.
+two. A plan or a revert whose connection was lost after it had written something else on the way (a first split, the
+end of an expired plan, its lock) says may or may not too. An envelope's answer says first what to do: set `alloc:envelope:expected` back by hand if it holds the new digest
+([Allocation](allocation.md#a-write-whose-answer-was-lost)). What such a write leaves is on the Budget split page,
+under Other states: the expected key naming an envelope that is not this host's, for as long as the key holds that
+digest, or an applied split with no row in the history, until a later change of the split writes its own row. That
+second notice also goes once twenty newer rows that change no split have filled the history the page reads (with
+nineteen it is still said), and the page may show a view up to about 30 seconds old. The next preview of an envelope
+change says in one line what the key holds, at once even when Valkey refuses the connection.
 
 A Valkey password changed in the deployment's `.env` needs no restart: the console's clients read it again each time they
 connect, so after a rotation they read Valkey again at their next try, and so does a password a bad line kept from being

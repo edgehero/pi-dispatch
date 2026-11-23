@@ -8,7 +8,7 @@ import { parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { makeAnswerDraftStore, answerStandingSource, answerRuleConfigDigest, answerApiRoot } from "@edgehero/pi-dispatch/answerer";
 import { planStandingAnswerAdd, applyStandingAnswerAdd, planAnswerDraftDrop } from "./answerer-actions.mjs";
-import { boundedClient, CONFIRM_READ_TIMEOUT_MS, within } from "./job-actions.mjs";
+import { boundedClient, CONFIRM_READ_TIMEOUT_MS, valkeyRead, within } from "./job-actions.mjs";
 
 /** What a read that ran out of time answers inside the service, told apart from every value a store returns. */
 const READ_LATE = Symbol("read-late");
@@ -35,6 +35,9 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
   // carries no `valkeyMayStillRun` (a read's error has that mark as a write's does, and a confirm that read it there
   // said a change may have been made where none was sent). NEVER for a path that carries a write (`apply`, `sent`):
   // those time their own reads (`readInTime`) and leave the write to the client's bound.
+  // What a timed path throws because Valkey did not answer is marked `valkeyNotSent` (issue #987), which the console's
+  // preview answers as Valkey unreachable with Try again: this timer's own error, and a read asked through
+  // `valkeyRead`, whose mark is kept where every other is dropped. True of each of them, since none writes.
   const using = async (fn, { timed = false } = {}) => {
     const redis = boundedClient(redisFn, paths.valkeyUrl);
     const release = () => {
@@ -49,12 +52,12 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
     try {
       got = await within(work, readTimeoutMs, () => READ_LATE);
     } catch (err) {
-      throw new Error(err?.message ?? String(err));
+      throw Object.assign(new Error(err?.message ?? String(err)), err?.valkeyNotSent === true ? { valkeyNotSent: true } : {});
     } finally {
       release();
       work.catch(() => {});
     }
-    if (got === READ_LATE) throw new Error(`Valkey did not answer within ${readTimeoutMs / 1000} seconds`);
+    if (got === READ_LATE) throw Object.assign(new Error(`Valkey did not answer within ${readTimeoutMs / 1000} seconds`), { valkeyNotSent: true });
     return got;
   };
   /** A read inside a path that also writes: its answer, or `READ_LATE` (also for a read that failed: nothing was sent). */
@@ -106,7 +109,9 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
     async privateDraft(runId) { return RUN_RE.test(runId ?? "") ? using(async store => (await currentDraft(store, runId)).draft, { timed: true }) : null; },
     async preview(name, params) {
       if (name === "standing-answer-add") return planStandingAnswerAdd({ params, paths, fs, now });
-      if (name === "answer-draft-drop") return using(async store => planAnswerDraftDrop({ params, draft: (await currentDraft(store, params.runId)).draft }), { timed: true });
+      // The draft's read is the one thing here that throws when Valkey does not answer (the store's own timer, after 2
+      // seconds, with an error that names no Valkey), so it is asked through `valkeyRead` (issue #987).
+      if (name === "answer-draft-drop") return using(async store => planAnswerDraftDrop({ params, draft: (await valkeyRead(currentDraft(store, params.runId))).draft }), { timed: true });
       return { refusal: "This answerer action is not available." };
     },
     async apply(name, entry) {

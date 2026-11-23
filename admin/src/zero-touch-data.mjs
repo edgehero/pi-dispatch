@@ -12,7 +12,7 @@ import { makeTouchOutbox } from "@edgehero/pi-dispatch/touch-outbox";
 import { readZeroTouch, ZERO_TOUCH_NO_PROJECT, zeroTouchProjectMatches } from "@edgehero/pi-dispatch/zero-touch";
 import { runMirrorMaxRunsOf } from "@edgehero/pi-dispatch/retention";
 import { QUEUE_CLOSE_TIMEOUT_MS, readRunById, RUN_MIRROR_UNREAD } from "./read-model.mjs";
-import { boundedClient, checkTriggerFixSource, connectedQueue, CONFIRM_READ_TIMEOUT_MS, refusedByValkey, TRIGGER_FIX_UNCHECKED, within } from "./job-actions.mjs";
+import { boundedClient, checkTriggerFixSource, connectedQueue, CONFIRM_READ_TIMEOUT_MS, refusedByValkey, TRIGGER_FIX_UNCHECKED, valkeyRead, within } from "./job-actions.mjs";
 import { runMatches } from "./run-filter.mjs";
 import { planZeroTouchGroup, planZeroTouchName, planZeroTouchInstruction, planZeroTouchInstructionUndo, applyZeroTouchFilePlan } from "./zero-touch-actions.mjs";
 const hash = (text) => createHash("sha256").update(text).digest("hex");
@@ -29,7 +29,10 @@ const ACCOUNTING_UNPREPARED = "Fix accounting could not be prepared. Nothing was
 
 /** What a grouping confirm says of an add that was started and not confirmed, and of a status write that was not answered. */
 export const GROUP_UNCONFIRMED = "The grouping job may or may not have been queued: the queue did not confirm it. Preview it again first: the preview says when a grouping is pending. A second one is paid again.";
-export const GROUP_STATUS_UNANSWERED = "Nothing was queued: the question's grouping status write was not answered, so it may read as pending.";
+// How long it may read as pending is said too (issue #987): only a grouping's own status write replaces the mark (one
+// the worker refuses before it starts writes none), or the record's expiry ends it, and the confirm that follows such
+// a mark pays again.
+export const GROUP_STATUS_UNANSWERED = "Nothing was queued: the question's grouping status write was not answered, so it may read as pending until a grouping records a result or its record expires.";
 
 /** What a read that ran out of time throws: its page says unavailable, its preview that it failed; nothing was written for it. */
 const READ_LATE = Symbol("read-late");
@@ -46,7 +49,10 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
   // ends there whatever is still waiting, its client dropped so nothing more is sent. NEVER for a path that carries a
   // person's write (`withWriters`, `trackConfiguration`, `apply`): a timer that fired first would answer for a write
   // it knows nothing about, where the client's own error says whether it was sent.
-  const using = async (fn, { timeoutMs = null } = {}) => {
+  // `reads` (issue #987) is for a timed path that writes nothing at all (a preview, a fix's context): its timer's error
+  // is marked `valkeyNotSent`, which the console's preview answers as Valkey unreachable with Try again. Never the
+  // page's read, which repairs what an earlier write left behind before it reads, so its timer cannot say that.
+  const using = async (fn, { timeoutMs = null, reads = false } = {}) => {
     const redis = boundedClient(redisFn, paths.valkeyUrl);
     const groups = makeQuestionGroupStore({ redis, now, retentionDays });
     const fixes = makeZeroTouchFixStore({ redis, now, retentionDays });
@@ -62,15 +68,18 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
     }
     try {
       const got = await within(work, timeoutMs, () => READ_LATE);
-      if (got === READ_LATE) throw new Error(`Valkey did not answer within ${timeoutMs / 1000} seconds`);
+      if (got === READ_LATE) throw Object.assign(new Error(`Valkey did not answer within ${timeoutMs / 1000} seconds`), reads ? { valkeyNotSent: true } : {});
       return got;
     } finally {
       release();
       work.catch(() => {});
     }
   };
+  // The two store reads that throw when Valkey does not answer are asked through `valkeyRead` (issue #987): the store's
+  // own timer ends each after 2 seconds, before the client's bound, with an error that names no Valkey, and the preview
+  // then said it had failed. The confirm's re-plan catches whatever this throws as nothing sent, as before.
   async function plan(name, params, stores) {
-    if (name === "zero-touch-group") return planZeroTouchGroup({ params, config: config(), meta: await stores.groups.readMeta(params.runId), surface: "console" });
+    if (name === "zero-touch-group") return planZeroTouchGroup({ params, config: config(), meta: await valkeyRead(stores.groups.readMeta(params.runId)), surface: "console" });
     if (name === "zero-touch-name") {
       const snapshot = await stores.groups.publicSnapshot();
       if (!snapshot.groups.some((g) => g.id === params.groupId)) return { refusal: "This group is no longer retained. Reload the Zero touch page." };
@@ -89,7 +98,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
       if (snapshot.state !== "ok" && typeof params.groupId === "string" && !snapshot.groups.some((g) => g.id === params.groupId)) return { refusal: TRIGGER_FIX_UNCHECKED };
       return planZeroTouchInstruction({ params, paths, sourceRecord: source.record, group: snapshot.groups.find((g) => g.id === params.groupId), binding, fs, surface: "console" });
     }
-    if (name === "zero-touch-undo") return planZeroTouchInstructionUndo({ params, paths, fix: await stores.fixes.read(params.fixId, { includeUndo: true }), fs, surface: "console" });
+    if (name === "zero-touch-undo") return planZeroTouchInstructionUndo({ params, paths, fix: await valkeyRead(stores.fixes.read(params.fixId, { includeUndo: true })), fs, surface: "console" });
     return { refusal: "This Zero touch action is not available." };
   }
   return {
@@ -128,14 +137,14 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
       while (take < records.length && records[take].endedAt === records[take - 1].endedAt) take++;
       return { runs: records.slice(0, take), next: take < records.length ? Date.parse(records[take - 1].endedAt) : null, mirror: report.recordMirror ?? "off", truncated: report.coverage.partial, examined: report.records.length, touchCoverage: report.coverage, touchTotal: report.state !== "ready" ? null : report.totals.touched };
     },
-    async preview(name, params) { return using((stores) => plan(name, params, stores), { timeoutMs: stepTimeoutMs }); },
+    async preview(name, params) { return using((stores) => plan(name, params, stores), { timeoutMs: stepTimeoutMs, reads: true }); },
     async withWriters(fn) { return using(({ touches, outbox }) => fn({ touchStore: touches, touchOutbox: outbox, now })); },
     async configurationContext(runId) {
       return using(async ({ redis }) => {
         const { record } = await readRunById(redis, { logsDir: paths.logsDir, jobId: runId, fs });
         if (record?.outcome !== "policy" || !/^[a-f0-9]{64}$/.test(record.touchScopeId ?? "") || typeof record.reason !== "string") return null;
         return { runId, scopeId: record.touchScopeId, project: record.project ?? null, reason: record.reason, groupId: null, triggerIndex: record.triggerIndex ?? null };
-      }, { timeoutMs: stepTimeoutMs });
+      }, { timeoutMs: stepTimeoutMs, reads: true });
     },
     async trackConfiguration(entry, apply) {
       return using(async ({ fixes, outbox }) => {
@@ -176,9 +185,10 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
           if (!connected.queue) return { unreachable: connected.unreachable };
           const { queue } = connected;
           // The status is written `pending` BEFORE the add, and put back only where the add provably queued nothing:
-          // an add whose answer was lost leaves it, so the next preview says a grouping is pending or could not be
-          // confirmed and that confirming can pay for another. A pending that never resolves (the job did not land)
-          // stays until the question's record expires; it refuses nothing, and a later confirm overwrites it.
+          // an add whose answer was lost leaves it, so the next preview says a grouping is marked pending and that
+          // confirming can pay for another (`GROUP_PENDING_LINE`). A pending that never resolves (the job did not
+          // land, or the worker refused it before it started, which writes no status) stays until a grouping records
+          // a result or the question's record expires; it refuses nothing, and a later confirm writes it again.
           let prior;
           let marked;
           let writing = false;
