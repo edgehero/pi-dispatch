@@ -34,11 +34,27 @@ export const NO_OLDER_STATE = async () => [];
 forbidDefaultSubscriptionQuotaRead();
 export const NO_SUBSCRIPTION_QUOTA = async () => null;
 const QUIET = { readDollarRecords: NO_DOLLAR_RECORDS, readDollarCounters: NO_DOLLAR_COUNTERS, olderStateFindings: NO_OLDER_STATE, readSubscriptionQuota: NO_SUBSCRIPTION_QUOTA };
+// Issue #1060: what else doctor sends to the deployment's Valkey, which for a test is the address its doctor env's
+// VALKEY_URL names, and 127.0.0.1:6379 when that names none: CI's shared Valkey, or a developer's own Redis. Measured
+// before these defaults: six test files opened about 470 connections there in one run, nearly all for the host
+// registry, whose read also removes a `host:live` member whose row is gone, so it is not only a read. Here each seam
+// defaults to an answer that contacts nothing: Valkey answers the probe, no host is registered, no dollar counter
+// exists, no model is cooling down, and a published record goes nowhere. The probe's stand-in also turns off doctor's
+// password and owner checks, whose defaults are real only where the probe's is (`runDoctor`). A test that wants
+// another answer passes its own seam; one that wants a real read passes the seam as `undefined` and names its own
+// Valkey in the doctor env. A test in doctor.test.mjs runs both entry points on these defaults against a listener that
+// counts connections, and holds every function of doctor.mjs that opens a client to a seam named here.
+export const VALKEY_ANSWERS = async () => true;
+export const NO_HOSTS = async () => ({ hosts: [] });
+export const NO_DOLLAR_KEYS = async () => false;
+export const NO_COOLDOWNS = async () => [];
+export const NO_PUBLISH = async () => {};
+const NO_VALKEY = { probeValkey: VALKEY_ANSWERS, readHosts: NO_HOSTS, dollarKeysExist: NO_DOLLAR_KEYS, readModelCooldowns: NO_COOLDOWNS, readAppliedSplit: NO_SPLIT };
 
 export function runDoctor(shellVars, deps = {}) {
-	return realRunDoctor(shellVars, { readModelCooldowns: async () => [], readAppliedSplit: NO_SPLIT, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...QUIET, ...deps });
+	return realRunDoctor(shellVars, { ...NO_VALKEY, publishDoctor: NO_PUBLISH, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...QUIET, ...deps });
 }
 
 export function collectChecks(shellVars, seams = {}) {
-	return realCollectChecks(shellVars, { readModelCooldowns: async () => [], readAppliedSplit: NO_SPLIT, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...QUIET, ...seams });
+	return realCollectChecks(shellVars, { ...NO_VALKEY, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...QUIET, ...seams });
 }

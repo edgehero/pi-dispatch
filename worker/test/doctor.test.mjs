@@ -4,6 +4,7 @@ import { readPackagedGrantHelper } from "../src/egress-conf-copy.mjs";
 import assert from "node:assert/strict";
 import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { makeWaitChecker } from "../src/wait-check.mjs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -13458,6 +13459,99 @@ test("no doctor test reaches a real Valkey for the applied split: every runDocto
 			return [...src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"\.\.\/src\/doctor\.mjs"/g)].some((m) => /\b(runDoctor|collectChecks)\b/.test(m[1]));
 		});
 	assert.deepEqual(offenders, []);
+});
+
+// --- issue #1060: a doctor test reaches no Valkey it was not given --------------------------------------------------------
+
+/**
+ * A listener that only counts, standing where a doctor env's VALKEY_URL points. Whatever a Valkey seam left on its
+ * default dials lands here and is closed unanswered, which each default takes as a Valkey it could not read.
+ */
+async function countingValkey() {
+	const dials = [];
+	const server = createServer((socket) => {
+		dials.push(socket.remotePort);
+		socket.on("error", () => {});
+		socket.destroy();
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	return { url: `redis://127.0.0.1:${server.address().port}`, dials, close: () => new Promise((resolve) => server.close(resolve)) };
+}
+
+test("doctor through the test helper opens no connection to the Valkey its env names, and runDoctor hands every Valkey seam on (#1060)", async () => {
+	// The rule, not the site: the helper stands in for every seam whose default opens a client. With no VALKEY_URL in a
+	// test's doctor env the address is 127.0.0.1:6379, CI's shared Valkey or a developer's own Redis, and the registry
+	// read alone went there some 400 times in one run of this file.
+	const valkey = await countingValkey();
+	try {
+		// Every read's gate is open: Valkey is usable, a failover trigger gives the cooldown read models to ask about, a
+		// peer that publishes no dollar fingerprint makes doctor look for dollar counters, and the run publishes.
+		const model = "claude-sonnet-5-5";
+		const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", VALKEY_URL: valkey.url, PI_WORKER_NAME: "mini1", PI_SETTINGS_FILE: noOverlay(), PI_TRIGGERS_FILE: triggersFile(undefined, undefined, { provider: "anthropic", model, models: [`anthropic/${model}`, "openai/gpt-4o"], fallbackModels: ["openai/gpt-4o"] }) };
+		const dir = tempDir("pi-no-valkey-");
+		const deps = (extra = {}) => ({ out: () => {}, writeErr: () => {}, cwd: dir, home: dir, spawn: fakeSpawn(green), fileExists: existsSync, nodeVersion: "22.19.0", agentDir: NO_AGENT_DIR, publish: true, ...extra });
+		const peer = async () => ({ hosts: [{ name: "mini2", tz: Intl.DateTimeFormat().resolvedOptions().timeZone }] });
+
+		// Honoured through runDoctor, each asked about the address the env names: a seam runDoctor dropped on the way to
+		// collectChecks would leave the stand-in unasked and its default dialling.
+		const asked = [];
+		const note = (seam, answer) => async (url) => (asked.push([seam, url]), answer);
+		await runDoctor(env, deps({ probeValkey: note("probeValkey", true), readHosts: (url) => (asked.push(["readHosts", url]), peer()), dollarKeysExist: note("dollarKeysExist", false), readAppliedSplit: note("readAppliedSplit", null), readModelCooldowns: note("readModelCooldowns", []), publishDoctor: note("publishDoctor", undefined) }));
+		assert.deepEqual([...new Set(asked.map(([seam]) => seam))].sort(), ["dollarKeysExist", "probeValkey", "publishDoctor", "readAppliedSplit", "readHosts", "readModelCooldowns"]);
+		assert.deepEqual([...new Set(asked.map(([, url]) => url))], [valkey.url]);
+
+		// On the helper's defaults alone, and with only the peer passed (the dollar counter read has no other gate).
+		await runDoctor(env, deps());
+		await collectChecks(env, deps());
+		await runDoctor(env, deps({ readHosts: peer }));
+		await collectChecks(env, deps({ readHosts: peer }));
+		assert.deepEqual(valkey.dials, [], "no seam was left on a default that opens a client");
+
+		// And the listener is where a default lands: the registry read with its stand-in taken away dials it.
+		await runDoctor(env, deps({ readHosts: undefined }));
+		assert.ok(valkey.dials.length > 0, "a seam on its default reaches the address the doctor env names");
+	} finally {
+		await valkey.close();
+	}
+});
+
+test("BY SHAPE: every function of doctor.mjs that opens a Valkey client is the default of a seam the test helper stands in for (#1060)", () => {
+	// The run above reaches only the reads whose gates it opens. This holds the rest: a new read added to doctor.mjs
+	// fails here until its seam has a stand-in in helpers/doctor.mjs and a row below.
+	const src = readFileSync(new URL("../src/doctor.mjs", import.meta.url), "utf8").replace(/^\s*(\/\/|\*).*$/gm, "");
+	const helper = readFileSync(new URL("./helpers/doctor.mjs", import.meta.url), "utf8");
+	// The function that opens a client, and the seam a test passes in its place. runDoctor's own two are the password
+	// check and the owner check, real only where the probe is, so the probe's stand-in turns both off.
+	const OPENERS = {
+		defaultProbeValkey: "probeValkey",
+		runDoctor: "probeValkey",
+		defaultReadHosts: "readHosts",
+		defaultDollarKeysExist: "dollarKeysExist",
+		defaultReadAppliedSplit: "readAppliedSplit",
+		defaultReadModelCooldowns: "readModelCooldowns",
+		defaultPublishDoctor: "publishDoctor",
+		defaultReadCapacity: "readCapacity",
+		defaultReadDollarCounters: "readDollarCounters",
+		defaultReadSubscriptionQuota: "readSubscriptionQuota",
+	};
+	// Each call of what makes a client or dials the Valkey's address, by the top-level function it is written in.
+	const opens = new Set();
+	for (const call of src.matchAll(/\b(?:withDoctorClient|makeRedisClient|valkeyAuthState)\(|\bprobeTcp: probeTcpAddress\b/g)) {
+		const owner = [...src.slice(0, call.index).matchAll(/^(?:export )?(?:async )?function (\w+)\(/gm)].at(-1)?.[1];
+		// withDoctorClient is where the client itself is made, and its own declaration matches too (found under the
+		// function before it, which opens one anyway): the functions that open a client are its callers.
+		if (owner !== "withDoctorClient") opens.add(owner);
+	}
+	assert.deepEqual([...opens].sort(), Object.keys(OPENERS).sort());
+	assert.match(src, /valkeyAuth !== undefined\s*\? valkeyAuth\s*: deps\.probeValkey === undefined\s*\? async /, "the password check's default is real only where the probe's is");
+	assert.match(src, /valkeyOwner !== undefined\s*\? valkeyOwner\s*: deps\.probeValkey === undefined && platform === "linux"\s*\? \(url, /, "and so is the owner check's");
+	const seams = [...new Set(Object.values(OPENERS))];
+	for (const seam of seams) assert.match(helper, new RegExp(`\\b${seam}: [A-Z_]+\\b`), `the helper stands in for ${seam}`);
+	// And runDoctor hands each on, to collectChecks in `seams` or to the publish itself: the model cooldown read was
+	// honoured by collectChecks and dropped here, so no doctor run could stand in for it.
+	const body = src.slice(src.indexOf("export async function runDoctor("), src.indexOf("\nexport function doctorResultsRecord("));
+	const handed = `${body.match(/\n\tconst seams = \{[^\n]*/)[0]}${body.match(/await publishResults\(\{[^}]*\}/)[0]}`;
+	for (const seam of seams) assert.match(handed, new RegExp(`\\b${seam}\\b`), `runDoctor hands ${seam} on`);
 });
 
 // --- issue #596: job sizes ---------------------------------------------------------------------------------------------
