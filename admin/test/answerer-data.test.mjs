@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { makeAnswererService, answererStats } from "../src/answerer-data.mjs";
+import { DRAFT_DROP_UNCONFIRMED, makeAnswererService, answererStats } from "../src/answerer-data.mjs";
 import { planStandingAnswerAdd, applyStandingAnswerAdd, planAnswerDraftDrop } from "../src/answerer-actions.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { answererFixture } from "./helpers/answerer-goldens.mjs";
@@ -217,4 +217,39 @@ test("a triggers file that does not load gives an operator no standing list, whe
   assert.equal(got.state, "configuration-unavailable");
   assert.ok(!Object.hasOwn(got, "standing"), "no list, so the page cannot say none was adopted");
   assert.deepEqual(got.rules, []);
+});
+
+test("a draft's drop that its store gave up on says may or may not once the write was asked for, and Valkey unreachable while it had only read (#987)", async () => {
+  // The store ends each command by a timer of its own and throws an error that cannot say whether the command was sent:
+  // what was asked of the client says it. The real service over a store that asks the client as the real one does.
+  const { paths } = setup();
+  const doc = JSON.parse(readFileSync(paths.triggersPath));
+  const asked = [];
+  const gaveUp = () => { throw new Error("answer-store-timeout"); };
+  const service = (drop) => makeAnswererService({
+    paths, now: () => AT,
+    redisFn: () => ({ get: async (key) => (asked.push(`get ${key}`), null), eval: async (...args) => (asked.push(`eval ${args[2]}`), 1), del: async (key) => (asked.push(`del ${key}`), 1), disconnect() {} }),
+    storeFn: ({ redis }) => ({
+      privateInput: async () => ({ runId: fixture.privateDraft.meta.runId, ruleId: fixture.rules[0].id, configDigest: answerRuleConfigDigest(doc, fixture.rules[0]), project: "web", source: { kind: "github", repo: "acme/web", apiUrl: "https://api.github.com", target: { type: "issue", number: 512 } } }),
+      privateDraft: async () => fixture.privateDraft,
+      drop: () => drop(redis),
+    }),
+  });
+  const entry = { payload: { params: { runId: fixture.privateDraft.meta.runId, draftRunId: fixture.privateDraft.meta.draftRunId, digest: fixture.privateDraft.digest } } };
+  const dropped = (drop) => service(drop).apply("answer-draft-drop", entry);
+  // The row's compare-and-set was asked for and the store gave up on it: it may land when Valkey answers.
+  assert.deepEqual(await dropped(async (redis) => { await redis.get("meta"); await redis.eval("script", 1, "meta"); gaveUp(); }), { invalid: DRAFT_DROP_UNCONFIRMED, partial: true });
+  assert.equal(DRAFT_DROP_UNCONFIRMED, "The draft may or may not have been dropped: the drop was asked for and Valkey did not answer. Reload its run page once Valkey answers before trying again.");
+  assert.ok([...DRAFT_DROP_UNCONFIRMED].length <= 200, "an audit row keeps the whole sentence");
+  // So does the delete of the draft's body, asked for after a row that was answered.
+  assert.deepEqual(await dropped(async (redis) => { await redis.eval("script", 1, "meta"); await redis.del("private"); gaveUp(); }), { invalid: DRAFT_DROP_UNCONFIRMED, partial: true });
+  // The store gave up at its own read of the row: nothing was asked to change.
+  assert.deepEqual(await dropped(async (redis) => { await redis.get("meta"); gaveUp(); }), { unreachable: true });
+  // Valkey's own reply is an answer, and is thrown on as it is.
+  const replied = Object.assign(new Error("READONLY You can't write against a read only replica."), { name: "ReplyError" });
+  await assert.rejects(dropped(async (redis) => { await redis.eval("script", 1, "meta"); throw replied; }), (error) => error === replied);
+  // A drop that was answered says what it said.
+  assert.deepEqual(await dropped(async () => true), { ok: true });
+  assert.deepEqual(await dropped(async () => false), { invalid: "The draft changed before it could be dropped. Reload its run page." });
+  assert.deepEqual(asked, ["get meta", "eval meta", "eval meta", "del private", "get meta", "eval meta"]);
 });

@@ -1088,7 +1088,10 @@ queued, where a started run's confirm took 5 seconds (2026-11-23, #987). A previ
 "the deployment's Valkey could not be reached, so nothing was changed; try again", with Try again: a zero touch
 grouping or its Undo, dropping an answer draft, a sandbox End, prepare or pin, and a started run's allowance ("The
 dispatch_run hourly allowance could not be read. Nothing was queued."). It said that the preview failed and that the
-console's log had the reason, which is still what a preview says of anything else that goes wrong. The trigger page
+console's log had the reason, which is still what a preview says of anything else that goes wrong. Dropping an answer
+draft whose drop was asked for and not answered says "The draft may or may not have been dropped" and to reload its
+run page once Valkey answers; it said the change could not be made and that nothing was changed, though the drop
+could land when Valkey answered again. The trigger page
 checks Fire now when it loads, within 2.5 seconds, and says so when it could not. Adopt refuses when a host's applied state or a canary's facts could not be read,
 and says a canary's result is not known when the recent runs could not be, instead of asking for a canary that may have
 run. An envelope, a priorities plan or an allocation revert whose write was sent and not answered says it may or may not

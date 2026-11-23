@@ -1039,8 +1039,16 @@ test("an agent's re-run whose count against the hour was sent and not answered i
   const grantsEnv = { PI_DISPATCH_RUN_ROOTS: "/f", PI_DISPATCH_RUN_PER_HOUR: "3" };
   const lost = await checkAgentRerun(plan, { rm: { checkDispatchRun: async () => ({ unreachable: "Command timed out", allowanceMayBeUsed: true }) }, env: {}, grantsEnv, consumeRate: true });
   assert.deepEqual(lost, { refusal: "Nothing was queued. The paid-start allowance was sent this start and did not answer, so one start of this hour may have been used.", partial: true });
-  const unread = await checkAgentRerun(plan, { rm: { checkDispatchRun: async () => ({ unreachable: "Command timed out" }) }, env: {}, grantsEnv, consumeRate: true });
-  assert.deepEqual(unread, { refusal: "The paid-start admission could not read its shared allowance." });
+  // The allowance that could not be read, with nothing counted: the one sentence for it (issue #987), the read model's,
+  // which Fire now and the run-enqueue preview say. It had words of its own here, with no word that nothing was queued.
+  const { ALLOWANCE_UNREAD } = await import("../src/read-model.mjs");
+  for (const consumeRate of [true, false]) {
+    const unread = await checkAgentRerun(plan, { rm: { checkDispatchRun: async () => ({ unreachable: "Command timed out" }) }, env: {}, grantsEnv, consumeRate });
+    assert.deepEqual(unread, { refusal: ALLOWANCE_UNREAD });
+  }
+  assert.equal(ALLOWANCE_UNREAD, "The dispatch_run hourly allowance could not be read. Nothing was queued.");
+  // A refusal of the run itself is said as it was.
+  assert.deepEqual(await checkAgentRerun(plan, { rm: { checkDispatchRun: async () => ({ refused: "uncommitted changes" }) }, env: {}, grantsEnv }), { refusal: "uncommitted changes" });
 });
 
 // ---- a run like this one that is already queued or running ------------------------------------------------------------
