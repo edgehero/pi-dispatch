@@ -1009,8 +1009,12 @@ hosts whose rows answered and says so, and what a missing row could change is no
 Spend, the budget split's agreement (never "All hosts agree"), which hosts serve a secret profile (another may), and
 whether a queue a one-queue pause does not know belongs to such a host. Models says the waiting jobs and doctor's
 proposals are not known rather than that there are none. Meanwhile a live page's pill says Not live (its tooltip says
-the console could not read all it needs for the page), also when only a part was not read (the host registry, the
-running jobs or the parked runs), and a page kept as last seen shows no Parked count until it is read again.
+the console could not read all it needs for the page), also when only a part was not read: the host registry, the
+running jobs or the parked runs on any page, and on Runs, a run's page, Sandboxes and a host's page whatever a card
+there says could not be read (the run history or its last 24 hours, a run's record, transcript, inbox or chat, the
+open shells or cleanup notices, a host's waiting jobs or doctor results). A page whose reads were cut short says Not
+live too. The pill does not follow what a host published about itself as unreadable, or a host's capacity history,
+which is read when the page loads. A page kept as last seen shows no Parked count until it is read again.
 Since 2026-11-21 (#962) the configuration pages follow it too: Secrets still lists the profiles and bundles the
 settings overlay, the triggers file and the `.env` declare, read-only, and says what runs received and which hosts serve
 a profile are not known; a trigger's page names its bundle from the files; Updates says a host Valkey did not answer for

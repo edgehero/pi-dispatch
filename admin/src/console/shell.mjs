@@ -353,7 +353,7 @@ export function shellHtml(name, ctx, inner, { headline = null, description = nul
   const parked = meta.live || String(count) !== "" ? html`<span id="${NAV_PARKED_ID}" data-panel>${count}</span>` : null;
   const start = LIVE_STATES.start;
   const glyphs = Object.entries(LIVE_GLYPHS).map(([state, glyph]) => liveGlyph(state, glyph));
-  const liveHtml = meta.live ? html`<span id="live-status" class="${start.cls}" role="status" aria-live="polite" title="${start.title}"${dataUnread(ctx?.data) ? html` data-unread` : null}><span class="dot"></span>${glyphs}<span data-live-word>${start.word}</span></span>` : null;
+  const liveHtml = meta.live ? html`<span id="live-status" class="${start.cls}" role="status" aria-live="polite" title="${start.title}"${dataUnread(ctx?.data, name) ? html` data-unread` : null}><span class="dot"></span>${glyphs}<span data-live-word>${start.word}</span></span>` : null;
   const back = ["secrets", "connections", "updates", "devices", "project"].includes(name) ? html`<a class="back" href="${PAGES.config.path}">${ui.icon("chev-l", { size: "sm" })}Configuration</a>` : name === "run" ? html`<a class="back" href="${PAGES.runs.path}">${ui.icon("chev-l", { size: "sm" })}${PAGES.runs.nav}</a>` : ["host", "venue"].includes(name) ? html`<a class="back" href="${PAGES.fleet.path}">${ui.icon("chev-l", { size: "sm" })}Fleet</a>` : null;
   const heading = title ?? (name === "run" && typeof ctx?.query?.id === "string" && ctx.query.id !== "" ? html`${ctx.query.id}` : ["host", "venue"].includes(name) && typeof ctx?.query?.name === "string" ? html`${ctx.query.name}` : meta.title);
   const reload = mayOpen(name, role) ? selfHref(name, ctx?.query) : null;

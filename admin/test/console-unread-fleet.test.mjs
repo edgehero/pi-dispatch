@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { NOW } from "../../launch/fixture-deployment.mjs";
-import { pagePanels, loadPageData, renderPage } from "../src/console/pages.mjs";
+import { PAGES, pagePanels, loadPageData, renderPage } from "../src/console/pages.mjs";
 import { HOSTS_UNREAD, HOSTS_UNREAD_TEXT, NO_BEAT_READ, REGISTRY_PART_TEXT, beatFresh, hostsUnread } from "../src/console/panels/common.mjs";
 import { ACTIVE_PARTIAL_TEXT, ACTIVE_UNREAD_TEXT, DOCTOR_HOSTS_UNREAD_TEXT, HOSTS_LAST_EMPTY_TEXT, HOSTS_PART_EMPTY_TEXT, QUEUES_UNREAD_TEXT, STALLS_UNREAD } from "../src/console/panels/fleet.mjs";
 import { beatAgeOf, firstRunState } from "../src/doctor-view.mjs";
@@ -299,9 +299,112 @@ test("the overview's empty timeline and the first run's preview say nothing is r
   assert.match(preview(await first({ active: one, activeUnreachable: true })), /Running at least 1 job running/);
 });
 
-test("dataUnread: a failed read, or a snapshot read with the registry, the active jobs or the parked runs missing; nothing else", () => {
+test("dataUnread: a failed read, or a snapshot read with the registry, the active jobs or the parked runs missing; nothing else on a page with no reads of its own", () => {
   for (const data of [{ readFailed: true, snapshot: null }, { snapshot: { activeUnreachable: true } }, { snapshot: { parkedUnreachable: "timeout" } }, { snapshot: { queue: { fleetDegraded: "registry" }, hostsReadAt: null } }, { snapshot: { queue: { fleetDegraded: "registry" }, hostsReadAt: NOW } }]) assert.equal(dataUnread(data), true, JSON.stringify(data));
   for (const data of [null, undefined, {}, { parkedCount: 2 }, { snapshot: {} }, { snapshot: snap() }, { snapshot: { activeUnreachable: false, parkedUnreachable: null, queue: { fleetDegraded: null } } }]) assert.equal(dataUnread(data), false, JSON.stringify(data));
+});
+
+/**
+ * The pill's marks by page (issue #988), each in the shape its reader gives it (console-pill.test.mjs holds every one
+ * to the real readers and to the sentence a panel then draws): `[what, the mark over a page that is otherwise read]`.
+ */
+const READ = Object.freeze({
+  runs: { runsPage: { runs: [], next: null, mirror: "ok", truncated: false, examined: 0 }, runsWindow: { partial: false, floor: false } },
+  run: { run: { record: { jobId: "gh-1", outcome: "completed" }, source: "local" }, transcript: { exists: false }, progress: { missing: true }, inbox: { found: false }, chat: { mode: "fork", says: null }, children: [], childrenIncomplete: false, hostLoads: { hosts: [], more: 0 }, workspace: { shell: null, sessionsUnknown: false, unknown: true } },
+  sandboxes: { sandboxes: { hosts: [], sessions: [], sessionsUnavailable: false, noticesUnavailable: false }, browserGateways: { enabledHosts: [], sessions: [] }, hostLoads: { hosts: [], more: 0 } },
+  host: { snapshot: { queue: { fleetDegraded: null }, waiting: { rows: [] }, doctor: { hosts: [] } }, host: null, hostHistory: { runs: [], records: [], mirror: "off" } },
+});
+const REFUSED_RECORD = { jobId: "gh-2", outcome: "policy", reason: "job-image-missing", tokens: null, exitCode: null, budgetReserved: false };
+const PARKED_UNKNOWN = "This run asked a question, but whether it still waits for an answer cannot be told right now (the run history or the queue could not be read); try again.";
+const MARKS = Object.freeze({
+  runs: [
+    ["this host's run files unread", { runsPage: { ...READ.runs.runsPage, unreachable: "EACCES", mirror: "off" } }],
+    ["a mirror that is on and did not answer", { runsPage: { ...READ.runs.runsPage, mirror: "unreachable (Command timed out)" } }],
+    ["no window of the day", { runsWindow: null }],
+    ["a window folded without a side of the history", { runsWindow: { partial: true, floor: false } }],
+  ],
+  run: [
+    ["the record", { run: { unreadable: "the fleet's run mirror could not be read" } }],
+    ["the transcript's state", { transcript: { unreachable: "the transcript could not be read", exists: false } }],
+    ["the progress of a run with no record", { run: { missing: true }, progress: { unreachable: true } }],
+    ["the inbox", { inbox: { unreachable: true } }],
+    ["an inbox's messages", { inbox: { found: true, steer: true, state: "active", open: true, entries: null } }],
+    ["whether an inbox takes a message", { inbox: { found: true, steer: true, state: "active", open: null, entries: [] } }],
+    ["the chat facts", { chat: { unreachable: true } }],
+    ["a chat that cannot tell whether its question waits", { chat: { mode: null, says: PARKED_UNKNOWN } }],
+    ["the planner's check of a reply", { chatAnswer: { unreachable: true } }],
+    ["the search for child runs", { childrenIncomplete: true }],
+    ["the open shells behind the Workspace row", { workspace: { shell: null, sessionsUnknown: true, unknown: true } }],
+    ["the browser sessions behind the Workspace row", { browserGateways: { enabledHosts: ["build3"], sessions: [], partial: true } }],
+    ["the hosts' doctor runs, as their reader answers", { hostLoads: { unreachable: true, hosts: [], more: 0 } }],
+    ["the hosts' doctor runs, as the page's catch keeps them", { hostLoads: null, hostLoadsUnread: true }],
+    ["a refused run's snapshot", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: null, runsWindow: { partial: false } }],
+    ["a refused run's window", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: { queue: { fleetDegraded: null } }, runsWindow: null }],
+    ["a refused run's window, folded without a side of the history", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: { queue: { fleetDegraded: null } }, runsWindow: { partial: true } }],
+    ["a refused run's doctor results", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: { queue: { fleetDegraded: null }, doctor: { unreachable: "the doctor results could not be read" } }, runsWindow: { partial: false } }],
+  ],
+  sandboxes: [
+    ["the open shells", { sandboxes: { ...READ.sandboxes.sandboxes, sessionsUnavailable: true } }],
+    ["the cleanup notices", { sandboxes: { ...READ.sandboxes.sandboxes, noticesUnavailable: true } }],
+    ["the record of the run a kept workspace came from", { sandboxRunUnread: true }],
+    ["the hosts' doctor runs", { hostLoads: { unreachable: true, hosts: [], more: 0 } }],
+    ["the hosts' doctor runs, as the page's catch keeps them", { hostLoads: null, hostLoadsUnread: true }],
+    ["the browser terminals", { browserGateways: { enabledHosts: [], sessions: [], problem: "Browser-terminal information could not be read. Use the native terminal route." } }],
+  ],
+  host: [
+    ["the run records of a host with no row: none read", { hostHistory: null }],
+    ["the run records of a host with no row: a mirror that did not answer", { hostHistory: { runs: [], records: [], mirror: "unreachable (Command timed out)" } }],
+    ["the waiting jobs", { snapshot: { ...READ.host.snapshot, waiting: { unreachable: true } } }],
+    ["the doctor results", { snapshot: { ...READ.host.snapshot, doctor: { unreachable: "the doctor results could not be read" } } }],
+  ],
+});
+
+test("dataUnread, by page: each read a page makes beside its snapshot marks the pill when it failed, and none does while it answered", () => {
+  for (const [page, marks] of Object.entries(MARKS)) {
+    assert.equal(dataUnread({ page, ...READ[page] }), false, `${page}: every read answered`);
+    for (const [what, mark] of marks) {
+      assert.equal(dataUnread({ page, ...READ[page], ...mark }), true, `${page}: ${what}`);
+      // The shell names the page it draws, for data that names none; the same data on no page at all marks nothing.
+      assert.equal(dataUnread({ ...READ[page], ...mark }, page), true, `${page}: ${what}, the page named by the shell`);
+      assert.equal(dataUnread({ ...READ[page], ...mark }), false, `${page}: ${what}, on no page at all`);
+    }
+  }
+  // What answered and is not unread, where a careless rule would say so.
+  const live = [
+    ["runs", { runsPage: { ...READ.runs.runsPage, mirror: "off" } }, "a mirror that is off"],
+    ["runs", { runsWindow: { partial: false, floor: true } }, "a window that ended inside the day: a floor, read whole"],
+    ["runs", { runsPage: { ...READ.runs.runsPage, truncated: true, examined: 2000 } }, "a page that stopped at its cap"],
+    ["run", { run: { missing: true }, progress: { missing: true }, chat: { mode: null, says: "No run with that id is in this host's history, the fleet's run mirror or the queue." } }, "no such run"],
+    ["run", { run: { invalid: true } }, "an id that is not a run id"],
+    ["run", { progress: { unreachable: true } }, "a progress key that was not read, beside a record: the card draws the record's"],
+    ["run", { inbox: { found: true, steer: false, open: null, entries: null } }, "an inbox of a run that is not steer-armed"],
+    ["run", { snapshot: null, runsWindow: null }, "no snapshot and no window on the page of a run that was not refused: it reads neither"],
+    ["run", { run: { record: { ...REFUSED_RECORD, budgetReserved: true }, source: "local" }, snapshot: null, runsWindow: null }, "nor does a refusal that kept its count slot"],
+    ["run", { run: { record: REFUSED_RECORD, source: "local" }, snapshot: { queue: { fleetDegraded: null }, doctor: { hosts: [], more: 0 } }, runsWindow: { partial: false, byReason: {} } }, "a refused run whose snapshot and window answered"],
+    ["run", { artifacts: { state: "unreadable", kept: 2 } }, "kept files this host's store cannot read"],
+    ["sandboxes", { browserGateways: { enabledHosts: [], sessions: [], problem: "The sandbox gateways file is readable by others." } }, "a gateways file the console refuses"],
+    ["sandboxes", { sandboxes: { ...READ.sandboxes.sandboxes, sessionsMore: 3, hosts: [{ name: "build3", unreadable: true }] } }, "what a host published as unreadable"],
+    ["host", { host: { name: "build3", jobsUnreadable: true }, hostHistory: null }, "a host that has a row: its history is not what the page draws"],
+    ["host", { hostHistory: { runs: [], records: [], mirror: "off" } }, "a host no record names"],
+    ["host", { hostHistory: { runs: [{ jobId: "gh-1" }], records: [{ jobId: "gh-1" }], mirror: "unreachable (Command timed out)" } }, "records this host's files hold beside a mirror that did not answer: the page draws when the host was last seen from them"],
+    ["host", { hostCapacity: null }, "a capacity history that was not read: the card is read on page load, never by the stream"],
+    // A key the data lacks is a read the page did not make: the loader sets each key a page reads, and marks a report
+    // that did not arrive as the page's own read failing.
+    ["sandboxes", { sandboxes: undefined }, "data that holds no report"],
+    ["host", { snapshot: { queue: { fleetDegraded: null }, doctor: { hosts: [] } } }, "a snapshot that was not asked for the waiting jobs"],
+    ["run", { inbox: undefined, chat: undefined, transcript: undefined }, "data that holds none of a run's reads"],
+  ];
+  for (const [page, over, what] of live) assert.equal(dataUnread({ page, ...READ[page], ...over }), false, `${page}: ${what}`);
+});
+
+test("dataUnread: a load the deadline cut is unread on any page, and no page outside the table takes a mark of another's", () => {
+  const every = { ...READ.runs, ...READ.sandboxes, ...READ.host, ...READ.run, ...Object.assign({}, ...Object.values(MARKS).flat().map(([, mark]) => mark)), snapshot: { queue: { fleetDegraded: null } } };
+  for (const page of Object.keys(PAGES)) {
+    assert.equal(dataUnread({ page, deadlineSpent: true }), true, `${page}: cut by its deadline`);
+    if (!Object.hasOwn(MARKS, page)) assert.equal(dataUnread({ page, ...every }), false, `${page}: reads none of these, and none of them changes its pill`);
+  }
+  assert.deepEqual(Object.keys(MARKS).sort(), ["host", "run", "runs", "sandboxes"]);
+  for (const page of Object.keys(MARKS)) assert.equal(PAGES[page].live, true, `${page} is a live page`);
 });
 
 test("the host page says when the running jobs could not be read, beside what it did read; a read list says nothing of it", async () => {

@@ -6,9 +6,10 @@
  * action controls and the PATHS rule) are stated once, in `../panels.mjs`'s header. The names exported at the end of
  * this module are shared between the screens' modules only; `../panels.mjs` does not re-export them.
  */
+import { CHAT_REFUSALS } from "@edgehero/pi-dispatch/chat-mode";
 import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
-import { classifiedRows } from "../../costs.mjs";
+import { classifiedRows, refusedBeforeSpend } from "../../costs.mjs";
 import { beatAgeOf } from "../../doctor-view.mjs";
 import { fmtCost, usd2 } from "../../panel.mjs";
 import { resolveWorkerCount, forgeLinkOf, progressStaleFor } from "../../read-model.mjs";
@@ -166,15 +167,101 @@ export const rowLastSeen = (snapshot, h) => Boolean(snapshot?.queue?.fleetDegrad
 export const REGISTRY_PART_TEXT = "The host registry was read in part: some hosts' rows did not answer in time, so those hosts are as they were last seen.";
 
 /**
- * Whether a page's data holds something the console could not read (issue #962), the one rule of the live pill's Not
- * live for the page the server draws (`shell.mjs`) and for the hub's streams (`live.mjs`): the page's primary read
- * failed (`readFailed`), or its snapshot was read with a part missing that its panels then word as "could not be read":
- * the host registry this time (`queue.fleetDegraded`, whether it shows nothing or the rows as last seen, which are not
- * current either), the active jobs (`activeUnreachable`) or the parked runs (`parkedUnreachable`). A declaration, so
- * the modules that import each other in a circle can call it.
+ * A read that answered that it could not reach what it reads (`unreachable`, a word or true), which is how the
+ * readers answer an outage.
  */
-export function dataUnread(data) {
-  if (data?.readFailed === true) return true;
+const unreached = (read) => read !== null && typeof read === "object" && Boolean(read.unreachable);
+
+/**
+ * A page of the run history read without one of its sides: this host's files (`unreachable`), or a fleet mirror that
+ * is on and did not answer (a `mirror` word that is neither "ok" nor "off"). A mirror that is off is a whole answer:
+ * there are no other hosts' runs to hold.
+ */
+const historyPartUnread = (page) => page !== null && typeof page === "object" && (Boolean(page.unreachable) || (typeof page.mirror === "string" && page.mirror !== "ok" && page.mirror !== "off"));
+
+/** The 24 hours' window that could not be folded (null), or was folded without a side of the history (`partial`). */
+const windowUnread = (window) => window === null || window?.partial === true;
+
+/**
+ * A host's run records that could not be read: a history that failed (null), or an empty one whose fleet mirror was
+ * not read (the reader does not throw in an outage, it answers no runs and a mirror that is neither "ok" nor "off").
+ * Neither is a host no record names. The host page's sentence and the pill's mark are this one rule.
+ */
+export const hostHistoryUnread = (history) =>
+  history === null || (history !== undefined && !history.records?.length && typeof history.mirror === "string" && !["ok", "off"].includes(history.mirror));
+
+/**
+ * What each of four pages reads beside its snapshot, and when one of those reads failed in a way a panel of that page
+ * words as "could not be read" (issue #988): the marks are the readers' own, held to the real readers over a Valkey
+ * that fails a read, and no sentence is new. A key the data lacks is a read the page did not make, never a mark: the
+ * loader sets each key a page reads. A page that is not here is judged by its primary read and by the three parts of
+ * its snapshot alone (below).
+ *
+ *   - runs: the page of runs (a side of the history unread) and the 24 hours' window.
+ *   - run: the record (`unreadable`: the mirror did not answer, or the host that holds it); the transcript's state,
+ *     the progress, the inbox, the chat facts and the planner's check of a reply (`unreachable`); an inbox whose
+ *     messages or whose open flag could not be read; a chat that cannot tell whether its question still waits
+ *     (`CHAT_REFUSALS.parkedUnknown`); a search for child runs that was incomplete; the open shells and browser
+ *     sessions behind an operator's Workspace row, and the hosts' doctor runs behind what the run loaded; and for a run
+ *     refused before it started, the snapshot, its doctor results and the window its two cards are drawn from.
+ *   - sandboxes: the open shells and the cleanup notices of a report that did arrive; the record of the run a kept
+ *     workspace came from; the hosts' doctor runs behind what a fresh sandbox would load; and the browser terminals
+ *     where their read failed.
+ *   - host: the run records of a host that has no row, the waiting jobs and the doctor results.
+ *
+ * NOT MARKS, each because it would hold the pill at Not live for good, or is not the console's read: where a run was
+ * looked for (`runPlaces`: a finished run's lookup can be "not whole" for ever); what a host published about itself
+ * (a job list, a CPU reserve or a publication it calls unreadable); a run's kept files that this host's store cannot
+ * read; and a host's capacity history, which is read once when the page is drawn and never by the stream, as its card
+ * says.
+ */
+const PAGE_UNREAD = Object.freeze({
+  runs: (d) => historyPartUnread(d.runsPage) || windowUnread(d.runsWindow),
+  run: (d) => {
+    const record = d.run?.record ?? null;
+    if (Boolean(d.run?.unreadable) || [d.transcript, d.inbox, d.chat, d.chatAnswer, d.hostLoads].some(unreached)) return true;
+    // The progress key is the page's only source of progress while there is no record; with one, the card draws the
+    // record's.
+    if (record === null && unreached(d.progress)) return true;
+    if (d.childrenIncomplete === true || d.hostLoadsUnread === true || d.chat?.says === CHAT_REFUSALS.parkedUnknown) return true;
+    // An inbox that was found and is a steer-armed run's: its messages, or whether it takes one now, not read.
+    if (d.inbox?.found === true && d.inbox.steer === true && (d.inbox.entries === null || d.inbox.open === null)) return true;
+    if (d.workspace?.sessionsUnknown === true || d.browserGateways?.partial === true) return true;
+    // A run refused before it started (run.mjs `refusedBeforeStart`) draws two cards more: the host, its doctor result
+    // and its queue from a snapshot, and how often the same reason refused from the day's window.
+    if (record === null || typeof record !== "object" || record.outcome !== "policy" || !refusedBeforeSpend(record)) return false;
+    return d.snapshot === null || unreached(d.snapshot?.doctor) || windowUnread(d.runsWindow);
+  },
+  sandboxes: (d) => {
+    // A report that did not arrive is the page's primary read failing (`readFailed`), which the rule knows on any page.
+    if (Boolean(d.sandboxes?.sessionsUnavailable) || Boolean(d.sandboxes?.noticesUnavailable)) return true;
+    if (d.sandboxRunUnread === true || unreached(d.hostLoads) || d.hostLoadsUnread === true) return true;
+    // The gateway's own word where its read failed (`pages.mjs`); a registry it refuses says something else.
+    return /could not be read/.test(String(d.browserGateways?.problem ?? ""));
+  },
+  host: (d) => {
+    // The host panel's own rule, which it draws for a host with no row alone: there the run records are all that can
+    // say when the host was last seen.
+    if ((d.host === null || d.host === undefined) && hostHistoryUnread(d.hostHistory)) return true;
+    const s = d.snapshot;
+    return s !== null && typeof s === "object" && (unreached(s.waiting) || unreached(s.doctor));
+  },
+});
+
+/**
+ * Whether a page's data holds something the console could not read (issues #962 and #988), the one rule of the live
+ * pill's Not live for the page the server draws (`shell.mjs`) and for the hub's streams (`live.mjs`). On any page: its
+ * primary read failed (`readFailed`); its load's deadline cut a read (`deadlineSpent`); or its snapshot was read with
+ * a part missing: the host registry this time (`queue.fleetDegraded`, whether it shows nothing or the rows as last
+ * seen, which are not current either), the active jobs (`activeUnreachable`) or the parked runs
+ * (`parkedUnreachable`). And on the pages `PAGE_UNREAD` names, a read the page makes beside its snapshot failed, so
+ * that the pill there is Not live wherever a panel says "could not be read" of a read the page made. `page` is the
+ * page the data is drawn on: the data's own name for it (`data.page`, which `loadPageData` sets), or the page the
+ * shell draws, which it names itself. A declaration, so the modules that import each other in a circle can call it.
+ */
+export function dataUnread(data, page = data?.page) {
+  if (data?.readFailed === true || data?.deadlineSpent === true) return true;
+  if (typeof page === "string" && Object.hasOwn(PAGE_UNREAD, page) && data !== null && typeof data === "object" && PAGE_UNREAD[page](data)) return true;
   const s = data?.snapshot;
   if (s === null || typeof s !== "object") return false;
   return Boolean(s.queue?.fleetDegraded) || s.activeUnreachable === true || Boolean(s.parkedUnreachable);

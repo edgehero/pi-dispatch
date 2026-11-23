@@ -25,6 +25,7 @@ import {
   beatAgeOf,
   canAct,
   doctorFromSetup,
+  hostHistoryUnread,
   HOSTS_UNREAD_TEXT,
   hostsUnread,
   REGISTRY_PART_TEXT,
@@ -79,10 +80,6 @@ const notKnown = html`<p class="note">${HOSTS_UNREAD_TEXT}</p>`;
 // Issue #1062: over a registry read in part, a host with no row may be one whose row did not answer, not one gone.
 const partNotKnown = html`<p class="note">${REGISTRY_PART_TEXT} Whether this host is live is not known.</p>`;
 const goneOf = (v) => (unreadOf(v) ? notKnown : registryReadInPart(v.data?.snapshot) ? partNotKnown : gone);
-// A history that failed (null), or an empty one whose fleet mirror was not read: the reader does not throw in an
-// outage, it answers no runs and a mirror that is neither "ok" nor "off". Neither is a host no record names.
-const historyUnread = (history) =>
-  history === null || (history !== undefined && !history.records?.length && typeof history.mirror === "string" && !["ok", "off"].includes(history.mirror));
 
 /** A published id can be a digest; that never becomes a guessed container name. */
 export function orphanCommand(job) {
@@ -654,7 +651,7 @@ export const hostRow = card("Registry row", (h, v) =>
                 ? timeHtml(at)
                 : "at an unrecorded time";
             })()} in ${v.data.hostHistory.records.length} retained run records. </p>`
-          : historyUnread(v.data?.hostHistory)
+          : hostHistoryUnread(v.data?.hostHistory)
             ? html`<p>This host's run records could not be read.</p>`
             : html`<p>No retained run record names this host.</p>`
       }`,
