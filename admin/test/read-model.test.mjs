@@ -70,6 +70,7 @@ import {
   listRunsMerged,
 } from "../src/read-model.mjs";
 import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
+import { CONSOLE_AUDIT_FIELD_MAX } from "@edgehero/pi-dispatch/console-audit";
 import { CRON_ID_MAX } from "@edgehero/pi-dispatch/triggers";
 import { SCHEDULER_ID_MAX } from "@edgehero/pi-dispatch/bullmq-internals";
 
@@ -1514,7 +1515,7 @@ test("enqueueDispatchRun (aiInvoked) refuses over the per-hour rate limit; INCR-
   assert.ok(cmds.some((c) => c[0] === "disconnect"), "redis client closed in finally");
 });
 
-test("enqueueDispatchRun counts a start and sets its hour's expiry in one script on a bounded client, never as two commands (#961)", async () => {
+test("enqueueDispatchRun counts a start and sets its hour's expiry in one script on a bounded client that fails fast, never as two commands (#961, #987)", async () => {
   const { root, folder } = tempRootAndFolder("dr-expire-");
   const env = { VALKEY_URL: "redis://x", PI_DISPATCH_RUN_ROOTS: root, PI_DISPATCH_RUN_PER_HOUR: "5" };
   const cmds = [];
@@ -1543,7 +1544,47 @@ test("enqueueDispatchRun counts a start and sets its hour's expiry in one script
   assert.deepEqual([name, script, keys, ttl], ["eval", DISPATCH_RUN_COUNT_SCRIPT, 1, 7200]);
   assert.match(key, /^dispatch-run:\d{4}-\d{2}-\d{2}-\d{2}$/);
   assert.match(DISPATCH_RUN_COUNT_SCRIPT, /INCR[\s\S]*EXPIRE/);
-  assert.deepEqual(made, [{ commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }], "the console's bounded client");
+  // Each command bound, and since issue #987 fail fast and connected first, as the budget writes' client is: the
+  // console's bounded client keeps its offline queue, where a count on a Valkey that refused the connection waited
+  // out the whole bound before it said nothing was counted.
+  assert.deepEqual(made, [{ failFast: true, lazyConnect: true, commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }]);
+  // The preview's read is asked on the same kind.
+  const { checkDispatchRun } = await import("../src/read-model.mjs");
+  const reads = [];
+  const read = await checkDispatchRun({ folder, flow: "fix", consumeRate: false, ...fakes, redisFn: (_url, options) => (reads.push(options), { get: async () => "2", disconnect() {} }) });
+  assert.deepEqual(read, {});
+  assert.deepEqual(reads, made);
+});
+
+test("a dispatch run's allowance on a Valkey that refuses the connection answers at once with nothing counted, at the count and at the preview's read (#987)", async () => {
+  const { checkDispatchRun } = await import("../src/read-model.mjs");
+  const { makeRedisClient } = await import("@edgehero/pi-dispatch/connection");
+  const { createServer } = await import("node:net");
+  // A loopback port nothing listens on: bound, then closed.
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  await new Promise((resolve) => server.close(resolve));
+  const { root, folder } = tempRootAndFolder("dr-refused-");
+  const env = { VALKEY_URL: `redis://127.0.0.1:${port}`, PI_DISPATCH_RUN_ROOTS: root, PI_DISPATCH_RUN_PER_HOUR: "5" };
+  const { fakes } = dispatchFakes({ env, redisFn: makeRedisClient });
+  for (const consumeRate of [true, false]) {
+    const t0 = Date.now();
+    const res = await checkDispatchRun({ folder, flow: "fix", consumeRate, ...fakes });
+    const ms = Date.now() - t0;
+    // Unreachable, and no word of a start that may be used: the count never left, so nothing can have been counted.
+    assert.deepEqual(Object.keys(res), ["unreachable"], JSON.stringify(res));
+    assert.equal(typeof res.unreachable, "string");
+    // The console's bounded client held this for its whole command bound, 5 seconds.
+    assert.ok(ms < 1500, `${ms} ms`);
+  }
+  // And the run's enqueue ends there: Valkey unreachable, with nothing sent to any queue.
+  let queues = 0;
+  const t0 = Date.now();
+  const run = await enqueueDispatchRun({ folder, flow: "fix", task: "t", aiInvoked: true, ...fakes, makeQueueFn: () => ((queues += 1), { add: async () => ({}), close: async () => {} }) });
+  assert.deepEqual(Object.keys(run), ["unreachable"], JSON.stringify(run));
+  assert.equal(queues, 0, "no queue was opened for a start that was not counted");
+  assert.ok(Date.now() - t0 < 1500);
 });
 
 test("enqueueDispatchRun (aiInvoked) refuses entirely when the per-hour cap is 0, without touching redis", async () => {
@@ -1582,11 +1623,18 @@ test("enqueueDispatchRun says a run may or may not have been queued when its add
   };
   // Whatever an add throws once it was started, but Valkey's own answer: the run may be queued, so never "unreachable",
   // which every surface words as nothing changed.
+  // The start was counted against the hour before the add, and is never given back: said (issue #987), as Fire now says
+  // it, within what an audit row keeps of a reason.
+  const counted = "the run may or may not have been queued and one start of this hour was used: the queue did not confirm it. Preview it again first: the preview says when one is already queued or running";
+  assert.ok([...counted].length <= CONSOLE_AUDIT_FIELD_MAX, `${[...counted].length} code points`);
   for (const error of [new Error("connection down"), Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true })]) {
     const { fakes, seen } = failing(error);
     const res = await enqueueDispatchRun({ folder, flow: "fix", task: "t", aiInvoked: true, ...fakes });
-    assert.deepEqual(res, { invalid: "the run may or may not have been queued: the queue did not confirm it. Preview it again first: the preview says when one is already queued or running", partial: true });
+    assert.deepEqual(res, { invalid: counted, partial: true });
     assert.equal(seen.closed, true, "queue closed in finally even on error");
+    // The operator's own run counts nothing against the hour, and says nothing of a start.
+    const own = failing(error);
+    assert.deepEqual(await enqueueDispatchRun({ folder, flow: "fix", task: "t", aiInvoked: false, ...own.fakes }), { invalid: "the run may or may not have been queued: the queue did not confirm it. Preview it again first: the preview says when one is already queued or running", partial: true });
   }
   const { fakes, seen } = failing(Object.assign(new Error("READONLY You can't write against a read only replica."), { name: "ReplyError" }));
   const refused = await enqueueDispatchRun({ folder, flow: "fix", task: "t", aiInvoked: true, ...fakes });

@@ -698,7 +698,8 @@ const digest8 = (d) => (typeof d === "string" && /^[0-9a-f]{8}/.test(d) ? d.slic
  * host's file IS the envelope the applied split was made for. That is what an envelope write leaves whose record of
  * the digest was sent, not answered, and landed when Valkey woke (the file was never written), and what a write on
  * another host leaves here until the fleet re-bases. The fleet keeps running on the applied split: a host reads the key
- * only once its own file differs from the split. But a file with THAT digest, on any host, re-bases the fleet onto
+ * at every reconcile and goes by its value only once its own file differs from the split. But a file with THAT digest,
+ * on any host, re-bases the fleet onto
  * itself with no confirm, so a key nobody is about to honour is put back. Returned as its facts, `{ expected, file }`
  * (8-hex digests), or null; `expectedOtherText` words it.
  *

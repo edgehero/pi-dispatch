@@ -1051,14 +1051,17 @@ export const ENVELOPE_EXPECTED_LINES = Object.freeze({
 /**
  * The line an `envelope-set` preview adds for what the expected key holds, or null for nothing to say: the key is
  * absent, or it holds this host's file's digest or the applied split's (the envelope the fleet runs on, which this
- * change replaces as every envelope change does). One bounded read, and never a refusal: the plan is made from the
- * files, and a Valkey that cannot be read is the confirm's to refuse.
+ * change replaces as every envelope change does). One bounded read on a client that fails fast, and never a refusal:
+ * the plan is made from the files, and a Valkey that cannot be read is the confirm's to refuse.
  */
 async function envelopeExpectedLine(ctx, plan) {
   if (typeof ctx.a.rm?.readAllocations !== "function") return null;
   let alloc;
   try {
-    alloc = await ctx.a.rm.readAllocations({ url: ctx.a.paths.valkeyUrl, limit: 1, timeoutMs: ENVELOPE_EXPECTED_READ_MS });
+    // `failFast`: a Valkey that refuses the connection answers this at once, as the confirm's own client does, where the
+    // plain client's offline queue held the preview for the whole bound; one that takes it and answers nothing still
+    // ends at the bound.
+    alloc = await ctx.a.rm.readAllocations({ url: ctx.a.paths.valkeyUrl, limit: 1, timeoutMs: ENVELOPE_EXPECTED_READ_MS, failFast: true });
   } catch {
     return ENVELOPE_EXPECTED_LINES.unread;
   }
@@ -1334,7 +1337,11 @@ const jobActions = [
       const task = str(body, "task", { required: true, max: 32768 });
       const env = { ...ctx.a.env, PI_DISPATCH_RUN_ROOTS: ctx.a.grantsEnv?.PI_DISPATCH_RUN_ROOTS ?? "", PI_DISPATCH_RUN_PER_HOUR: ctx.a.grantsEnv?.PI_DISPATCH_RUN_PER_HOUR ?? "3" };
       const result = await ctx.a.rm.checkDispatchRun({ folder, flow, env, aiInvoked: true, consumeRate: false, now: ctx.now });
-      if (result.refused || result.unreachable) return { refusal: result.refused ?? "The paid-start allowance could not be read." };
+      if (result.refused) return { refusal: result.refused };
+      // Valkey did not answer the read of the hour's allowance (issue #987): the read model's sentence for it, which
+      // Fire now says too, and 503, so the bar is Valkey's with Try again. It said "The paid-start allowance could not
+      // be read." as a change refused, with Close and no word of what had not answered.
+      if (result.unreachable) return { refusal: ctx.a.rm.ALLOWANCE_UNREAD ?? VALKEY_UNREACHABLE, status: 503 };
       const job = { folder, flow, task };
       const already = typeof ctx.a.rm.dispatchRunAlready === "function" && typeof ctx.a.paths?.valkeyUrl === "string" ? alreadyLine(ctx, `a run of flow ${flow} for this folder`, await ctx.a.rm.dispatchRunAlready({ url: ctx.a.paths.valkeyUrl, folder, flow, env }), true) : null;
       return { target: folder, payload: { job }, afterDigest: sha256(JSON.stringify(job)), reserve: ctx.a.rm.estimateReserve?.(job, reserveInputs(ctx)) ?? null, summary: [`Start local flow ${flow}`, "The folder, committed flow permission, clean tree and hourly limit are checked again before enqueue.", ...(already ? [already] : [])] };
@@ -1558,7 +1565,8 @@ const jobActions = [
         const checked = await checkAgentRerun(fresh.plan, { rm: ctx.a.rm, env: ctx.a.env, grantsEnv: ctx.a.grantsEnv, now: ctx.now, consumeRate: true });
         if (checked.refusal) return { invalid: checked.refusal, ...(checked.partial === true ? { partial: true } : {}) };
       }
-      const res = await ctx.a.rm.enqueueRerun(entry.payload.plan, { url: ctx.a.paths.valkeyUrl, now: ctx.now });
+      // `counted` (issue #987): an add that was not confirmed says the start this confirm counted was used.
+      const res = await ctx.a.rm.enqueueRerun(entry.payload.plan, { url: ctx.a.paths.valkeyUrl, now: ctx.now, ...(counted ? { counted: true } : {}) });
       const out = funnelResult(res, { jobId: res?.jobId ?? null, queue: res?.queue ?? null });
       // An agent's re-run was counted against the hour before this: an answer that queued nothing says the start is gone.
       if (counted && typeof out.invalid === "string" && out.partial !== true) return { ...out, invalid: `${out.invalid}${/[.!?]$/.test(out.invalid) ? "" : "."} ${START_USED}` };
@@ -2984,6 +2992,14 @@ export async function previewAction(ctx, action) {
   } catch (e) {
     if (e instanceof BadRequest) return refuse(ctx, "preview", 400, `${e.message}; nothing was changed`);
     deps.log(`console: the ${action.name} preview failed (${codeOf(e)})`);
+    // Valkey did not answer a read this preview needed (issue #987): Valkey's refusal with Try again, as a confirm
+    // whose write answered `unreachable` gets, where this said the preview failed and to read the console's log, with
+    // no word of Valkey. `valkeyNotSent` is set where the read fails (the zero touch, answerer and sandbox services).
+    // `valkeyMayStillRun` is a client's own mark on a command that was sent and whose answer was lost, and a read's
+    // error carries it as a write's does. At a CONFIRM it must read as a change that may have been made. HERE it is
+    // safe to call unreachable, and only here: a preview writes nothing, so nothing was changed whichever command it
+    // was. Any other throw keeps the sentence below, which names no cause it does not know.
+    if (e?.valkeyNotSent === true || e?.valkeyMayStillRun === true) return refuse(ctx, "preview", 503, VALKEY_UNREACHABLE, "valkey");
     return refuse(ctx, "preview", 500, "the preview failed; the console's log has the reason; nothing was changed");
   }
   // A refusal names its bar's state only where its status cannot (the snapshot's timeout, a 503 that is not Valkey's),

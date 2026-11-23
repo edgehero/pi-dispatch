@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { planTriggerFire, enqueueTriggerFire } from "../src/trigger-fire.mjs";
-import { checkDispatchRun, DISPATCH_RUN_COUNT_SCRIPT } from "../src/read-model.mjs";
+import { planTriggerFire, enqueueTriggerFire, CANARY_UNCONFIRMED, FIRE_UNCONFIRMED } from "../src/trigger-fire.mjs";
+import { ALLOWANCE_UNREAD, checkDispatchRun, DISPATCH_RUN_COUNT_SCRIPT } from "../src/read-model.mjs";
+import { LOOK_FIRST } from "../src/job-actions.mjs";
+import { CONSOLE_AUDIT_FIELD_MAX } from "@edgehero/pi-dispatch/console-audit";
 
 const NOW = Date.UTC(2026, 0, 2, 12, 0, 10);
 function fixture() {
@@ -250,6 +252,52 @@ test("Fire now whose count or latch was sent and not answered queues nothing and
   const unsent = await enqueueTriggerFire(plan, { ...f.options, redisFn: latch(new Error("Connection is closed.")) });
   assert.deepEqual(unsent, { invalid: "Nothing was queued and one start of this hour was used: Fire now's latch for this minute could not be set.", partial: true });
   assert.equal(f.adds.length, 0);
+});
+
+test("a canary's answers after its start was counted name the canary, and Fire now's are word for word what they were (#987)", async () => {
+  const canary = { name: "pi-lint", version: "1.4.3" };
+  // Each stop of an enqueue past the hour's count, asked as a Fire now and as a canary of the same trigger.
+  const both = async (arrange) => {
+    const said = [];
+    for (const extra of [{}, { packageCanary: canary }]) {
+      const f = fixture();
+      const { plan } = await planTriggerFire(f.options);
+      said.push(await enqueueTriggerFire(plan, { ...f.options, ...extra, ...arrange(f, plan) }));
+    }
+    return said.map((res) => res.invalid);
+  };
+  const latch = (error) => () => ({ on() {}, set: () => Promise.reject(error), disconnect() {} });
+  // The add was started and threw.
+  assert.deepEqual(await both((f) => (f.setBroken(true), {})), [FIRE_UNCONFIRMED, CANARY_UNCONFIRMED]);
+  assert.equal(FIRE_UNCONFIRMED, "A run may have been queued and one start of this hour was used: Fire now got no queue acknowledgement. Preview it again first: the preview says when one is already queued or running");
+  assert.equal(CANARY_UNCONFIRMED, "A run may have been queued and one start of this hour was used: the canary got no queue acknowledgement. Preview it again first: the preview says when one is already queued or running");
+  assert.ok(CANARY_UNCONFIRMED.endsWith(LOOK_FIRST), "the same pointer as every other paid start's");
+  assert.ok([...CANARY_UNCONFIRMED].length <= CONSOLE_AUDIT_FIELD_MAX, "an audit row keeps the whole sentence, the start it used included");
+  // The add was answered and its read back was not.
+  assert.deepEqual(await both((f, plan) => ((f.options.queueFn({}, { name: plan.queue }).getJob = async () => { throw new Error("lost readback"); }), {})), [
+    `A run may have been queued and one start of this hour was used: Fire now could not verify the queued job. ${LOOK_FIRST}`,
+    `A run may have been queued and one start of this hour was used: the canary could not verify the queued job. ${LOOK_FIRST}`,
+  ]);
+  // The minute's latch: sent and not answered, not sent, and a stop before it was asked.
+  assert.deepEqual(await both(() => ({ redisFn: latch(lostAnswer()) })), [
+    "Nothing was queued, one start of this hour was used, and this minute's Fire now may be taken: its latch was sent and did not answer. Try again next minute.",
+    "Nothing was queued, one start of this hour was used, and this minute's canary may be taken: its latch was sent and did not answer. Try again next minute.",
+  ]);
+  assert.deepEqual(await both(() => ({ redisFn: latch(new Error("Connection is closed.")) })), [
+    "Nothing was queued and one start of this hour was used: Fire now's latch for this minute could not be set.",
+    "Nothing was queued and one start of this hour was used: the canary's latch for this minute could not be set.",
+  ]);
+  assert.deepEqual(await both(() => ({ redisFn: () => { throw new Error("no client"); } })), [
+    "Nothing was queued and one start of this hour was used: Fire now stopped before it queued anything.",
+    "Nothing was queued and one start of this hour was used: the canary stopped before it queued anything.",
+  ]);
+  // The allowance that could not be read is one sentence, the read model's, for a fire and for the run-enqueue preview.
+  assert.equal(ALLOWANCE_UNREAD, "The dispatch_run hourly allowance could not be read. Nothing was queued.");
+  const f = fixture();
+  const { plan } = await planTriggerFire(f.options);
+  const unread = async ({ consumeRate }) => (consumeRate ? { unreachable: "Connection is closed." } : {});
+  assert.deepEqual(await enqueueTriggerFire(plan, { ...f.options, admissionFn: unread }), { unreachable: ALLOWANCE_UNREAD });
+  assert.deepEqual(await planTriggerFire({ ...f.options, admissionFn: async () => ({ unreachable: "Connection is closed." }) }), { unreachable: ALLOWANCE_UNREAD });
 });
 
 test("a Fire now preview whose scheduler read never answers ends at its bound and waits for no close (#961)", async () => {

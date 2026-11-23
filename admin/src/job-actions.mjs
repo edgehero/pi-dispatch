@@ -895,6 +895,24 @@ export function boundedClient(redisFn, url) {
 /** Whether `err` is Valkey's own answer (a reply that is an error, or a refusal this project raised): nothing ran. */
 export const refusedByValkey = (err) => err?.name === "ReplyError" || err?.valkeyRefused === true;
 
+/**
+ * A read of Valkey on a path that WRITES NOTHING (a preview, issue #987): `reading`'s answer, or what it rejected with
+ * thrown on as a new error marked `valkeyNotSent`, which the console's preview answers as Valkey unreachable, with Try
+ * again, where it said the preview failed and to read the console's log. The mark is set HERE, where the read is asked,
+ * and not read off the error: a store's own timer ends its read before the client's bound does, with an error that
+ * names no Valkey and carries no code. The mark of a command that may still run is dropped, as `writeTracking`'s
+ * `unsent` drops it: a read changes nothing whenever it runs. Handed on as they are: Valkey's own reply
+ * (`refusedByValkey`: it was reached, and what it said belongs in the console's log), and an error the language raised
+ * (a fault of this code, never Valkey's silence). NEVER for a read on a path that also writes: there the client's own
+ * mark has to reach the confirm.
+ */
+export function valkeyRead(reading) {
+  return Promise.resolve(reading).catch((err) => {
+    if (refusedByValkey(err) || err?.valkeyNotSent === true || [TypeError, RangeError, ReferenceError, SyntaxError].some((kind) => err instanceof kind)) throw err;
+    throw Object.assign(new Error(boundedText(err?.message ?? String(err))), { valkeyNotSent: true, ...(typeof err?.code === "string" ? { code: err.code } : {}) });
+  });
+}
+
 const CONNECT_LATE = Symbol("connect-late");
 
 /** What `connectedQueue` answers for a queue whose connection ended before it was ever ready (issue #987). */
@@ -937,8 +955,13 @@ export async function connectedQueue({ url, options = {}, queueFn = makeQueue, p
  * A paid enqueue that was sent and not confirmed (issue #961): `partial`, never "nothing was queued". It says to look
  * first because a second try is only taken as a duplicate for a while (a local or cron run and a `dispatch_run` within
  * the same minute, a forge run within the semantic window), so a retry after that can pay for the same run twice.
+ *
+ * `counted` (issue #987): the start was counted against the hour's `dispatch_run` allowance before the add, which is
+ * never given back, so the sentence says so, as Fire now's does (`FIRE_UNCONFIRMED`). Right after what may have been
+ * queued, before the pointer: an audit row keeps 200 code points of a reason, and "the run", a dispatch run's `what`,
+ * fits whole.
  */
-export const enqueueUnconfirmed = (what) => ({ invalid: `${what} may or may not have been queued: the queue did not confirm it. ${LOOK_FIRST}`, partial: true });
+export const enqueueUnconfirmed = (what, { counted = false } = {}) => ({ invalid: `${what} may or may not have been queued${counted ? " and one start of this hour was used" : ""}: the queue did not confirm it. ${LOOK_FIRST}`, partial: true });
 
 /**
  * What an answer to an approval says when its request is not the pending one for its run any more, and when the
@@ -1654,8 +1677,10 @@ export async function planRerun({
  * `{ unreachable }` for Valkey, with nothing sent; `{ invalid, partial }` once an add was started and not confirmed.
  * A fork of a run is queued through here as a forge plan (`enqueueRunFork`), so all of it holds for a fork. `queue` is
  * the queue the job is on: the plan's, or the queue of an approval's owner host when the helper routed the job there.
+ * `counted` (issue #987): the caller counted this start against the hour's `dispatch_run` allowance (an agent's
+ * re-run), so an add that was not confirmed says the start was used (`enqueueUnconfirmed`).
  */
-export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection, localRepoProblemFn = localRepoProblem, gitDirtyFn = gitDirty, now = () => Date.now(), touchStore = null, touchOutbox = null, interventionOrigin = "human", connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS } = {}) {
+export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection, localRepoProblemFn = localRepoProblem, gitDirtyFn = gitDirty, now = () => Date.now(), touchStore = null, touchOutbox = null, interventionOrigin = "human", connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS, counted = false } = {}) {
   const kind = plan?.kind;
   if (kind !== "local" && kind !== "cron" && kind !== "forge") return { refusal: "not a re-run plan" };
   if (typeof plan.queue !== "string" || !(plan.queue === QUEUE || plan.queue.startsWith(`${QUEUE}@`))) return { refusal: "the plan names no queue" };
@@ -1729,7 +1754,7 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
     }
     // Only Valkey's own reply is an answer: after any other throw no further command is waited for.
     lost = !refusedByValkey(err);
-    if (sent && lost) return enqueueUnconfirmed(what);
+    if (sent && lost) return enqueueUnconfirmed(what, { counted });
     return { unreachable: `${boundedText(err?.message ?? String(err))}; nothing was queued` };
   } finally {
     // The intent of a run that was not queued is taken back. After a lost answer that is started and not waited for:

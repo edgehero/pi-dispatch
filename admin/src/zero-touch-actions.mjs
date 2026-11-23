@@ -23,12 +23,22 @@ function sourceContext(record, groupId) {
   if (record.outcome === "policy" && Object.hasOwn(REASONS, record.reason)) return { runId: record.jobId, scopeId: record.touchScopeId ?? record.scopeId, project: record.project ?? null, groupId: null, reason: record.reason };
   return null;
 }
+/**
+ * What a grouping's preview says of a question whose status reads `pending` (issue #987). The status is a mark, never a
+ * count of jobs: the console writes it before its add and the worker when the job starts, and only a status write
+ * replaces it: the result a grouping records at its end (assigned, unassigned, failed, stale, or its source gone), or
+ * the console's own put-back where its add provably queued nothing. A grouping the worker refuses before it starts (the
+ * configuration changed since, the classifier is not priced) writes none, and neither does an add or a status write
+ * whose answer was lost. So the line says what the mark can mean and how long it stays, where it said "a previous
+ * grouping is pending or its result could not be confirmed" and nothing of when that ends.
+ */
+export const GROUP_PENDING_LINE = "A grouping of this question is marked pending: one is queued or running, an earlier request or its status write was not confirmed, or an earlier grouping ended without recording a result. The mark stays until a grouping records a result or the question's record expires. Confirming this request can pay for another classification.";
 export function planZeroTouchGroup({ params, config, meta, surface = "console" } = {}) {
   const denied = consoleOnly(surface); if (denied) return denied;
   let checked; try { checked = validateZeroTouchConfig(config); } catch { return refusal("The zeroTouch configuration is invalid; correct it before grouping questions."); }
   if (!checked?.capture) return refusal("Private question capture is not enabled in the reviewed zeroTouch configuration.");
   if (!QUESTION_RUN_RE.test(params?.runId ?? "") || !meta || meta.runId !== params.runId || !["unassigned", "failed", "stale", "refused", "pending"].includes(meta.status) || !/^[a-f0-9]{64}$/.test(meta.digest ?? "")) return refusal("The question has no available, unassigned private source. Read its grouping status and try again.");
-  return { plan: { kind: "question-grouping", runId: meta.runId, digest: meta.digest, configDigest: questionGroupConfigDigest(checked), model: checked.model, maxCostUsd: checked.maxCostUsd, title: "Group this question?", summary: [`Classify the meaning of ${meta.runId} with ${checked.model}, capped at $${checked.maxCostUsd}.`, "The job returns a group id only. It cannot answer a question or name a group.", ...(meta.status === "pending" ? ["A previous grouping is pending or its result could not be confirmed. Confirming this request can pay for another classification."] : [])], target: meta.runId, expect: null } };
+  return { plan: { kind: "question-grouping", runId: meta.runId, digest: meta.digest, configDigest: questionGroupConfigDigest(checked), model: checked.model, maxCostUsd: checked.maxCostUsd, title: "Group this question?", summary: [`Classify the meaning of ${meta.runId} with ${checked.model}, capped at $${checked.maxCostUsd}.`, "The job returns a group id only. It cannot answer a question or name a group.", ...(meta.status === "pending" ? [GROUP_PENDING_LINE] : [])], target: meta.runId, expect: null } };
 }
 export function planZeroTouchName({ params, paths, fs = nodeFs, surface = "console", versions = {} } = {}) {
   const denied = consoleOnly(surface); if (denied) return denied;

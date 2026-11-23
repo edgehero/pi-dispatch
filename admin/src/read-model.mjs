@@ -837,6 +837,13 @@ return n`;
 export const DISPATCH_RUN_ALLOWANCE_LOST = "Nothing was queued. The dispatch_run hourly allowance was sent this start and did not answer, so one start of this hour may have been used";
 
 /**
+ * What a paid start's preview and a Fire now say when the hour's allowance could not be read or counted because Valkey
+ * did not answer, with nothing sent (issue #987): one sentence for the console's `run-enqueue` preview and Fire now
+ * (`trigger-fire.mjs`), which each had words of their own, one of them with no word of what was not read.
+ */
+export const ALLOWANCE_UNREAD = "The dispatch_run hourly allowance could not be read. Nothing was queued.";
+
+/**
  * The paid-start bounds shared by dispatch_run and Fire now (#750). A preview performs the determinate
  * checks without consuming the hourly allowance; the executor repeats them at HEAD and consumes it immediately
  * before enqueue. Neither a preview nor a page load may spend that allowance.
@@ -844,7 +851,7 @@ export const DISPATCH_RUN_ALLOWANCE_LOST = "Nothing was queued. The dispatch_run
 export async function checkDispatchRun({
   folder, flow, aiInvoked = true, consumeRate = true, env = process.env,
   readFlowGateFn = readFlowGate, gitDirtyFn = gitDirty, localRepoProblemFn = localRepoProblem,
-  revParseHeadFn = revParseHead, redisFn = makeRedisClient, now = () => Date.now(),
+  revParseHeadFn = revParseHead, redisFn = makeRedisClient, now = () => Date.now(), connectTimeoutMs = VALKEY_COMMAND_TIMEOUT_MS,
 }) {
   // 1. flow required (both paths). Cheapest and most definitive: a flowless AI trigger is refused, and the
   // tool's `flow` is mandatory even though the CLI's `--flow` is optional.
@@ -898,15 +905,22 @@ export async function checkDispatchRun({
 
   // 5. aiInvoked ONLY -- per-hour rate limit. INCR-then-compare like reserveBudget: a refused attempt still
   // counts (no give-back), so a burst cannot probe the cap for free. A per-hour cap of 0 disables the tool.
-  // Issue #961: on the console's bounded client, so a Valkey that stopped answering ends this at the command bound, and
-  // the count and its expiry in ONE script (`DISPATCH_RUN_COUNT_SCRIPT`). A count that was sent and not answered is
+  // Issue #961: each command bound, so a Valkey that stopped answering ends this at the command bound, and the count
+  // and its expiry in ONE script (`DISPATCH_RUN_COUNT_SCRIPT`). A count that was sent and not answered is
   // `allowanceMayBeUsed`: nothing is given back, so the caller says one start of this hour may be gone.
+  // Issue #987: on the fail fast client the budget writes use (`writeClient`), connected before the count. The
+  // console's `boundedClient` keeps its offline queue, so on a Valkey that REFUSED the connection the count waited
+  // there for the whole command bound (5.1 s measured for a `run-enqueue` confirm) before it said nothing was
+  // counted; a connect that fails answers at once. The connect has the command bound's time (`connectTimeoutMs`), so
+  // a Valkey that takes the connection and answers nothing ends this when the queued count did. For every caller: the
+  // `run-enqueue` preview's read and its confirm's count, the `dispatch_run` tool's, Fire now's and a canary's (the
+  // trigger page's check, the preview, the confirm), and an agent's re-run.
   if (aiInvoked) {
     if (dispatchRunPerHour === 0) return { refused: "dispatch_run hourly limit (0) reached" };
     let redis;
     let sent = false;
     try {
-      redis = boundedClient(redisFn, valkeyUrl);
+      redis = await writeClient(valkeyUrl, redisFn, connectTimeoutMs);
       const key = hourKey(now());
       let count;
       if (consumeRate) {
@@ -1004,7 +1018,9 @@ export async function enqueueDispatchRun({
     return { ok: true, jobId };
   } catch (err) {
     if (!sent || refusedByValkey(err)) return unqueued(boundedText(err?.message ?? String(err)));
-    return enqueueUnconfirmed("the run");
+    // The start was counted before this add when the hour's allowance applies (`aiInvoked`), and the count is never
+    // given back: the sentence says so (issue #987), as Fire now's does.
+    return enqueueUnconfirmed("the run", { counted: aiInvoked === true });
   } finally {
     // Started, never awaited: the answer does not wait for a QUIT.
     void closeWithin(queue, QUEUE_CLOSE_TIMEOUT_MS);
@@ -2030,7 +2046,8 @@ return 1`;
  * A client for an allocation WRITE, connected before the first command: fail-fast (an unreachable Valkey refuses
  * rather than queueing the write behind reconnects) AND connected first, because a fail-fast client has no offline
  * queue, so a command sent before its socket is up fails with "Stream isn't writeable" (measured in the lab against a
- * live Valkey, where every write refused that way while the fake answered).
+ * live Valkey, where every write refused that way while the fake answered). Since issue #987 the hour's
+ * `dispatch_run` count and its preview's read use it too (`checkDispatchRun`), for the same reason.
  */
 async function writeClient(url, redisFn, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS) {
   parseConnection(url, { failFast: true });
@@ -2080,10 +2097,19 @@ const ALLOCATION_READS = Object.freeze(["get", "exists", "lrange"]);
  * compare-and-set, the lock's release), `set` (the lock, and the expected digest with NX), `lpush` and `ltrim` (a row
  * of `alloc:log`), which write. A plan or a revert reads first (`reconcile`), and a read that was sent and not answered
  * carries the client's `valkeyMayStillRun` as a write's does, so a plan stopped at its first GET read as a change that
- * may or may not have been made. `unsent(err)` is what such a caller throws on: for an error a command of this client
- * rejected with, that is not Valkey's own reply, while `wrote` is still false, a new error marked `valkeyNotSent` (no
- * mark of a command that may still run), which the confirm answers as Valkey unreachable and nothing changed. Any
- * other error is handed back as it is: once a write left, the client's own mark decides, as before.
+ * may or may not have been made. `unsent(err)` is what such a caller throws on, for an error a command of this client
+ * rejected with that is not Valkey's own reply:
+ *   - while `wrote` is still false, a new error marked `valkeyNotSent` (no mark of a command that may still run), which
+ *     the confirm answers as Valkey unreachable and nothing changed;
+ *   - for the FIRST write of the call, refused before it reached a socket (no `valkeyMayStillRun`: a connection that
+ *     died between the reads and the write), the same: nothing of this call was written;
+ *   - for a command refused that way AFTER an earlier write of the call left, a new error marked `valkeyMayStillRun`:
+ *     that earlier write was answered (a lost one stops the client, below), so what it wrote stays, a seed or an
+ *     expiry among them, and "nothing was changed", which the confirm said of any unmarked throw, was not true. It
+ *     errs towards "may or may not": the earlier write may be the lock alone, which changes no split, and this does
+ *     not tell them apart.
+ * Any other error is handed back as it is: Valkey's own reply, an error that is not this client's (the audit file),
+ * and a write's error that carries the client's own mark, which decides as before.
  *
  * After a command was lost (it rejected with `valkeyMayStillRun`) nothing more is asked of Valkey: every later
  * command rejects at once with that same error and never reaches the socket. The state releases its lock in a
@@ -2094,11 +2120,13 @@ const ALLOCATION_READS = Object.freeze(["get", "exists", "lrange"]);
  */
 export function writeTracking(redis) {
   let wrote = false;
+  let writes = 0;
   let lost = null;
-  const rejected = new WeakSet();
-  const noted = (err) => {
+  // Each error a command of this client rejected with, and whether that command was a write.
+  const rejected = new WeakMap();
+  const noted = (err, write) => {
     if (err !== null && typeof err === "object") {
-      rejected.add(err);
+      if (!rejected.has(err)) rejected.set(err, write);
       if (lost === null && err.valkeyMayStillRun === true) lost = err;
     }
     return err;
@@ -2109,25 +2137,35 @@ export function writeTracking(redis) {
       if (typeof name !== "string" || typeof value !== "function") return value;
       return (...args) => {
         if (lost !== null) return Promise.reject(lost);
-        if (!ALLOCATION_READS.includes(name.toLowerCase())) wrote = true;
+        const write = !ALLOCATION_READS.includes(name.toLowerCase());
+        if (write) {
+          wrote = true;
+          writes += 1;
+        }
         try {
           return Promise.resolve(value.apply(target, args)).catch((err) => {
-            throw noted(err);
+            throw noted(err, write);
           });
         } catch (err) {
-          return Promise.reject(noted(err));
+          return Promise.reject(noted(err, write));
         }
       };
     },
   });
+  const marked = (err, mark) => Object.assign(new Error(boundedText(err.message ?? String(err))), { [mark]: true, ...(typeof err.code === "string" ? { code: err.code } : {}) });
   return {
     redis: client,
     get wrote() {
       return wrote;
     },
     unsent(err) {
-      if (wrote || err === null || typeof err !== "object" || !rejected.has(err) || refusedByValkey(err)) return err;
-      return Object.assign(new Error(boundedText(err.message ?? String(err))), { valkeyNotSent: true, ...(typeof err.code === "string" ? { code: err.code } : {}) });
+      if (err === null || typeof err !== "object" || !rejected.has(err) || refusedByValkey(err)) return err;
+      if (!wrote) return marked(err, "valkeyNotSent");
+      // A write left before this error. The client's own mark decides where there is one.
+      if (err.valkeyMayStillRun === true) return err;
+      // Refused before it reached a socket. Nothing of the call was written when its command is the one write the call
+      // started; what another write changed stays when there was one.
+      return marked(err, writes === (rejected.get(err) ? 1 : 0) ? "valkeyNotSent" : "valkeyMayStillRun");
     },
   };
 }
@@ -2137,8 +2175,9 @@ export function writeTracking(redis) {
  * and the key may hold the new digest now or when Valkey wakes. The instruction comes FIRST (issue #987): an audit row
  * keeps 200 characters of a reason (`CONSOLE_AUDIT_FIELD_MAX`), and the sentence this replaces was cut before "set it
  * back by hand", the one part an operator needs. It also said the hosts then refuse governed jobs as envelope-mismatch,
- * which the worker does not do: a host compares its file with the applied split and reads this key only when the two
- * differ (`reconcile`), so with the key alone moved every host keeps running. What the stray digest does is let a file
+ * which the worker does not do: a host compares its file with the applied split and goes by this key's value only when
+ * the two differ (`reconcile`, which reads the key every time and seeds it when it is absent), so with the key alone
+ * moved every host keeps running. What the stray digest does is let a file
  * that has it re-base the fleet with no confirm, which is why it is put back.
  */
 export const envelopeDigestUnconfirmed = (key, digest) => `If ${key} holds ${digest}, set it back by hand to the digest doctor prints (docs/allocation.md): Valkey did not confirm that write, and the envelope file was not written`;
@@ -2167,12 +2206,21 @@ function pick(obj, fields) {
  *     the deployment, each envelope entry (`project:<id>`, `_other` included) and each project member's repo ledger,
  *     with each key's NAME, so an operator can find it in `valkey-cli`.
  */
-export async function readAllocations({ url, envelope = null, projects = [], now = new Date(), withReasons = false, limit = 20, redisFn = makeRedisClient, timeoutMs = 2500, prefix = null } = {}) {
+export async function readAllocations({ url, envelope = null, projects = [], now = new Date(), withReasons = false, limit = 20, redisFn = makeRedisClient, timeoutMs = 2500, prefix = null, failFast = false } = {}) {
   let redis;
   try {
     parseConnection(url, { failFast: true });
-    redis = redisFn(url);
-    redis.on?.("error", () => {});
+    // `failFast` (issue #987), for a caller that must not wait on a Valkey that REFUSES the connection (the
+    // `envelope-set` preview): the fail fast client the budget writes use, connected first (`writeClient`), so a refusal
+    // answers at once, where the plain client's offline queue held the reads for the whole `timeoutMs`. One bound all
+    // the same: the connect has `timeoutMs`, and the reads what is left of it.
+    const startedAt = performance.now();
+    if (failFast) redis = await writeClient(url, redisFn, timeoutMs);
+    else {
+      redis = redisFn(url);
+      redis.on?.("error", () => {});
+    }
+    const left = failFast ? Math.max(1, timeoutMs - (performance.now() - startedAt)) : timeoutMs;
     const keys = allocKeys(prefix);
     const work = (async () => {
       const [planText, expected, logRaw] = await Promise.all([redis.get(keys.plan), redis.get(keys.expected), redis.lrange(keys.log, 0, Math.max(0, limit - 1))]);
@@ -2192,7 +2240,7 @@ export async function readAllocations({ url, envelope = null, projects = [], now
       if (envelope) out.spend = await envelopeSpend(redis, envelope, projects, now);
       return out;
     })().catch((err) => ({ unreachable: err?.message ?? String(err) }));
-    return await withTimeout(work, timeoutMs, { unreachable: "timed out reaching the queue" });
+    return await withTimeout(work, left, { unreachable: "timed out reaching the queue" });
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
