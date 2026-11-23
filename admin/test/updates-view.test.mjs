@@ -287,7 +287,7 @@ test("a partial read of the runs is said only beside a row it could be wrong abo
 test("the console reads Updates through that one composed read, with its own paths, and both of its actions use it", () => {
 	const cli = readFileSync(new URL("../src/console/cli.mjs", import.meta.url), "utf8");
 	assert.match(cli, /m\.updatesView\.readDeploymentUpdates\(\{[^}]*paths: side\.paths/s, "an actions' lookup and the page must read the same shapes");
-	assert.match(cli, /updates: \(\) => readUpdatesFacts\(\)/, "the page");
+	assert.match(cli, /updates: \(\{ within \} = \{\}\) => readUpdatesFacts\(\{ within \}\)/, "the page, under its load's deadline");
 	assert.match(cli, /m\.readModel\.scanFleetRunRecords\(\{ redis,/, "a canary runs on whichever host took the job: this host's scan alone reads one on another host as never tried");
 	assert.match(cli.slice(cli.indexOf("const readUpdatesFacts"), cli.indexOf("const pageDeps")), /records: history\.records, recordsPartial: history\.partial/, "the page must be told when that read was partial");
 	assert.match(cli, /updates: \{ read: readUpdatesFacts,/, "the actions");

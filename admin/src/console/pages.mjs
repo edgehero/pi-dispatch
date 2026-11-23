@@ -57,6 +57,7 @@ import { FORGES } from "@edgehero/pi-dispatch/forges";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { RUN_FILTER_FIELDS, parseRunFilter, localEventFilterValue } from "../run-filter.mjs";
 import { html, page } from "./html.mjs";
+import { PAGE_DEADLINE_MS, PageDeadlinePassed, pageDeadline } from "./page-deadline.mjs";
 import { seg } from "./kit.mjs";
 import { HEADLINE_ID, NAV_PARKED_ID, navParkedHtml, shellHtml } from "./shell.mjs";
 import { TIMELINE_ROWS, TIMELINE_ZOOMS } from "./timeline.mjs";
@@ -129,7 +130,7 @@ import { parseRunPath, RUN_PATH_PREFIX, runPathLink } from "./run-path.mjs";
 import { runTranscriptSection } from "./transcript.mjs";
 import { WHATIF_MODEL_RE } from "./whatif.mjs";
 import { SPEND_TITLE, VENUE_LABEL, recordReason } from "../words.mjs";
-import { RUN_RECORD_UNREAD, runAbsent, runPlaces } from "../read-model.mjs";
+import { RUN_MIRROR_READ_MS, RUN_RECORD_UNREAD, runAbsent, runPlaces } from "../read-model.mjs";
 import { fromNewerRelease } from "../newer-release.mjs";
 import { agentReadProjection } from "../agent-read.mjs";
 import { runAnswerDraft } from "./panels/run.mjs";
@@ -636,7 +637,7 @@ export function returnPathOf(raw) {
  * which only the overview draws. It is the page's to ask, not the reader's: one reader serves every screen and
  * `/api/state`, and a reader built to read them would make every other screen pay for a read it never draws.
  */
-const PAGE_READS = Object.freeze({
+export const PAGE_READS = Object.freeze({
   setup: ["snapshot", "setup"],
   models: ["snapshot", "waiting", "models"],
   sandboxes: ["parkedCount", "hostLoads"],
@@ -672,6 +673,8 @@ const PAGE_READS = Object.freeze({
 /** The runs a screen shows per page, and how far the run detail looks for a run's children. */
 export const RUNS_PER_PAGE = 50;
 const CHILD_SEARCH = Object.freeze({ pageSize: 100, pages: 3 });
+/** What the trigger page's Fire now check reads as when it threw, or had not answered when the page's deadline passed. */
+const FIRE_CHECK_UNREAD = "The console could not check whether this schedule can fire here.";
 /** The audit rows per page. */
 export const AUDIT_PER_PAGE = 50;
 
@@ -721,9 +724,11 @@ async function parkedCountOf(deps) {
  * exist, and `incomplete` that a page could not be read (the read threw, or answered with no list) or was read without
  * a side of the history (this host's files, or the other hosts' runs behind a mirror that did not answer): a child may
  * be in what was not read, so the page says the search was incomplete, never "no child run" (issue #962). A mirror
- * that is off is a whole answer: there are no other hosts to hold one.
+ * that is off is a whole answer: there are no other hosts to hold one. `readPage` is how one page is read, the
+ * reader's own `runsPage` where none is given: a page's load passes its read under the load's deadline (issue #988),
+ * and a page that read cuts is one that could not be read.
  */
-export async function childrenOf(fleet, record) {
+export async function childrenOf(fleet, record, { readPage = (opts) => fleet.runsPage(opts) } = {}) {
   const startMs = Date.parse(record.startedAt ?? record.endedAt ?? "");
   const children = [];
   let searched = 0;
@@ -732,7 +737,7 @@ export async function childrenOf(fleet, record) {
   for (let i = 0; i < CHILD_SEARCH.pages; i += 1) {
     let pageRead;
     try {
-      pageRead = await fleet.runsPage({ before, limit: CHILD_SEARCH.pageSize });
+      pageRead = await readPage({ before, limit: CHILD_SEARCH.pageSize });
     } catch {
       incomplete = true;
       break;
@@ -776,6 +781,8 @@ function formsDrawn(who) {
  *   - `env`: the deployment's env, of which only the forge instance variables are kept (`forgeEnvOf`).
  *   - `now`: the clock (a function or a number), read ONCE; every panel draws from this instant.
  *   - `deployment` (optional, issue #737): `{ folder }`, the deployment directory's last folder, kept as `data.deployment`.
+ *   - `deadline` (optional, issue #988): `{ ms, clock, timers }` for this load's deadline (`pageDeadline`), so a test moves
+ *     its time by hand; `PAGE_DEADLINE_MS` on the monotonic clock where none is given.
  *
  * `who` is who will see the page (`{ role, readOnly, live }`, `readOnly` the console's own): the spend screen's
  * `paths=full` reads full paths for an operator's request alone, so a viewer's page data never holds them, and the
@@ -790,6 +797,28 @@ function formsDrawn(who) {
  * together, so a load waits for that scan once; a live load's (`who.live`) costs none, and keeps what the request was
  * told of an absence (the reader's `lookUp`).
  *
+ * ONE DEADLINE OVER WHAT A LOAD ASKS OF VALKEY (issues #987 and #988, `page-deadline.mjs`). The reads below are made
+ * one after another, each with a bound of its own, so on a Valkey that is connected and does not answer a page took
+ * the sum of them. Every read that asks Valkey now runs under one deadline counted from the start of the load. THE
+ * RULE: the page never puts an answer of its own in place of one a read can give itself. So a read is handed its
+ * bound wherever it takes one, and then ends inside the deadline with its own answer for a Valkey that did not answer,
+ * built by its own code from what its files hold. Two ways, by whether the read takes a bound:
+ *
+ *   - `drawn`: a read that takes its bound from the page (`within`: its own, or what is left of the deadline when
+ *     that is sooner, never under 1 ms): a run's record, the run history, the runs' window, and the views over the
+ *     snapshot. It is made for as long as the grace has not passed, since what it reads of this host's files needs no
+ *     Valkey, and it is waited for `PAGE_VIEW_GRACE_MS` past the deadline, in which the reader says in its own words
+ *     what it could not read. Only a reader that ends in neither is cut, and then it is the read that failed.
+ *   - `asked`: a read that takes no bound (the snapshot, a transcript's state, the hosts' publications). It is waited
+ *     for until the deadline, and is not made once the deadline has passed. It is then drawn exactly as that read is
+ *     drawn for a Valkey that did not answer: `asked` throws into the read's own catch, and `askedOr` answers what a
+ *     read with no catch answers when it could not read. A cut read is never worded as a fault of this console.
+ *
+ * A load the deadline cut says so (`data.deadlineSpent`), and `data.snapshotFailure` is "late" where the snapshot is
+ * what it cut. A Valkey that is slow and still answers inside the deadline is cut nowhere. Not timed: what reads
+ * files alone (the audit log, the secrets view, the editor's hints), synchronous work, and the Insights pages'
+ * assembly, which is mostly a fold over the run records and whose Valkey reads keep the bounds they have inside it.
+ *
  * Never throws for a read that fails: the field is null (or carries a sentence), and the panel says so.
  */
 export async function loadPageData(name, query, deps = {}, who = {}) {
@@ -799,17 +828,43 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // Issue #737: the deployment the console serves, by its folder's last part (`cli.mjs`'s `pageDeps.deployment`), for
   // the first run's checklist; null where the caller passes none.
   const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
+  // This load's deadline, and the ways a read runs under it (see above). `cut` marks the load; `within` is the
+  // deadline's, remembering whether it handed out less than a read's own bound, which with a deadline that has passed
+  // by the time that read's view returns says the view was cut too.
+  const deadline = pageDeadline(deps.deadline?.ms ?? PAGE_DEADLINE_MS, { clock: deps.deadline?.clock, timers: deps.deadline?.timers });
+  const cut = () => { data.deadlineSpent = true; };
+  const passed = () => { cut(); throw new PageDeadlinePassed(); };
+  const asked = (read) => deadline.settle(read, passed);
+  const askedOr = (read, unread) => deadline.settle(read, () => { cut(); return typeof unread === "function" ? unread() : unread; });
+  let shortened = false;
+  const within = (ownMs) => {
+    const ms = deadline.within(ownMs);
+    if (ms < ownMs) shortened = true;
+    return ms;
+  };
+  const drawn = async (read) => {
+    const got = await deadline.settle(read, passed, { grace: true });
+    if (shortened && deadline.spent()) cut();
+    return got;
+  };
+  // The run history under the deadline: this host's files and the fleet's mirror, the mirror within the bound the
+  // reader is handed, so past the deadline the reader still answers, with this host's part and the mirror not reached.
+  const mirrorBound = () => ({ timeoutMs: within(RUN_MIRROR_READ_MS) });
+  const runsPageOf = (opts) => drawn(() => deps.fleet.runsPage({ ...opts, ...mirrorBound() }));
+  const runByIdOf = (id, opts = {}) => drawn(() => deps.fleet.runById(id, { ...opts, ...mirrorBound() }));
+  // The runs' window is a shared read with a bound of its own: this load waits for it as long as its deadline has.
+  const runsWindowRead = () => drawn(() => deps.fleet.runsWindow?.({ timeoutMs: within(Infinity) }));
   // The trigger page's Fire now check is started here and awaited where the page reads it (issue #961): it has a bound
   // of its own, and beside the snapshot's read rather than after it a Valkey that stopped answering holds the page for
   // the longer of the two, not their sum.
   const fireCheck = name === "trigger" && formsDrawn(who)
-    ? Promise.resolve().then(() => (typeof deps.triggerFireCheck === "function" ? deps.triggerFireCheck(q.index) : { refusal: "Fire now is not available in this deployment." })).catch(() => ({ refusal: "The console could not check whether this schedule can fire here." }))
+    ? Promise.resolve().then(() => (typeof deps.triggerFireCheck === "function" ? deps.triggerFireCheck(q.index) : { refusal: "Fire now is not available in this deployment." })).catch(() => ({ refusal: FIRE_CHECK_UNREAD }))
     : null;
-  if (name === "watch" || name === "watch-board") data.watch = await loadWatchData(deps.watch, q, { board: name === "watch-board", privateRead: who?.role === "operator" && who?.live !== true });
+  if (name === "watch" || name === "watch-board") data.watch = await askedOr(() => loadWatchData(deps.watch, q, { board: name === "watch-board", privateRead: who?.role === "operator" && who?.live !== true }), { unavailable: true });
   const reads = PAGE_READS[name];
   if (["parked", "answer-rules", "run"].includes(name) && deps.answerer) {
     const operatorRead = who?.role === "operator" || who?.live === true && who?.role === undefined;
-    try { data.answerer = await deps.answerer.read({ role: operatorRead ? "operator" : who?.role ?? "viewer", ...(name === "run" && operatorRead ? { runId: q.id } : {}) }); }
+    try { data.answerer = await asked(() => deps.answerer.read({ role: operatorRead ? "operator" : who?.role ?? "viewer", ...(name === "run" && operatorRead ? { runId: q.id } : {}) })); }
     catch { data.answerer = { state: "unavailable", partial: true, rows: [] }; }
   }
   if (name === "overview" && (who?.role === "operator" || who?.live === true && who?.role === undefined) && typeof deps.agentWrites === "function") {
@@ -818,17 +873,17 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // Private workspace and opener configuration reads never join /api/state or a viewer's shared load.
   if ((who?.role === "operator" || who?.live === true && who?.role === undefined) && ["sandboxes", "run", "host", "trigger"].includes(name) && deps.sandboxes) {
     if (["sandboxes", "run"].includes(name) && typeof deps.gatewayView === "function") {
-      try { data.browserGateways = await deps.gatewayView(); } catch { data.browserGateways = { enabledHosts: [], sessions: [], problem: "Browser-terminal information could not be read. Use the native terminal route." }; }
+      try { data.browserGateways = await asked(() => deps.gatewayView()); } catch { data.browserGateways = { enabledHosts: [], sessions: [], problem: "Browser-terminal information could not be read. Use the native terminal route." }; }
     }
     try { const hosts = deps.sandboxes.hosts(); data.sandboxHosts = hosts.config ?? null; data.sandboxHostsProblem = hosts.refusal ?? null; } catch { data.sandboxHosts = null; data.sandboxHostsProblem = "Terminal host configuration could not be read. Inspect its owner, permissions and format."; }
     if (name === "sandboxes") {
-      try { data.sandboxes = await deps.sandboxes.read(q); } catch { data.sandboxes = null; data.readFailed = true; }
+      try { data.sandboxes = await asked(() => deps.sandboxes.read(q)); } catch { data.sandboxes = null; data.readFailed = true; }
       // The run a kept workspace came from, for what opens: its record's `loaded`, unknown when it cannot be read. A read that
       // failed is not a record with nothing in it, so it says so rather than "not recorded". `readRunById` answers that and does not
       // throw: `{ unreadable }` or `{ invalid }`, and only `{ missing }` means both places were read and hold none.
       if (typeof q.id === "string" && typeof deps.fleet?.runById === "function") {
         let found = null;
-        try { found = await deps.fleet.runById(q.id); } catch { found = { unreadable: true }; }
+        try { found = await runByIdOf(q.id); } catch { found = { unreadable: true }; }
         data.sandboxRun = found?.record ?? null;
         if (found?.unreadable || found?.invalid) data.sandboxRunUnread = true;
       }
@@ -838,17 +893,22 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   if (reads.includes("hostLoads")) {
     // A read that threw is marked (issue #962): null alone is also a console that wires no such read, and the trigger
     // page's card must say the hosts could not be read, never that no live host can run the trigger's jobs.
-    try { data.hostLoads = typeof deps.hostLoads === "function" ? await deps.hostLoads() : null; } catch { data.hostLoads = null; data.hostLoadsUnread = true; }
+    try { data.hostLoads = typeof deps.hostLoads === "function" ? await asked(() => deps.hostLoads()) : null; } catch { data.hostLoads = null; data.hostLoadsUnread = true; }
   }
   if (name === "zero-touch") {
     // A read that threw (issue #962) is caught, as before, and says so: `failure` is what the panel words, and the
     // console's log gets the error's code or kind. Never the error's own text on the page or in the log: it may name a
     // path or a host.
-    try { data.zeroTouch = typeof deps.zeroTouch === "function" ? await deps.zeroTouch({ windowDays: q.days, project: q.project, scopeId: q.scope, role: who?.role }) : null; }
+    try { data.zeroTouch = typeof deps.zeroTouch === "function" ? await asked(() => deps.zeroTouch({ windowDays: q.days, project: q.project, scopeId: q.scope, role: who?.role })) : null; }
     catch (err) {
-      data.zeroTouch = { state: "unavailable", failure: "read-failed" };
-      const kind = [err?.code, err?.name].find((v) => typeof v === "string" && /^[A-Za-z0-9_]{1,40}$/.test(v)) ?? "error";
-      try { deps.log?.(`console: the Zero touch read failed (${kind})`); } catch { /* a log that cannot be written fails no page */ }
+      // A read the page's deadline cut is no failure of this console (issue #988): it is unavailable, as the read's
+      // own answer for a Valkey that did not answer is, with no reason of the console's and nothing for its log.
+      if (err instanceof PageDeadlinePassed) data.zeroTouch = { state: "unavailable" };
+      else {
+        data.zeroTouch = { state: "unavailable", failure: "read-failed" };
+        const kind = [err?.code, err?.name].find((v) => typeof v === "string" && /^[A-Za-z0-9_]{1,40}$/.test(v)) ?? "error";
+        try { deps.log?.(`console: the Zero touch read failed (${kind})`); } catch { /* a log that cannot be written fails no page */ }
+      }
     }
     // Role projection happens before page data can be inspected or reused, not just while rendering a group panel.
     data.zeroTouch = zeroTouchView(data.zeroTouch, { role: who?.role, windowDays: q.days, nowMs: now });
@@ -859,22 +919,24 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   if (name === "run" && typeof deps.env?.PI_CHAIN_MAX_PER_JOB === "string" && /^\d{1,9}$/.test(deps.env.PI_CHAIN_MAX_PER_JOB)) data.chainMaxPerJob = Number(deps.env.PI_CHAIN_MAX_PER_JOB);
   if (reads.includes("snapshot")) {
     try {
-      data.snapshot = await (reads.includes("waiting") ? deps.fleet.snapshot({ waiting: true }) : deps.fleet.snapshot());
-    } catch {
+      data.snapshot = await asked(() => (reads.includes("waiting") ? deps.fleet.snapshot({ waiting: true }) : deps.fleet.snapshot()));
+    } catch (err) {
       data.snapshot = null;
       // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
       data.readFailed = true;
+      // Issue #988: the read did not fail, the page's deadline cut it (or had passed before it could be made).
+      if (err instanceof PageDeadlinePassed) data.snapshotFailure = "late";
       // Issue #844: what the deployment's files hold needs no Valkey, so a page still draws it rather than an empty
       // list. Absent where the reader has none or it throws: a panel then says the fact could not be read.
       try { if (typeof deps.fleet?.fileViews === "function") data.files = deps.fleet.fileViews() ?? null; } catch { data.files = null; }
     }
   }
   if (reads.includes("setup")) {
-    try { data.setup = setupFacts(typeof deps.setup === "function" ? await deps.setup({ role: who.role, snapshot: data.snapshot }) : null, { role: who.role ?? "operator" }); }
+    try { data.setup = setupFacts(typeof deps.setup === "function" ? await drawn(() => deps.setup({ role: who.role, snapshot: data.snapshot, within })) : null, { role: who.role ?? "operator" }); }
     catch { data.setup = setupFacts(null, { role: who.role }); }
   }
   if (reads.includes("models")) {
-    try { data.models = typeof deps.modelsView === "function" ? await deps.modelsView(data.snapshot) : null; }
+    try { data.models = typeof deps.modelsView === "function" ? await drawn(() => deps.modelsView(data.snapshot, { within })) : null; }
     catch { data.models = null; }
   }
   if (reads.includes("secrets")) {
@@ -883,7 +945,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     catch { data.secrets = null; }
   }
   if (reads.includes("connections")) {
-    try { data.connections = typeof deps.connections === "function" ? await deps.connections(data.snapshot) : null; }
+    try { data.connections = typeof deps.connections === "function" ? await drawn(() => deps.connections(data.snapshot, { within })) : null; }
     catch { data.connections = null; }
   }
   // Issue #849: whether the host-setup grant is on, for the pages that send an operator to /setup rather than a terminal. One boolean, none of `setup`'s reads.
@@ -902,11 +964,11 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     catch { data.devices = null; }
   }
   if (reads.includes("updates")) {
-    try { data.updates = typeof deps.updates === "function" ? await deps.updates() : null; }
+    try { data.updates = typeof deps.updates === "function" ? await drawn(() => deps.updates({ within })) : null; }
     catch { data.updates = null; }
   }
   if (reads.includes("project")) {
-    try { data.projectView = typeof deps.projectView === "function" ? await deps.projectView(q.id, data.snapshot) : { id: q.id, state: "unreadable" }; }
+    try { data.projectView = typeof deps.projectView === "function" ? await drawn(() => deps.projectView(q.id, data.snapshot, { within })) : { id: q.id, state: "unreadable" }; }
     catch { data.projectView = { id: q.id, state: "unreadable" }; }
   }
   if (name === "triggers") {
@@ -914,7 +976,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     // Issue #962: with no file views either, the schedulers are as unread as with them. A list that only lacks its
     // rules would say "No next fire is published" of a Valkey nobody read.
     const listed = data.snapshot ?? (data.files ? { ...data.files, schedulersUnread: true } : data.snapshot === null ? { schedulersUnread: true } : null);
-    try { data.triggerList = typeof deps.triggerList === "function" ? await deps.triggerList(listed) : triggerListOf({ snapshot: listed, now }); }
+    try { data.triggerList = typeof deps.triggerList === "function" ? await drawn(() => deps.triggerList(listed, { within })) : triggerListOf({ snapshot: listed, now }); }
     catch {
       // The same input again, without the reader; and should the file views themselves be what it cannot take, none.
       try { data.triggerList = triggerListOf({ snapshot: listed, now }); } catch { data.triggerList = triggerListOf({ snapshot: null, now }); }
@@ -931,7 +993,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       }
     }
     if (data.snapshot && typeof deps.fleet?.triggerSkew === "function") {
-      try { data.snapshot = { ...data.snapshot, triggerSkew: { [q.index]: await deps.fleet.triggerSkew(q.index, data.snapshot.waiting) } }; } catch { /* An unreadable skew check remains unknown. */ }
+      try { data.snapshot = { ...data.snapshot, triggerSkew: { [q.index]: await asked(() => deps.fleet.triggerSkew(q.index, data.snapshot.waiting)) } }; } catch { /* An unreadable skew check remains unknown. */ }
     }
     data.triggerDetail = triggerDetailOf(data.snapshot, q.index, { now });
     // Issue #962: which bundle a trigger's project binds is the triggers file's and the projects file's to say, so with
@@ -939,7 +1001,8 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     if (data.snapshot === null && Array.isArray(data.files?.triggers?.triggers)) {
       try { data.fileBundles = secretBundlesView({ triggers: data.files.triggers, settings: data.files.settings, env: deps.env ?? {}, projects: data.files.projects }) ?? { bundles: [], byIndex: {} }; } catch { /* left unset: the card says the bundles are not known */ }
     }
-    if (fireCheck !== null) data.triggerFireCheck = await fireCheck;
+    // Made at the top of the load, so past the deadline its answer is taken where it has one and not waited for where it has none.
+    if (fireCheck !== null) data.triggerFireCheck = await askedOr(fireCheck, () => ({ refusal: FIRE_CHECK_UNREAD }));
   }
   if (name === "trigger" || name === "trigger-add") {
     try { data.triggerEditor = typeof deps.triggerEditor === "function" ? await deps.triggerEditor() : readTriggerEditor({ paths: deps.paths ?? {}, env: deps.env ?? {} }); } catch { data.triggerEditor = {}; }
@@ -952,16 +1015,16 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   }
   if (name === "host") {
     data.host = data.snapshot?.hostBudgets?.find((host) => host.name === q.name) ?? null;
-    try { const history = await deps.fleet.runsPage({ filter: { host: q.name }, limit: RUNS_PER_PAGE }); data.hostHistory = { ...history, records: history?.runs ?? [] }; } catch { data.hostHistory = null; }
+    try { const history = await runsPageOf({ filter: { host: q.name }, limit: RUNS_PER_PAGE }); data.hostHistory = { ...history, records: history?.runs ?? [] }; } catch { data.hostHistory = null; }
     // Capacity is an expensive historical fold. A live replacement deliberately omits its panel, keeping the initial chart.
     if (who?.live !== true) {
-      try { data.hostCapacity = typeof deps.hostCapacity === "function" ? await deps.hostCapacity(q.name) : null; } catch { data.hostCapacity = null; }
+      try { data.hostCapacity = typeof deps.hostCapacity === "function" ? await drawn(() => deps.hostCapacity(q.name, { within })) : null; } catch { data.hostCapacity = null; }
     } else data.live = true;
   }
   if (reads.includes("subscriptions")) data.subscriptions = await subscriptionsOf(deps);
   if (reads.includes("runsPage")) {
     try {
-      data.runsPage = q.filter?.touched === "1" ? await deps.zeroTouchRuns({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter, windowDays: Number(q.filter.days), scopeId: q.filter.scope ?? null }) : await deps.fleet.runsPage({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter ?? null });
+      data.runsPage = q.filter?.touched === "1" ? await asked(() => deps.zeroTouchRuns({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter, windowDays: Number(q.filter.days), scopeId: q.filter.scope ?? null })) : await runsPageOf({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter ?? null });
     } catch {
       data.runsPage = null;
       data.readFailed = true;
@@ -969,19 +1032,19 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   }
   if (reads.includes("runsWindow")) {
     try {
-      data.runsWindow = (await deps.fleet.runsWindow?.()) ?? null;
+      data.runsWindow = (await runsWindowRead()) ?? null;
     } catch {
       data.runsWindow = null;
     }
   }
   if (reads.includes("run")) {
     try {
-      data.run = await deps.fleet.runById(q.id, { historyHost: q.historyHost ?? null });
+      data.run = await runByIdOf(q.id, { historyHost: q.historyHost ?? null });
     } catch {
       data.run = { unreadable: RUN_RECORD_UNREAD };
       data.readFailed = true;
     }
-    if (data.run?.record) Object.assign(data, await childrenOf(deps.fleet, data.run.record).then(({ children, searched, incomplete }) => ({ children, childrenSearched: searched, childrenIncomplete: incomplete })));
+    if (data.run?.record) Object.assign(data, await childrenOf(deps.fleet, data.run.record, { readPage: runsPageOf }).then(({ children, searched, incomplete }) => ({ children, childrenSearched: searched, childrenIncomplete: incomplete })));
   }
   // Issue #920: what a forge job's /artifacts folder left, from this host's store (the manifest only, never a file).
   if (reads.includes("artifacts") && typeof deps.fleet?.artifacts === "function") {
@@ -997,7 +1060,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     // Only a read's own answer (`exists` true or false) says whether a stream exists: anything else, an answer that is
     // not one included, is a stream that could not be read, never "none".
     try {
-      const meta = await deps.fleet.transcriptMeta(q.id);
+      const meta = await asked(() => deps.fleet.transcriptMeta(q.id));
       const read = meta !== null && typeof meta === "object" && !meta.unreachable && !meta.invalid && typeof meta.exists === "boolean";
       data.transcript = read ? { exists: meta.exists, ended: meta.ended === true, outcome: typeof meta.outcome === "string" ? meta.outcome : null, length: Number.isSafeInteger(meta.length) ? meta.length : 0, lastId: typeof meta.lastId === "string" && TRANSCRIPT_ID_RE.test(meta.lastId) ? meta.lastId : null } : { unreachable: true, exists: false };
     } catch {
@@ -1013,10 +1076,10 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     // recovery's. A fleet without it (an older reader double) reads by the page's id, as before.
     try {
       if (typeof deps.fleet.progressOfRun === "function") {
-        const got = await deps.fleet.progressOfRun(q.id, data.run?.record ?? null);
+        const got = await asked(() => deps.fleet.progressOfRun(q.id, data.run?.record ?? null));
         data.progress = got?.progress ?? { unreachable: true };
         if (got?.continues === true) data.progressContinues = { as: typeof got.continuesAs === "string" && RUN_ID_RE.test(got.continuesAs) ? got.continuesAs : null };
-      } else data.progress = await deps.fleet.progress(q.id);
+      } else data.progress = await asked(() => deps.fleet.progress(q.id));
     } catch {
       data.progress = { unreachable: true };
       // A continued attempt shows its own record whatever the read did: the record alone says its run went on.
@@ -1024,14 +1087,14 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     }
   }
   if (name === "run" && !data.run?.record && typeof deps.fleet?.runLiveFacts === "function") {
-    try { data.activeRun = await deps.fleet.runLiveFacts(q.id, lookup); } catch { data.activeRun = null; }
+    try { data.activeRun = await asked(() => deps.fleet.runLiveFacts(q.id, lookup)); } catch { data.activeRun = null; }
   }
   if (reads.includes("inbox") && typeof deps.fleet?.inbox === "function") {
     // Issue #646: a steer-armed job's inbox, WITHOUT TEXT (the reader's `readJobInbox`: ids, modes, sources, states,
     // times and byte counts), and whether its run takes messages now. Both roles get the list; `runInbox` draws the
     // message form and the withdraw buttons for an operator alone.
     try {
-      data.inbox = await deps.fleet.inbox(q.id);
+      data.inbox = await asked(() => deps.fleet.inbox(q.id));
     } catch {
       data.inbox = { unreachable: true };
     }
@@ -1042,7 +1105,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     // record whether a later run took the answer), for the Chat panel. Null without a job-state reader. The newer-run
     // search is a runs-page read, so the live loop pays it only for a parked record, whose mode depends on it.
     try {
-      data.chat = await chatFactsOf(deps.fleet, q.id, data.run?.record ?? null, { searchNewer: "saved", now: () => now, lookup });
+      data.chat = await asked(() => chatFactsOf(deps.fleet, q.id, data.run?.record ?? null, { searchNewer: "saved", now: () => now, lookup }));
     } catch {
       data.chat = { unreachable: true };
     }
@@ -1050,7 +1113,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     // parked run's retained job and the triggers file (`parkedAnswerCheck`, a sentence or ok, never the job's data),
     // reused for PARK_CHECK_CACHE_MS per run id (`parkedAnswerCheckOf`), so the 2 s loop does not read it every tick.
     if (data.chat?.mode === "reply" && typeof deps.fleet?.parkedAnswerCheck === "function") {
-      data.chatAnswer = await parkedAnswerCheckOf(deps.fleet, q.id, data.run?.record ?? null, { now: () => now, lookup });
+      data.chatAnswer = await askedOr(() => parkedAnswerCheckOf(deps.fleet, q.id, data.run?.record ?? null, { now: () => now, lookup }), { unreachable: true });
     }
   };
   const actionsRead = async () => {
@@ -1062,12 +1125,12 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     const record = data.run.record;
     const forkPoints = await readForkPoints({ jobId: q.id, env: deps.env ?? {}, now: () => now });
     data.forkPoints = forkPoints.ok ? { ok: true, entries: forkPoints.entries } : { refusal: forkPoints.refusal };
-    data.rerunCheck = await rerunCheckOf(deps.fleet, q.id, record, { now: () => now, lookup });
+    data.rerunCheck = await askedOr(() => rerunCheckOf(deps.fleet, q.id, record, { now: () => now, lookup }), () => (typeof deps.fleet?.rerunCheck === "function" ? { unreachable: true } : null));
     if (!refusedBeforeStart(record)) data.sandboxCheck = await sandboxCheckOf(deps.fleet, q.id, record, { now: () => now });
   };
   await Promise.all([reads.includes("chat") ? chatRead() : null, reads.includes("actions") && data.run?.record ? actionsRead() : null]);
   if (name === "run" && data.run?.record && (who?.role === "operator" || who?.live === true && who?.role === undefined) && typeof deps.sandboxes?.workspace === "function") {
-    try { data.workspace = await deps.sandboxes.workspace(data.run.record); } catch { data.workspace = { unknown: true, sessionsUnknown: true }; }
+    try { data.workspace = await asked(() => deps.sandboxes.workspace(data.run.record)); } catch { data.workspace = { unknown: true, sessionsUnknown: true }; }
   }
   if (name === "run" && data.run?.record) {
     const record = data.run.record;
@@ -1082,14 +1145,14 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
         if (id !== record.jobId && RUN_ID_RE.test(id)) siblings.push(id);
       }
     }
-    const related = async (id) => { try { return (await deps.fleet.runById(id))?.record ?? null; } catch { return null; } };
+    const related = async (id) => { try { return (await runByIdOf(id))?.record ?? null; } catch { return null; } };
     const base = typeof record.recoveryOf === "string" && RUN_ID_RE.test(record.recoveryOf) ? record.recoveryOf : q.id;
     const recoveryIds = record.checkpoints || record.recovered || record.recoverSkipped || String(record.reason ?? "").startsWith("recovery-")
       ? [base, ...Array.from({ length: RECOVERY_CAP }, (_, i) => `${base}.r${i + 1}`)].filter((id) => id !== q.id && RUN_ID_RE.test(id)) : [];
     const [siblingRecords, recoveryRecords, trigger, holds] = await Promise.all([
       Promise.all(siblings.map(related)), Promise.all(recoveryIds.map(related)),
       typeof deps.fleet.runTrigger === "function" ? Promise.resolve().then(() => deps.fleet.runTrigger(record.triggerIndex, record.triggerType)).catch(() => null) : null,
-      recoveryIds.length && typeof deps.fleet.runHolds === "function" ? deps.fleet.runHolds(q.id, record).catch(() => null) : null,
+      recoveryIds.length && typeof deps.fleet.runHolds === "function" ? askedOr(() => deps.fleet.runHolds(q.id, record), null).catch(() => null) : null,
     ]);
     data.siblings = siblingRecords.filter(Boolean);
     data.recoveryRuns = [record, ...recoveryRecords.filter(Boolean)].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
@@ -1097,12 +1160,12 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     data.runHolds = holds;
     const continuation = data.chat?.activeJobId ?? data.chat?.queuedJobId;
     if (continuation && continuation !== q.id && RUN_ID_RE.test(continuation)) {
-      try { data.recoveryLive = await deps.fleet.runLiveFacts?.(continuation, lookup) ?? null; } catch { data.recoveryLive = null; }
-      try { data.recoveryProgress = await deps.fleet.progressOfRun?.(continuation, recoveryRecords.find((r) => r?.jobId === continuation) ?? null) ?? null; } catch { data.recoveryProgress = null; }
+      try { data.recoveryLive = await asked(() => deps.fleet.runLiveFacts?.(continuation, lookup)) ?? null; } catch { data.recoveryLive = null; }
+      try { data.recoveryProgress = await asked(() => deps.fleet.progressOfRun?.(continuation, recoveryRecords.find((r) => r?.jobId === continuation) ?? null)) ?? null; } catch { data.recoveryProgress = null; }
     }
     if (refusedBeforeStart(record)) {
-      try { data.snapshot = await deps.fleet.snapshot(); } catch { data.snapshot = null; }
-      try { data.runsWindow = await deps.fleet.runsWindow?.() ?? null; } catch { data.runsWindow = null; }
+      try { data.snapshot = await asked(() => deps.fleet.snapshot()); } catch (err) { data.snapshot = null; if (err instanceof PageDeadlinePassed) data.snapshotFailure = "late"; }
+      try { data.runsWindow = await runsWindowRead() ?? null; } catch { data.runsWindow = null; }
     }
   }
   if (reads.includes("insights")) {
@@ -1146,10 +1209,11 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     // panel draws a form for an operator on a console that takes changes alone.
     const rows = parkedCheckRows(data.snapshot);
     const isoOf = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
-    const got = await Promise.all(rows.map((p) => parkedAnswerCheckOf(deps.fleet, p.jobId, { jobId: p.jobId, endedAt: isoOf(p.parkedAt), target: p.target }, { now: () => now, lookup })));
+    const unread = () => (typeof deps.fleet?.parkedAnswerCheck === "function" ? { unreachable: true } : null);
+    const got = await Promise.all(rows.map((p) => askedOr(() => parkedAnswerCheckOf(deps.fleet, p.jobId, { jobId: p.jobId, endedAt: isoOf(p.parkedAt), target: p.target }, { now: () => now, lookup }), unread)));
     data.parkedChecks = Object.fromEntries(rows.map((p, i) => [p.jobId, got[i]]));
   }
-  if (reads.includes("parkedCount")) data.parkedCount = await parkedCountOf(deps);
+  if (reads.includes("parkedCount")) data.parkedCount = await askedOr(() => parkedCountOf(deps), null);
   return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "setup" ? { setup: setupFacts(data.setup, { role: "agent" }) } : {}), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}) } : data;
 }
 

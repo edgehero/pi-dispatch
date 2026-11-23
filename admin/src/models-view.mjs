@@ -218,19 +218,36 @@ function readText(path, fs, { missing = null } = {}) {
     return fs.readFileSync(path, "utf8");
   } catch (error) { if (error?.code === "ENOENT") return missing; throw error; }
 }
-function bounded(promise) {
+function bounded(promise, ms = MODELS_LIMITS.timeoutMs) {
   let timer;
-  return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("model observation timed out")), MODELS_LIMITS.timeoutMs); })]).finally(() => clearTimeout(timer));
+  return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("model observation timed out")), ms); })]).finally(() => clearTimeout(timer));
+}
+/** A read's bound under `within` (a page's deadline, issue #988), or its own where the caller has none. */
+const boundOf = (within) => (typeof within === "function" ? within(MODELS_LIMITS.timeoutMs) : MODELS_LIMITS.timeoutMs);
+/**
+ * A history read through the fleet reader, bounded here as before and, where the caller has a deadline, handed that
+ * same bound as the reader's own (`read` is called with `{ timeoutMs }`): the reader then ends first, with the answer
+ * it gives itself for a mirror that did not answer (this host's records, the mirror said as not reached), where a
+ * wait cut from outside would leave nothing. A caller with no deadline calls the reader as before (`read(null)`).
+ */
+function fleetRead(within, read) {
+  if (typeof within !== "function") return bounded(read(null));
+  const ms = boundOf(within);
+  return bounded(read({ timeoutMs: ms }), ms);
 }
 
-/** Fetch an explicit bounded history only for Models, then hydrate named originals through the authoritative by-id reader. */
-export async function readModelsHistory({ fleet, now, seed = null } = {}) {
+/**
+ * Fetch an explicit bounded history only for Models, then hydrate named originals through the authoritative by-id reader.
+ * `within` is `readModelsView`'s: each read's bound, or what is left of a page's deadline when that is sooner, handed to
+ * the fleet reader as well (`fleetRead`), so a page cut at its deadline still counts this host's own records.
+ */
+export async function readModelsHistory({ fleet, now, seed = null, within = null } = {}) {
   if (typeof fleet?.runsPage !== "function") return { records: Array.isArray(seed) ? seed : null, sourceRecords: [], partial: true, truncated: false, sourcesUnknown: true };
   const records = [], sourceRecords = [];
   let before = null, partial = false, truncated = false;
   for (let pageIndex = 0; pageIndex < 10; pageIndex++) {
     let page;
-    try { page = await bounded(fleet.runsPage({ before, limit: 100 })); } catch { partial = true; break; }
+    try { page = await fleetRead(within, (bound) => fleet.runsPage({ before, limit: 100, ...bound })); } catch { partial = true; break; }
     if (!Array.isArray(page?.runs) || page.unreachable || page.refusal) { partial = true; break; }
     if (page.mirror !== "ok" || page.truncated) partial = true;
     for (const record of page.runs.slice(0, MODELS_LIMITS.records - records.length)) if (runId(record?.jobId) && Number.isFinite(atOf(record)) && atOf(record) <= now && atOf(record) >= now - MODELS_LIMITS.days * DAY && records.length < MODELS_LIMITS.records) records.push(record);
@@ -246,7 +263,7 @@ export async function readModelsHistory({ fleet, now, seed = null } = {}) {
   const wanted = originals.slice(0, MODELS_LIMITS.canarySources);
   if (wanted.length && typeof fleet.runById !== "function") sourcesUnknown = true;
   else for (let offset = 0; offset < wanted.length; offset += 4) {
-    const batch = await Promise.allSettled(wanted.slice(offset, offset + 4).map(id => bounded(fleet.runById(id))));
+    const batch = await Promise.allSettled(wanted.slice(offset, offset + 4).map(id => fleetRead(within, (bound) => (bound ? fleet.runById(id, bound) : fleet.runById(id)))));
     batch.forEach((result, index) => {
       const id = wanted[offset + index], record = result.status === "fulfilled" ? result.value?.record : null;
       if (record?.jobId === id) sourceRecords.push(record);
@@ -261,8 +278,13 @@ export async function readModelsHistory({ fleet, now, seed = null } = {}) {
  * caller's: an object, null for one the caller tried and could not read (issue #962: it is NOT read again here, since a
  * second read of a Valkey that does not answer only stacks a second timeout on the page; the view then says the waiting
  * jobs and the doctor proposals are not known), or undefined for a caller that has none, which is read here.
+ *
+ * `within` (issue #988) is a page's deadline: `(ownMs) => ms`, a read's own bound or what is left of the deadline when
+ * that is sooner. Every bounded read here takes its bound through it, so on a Valkey that does not answer the reads end
+ * together at the deadline, each as the unread one it is, and the view is still drawn from the files. A caller with no
+ * deadline (a tool) passes none, and each read keeps its own bound.
  */
-export async function readModelsView({ paths = {}, env = {}, deploymentDir = null, now = Date.now(), snapshot, fleet = null, fs = nodeFs, redis = null, reads = {} } = {}) {
+export async function readModelsView({ paths = {}, env = {}, deploymentDir = null, now = Date.now(), snapshot, fleet = null, fs = nodeFs, redis = null, reads = {}, within = null } = {}) {
   now = typeof now === "function" ? now() : now;
   let configUnknown = false, overlayUnknown = false, entries = [], modelRoles = {}, projects = [], limits = [], overlay = null, envList = null;
   let settings = snapshot?.settings?.overlay ?? {};
@@ -288,7 +310,7 @@ export async function readModelsView({ paths = {}, env = {}, deploymentDir = nul
   let records, sourceRecords = [], historyCoverage = { partial: true };
   try {
     if (reads.records) records = await reads.records();
-    else { historyCoverage = await readModelsHistory({ fleet, now, seed: source }); records = historyCoverage.records; sourceRecords = historyCoverage.sourceRecords; }
+    else { historyCoverage = await readModelsHistory({ fleet, now, seed: source, within }); records = historyCoverage.records; sourceRecords = historyCoverage.sourceRecords; }
   } catch { records = null; }
   const policies = collectModelPolicies({ entries, modelRoles, projects, deployment, envList });
   const configuredRefs = cooldownModelRefs(policies.runs, deployment);
@@ -296,9 +318,9 @@ export async function readModelsView({ paths = {}, env = {}, deploymentDir = nul
   const specs = dollarWindowSpecs({ caps: {}, limits, now: new Date(now) }).filter(row => row.ledger === "model");
   try {
     if (!client && (configuredRefs.length || specs.length) && (!reads.cooldowns && configuredRefs.length || !reads.counters && specs.length)) { client = (reads.redis ?? makeRedisClient)(paths.valkeyUrl); client.on?.("error", () => {}); owned = true; }
-    if (configuredRefs.length) cooldowns = await bounded(reads.cooldowns ? reads.cooldowns(configuredRefs, { now: () => now }) : readModelCooldowns(client, configuredRefs, { now: () => now }));
+    if (configuredRefs.length) cooldowns = await bounded(reads.cooldowns ? reads.cooldowns(configuredRefs, { now: () => now }) : readModelCooldowns(client, configuredRefs, { now: () => now }), boundOf(within));
     if (specs.length) {
-      const values = reads.counters ? await bounded(reads.counters(specs.map(row => row.key))) : await bounded(client.mget(...specs.map(row => row.key)));
+      const values = await bounded(reads.counters ? reads.counters(specs.map(row => row.key)) : client.mget(...specs.map(row => row.key)), boundOf(within));
       if (!Array.isArray(values) || values.length !== specs.length) throw new Error("incomplete model counters");
       counters = new Map(specs.map((row, index) => [row.key, values?.[index] == null ? 0 : /^\d+$/.test(String(values[index])) && Number.isSafeInteger(Number(values[index])) ? Number(values[index]) : null]));
     }

@@ -134,6 +134,28 @@ export const UPDATES_FACTS_TIMEOUT_MS = 6_000;
 const READS_COMMAND_TIMEOUT_MS = 5_000;
 
 /**
+ * Two readers' own bounds, named here because a page load hands each its bound or what is left of the page's deadline,
+ * whichever is sooner (issue #988, `pageDeps`' `within`): the schedule zones' read (`readTriggerScheduleZones`) and the
+ * capacity report's (`readCapacity`).
+ */
+export const SCHEDULE_ZONES_TIMEOUT_MS = 2_000;
+export const HOST_CAPACITY_TIMEOUT_MS = 2_000;
+
+/**
+ * `reading`'s answer, or `late()` once `ms` have passed without it: the wait ends, the read goes on (a cached read's
+ * answer is then there for the next caller), and its later rejection is caught. `ms` that is no finite time waits
+ * for the read itself.
+ */
+export function waitedFor(reading, ms, late) {
+  if (!Number.isFinite(ms)) return reading;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(late()), ms);
+    timer.unref?.();
+    Promise.resolve(reading).then(resolve, reject).finally(() => clearTimeout(timer));
+  });
+}
+
+/**
  * How long one audit-chain verification is reused (issue #737). `verifyConsoleAudit` re-hashes every row of every
  * month the log keeps, which is far too much for each load of the audit page; the page says when it was checked.
  */
@@ -796,8 +818,10 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     const answerer = makeAnswererService({ paths: side.paths, env: side.env, fs, now });
     const pricing = pricingOf(m.pricing);
     // The page's snapshot passes through as it is: null (the page could not read it) is not read a second time, and a
-    // caller with none (undefined) has the view read its own (issue #962).
-    const modelsView = m.modelsView ? (snapshot) => m.modelsView.readModelsView({ paths: side.paths, env: side.env, deploymentDir: config.dir, now: now(), snapshot, fleet, fs, redis }) : null;
+    // caller with none (undefined) has the view read its own (issue #962). `within` is a page load's deadline (issue
+    // #988), which this view and the ones below pass to their own bounded reads; a caller with none (a tool, an
+    // action) leaves each read the bound it has.
+    const modelsView = m.modelsView ? (snapshot, { within } = {}) => m.modelsView.readModelsView({ paths: side.paths, env: side.env, deploymentDir: config.dir, now: now(), snapshot, fleet, fs, redis, within }) : null;
     const modelRoles = m.modelRolePlans?.createModelRoleActions({
       paths: side.paths, env: side.env, fs, now,
       checkModelsKnown: m.modelCatalog?.checkModelsKnown,
@@ -839,13 +863,19 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     // timer starts: a slow scan of this host's records is no Valkey that did not answer. One that could not be read
     // at all is partial, so a gate says a canary's result is not known rather than that none ran. An audit log that could
     // not be read is null and not an empty list (issue #962): the page says so, where no row is a log with none.
-    const readUpdatesFacts = async () => {
-      const history = await updatesHistory().catch(() => ({ records: [], partial: true }));
+    // Under a page's deadline (`within`, issue #988) the Valkey part ends at the deadline when that is sooner than its
+    // own end, and the wait for the fleet's run records ends there too: that read is cached and goes on, so the next
+    // load has its answer, and this one says the records are partial. That wait covers the scan of this host's
+    // records as well, so a scan longer than what the deadline has left is partial for this load, as a mirror that
+    // did not answer is. An action's read has no deadline and waits for the records as before.
+    const readUpdatesFacts = async ({ within } = {}) => {
+      const factsMs = io.updatesFactsTimeoutMs ?? UPDATES_FACTS_TIMEOUT_MS;
+      const history = await waitedFor(updatesHistory().catch(() => ({ records: [], partial: true })), within ? within(Infinity) : Infinity, () => ({ records: [], partial: true }));
       const audit = await Promise.resolve().then(() => m.audit.readConsoleAudit({ logsDir: config.logsDir, fs, limit: 200 })).then((read) => (read?.unreadable ? null : read?.rows ?? [])).catch(() => null);
       const LATE = Symbol("late");
       let timer;
       const late = new Promise((resolve) => {
-        timer = setTimeout(resolve, io.updatesFactsTimeoutMs ?? UPDATES_FACTS_TIMEOUT_MS, LATE);
+        timer = setTimeout(resolve, within ? within(factsMs) : factsMs, LATE);
         timer.unref?.();
       });
       const reading = m.updatesView.readDeploymentUpdates({
@@ -880,12 +910,12 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       setupGranted: () => setup?.granted?.() === true,
       // This console's own host, by the worker's name rule over the deployment's env, as the fleet reader names it (`doctorSelf`): a run page's fix button only for a run refused here.
       selfHost: () => m.readModel.doctorSelfName?.(side.env) ?? null,
-      setup: async ({ role, snapshot } = {}) => {
+      setup: async ({ role, snapshot, within } = {}) => {
         const state = setup?.state(role ?? "operator", snapshot) ?? { enabled: false, reason: "host-setup-disabled", actions: [], providerKey: null, progress: [], allowlistCount: null };
         // Connections owns the allowlist reader; setup copies only its count, never a sample or secret.
         if (typeof m.connectionsView?.readConnections === "function") {
           try {
-            const connection = await m.connectionsView.readConnections({ publications: false, snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid });
+            const connection = await m.connectionsView.readConnections({ publications: false, snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid, within });
             if (Array.isArray(connection?.egress?.allowlist)) state.allowlistCount = connection.egress.allowlist.length + connection.egress.more;
             if (connection?.providerKeys) state.providerKeys = connection.providerKeys;
           } catch { /* unknown remains unknown */ }
@@ -896,17 +926,17 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       paths: side.paths,
       configLocations: () => m.readModel.configLocationsOf({ paths: side.paths, deploymentDir: config.dir }),
       secretsView: (snapshot, files = null) => m.secretsView.secretsView({ snapshot, files, env: side.env, fs }),
-      updates: () => readUpdatesFacts(),
+      updates: ({ within } = {}) => readUpdatesFacts({ within }),
       // Issue #849: the remembered browsers, for their page. The listing carries each record's hash for the actions; the page needs none of them.
       devices: devices ? () => { const listed = devices.list(); return listed.problem ? listed : { ...listed, devices: listed.devices.map(({ hash, ...rest }) => rest) }; } : null,
-      connections: (snapshot) => m.connectionsView.readConnections({ snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid }),
-      projectView: (id, snapshot) => m.projectView.readProjectView({ id, snapshot, paths: side.paths, env: side.env, deploymentDir: config.dir, pricing, fleet, fs, now: now(), platform: io.platform ?? process.platform, uid }),
+      connections: (snapshot, { within } = {}) => m.connectionsView.readConnections({ snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid, within }),
+      projectView: (id, snapshot, { within } = {}) => m.projectView.readProjectView({ id, snapshot, paths: side.paths, env: side.env, deploymentDir: config.dir, pricing, fleet, fs, now: now(), platform: io.platform ?? process.platform, uid, within }),
       triggerCheck: (input) => m.triggerCheck.checkTriggerEvent({ input, triggersPath: side.paths.triggersPath, fs }),
-      triggerList: async (snapshot) => {
+      triggerList: async (snapshot, { within } = {}) => {
         const [history, zones] = await Promise.all([
           triggerHistory(),
           // A snapshot of the files alone (issue #844) says the fleet's Valkey was not read: no second wait on it for zones.
-          snapshot?.schedulersUnread === true ? {} : m.scheduleZones.readTriggerScheduleZones({ url: side.paths.valkeyUrl, triggers: snapshot?.triggers?.triggers ?? [], now }),
+          snapshot?.schedulersUnread === true ? {} : m.scheduleZones.readTriggerScheduleZones({ url: side.paths.valkeyUrl, triggers: snapshot?.triggers?.triggers ?? [], now, ...(within ? { timeoutMs: within(SCHEDULE_ZONES_TIMEOUT_MS) } : {}) }),
         ]);
         const mirrored = snapshot?.recordDetails instanceof Map ? [...snapshot.recordDetails.values()] : Array.isArray(snapshot?.runs) ? snapshot.runs : null;
         const records = Array.isArray(history) ? [...history, ...(mirrored ?? [])] : mirrored;
@@ -929,7 +959,9 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
         planTimeoutMs: TRIGGER_FIRE_CHECK_TIMEOUT_MS,
       }),
       killSwitchPlan: killSwitchPlanFn,
-      hostCapacity: (host) => m.insights.assembleHostCapacity(side.paths, host, now(), { envFn: () => side.env }),
+      // The report is this host's files and the fleet's: under a page's deadline the fleet's part ends at it, and the
+      // files' part is still drawn (`readCapacity` builds from what it could read and says what it could not).
+      hostCapacity: (host, { within } = {}) => m.insights.assembleHostCapacity(side.paths, host, now(), { envFn: () => side.env, ...(within ? { readCapacityFn: (opts) => m.readModel.readCapacity({ ...opts, timeoutMs: within(HOST_CAPACITY_TIMEOUT_MS) }) } : {}) }),
       watch: fleet.watch,
       zeroTouch: zeroTouch ? (query) => zeroTouch.read(query) : undefined,
       // The page load's one log line (issue #962): a Zero touch read that threw, by its code, since the page says only that it failed.

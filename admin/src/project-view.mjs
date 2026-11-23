@@ -12,7 +12,7 @@ import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 import { costsSinceMs, recordInProject, recordInRepo } from "./costs.mjs";
 import { assembleAllocationView, recordSpendOf } from "./insights-assembly.mjs";
-import { readProjects, readScopedLimits, readTriggers, readSettingsView, readSubscriptions, scanRunRecords, readSizeSuggestions, hostBudgetsOf, secretBundlesView, attributeRunsToTriggers } from "./read-model.mjs";
+import { readProjects, readScopedLimits, readTriggers, readSettingsView, readSubscriptions, scanRunRecords, readSizeSuggestions, hostBudgetsOf, secretBundlesView, attributeRunsToTriggers, RUN_MIRROR_READ_MS } from "./read-model.mjs";
 import { planProjectEdit, planProjectDelete } from "./write-plans.mjs";
 import { outcomeKey, recordReason, reasonWords } from "./words.mjs";
 import { fromNewerRelease, readableRecords } from "./newer-release.mjs";
@@ -28,14 +28,25 @@ const WINDOW_KEYS = Object.freeze({ day: dayKey, week: weekKey, month: monthKey 
 const LOADS_WINDOW_MS = 7 * DAY;
 const WORST = Object.freeze({ failed: 6, "awaiting-approval": 5, "awaiting-input": 4, refused: 3, cancelled: 2, completed: 1 });
 
-/** Four bounded pages across the fleet; the page says when that cap leaves older records outside its view. */
-export async function readProjectFleetRuns(fleet, { sinceMs } = {}) {
+/**
+ * How long the allocation's Valkey read may take: `readAllocations`' own bound, named here because a page hands the
+ * read this or what is left of its deadline, whichever is sooner (issue #988).
+ */
+export const ALLOCATION_READ_MS = 2_500;
+
+/**
+ * Four bounded pages across the fleet; the page says when that cap leaves older records outside its view. `within` is
+ * `readProjectView`'s: each page's mirror read takes its bound through it, so on a Valkey that does not answer a page
+ * is this host's own records with the mirror said as not reached, the reader's own answer, and the search ends
+ * incomplete with the runs it read.
+ */
+export async function readProjectFleetRuns(fleet, { sinceMs, within = null } = {}) {
   if (typeof fleet?.runsPage !== "function") return { runs: [], incomplete: true };
   const runs = [];
   let before = null;
   for (let page = 0; page < 4; page++) {
     let got;
-    try { got = await fleet.runsPage({ before, limit: 100 }); } catch { return { runs, incomplete: true }; }
+    try { got = await fleet.runsPage({ before, limit: 100, ...(typeof within === "function" ? { timeoutMs: within(RUN_MIRROR_READ_MS) } : {}) }); } catch { return { runs, incomplete: true }; }
     if (!Array.isArray(got?.runs)) return { runs, incomplete: true };
     runs.push(...got.runs);
     if (got.unreachable || got.truncated || typeof got.mirror === "string" && got.mirror.startsWith("unreachable")) return { runs, incomplete: true };
@@ -125,10 +136,17 @@ function runView(r, subscriptions, pricing) {
 /**
  * Page-specific I/O: `reads` replaces individual readers in tests; `snapshot` is the fleet's existing safe snapshot.
  * No method is added to the global snapshot, so these joins cost the overview and state API nothing.
+ *
+ * `within` (issue #988) is a page's deadline: `(ownMs) => ms`, a read's own bound or what is left of the deadline when
+ * that is sooner. The two reads here that ask Valkey, the allocation and the fleet's run pages, are each handed their
+ * bound through it, so each ends inside the deadline with the answer it gives itself for a Valkey that did not answer
+ * (the envelope file's window, total and floors with the split not read; this host's runs with the mirror not
+ * reached), and the view is drawn from that and the files. A caller with no deadline passes none, and each reader is
+ * then called as before.
  */
-export async function readProjectView({ id, paths = {}, env = {}, deploymentDir = null, platform = process.platform, uid = process.geteuid?.(), now = Date.now(), pricing, snapshot = null, fleet = null, reads = {}, fs = nodeFs } = {}) {
+export async function readProjectView({ id, paths = {}, env = {}, deploymentDir = null, platform = process.platform, uid = process.geteuid?.(), now = Date.now(), pricing, snapshot = null, fleet = null, reads = {}, fs = nodeFs, within = null } = {}) {
   if (typeof id !== "string" || !PROJECT_ID_RE.test(id)) return { id: null, state: "missing" };
-  const io = { projects: readProjects, limits: readScopedLimits, triggers: readTriggers, settings: readSettingsView, subscriptions: readSubscriptions, scan: scanRunRecords, allocation: assembleAllocationView, sizing: readSizeSuggestions, edit: planProjectEdit, delete: planProjectDelete, fleetRuns: (opts) => readProjectFleetRuns(fleet, opts), ...reads };
+  const io = { projects: readProjects, limits: readScopedLimits, triggers: readTriggers, settings: readSettingsView, subscriptions: readSubscriptions, scan: scanRunRecords, allocation: assembleAllocationView, sizing: readSizeSuggestions, edit: planProjectEdit, delete: planProjectDelete, fleetRuns: (opts) => readProjectFleetRuns(fleet, { ...opts, within }), ...reads };
   let pv;
   try { pv = await io.projects({ projectsPath: paths.projectsFile, fs }); } catch { pv = null; }
   if (!pv || pv.invalid || pv.unreadable || !Array.isArray(pv.projects)) return { id, state: "unreadable", problem: "The projects file could not be read. Run pi-dispatch doctor for the reason." };
@@ -154,7 +172,7 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
     guarded(() => io.settings({ settingsFile: paths.settingsFile, fs }), null),
     guarded(() => io.subscriptions({ subscriptionsPath: paths.subscriptionsPath, fs }), null),
     guarded(() => io.scan({ logsDir: paths.logsDir, sinceMs: historySince, nowMs: now, fs }), null),
-    guarded(() => io.allocation(paths, null, { consoleView: true, role: "viewer", nowMs: now, envFn: () => env }), { problem: "The allocation could not be read." }),
+    guarded(() => io.allocation(paths, null, { consoleView: true, role: "viewer", nowMs: now, envFn: () => env, ...(typeof within === "function" ? { timeoutMs: within(ALLOCATION_READ_MS) } : {}) }), { problem: "The allocation could not be read." }),
     guarded(() => io.fleetRuns({ sinceMs: historySince, nowMs: now }), { runs: [], incomplete: true }),
   ]);
   const limits = Array.isArray(sl?.limits) ? sl.limits : [];

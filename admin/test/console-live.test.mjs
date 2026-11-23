@@ -6,6 +6,8 @@ import { page, html } from "../src/console/html.mjs";
 import { STREAM_SHUTDOWN as CLIENT_STREAM_SHUTDOWN } from "@edgehero/pi-dispatch/console-client";
 import { LIVE_DEFAULTS, makeLiveHub, queryKey, stateOf, TOKENS_BACK_LINE, TOKENS_HELD_LINE } from "../src/console/live.mjs";
 import * as realPages from "../src/console/pages.mjs";
+import { PAGE_DEADLINE_MS, PAGE_VIEW_GRACE_MS } from "../src/console/page-deadline.mjs";
+import { handTime } from "./helpers/hand-time.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
 import { SHELL_PANEL_IDS } from "../src/console/shell.mjs";
 import { STREAM_ENDS, STREAM_SHUTDOWN } from "../src/console/session-ends.mjs";
@@ -1229,6 +1231,74 @@ test("the REAL loadPageData: a snapshot, a runs page or a run that cannot be rea
   fleet = { ...good, snapshot: boom };
   await h.hub.tick();
   assert.deepEqual(namesIn(res.take()), ["stale"]);
+});
+
+test("the REAL loadPageData cut by its deadline is a failed load to the hub: never a good render, never kept as one, and read again once its time is up", async () => {
+  // Issue #988: a Valkey that takes every read and answers none. The load is back at its deadline with the page's own
+  // read marked failed, as a read that threw is, so the hub keeps a holder's panels and says stale, draws a stream that
+  // holds none the unread panels, and reads again when the page's time is up. The deadline's clock is moved by hand.
+  const time = handTime();
+  const silent = () => new Promise(() => {});
+  const good = { snapshot: async () => ({}), runsPage: async () => ({ runs: [], next: null, mirror: "off", examined: 0 }), runById: async () => ({ missing: true }), parkedCount: async () => 0 };
+  let fleet = good;
+  let loads = 0;
+  const now = clock();
+  const h = hubOn({
+    now,
+    pageMinMs: { runs: 5000 },
+    load: (pageName, query, who) => ((loads += 1), realPages.loadPageData(pageName, query, { fleet, now: T0, env: {}, deadline: { clock: time.clock, timers: time.timers } }, who)),
+    pagePanels: async (_page, { data }) => [{ id: "p-main", html: data.readFailed === true ? "could not be read" : "read" }],
+  });
+  /** The hub's ticks driven on the hand clock until none runs: how long their loads waited in all. */
+  const ticked = async () => {
+    let back = false;
+    const start = time.clock();
+    h.hub.tick().then(() => { back = true; });
+    await time.settled();
+    while (!back) {
+      assert.ok(time.clock() - start < 60_000, "the tick came back: a load is waited for until its deadline, not for Valkey");
+      await time.advance(250);
+    }
+    return time.clock() - start;
+  };
+  try {
+    for (const [page, read, cutAt] of [["overview", "snapshot", PAGE_DEADLINE_MS], ["runs", "runsPage", PAGE_DEADLINE_MS + PAGE_VIEW_GRACE_MS]]) {
+      fleet = good;
+      const holder = fakeRes();
+      const leave = h.hub.subscribe({ res: holder, sessionId: "s1", session: OP, page, query: {} });
+      assert.equal(await ticked(), 0, `${page}: a Valkey that answers costs no wait`);
+      assert.deepEqual(panelsIn(holder.take()).map((p) => p.html), ["read"], page);
+      // Valkey stops answering. The next load is back at its deadline (and, for a read that also draws this host's
+      // files, the grace), not when Valkey wakes: its page's own read is the read that failed.
+      fleet = { ...good, [read]: silent };
+      now.advance(5000);
+      assert.equal(await ticked(), cutAt, `${page}: the load is waited for until its deadline and no longer`);
+      assert.deepEqual(namesIn(holder.take()), ["stale"], `${page}: its panels are kept, and said to be as last seen`);
+      // A stream of another view opens now and holds nothing: it is drawn the page that says so, told unread, never fresh.
+      loads = 0;
+      const opened = fakeRes();
+      const leaveOpened = h.hub.subscribe({ res: opened, sessionId: "s2", session: VIEW, page, query: {} });
+      now.advance(1000);
+      await ticked();
+      assert.deepEqual(namesIn(opened.text()), ["unread", "panel"], page);
+      assert.deepEqual(panelsIn(opened.take()).map((p) => p.html), ["could not be read"], page);
+      assert.deepEqual(namesIn(holder.take()), [], `${page}: said once`);
+      // The runs page is read at most every 5 s: for that long the cut load stands, as the failed load it is.
+      if (page === "runs") assert.equal(loads, 0, "no second load inside the page's five seconds");
+      else assert.ok(loads >= 1, "a page read every tick is read again");
+      // Valkey answers again: the next load that is due is a good one, and both streams are told fresh.
+      fleet = good;
+      now.advance(5000);
+      assert.equal(await ticked(), 0);
+      assert.deepEqual(namesIn(holder.take()), ["fresh"], `${page}: nothing changed since its last good render`);
+      assert.deepEqual(namesIn(opened.text()), ["fresh", "panel"], page);
+      assert.deepEqual(panelsIn(opened.take()).map((p) => p.html), ["read"], page);
+      leave();
+      leaveOpened();
+    }
+  } finally {
+    h.hub.close();
+  }
 });
 
 // ---- /api/state's projection ----

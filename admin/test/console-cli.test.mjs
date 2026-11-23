@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, deploymentOf, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, makeSetupExposureReader, readSideOf, RESERVE_ENV_KEYS, runCli, TRIGGER_FIRE_CHECK_TIMEOUT_MS, setupProviderOf, STOP_DEADLINE_MS, USAGE } from "../src/console/cli.mjs";
+import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, deploymentOf, endpointSnapshotFn, HOST_CAPACITY_TIMEOUT_MS, INSIGHTS_CACHE_MS, loadModules, makeSetupExposureReader, readSideOf, RESERVE_ENV_KEYS, runCli, SCHEDULE_ZONES_TIMEOUT_MS, TRIGGER_FIRE_CHECK_TIMEOUT_MS, UPDATES_FACTS_TIMEOUT_MS, setupProviderOf, STOP_DEADLINE_MS, USAGE } from "../src/console/cli.mjs";
 import * as live from "../src/console/live.mjs";
 import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
 import * as realPages from "../src/console/pages.mjs";
@@ -1481,6 +1481,73 @@ test("manual console editor metadata reads configured webhooks from deployment .
   assert.ok(!JSON.stringify(locations).includes(dep.dir), "the raw deployment path does not enter either role's display");
   assert.equal(captured.actionDeps.grantsEnv.PI_DISPATCH_RUN_ROOTS, undefined);
   assert.equal(captured.actionDeps.grantsEnv.PI_DISPATCH_RUN_PER_HOUR, undefined);
+});
+
+test("a page load's deadline reaches each view's own reads through the console's dependencies, and a caller with none names no bound", async () => {
+  // Issue #988. `loadPageData` hands each view `within` (a read's own bound, or what is left of the page's deadline);
+  // these are the lines of the console's start that pass it on, which no page test boots.
+  const dep = deployment();
+  const modules = fakeModules();
+  const seen = { models: [], connections: [], project: [], zones: [], capacity: [], updates: [] };
+  const silent = () => new Promise(() => {});
+  modules.modelsView = { readModelsView: async (args) => (seen.models.push(args), {}) };
+  modules.connectionsView = { readConnections: async (args) => (seen.connections.push(args), { egress: { allowlist: [], more: 0 } }) };
+  modules.projectView = { readProjectView: async (args) => (seen.project.push(args), {}) };
+  modules.scheduleZones = { readTriggerScheduleZones: async (args) => (seen.zones.push(args), {}) };
+  modules.triggerList = { triggerListOf: (args) => args };
+  modules.readModel.readCapacity = async (args) => (seen.capacity.push(args), { report: null });
+  // The assembly reads through the reader it is handed, and through its own where it is handed none.
+  modules.insights = { ...modules.insights, assembleHostCapacity: async (paths, host, nowMs, options) => { if (options.readCapacityFn) await options.readCapacityFn({ url: paths.valkeyUrl, window: "7d" }); else seen.capacity.push("its own reader"); return { hosts: [] }; } };
+  // The fleet's run records never answer here, and neither does the Valkey part of the facts.
+  modules.readModel.scanFleetRunRecords = silent;
+  modules.updatesView = { readDeploymentUpdates: (args) => (seen.updates.push(args), seen.updates.length === 1 ? silent() : Promise.resolve({ from: "files" })) };
+  let captured;
+  modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+  let stop;
+  const until = new Promise((resolve) => { stop = resolve; });
+  assert.equal(await runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: () => {}, until, onListening: () => stop() }), 0);
+  const deps = captured.pageDeps;
+  const own = [];
+  const within = (ms) => (own.push(ms), 7);
+
+  await deps.modelsView(null, { within });
+  assert.deepEqual([seen.models.at(-1).snapshot, seen.models.at(-1).within], [null, within]);
+  await deps.modelsView(null);
+  assert.equal(seen.models.at(-1).within, undefined, "no deadline: the view's own bounds");
+
+  await deps.connections(null, { within });
+  assert.deepEqual([seen.connections.at(-1).snapshot, seen.connections.at(-1).within, seen.connections.at(-1).publications], [null, within, undefined]);
+  await deps.setup({ role: "operator", snapshot: null, within });
+  assert.deepEqual([seen.connections.at(-1).within, seen.connections.at(-1).publications], [within, false], "Setup's read of the same view");
+  await deps.connections(null);
+  assert.equal(seen.connections.at(-1).within, undefined);
+
+  await deps.projectView("web", null, { within });
+  assert.deepEqual([seen.project.at(-1).id, seen.project.at(-1).within], ["web", within]);
+  await deps.projectView("web", null);
+  assert.equal(seen.project.at(-1).within, undefined);
+
+  // Two readers take a bound of their own: each is handed it through the deadline, and left alone without one.
+  assert.deepEqual(own, [], "a view asks the deadline; passing it on asks nothing");
+  const rules = { triggers: { triggers: [{ type: "cron", id: "nightly", pattern: "0 3 * * *" }] } };
+  await deps.triggerList(rules, { within });
+  assert.equal(seen.zones.at(-1).timeoutMs, 7);
+  await deps.triggerList(rules);
+  assert.ok(!Object.hasOwn(seen.zones.at(-1), "timeoutMs"), "the zones' reader keeps its default");
+  await deps.hostCapacity("build3", { within });
+  assert.deepEqual([seen.capacity.at(-1).timeoutMs, seen.capacity.at(-1).window], [7, "7d"], "the report's own arguments, and the bound");
+  await deps.hostCapacity("build3");
+  assert.equal(seen.capacity.at(-1), "its own reader");
+  assert.deepEqual(own, [SCHEDULE_ZONES_TIMEOUT_MS, HOST_CAPACITY_TIMEOUT_MS]);
+
+  // Updates: the wait for the fleet's run records ends with the deadline (the read goes on, cached, for the next
+  // load), and so does the Valkey part of the facts; what is left is the files' answer.
+  own.length = 0;
+  const facts = await deps.updates({ within });
+  assert.deepEqual(facts, { from: "files" });
+  assert.deepEqual(own, [Infinity, UPDATES_FACTS_TIMEOUT_MS], "what is left of the deadline, then the facts' own end or less");
+  assert.deepEqual(seen.updates.map((args) => [args.recordsPartial, args.records]), [[true, []], [true, []]], "the read with Valkey, cut, then the one without");
+  assert.equal(seen.updates[1].redis, null);
 });
 
 test("the rules read joins retained local history, mirrored records and verified scheduler clocks without changing shared state", async () => {
