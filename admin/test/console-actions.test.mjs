@@ -3474,6 +3474,44 @@ test("a part-way fleet pause with a queue Valkey answered with an error, over a 
   }
 });
 
+// Issue #1041: a queue whose pause Valkey answered with an error, and whose read back it answered with an error too (its
+// meta key of another type), was said only "not confirmed", without the error clause. It is said as answered with an
+// error and possibly partly applied, the clause leading, so the row keeps it whatever the Valkey's address.
+test("a part-way fleet pause whose read back Valkey answered with an error too says it was answered with an error and may have partly applied, never only not confirmed, with a realistic or a long Valkey address (#1041)", async () => {
+  const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+  const wrongType = "WRONGTYPE Operation against a key holding the wrong kind of value";
+  for (const url of ["redis://127.0.0.1:6483/8", `redis://${"valkey-".repeat(12)}primary.example.internal:6379/0`]) {
+    const { paths } = deployment(url);
+    const make = quietQueue();
+    const fleet = RM.createFleetReader(paths, {
+      makeQueueFn: (conn, opts) => {
+        const q = make(conn, opts);
+        return opts?.name === "pi-jobs@hostb" ? { ...q, pause: async () => { throw reply(`${wrongType} script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:30.`); }, isPaused: async () => { throw reply(wrongType); } } : { ...q, pause: async () => {} };
+      },
+      parseConnectionFn: () => ({}),
+      redisFn: () => keyedRedis({}),
+      discoverHostQueuesFn: async () => ["pi-jobs@hostb"],
+      readOnly: true,
+      switchStepTimeoutMs: 80,
+      closeTimeoutMs: 30,
+    });
+    try {
+      const c = await start({ paths, a: { fleet, pauseSnapshotTimeoutMs: 300, killSwitchPlanFn: () => ({ urls: [paths.valkeyUrl], disagreement: null, context: null }) } });
+      const res = (await c.both("fleet-pause", {})).confirm;
+      assert.equal(res.status, 409, res.text);
+      const said = res.json().error;
+      assert.equal(said, `the kill switch did not reach every queue, Valkey answered a pause with an error: ${url} answered with an error for pi-jobs@hostb (its state could not be read, so it may have partly applied); confirmed paused: pi-jobs. Look at the fleet and try again`);
+      assert.ok(!said.includes("not confirmed"), "a read back Valkey answered is not a lost answer");
+      assert.ok(res.json().html.includes("may have been done"), res.json().html);
+      const row = c.audit.rows.at(-1);
+      assert.deepEqual([row.outcome, row.reason], ["failed", [...said].slice(0, 200).join("")]);
+      assert.ok(row.reason.startsWith("the kill switch did not reach every queue, Valkey answered a pause with an error: "), row.reason);
+    } finally {
+      await fleet.dispose();
+    }
+  }
+});
+
 test("this host's own queue that does not exist yet: a fleet preview and a resume write nothing for it, one queue's preview says so, and the fleet pause reaches it (#964)", live, async () => {
   const v = await freshValkey();
   const { paths } = deployment(URL13);
