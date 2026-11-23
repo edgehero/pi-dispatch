@@ -34,6 +34,8 @@ an unattended pause never grants permission to resume a person's pause.
 
 ## Read tools
 
+A read tool writes nothing to Valkey: it creates no queue key and prunes no stale entry. Calling one changes nothing.
+
 - `dispatch_status`: queue state, counts, budget, settings and schedulers.
 - `dispatch_runs`: run records, recovery and turn limits; local workspace retention where known. Never raw logs,
   transcript text, questions, drafts or bundle variable names.

@@ -19,8 +19,9 @@ const idOk = (id) => typeof id === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(i
 export { sandboxPrepareQueueName } from "./worker-name.mjs";
 
 export const sandboxPrepareSlotKey = (host, slot) => `sandbox:prepare:pending:${host}:${slot}`;
-export function makeSandboxPrepareQueue(connection, { host } = {}) {
-	return makeQueue(connection, { name: sandboxPrepareQueueName(host) });
+/** `metaWrite` is `makeQueue`'s (issue #1036): false for a reader that writes nothing by building its queues. */
+export function makeSandboxPrepareQueue(connection, { host, metaWrite = true } = {}) {
+	return makeQueue(connection, { name: sandboxPrepareQueueName(host), metaWrite });
 }
 
 /** Rebuild exactly the command's fields; no payload can add a token, image, executable or provider setting. */

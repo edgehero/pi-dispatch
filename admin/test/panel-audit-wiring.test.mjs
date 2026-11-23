@@ -732,3 +732,118 @@ test("a tool's paid start that was sent and not confirmed is audited as action-u
     fx.restore();
   }
 });
+
+// Issue #1036: a read tool writes nothing to Valkey. Every tool the extension registers as "Read-only", through the
+// real extension, against a real Valkey: database 9, which in the admin suite is this file's alone (its tests run one
+// after another and no other admin test file names it), because the tools read the deployment's own key names and no
+// prefix can stand in for them. The census is every key of the database with its value, taken before and after each
+// tool. Three things a pruning reader removes are planted first and must still be there after every tool: a
+// `host:live` member with no row, a `wait:held` member with no hash, and a run mirror id with no record. The person's
+// surfaces then prune them, as they always have.
+const READ_TOOLS = Object.freeze([
+  ["dispatch_status", {}], ["dispatch_runs", {}], ["dispatch_costs", {}], ["dispatch_capacity", {}], ["dispatch_triggers", {}],
+  ["dispatch_pauses", {}], ["dispatch_limits", {}], ["dispatch_waits", {}], ["dispatch_projects", {}], ["dispatch_allocations", {}],
+  ["dispatch_failed", {}], ["dispatch_waiting", {}], ["dispatch_setup", {}], ["dispatch_hosts", {}], ["dispatch_models", {}],
+  ["dispatch_secrets", {}], ["dispatch_connections", {}],
+]);
+
+test("every tool registered as read-only is in the census of tools that write nothing (#1036)", () => {
+  const registered = Object.values(tools()).filter((t) => /^Read-only\b/.test(t.description)).map((t) => t.name).sort();
+  assert.deepEqual(READ_TOOLS.map(([name]) => name).sort(), registered, "a tool that says Read-only joins READ_TOOLS, and the census below");
+});
+
+test("the read tools write nothing to Valkey: no key appears, goes or changes, and what a pruning reader removes stays until a person's surface reads (#1036)", { timeout: 180_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  const fx = deployment({ valkey: LIVE });
+  const { default: IORedis } = await import("ioredis");
+  const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  const tag = `${process.pid}-${Date.now().toString(36)}`;
+  const liveHost = `h1036-${tag}`;
+  const staleHost = `gone1036-${tag}`;
+  const staleHeld = `held1036-${tag}`;
+  const staleRun = `run1036-${tag}`;
+  const scanAll = async () => {
+    const keys = [];
+    let cursor = "0";
+    do {
+      const [next, batch] = await r.scan(cursor, "COUNT", 1000);
+      cursor = String(next);
+      keys.push(...batch);
+    } while (cursor !== "0");
+    return keys.sort();
+  };
+  // A key with an expiry is not this test's and may go by itself between two looks: left out by name, from the start.
+  const expiring = new Set();
+  for (const key of await scanAll()) if ((await r.pttl(key)) >= 0) expiring.add(key);
+  const census = async () => {
+    const rows = {};
+    for (const key of await scanAll()) if (!expiring.has(key)) rows[key] = (await r.dumpBuffer(key))?.toString("base64") ?? null;
+    return rows;
+  };
+  const changesOf = (before, after) => [
+    ...Object.keys(after).filter((k) => !Object.hasOwn(before, k)).map((k) => `+${k}`),
+    ...Object.keys(before).filter((k) => !Object.hasOwn(after, k)).map((k) => `-${k}`),
+    ...Object.keys(before).filter((k) => Object.hasOwn(after, k) && after[k] !== before[k]).map((k) => `~${k}`),
+  ];
+  const planted = async () => ({ host: await r.sismember(HOST_SET, staleHost), held: await r.sismember("wait:held", staleHeld), run: (await r.zscore("runs:index", staleRun)) !== null ? 1 : 0 });
+  // The queues a reader builds for this deployment: the shared one and the live host's own.
+  const queueKeys = async () => (await scanAll()).filter((k) => k.startsWith("bull:pi-jobs:") || k.startsWith(`bull:pi-jobs@${liveHost}:`) || k.startsWith("bull:pi-jobs@mini1:"));
+  // The database as this test found it: every key's name, and the queue keys it takes away, to put back at the end.
+  const found = new Set(await scanAll());
+  const taken = [];
+  for (const key of await queueKeys()) taken.push([key, await r.dumpBuffer(key), await r.pttl(key)]);
+  try {
+    // An envelope and its projects, so dispatch_allocations reads Valkey too, on the real client.
+    writeFileSync(fx.files.projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
+    writeFileSync(fx.files.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", _other: "0" }, defaultWeights: { shop: 1, _other: 0 }, delegation: { enabled: false } }));
+    indexMod._setAllocationSeamsForTests({});
+    await r.sadd(HOST_SET, liveHost, staleHost);
+    await r.hset(`host:h:${liveHost}`, { name: liveHost, routes: "true", beatAt: String(Date.now()), jobs: "[]" });
+    await r.sadd("wait:held", staleHeld);
+    await r.zadd("runs:index", Date.now(), staleRun);
+
+    const wrote = {};
+    for (const [name, params] of READ_TOOLS) {
+      // No queue of this deployment exists when a tool starts, so a read that builds one shows as its meta key: writing
+      // a meta hash that is already there with the same fields changes nothing a census can see.
+      const left = await queueKeys();
+      if (left.length > 0) await r.del(...left);
+      const before = await census();
+      const out = await tool(name, params);
+      const changes = changesOf(before, await census());
+      const still = await planted();
+      const pruned = Object.entries(still).filter(([, there]) => there !== 1).map(([what]) => `pruned ${what}`);
+      if (changes.length > 0 || pruned.length > 0) wrote[name] = [...changes, ...pruned];
+      assert.equal(out?.threw, undefined, `${name} answered (${out?.threw})`);
+      // Put back what a tool pruned, so each tool is measured against the same state.
+      await r.sadd(HOST_SET, staleHost);
+      await r.sadd("wait:held", staleHeld);
+      await r.zadd("runs:index", Date.now(), staleRun);
+    }
+    assert.deepEqual(wrote, {}, "each read tool against the keys it added (+), removed (-) or changed (~), and what it pruned");
+    assert.deepEqual(await planted(), { host: 1, held: 1, run: 1 });
+    assert.deepEqual(await queueKeys(), [], "and no queue's key was made by reading");
+
+    // A person's surface still prunes: /dispatch status the registry's and the held index's stale members, and the
+    // panel's reader the run mirror's.
+    await command("status");
+    assert.deepEqual(await planted(), { host: 0, held: 0, run: 1 }, "/dispatch status prunes the registry and the held index, as before");
+    await withPanel(async () => {
+      const end = Date.now() + 8000;
+      while ((await planted()).run === 1 && Date.now() < end) await settle(50);
+    });
+    assert.equal((await planted()).run, 0, "the panel's reader prunes the run mirror, as before");
+  } finally {
+    await r.srem(HOST_SET, liveHost, staleHost).catch(() => {});
+    await r.del(`host:h:${liveHost}`).catch(() => {});
+    await r.srem("wait:held", staleHeld).catch(() => {});
+    await r.zrem("runs:index", staleRun).catch(() => {});
+    // Every key that was not here at the start is this test's doing (what the person's surfaces built for the queues,
+    // which are not read-only, and the mirror's horizon their prune records), and the queue keys it took away go back.
+    const made = (await scanAll().catch(() => [])).filter((k) => !found.has(k));
+    if (made.length > 0) await r.del(...made).catch(() => {});
+    for (const [key, dump, ttl] of taken) if (dump) await r.restore(key, ttl > 0 ? ttl : 0, dump, "REPLACE").catch(() => {});
+    r.disconnect();
+    indexMod._setAllocationSeamsForTests({});
+    fx.restore();
+  }
+});

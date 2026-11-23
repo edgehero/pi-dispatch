@@ -275,7 +275,8 @@ One command puts a live terminal view over the whole deployment:
   [`SECURITY.md`](https://github.com/edgehero/pi-dispatch/blob/main/SECURITY.md) before enabling it.
   The bundled `operate-pi-dispatch` skill explains each action mark and refusal.
 - **Agent reads expose operational facts.** Failed jobs, all waiting jobs, hosts and setup have dedicated
-  read tools. Runs report local retention when known; hosts report budgets, holds, CPU reserve, orphans,
+  read tools. A read tool writes nothing to Valkey: it creates no queue key and removes no stale entry, which
+  the panel, `/dispatch status` and the worker still do. Runs report local retention when known; hosts report budgets, holds, CPU reserve, orphans,
   kept sandboxes, doctor counts and qualified venue declarations. Costs include running holds and bounded
   what-if estimates. Model results omit private job/operator text, question and draft content, variable
   names, host paths and what a run loaded. Setup suggestions come from the trusted command catalogue.
