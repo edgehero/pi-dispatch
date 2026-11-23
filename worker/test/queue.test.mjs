@@ -629,6 +629,26 @@ test("the look for queues says when Valkey answered its scan with an error, by t
 	assert.deepEqual(await discoverHostQueuesReporting({ scan: async () => ["0", ["bull:pi-jobs@hostb:meta", "bull:pi-jobs:meta"]] }, { timeoutMs: 200 }), { names: ["pi-jobs@hostb"], incomplete: null });
 });
 
+test("makeQueue's metaWrite: false builds the queue with BullMQ's skipMetasUpdate, and the default builds it without (#1036)", { timeout: 8000 }, async () => {
+	const { makeQueue } = await import("../src/queue.mjs");
+	const refused = () => parseConnection("redis://127.0.0.1:1", { failFast: true, context: {}, judge: async () => { throw new Error("no Valkey in this test"); } });
+	const built = [makeQueue(refused(), { name: "qtest-meta-off", metaWrite: false }), makeQueue(refused(), { name: "qtest-meta-on" }), makeQueue(refused(), { name: "qtest-meta-true", metaWrite: true })];
+	// The sandbox request queue's factory hands the option on, so a read-only reader's request queue is built the same way.
+	const { makeSandboxPrepareQueue } = await import("../src/sandbox-prepare-requests.mjs");
+	built.push(makeSandboxPrepareQueue(refused(), { host: "mini1", metaWrite: false }), makeSandboxPrepareQueue(refused(), { host: "mini1" }));
+	for (const q of built) {
+		q.removeAllListeners("error");
+		q.on("error", () => {});
+	}
+	try {
+		assert.deepEqual(built.map((q) => q.opts.skipMetasUpdate), [true, undefined, undefined, true, undefined]);
+		assert.deepEqual(built.slice(0, 3).map((q) => q.name), ["qtest-meta-off", "qtest-meta-on", "qtest-meta-true"]);
+		assert.equal(built[3].name, built[4].name, "the same queue either way");
+	} finally {
+		for (const q of built) await q.close().catch(() => {});
+	}
+});
+
 // Integration against a real Valkey. Runs when VALKEY_TEST_URL is set (CI provides a service).
 const url = process.env.VALKEY_TEST_URL;
 const skip = url ? false : "VALKEY_TEST_URL not set; the queue integration test needs a Valkey";
@@ -680,6 +700,83 @@ test("enqueueLocalJobReporting against a real Valkey: the second identical enque
 	} finally {
 		await q.obliterate({ force: true }).catch(() => {});
 		await q.close();
+	}
+});
+
+// Issue #1036, measured against the pinned BullMQ on a real Valkey: what a queue built with `metaWrite: false` writes.
+test("against a real Valkey: a queue built with metaWrite: false writes no key by being built or by any read the console makes, and the default writes its meta hash (#1036)", { skip, timeout: 30_000 }, async () => {
+	const { parseConnection, makeRedisClient } = await import("../src/connection.mjs");
+	const { makeQueue } = await import("../src/queue.mjs");
+	const tag = `qtest-1036-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+	const direct = makeRedisClient(url);
+	direct.on("error", () => {});
+	const keysOf = async (name) => (await direct.keys(`bull:${name}:*`)).sort();
+	const quiet = makeQueue(parseConnection(url), { name: `${tag}-off`, metaWrite: false });
+	const usual = makeQueue(parseConnection(url), { name: `${tag}-on` });
+	try {
+		await quiet.waitUntilReady();
+		await usual.waitUntilReady();
+		// The constructor's write goes out once the client is ready; a read on the same connection answers after it.
+		assert.equal(await usual.isPaused(), false);
+		assert.deepEqual(await keysOf(`${tag}-on`), [`bull:${tag}-on:meta`], "the default writes the meta hash, as before");
+		assert.deepEqual(Object.keys(await direct.hgetall(`bull:${tag}-on:meta`)).sort(), ["opts.maxLenEvents", "version"]);
+		// Every read the console's reader and its one-shot readers make of a queue.
+		const reads = {
+			isPaused: () => quiet.isPaused(),
+			getJobCounts: () => quiet.getJobCounts("waiting", "active", "paused", "delayed", "failed"),
+			getWorkers: () => quiet.getWorkers(),
+			getJobSchedulers: () => quiet.getJobSchedulers(0, -1, true),
+			getActive: () => quiet.getActive(0, 49),
+			getFailed: () => quiet.getFailed(0, 49),
+			getFailedCount: () => quiet.getFailedCount(),
+			getDelayed: () => quiet.getDelayed(0, 49),
+			getWaiting: () => quiet.getWaiting(0, 49),
+			getJob: () => quiet.getJob("no-such-job"),
+			getJobState: () => quiet.getJobState("no-such-job"),
+		};
+		for (const [name, read] of Object.entries(reads)) {
+			await read();
+			assert.deepEqual(await keysOf(`${tag}-off`), [], `${name} wrote nothing`);
+		}
+	} finally {
+		await quiet.close().catch(() => {});
+		await usual.close().catch(() => {});
+		const left = [...(await keysOf(`${tag}-off`)), ...(await keysOf(`${tag}-on`))];
+		if (left.length > 0) await direct.del(...left);
+		direct.disconnect();
+	}
+});
+
+test("against a real Valkey: a pause and a resume through a queue built with metaWrite: false work on a queue with no meta key, and say what they leave there (#1036)", { skip, timeout: 30_000 }, async () => {
+	const { parseConnection, makeRedisClient } = await import("../src/connection.mjs");
+	const { makeQueue } = await import("../src/queue.mjs");
+	const name = `qtest-1036p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+	const direct = makeRedisClient(url);
+	direct.on("error", () => {});
+	const keys = async () => (await direct.keys(`bull:${name}:*`)).map((k) => k.slice(`bull:${name}:`.length)).sort();
+	const q = makeQueue(parseConnection(url), { name, metaWrite: false });
+	try {
+		await q.waitUntilReady();
+		assert.deepEqual(await keys(), []);
+		// A pause of a queue that has no meta key: the script makes the hash with the one field it needs.
+		await q.pause();
+		assert.deepEqual([await q.isPaused(), await direct.hgetall(`bull:${name}:meta`), await keys()], [true, { paused: "1" }, ["events", "meta"]]);
+		// A resume takes the field away, which removes a hash that held nothing else; each left one entry on the stream.
+		await q.resume();
+		assert.deepEqual([await q.isPaused(), await direct.exists(`bull:${name}:meta`), await keys(), await direct.xlen(`bull:${name}:events`)], [false, 0, ["events"], 2]);
+		// With a job: the add script sets the one field it wants itself, and a pause moves the job between the two lists.
+		const job = await q.add("t", { n: 1 });
+		assert.deepEqual([await direct.hgetall(`bull:${name}:meta`), (await q.getJobCounts("waiting", "paused")).waiting], [{ "opts.maxLenEvents": "10000" }, 1]);
+		await q.pause();
+		assert.deepEqual([await q.getJobCounts("waiting", "paused"), await direct.hgetall(`bull:${name}:meta`)], [{ waiting: 0, paused: 1 }, { "opts.maxLenEvents": "10000", paused: "1" }]);
+		await q.resume();
+		assert.deepEqual([await q.getJobCounts("waiting", "paused"), await direct.hgetall(`bull:${name}:meta`), (await q.getJob(job.id))?.id], [{ waiting: 1, paused: 0 }, { "opts.maxLenEvents": "10000" }, job.id]);
+	} finally {
+		await q.obliterate({ force: true }).catch(() => {});
+		await q.close().catch(() => {});
+		const left = await direct.keys(`bull:${name}:*`);
+		if (left.length > 0) await direct.del(...left);
+		direct.disconnect();
 	}
 });
 

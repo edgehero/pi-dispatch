@@ -255,11 +255,20 @@ async function closeChild(child) {
 /**
  * A queue handle. `name` defaults to the shared queue, so every existing caller is unchanged and a
  * single-host deployment never names anything else.
+ *
+ * `metaWrite: false` (issue #1036) is for a reader that promises to write nothing. BullMQ's `Queue` constructor writes
+ * the queue's meta hash (`version`, `opts.maxLenEvents`) as soon as its client is ready, so building a queue to READ it
+ * created `bull:<queue>:meta` on a Valkey that held nothing, and that key is what the look for queues takes for a queue
+ * that exists (`discoverHostQueuesReporting`). BullMQ's own `skipMetasUpdate` leaves that write out (read at 5.80.4,
+ * queue.js). Nothing a queue built this way does needs it: the scripts that want `opts.maxLenEvents` set it themselves
+ * when it is missing (`getOrSetMaxEvents`), the pause script writes `paused` and reads neither field, and `version` is
+ * read by nobody here. So such a queue can still pause, resume and add; what it will not do is write by being built.
+ * The default keeps the write, as every worker's and every producer's queue has it.
  */
-export function makeQueue(connection, { name = QUEUE } = {}) {
+export function makeQueue(connection, { name = QUEUE, metaWrite = true } = {}) {
 	// Issue #464: only a connection `parseConnection` built, which judges and pins the Valkey it dials.
 	assertJudgedConnection(connection);
-	const queue = new SettledQueue(name, { connection });
+	const queue = new SettledQueue(name, { connection, ...(metaWrite ? {} : { skipMetasUpdate: true }) });
 	// Issue #468: an error of this queue is one line, its message, never BullMQ's console.error of the whole object.
 	// A queue that gives up is the kind a long-lived reader replaces, so it is the kind that repeats the line per read.
 	onValkeyError(queue, `queue ${name}`, undefined, { quietly: givesUp(connection) });

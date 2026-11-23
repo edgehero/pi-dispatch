@@ -81,6 +81,10 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 	assert.match(at("worker/src/queue.mjs"), /class SettledQueue extends Queue \{/);
 	assert.equal((at("worker/src/queue.mjs").match(/new (?:Queue|SettledQueue)\(/g) ?? []).length, 1);
 	assert.match(at("worker/src/index.mjs"), /assertJudgedConnection\(connection\);\s*worker = new Worker\(/);
+	// Issue #1036: BullMQ's switch that leaves a queue's meta write out is named in one place, `makeQueue`, whose
+	// `metaWrite` every reader that writes nothing passes; no file reaches past it to build a queue that way itself.
+	assert.deepEqual(files.filter((file) => /skipMetasUpdate/.test(file.code)).map((file) => file.path), ["worker/src/queue.mjs"]);
+	assert.match(at("worker/src/queue.mjs"), /const queue = new SettledQueue\(name, \{ connection, \.\.\.\(metaWrite \? \{\} : \{ skipMetasUpdate: true \}\) \}\);/);
 	// Issue #468: and each carries the one-line `error` listener, so BullMQ never prints the whole error object.
 	assert.match(at("worker/src/queue.mjs"), /const queue = new SettledQueue\([^;]*\);[\s\S]{0,200}?\n\tonValkeyError\(queue, `queue \$\{name\}`, undefined, \{ quietly: givesUp\(connection\) \}\);/);
 	assert.match(at("worker/src/index.mjs"), /worker = new Worker\([\s\S]*?\}\);\s*onValkeyError\(worker, /);

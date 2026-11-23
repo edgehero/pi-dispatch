@@ -615,10 +615,12 @@ function registerTools(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute() {
       const paths = resolvePaths(deploymentEnv());
+      // Issue #1036: a tool described as read-only writes nothing. `readOnly` builds the queues without BullMQ's meta
+      // write and reads the registry without pruning it; `/dispatch status` below is a person's and stays a pruning reader.
       const [queue, budget, schedulers] = await Promise.all([
-        readQueueState({ url: paths.valkeyUrl }),
+        readQueueState({ url: paths.valkeyUrl, readOnly: true }),
         readBudget({ url: paths.valkeyUrl }),
-        readSchedulers({ url: paths.valkeyUrl }),
+        readSchedulers({ url: paths.valkeyUrl, readOnly: true }),
       ]);
       // The operator-only overlay keys (`secretProfiles`, `secretBundles`: resolver paths the worker executes) are left
       // out of what the model reads (issue #704 review): no tool can set them, and none needs to see them.
@@ -652,7 +654,8 @@ function registerTools(pi: ExtensionAPI): void {
       // a bare array holding some unstated fraction of a fleet's runs is exactly that laundering. `mirror`
       // says whether the list is the whole deployment ("ok"), this host alone ("off"), capped
       // ("truncated"), or unknown ("unreachable ...").
-      const merged: any = await listRunsMerged({ logsDir: paths.logsDir, limit: params.limit ?? 10, url: paths.valkeyUrl });
+      // `prune: false` (issue #1036): an expired id stays in the mirror's index for a pruning reader (the panel, the worker).
+      const merged: any = await listRunsMerged({ logsDir: paths.logsDir, limit: params.limit ?? 10, url: paths.valkeyUrl, prune: false });
       return toolText(JSON.stringify(Array.isArray(merged?.runs) ? { ...merged, runs: merged.runs.map((r: any) => modelRunRecord(runShown(r), { list: true })) } : merged));
     },
   });
@@ -1039,7 +1042,8 @@ function registerTools(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute() {
       const paths = resolvePaths(deploymentEnv());
-      const held = await readHeldJobs({ url: paths.valkeyUrl });
+      // `prune: false` (issue #1036): a stale member of the held index is skipped and left for `/dispatch status` or the worker.
+      const held = await readHeldJobs({ url: paths.valkeyUrl, prune: false });
       return toolText(JSON.stringify(waitingForAgent(held)));
     },
   });

@@ -330,8 +330,13 @@ function parseNonNegInt(raw, fallback) {
  * queues was not read whole), `registryReadInPart` (the registry answered and some rows were not read; the rows that
  * were read still count the workers, a floor, where they were thrown away with the rest) and `hostErrors` (the hosts
  * whose rows Valkey answered with an error, each with the reply's code).
+ *
+ * `readOnly` (issue #1036, default false) makes it write NOTHING: its queues are built without BullMQ's meta write
+ * (`makeQueue`'s `metaWrite: false`) and its registry read prunes no stale member. For `dispatch_status`, which is
+ * described to a model as read-only. `/dispatch status` and the setup wizard's probe are a person's and keep the
+ * default: they are pruning readers, beside the worker and the receiver, and somebody has to be.
  */
-export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500, readOnly = false } = {}) {
   let queue;
   const queuesToClose = [];
   try {
@@ -341,9 +346,9 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
     // state of half a deployment.
     // The UNION, not the registry alone: a queue whose host has gone quiet still holds jobs and still has
     // a paused flag, and a status read that cannot see it cannot tell an operator why work has stopped.
-    const { names, hosts, blind, blindPartial, incomplete, hostErrors } = await readFleetQueues({ url, redisFn, timeoutMs });
+    const { names, hosts, blind, blindPartial, incomplete, hostErrors } = await readFleetQueues({ url, redisFn, timeoutMs, ...(readOnly === true ? { prune: false } : {}) });
     const fleet = blind && blindPartial !== true ? { unreachable: blind } : { hosts };
-    const queues = names.map((name) => makeQueueFn(consoleQueueConnection(url, parseConnectionFn), { name }));
+    const queues = names.map((name) => makeQueueFn(consoleQueueConnection(url, parseConnectionFn), { name, ...(readOnly === true ? { metaWrite: false } : {}) }));
     queuesToClose.push(...queues);
     queue = queues[0];
     // Across every queue, because "is this deployment paused" is the question. `queues[0]` alone would
@@ -598,16 +603,17 @@ export function queueSwitchErrored(queue, paused, reads) {
  * even name it. A meta key outlives its worker, so the union always can.
  *
  * One client for both reads. Both fail open -- an unreadable registry or keyspace degrades the answer, it
- * never refuses the command.
+ * never refuses the command. `prune` is the registry read's (`readLiveHosts`; left to its default when not given):
+ * false for a caller that writes nothing (issue #1036), which leaves a stale `host:live` member for a pruning reader.
  */
-export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutMs = 2500, prune } = {}) {
   let redis;
   try {
     // Made inside the try (PR #478's gate): a VALKEY_URL the client refuses (a path that names no database) is this
     // read's degraded answer, like a down Valkey, never a throw out of a function that fails open.
     redis = redisFn(url);
     redis.on?.("error", () => {}); // a down Valkey is one clean line, never nine ioredis stack traces
-    const { names, blind, blindPartial, hosts, incomplete, unreadHosts, hostErrors, shortErrors } = await fleetQueuesOn(redis, { timeoutMs });
+    const { names, blind, blindPartial, hosts, incomplete, unreadHosts, hostErrors, shortErrors } = await fleetQueuesOn(redis, { timeoutMs, ...(prune === undefined ? {} : { prune }) });
     // `incomplete` only where the keyspace scan said so: a caller that claims "no queue holds it" needs to know. The
     // three keys of issue #1036 only where `fleetQueuesOn` had them.
     return { names, blind, ...(blindPartial ? { blindPartial } : {}), hosts, ...(incomplete ? { incomplete } : {}), ...(unreadHosts ? { unreadHosts } : {}), ...(hostErrors ? { hostErrors } : {}), ...(shortErrors ? { shortErrors } : {}) };
@@ -2701,8 +2707,11 @@ export async function readCapacity({ url, env = process.env, window = "7d", host
  * `{ unreachable }` and an empty list stay distinguishable all the way to the renderer. "There are no
  * other hosts" and "I could not find out" are different facts, and a panel that shows the second as the
  * first tells an operator their fleet is gone when Valkey merely blinked.
+ *
+ * `prune` (issue #1036; `readLiveHosts`' own, left to its default when not given): false reads the registry without
+ * removing a stale member, for a caller that writes nothing.
  */
-export async function readHosts({ url, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now() } = {}) {
+export async function readHosts({ url, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now(), prune } = {}) {
   let redis;
   try {
     parseConnection(url, { failFast: true }); // throws on junk before any client exists
@@ -2713,7 +2722,7 @@ export async function readHosts({ url, redisFn = makeRedisClient, timeoutMs = 25
     // handful of hosts on a slow Valkey the outer timer always won -- and the caller degraded to the
     // shared queue alone for no reason but fleet size. Halved inward; since issue #1062 the inner bound is the whole
     // read, rows side by side, and a listing that is not whole keeps its `incomplete` for the caller to say.
-    const res = await withTimeout(readLiveHosts(redis, { now, timeoutMs: Math.max(250, Math.floor(timeoutMs / 2)) }), timeoutMs, { unreachable: "timed out reaching the registry" });
+    const res = await withTimeout(readLiveHosts(redis, { now, timeoutMs: Math.max(250, Math.floor(timeoutMs / 2)), ...(prune === undefined ? {} : { prune }) }), timeoutMs, { unreachable: "timed out reaching the registry" });
     // Issue #1036: the code of an error reply rides beside the words, the index's (`error`) and each row's (`hostErrors`).
     if (res.unreachable) return { unreachable: res.unreachable, ...(replyCodeOf(res.error) ? { error: replyCodeOf(res.error) } : {}) };
     const unread = res.incomplete ? unreadHostsOf(res) : [];
@@ -2776,7 +2785,14 @@ export function resolveWorkerCount({ hosts, workerCount }) {
   return { count: "unknown", names: [] };
 }
 
-export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now() } = {}) {
+/**
+ * The jobs the worker holds on a trigger's wait, oldest first, off the worker's own index (`wait:held`).
+ *
+ * `prune` (issue #1036, default true): a member with no hash is stale and is removed in passing, which is what keeps an
+ * index a set cannot expire from only growing. False skips it the same and writes nothing, for `dispatch_waits`, which
+ * is described to a model as read-only; `/dispatch status` keeps the default and prunes, as the worker does.
+ */
+export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now(), prune = true } = {}) {
   let redis;
   try {
     parseConnection(url, { failFast: true }); // throws on junk before any client exists
@@ -2794,7 +2810,7 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
             // being updated. The reader prunes it, which is what makes an index safe here at all -- a set
             // cannot expire its own members, so the alternative is a set that only grows.
             if (!h || !h.since) {
-              await redis.srem(HELD_SET, jobId).catch(() => {});
+              if (prune) await redis.srem(HELD_SET, jobId).catch(() => {});
               return null;
             }
             const since = Number(h.since);
@@ -3035,7 +3051,8 @@ async function readWorkerCount(queue) {
  * Read the resident job schedulers and compute per-entry `overdueMs`: BullMQ's no-overlap scheduler can silently
  * under-fire under load, so the admin surfaces `next` drift rather than let it look healthy (design.md:249). Returns an
  * array, or `{ unreachable }` on a connection error. An array read over a host registry read in part carries
- * `hostsReadInPart` (issue #1062).
+ * `hostsReadInPart` (issue #1062). `readOnly` (issue #1036, default false) is `readQueueState`'s: queues built without
+ * the meta write and a registry read that prunes nothing, for `dispatch_status`; `/dispatch triggers` keeps the default.
  */
 export async function readSchedulers({
   url,
@@ -3044,14 +3061,15 @@ export async function readSchedulers({
   redisFn = makeRedisClient,
   timeoutMs = 2500,
   now = Date.now,
+  readOnly = false,
 } = {}) {
   const opened = [];
   try {
     // ACROSS EVERY QUEUE (issue #57). A named host installs its own schedulers on `pi-jobs@<name>`, so a
     // read of the shared queue alone would show ZERO schedulers while cron was running -- a panel that
     // contradicts a working deployment is worse than one that says nothing.
-    const fleet = await readHosts({ url, redisFn, timeoutMs });
-    const queues = fleetQueueNames(fleet.hosts).map((name) => makeQueueFn(parseConnectionFn(url, { failFast: true }), { name }));
+    const fleet = await readHosts({ url, redisFn, timeoutMs, ...(readOnly === true ? { prune: false } : {}) });
+    const queues = fleetQueueNames(fleet.hosts).map((name) => makeQueueFn(parseConnectionFn(url, { failFast: true }), { name, ...(readOnly === true ? { metaWrite: false } : {}) }));
     opened.push(...queues);
     // The SHARED queue's failure is a real connection failure and must surface as `{ unreachable }`;
     // an additional HOST queue's is caught, because one unreadable host must degrade to its own rows
@@ -3227,12 +3245,13 @@ export async function mergedRunsOn(redis, { logsDir, limit = 10, fs = nodeFs, ti
  * improves on the `readHeldJobs` precedent, whose connection-first shape forced `dashboard.ts` to keep an
  * inline copy that a source-text parity test then had to police.
  */
-export async function listRunsMerged({ logsDir, limit = 10, url, fs = nodeFs, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+export async function listRunsMerged({ logsDir, limit = 10, url, fs = nodeFs, redisFn = makeRedisClient, timeoutMs = 2500, prune = true } = {}) {
   let redis;
   try {
     redis = redisFn(url);
     redis.on?.("error", () => {}); // one clean line on a down Valkey, never ioredis stack traces
-    return await mergedRunsOn(redis, { logsDir, limit, fs, timeoutMs });
+    // `prune` is `mergedRunsOn`'s: false for `dispatch_runs` (issue #1036), a read that leaves an expired id in the index.
+    return await mergedRunsOn(redis, { logsDir, limit, fs, timeoutMs, prune });
   } catch (err) {
     const local = listRuns({ logsDir, limit, fs });
     const runs = Array.isArray(local) ? local : [];
@@ -4932,9 +4951,15 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *   - `readOnly` (default false): `snapshot()` issues NO Valkey write. The three reads that prune as they go (the
  *     registry's stale members, the run mirror's expired ids and its horizon, the held index's stale members) skip the
  *     stale entry the same and leave it for a pruning reader (the TUI, the worker). The console passes true, because
- *     a page view that writes is a read that needs a writer's care. What it does NOT cover: BullMQ's own `Queue`
- *     constructor writes the queue's meta hash (`version`, `opts.maxLenEvents`) once per queue built, which
- *     `makeQueue` does not let a caller turn off; and `pause`, `resume` and `cancelActive` are writes by definition.
+ *     a page view that writes is a read that needs a writer's care. Since issue #1036 it covers the queues too: every
+ *     queue a read-only reader builds (the shared one, the pool's, a sandbox request queue) is built without BullMQ's
+ *     meta write (`makeQueue`'s `metaWrite: false`), which until then wrote `bull:<queue>:meta` once per queue built,
+ *     so reading a Valkey that held nothing left it holding the reader's queues. What it does NOT cover: `pause`,
+ *     `resume`, `cancelActive` and a sandbox request are writes by definition, and they go through those same queues.
+ *     Measured against BullMQ 5.80.4 on a queue with no meta key: a pause writes `paused` into a new meta hash and an
+ *     entry on the events stream, a resume takes the field away again (which removes a hash that held nothing else)
+ *     and adds its own entry; neither needs the constructor's two fields. A reader that is not read-only (the
+ *     `/dispatch` panel's) builds its queues as before.
  *   - `activeLimit` (default 1, at most `ACTIVE_PER_QUEUE_MAX`): how many active jobs each queue is asked for. One is
  *     the TUI's old cost (it shows the first id); the console passes 50 to list them all.
  *
@@ -4995,6 +5020,8 @@ export function createFleetReader(
   } = {},
 ) {
   const prune = readOnly !== true;
+  // Issue #1036: a read-only reader's queues write nothing by being built (`makeQueue`'s `metaWrite`).
+  const metaWrite = readOnly !== true;
   const activePerQueue = Number.isSafeInteger(activeLimit) ? Math.min(Math.max(activeLimit, 1), ACTIVE_PER_QUEUE_MAX) : 1;
   // Every queue this reader holds is built `failFast`, so a read during an outage is refused rather than waiting in an
   // offline queue, and with a bound on each command (`consoleQueueConnection`, issue #842), so a read or a pause on a
@@ -5023,7 +5050,7 @@ export function createFleetReader(
     if (held) Promise.resolve().then(() => held.close()).catch(() => {});
     return watched(open());
   };
-  const queue = watched(makeQueueFn(consoleQueueConnection(paths.valkeyUrl, parseConnectionFn)));
+  const queue = watched(makeQueueFn(consoleQueueConnection(paths.valkeyUrl, parseConnectionFn), { metaWrite }));
   // Persistent, so it rides a restart out, which the queues above cannot. Bounded, or a read on it waits for as long as the
   // Valkey does not answer: one such read in a snapshot's `Promise.all` hung the page whole, and the watch pages read
   // nothing else. A command past the bound is gone unless it had reached the socket (`makeRedisClient`).
@@ -5037,7 +5064,7 @@ export function createFleetReader(
   const sandboxQueues = new Map();
   const sandboxQueue = (host) => {
     if (typeof host !== "string" || !WORKER_NAME_RE.test(host)) throw new Error("a sandbox request needs a worker name");
-    sandboxQueues.set(host, stillOpen(sandboxQueues.get(host), () => makeSandboxPrepareQueueFn(consoleQueueConnection(paths.valkeyUrl, parseConnectionFn), { host })));
+    sandboxQueues.set(host, stillOpen(sandboxQueues.get(host), () => makeSandboxPrepareQueueFn(consoleQueueConnection(paths.valkeyUrl, parseConnectionFn), { host, metaWrite })));
     return sandboxQueues.get(host);
   };
   const watchStore = makeWatchStore(redis, { now: nowFn });
@@ -5065,7 +5092,7 @@ export function createFleetReader(
   const pool = new Map([[queue.name, queue]]);
   // The pool's queue for `name`: the one held, or a new one where it has none or the held one's client ended.
   const queueNamed = (name) => {
-    pool.set(name, stillOpen(pool.get(name), () => makeQueueFn(consoleQueueConnection(paths.valkeyUrl, parseConnectionFn), { name })));
+    pool.set(name, stillOpen(pool.get(name), () => makeQueueFn(consoleQueueConnection(paths.valkeyUrl, parseConnectionFn), { name, metaWrite })));
     return pool.get(name);
   };
   // The last set we successfully resolved. On an unreachable registry the fleet does NOT shrink to the shared queue:
@@ -5230,8 +5257,10 @@ export function createFleetReader(
   // finds any meta key a writer plants. The kill switch's previews keep `SWITCH_PREVIEW_QUEUES_MAX`.
   //
   // `unread` (issue #964): this host's own queue where discovery did not name it, which the switch flips and this never
-  // reads: building a BullMQ queue for a name writes that queue's meta key, which every later scan lists as a queue, and
-  // a preview, or the agent's failed read on every call, writes nothing. A queue no whole scan found holds no job.
+  // reads. A queue no whole scan found holds no job, so nothing is lost by not reading it; and a reader that is not
+  // read-only (the panel's) would write that queue's meta key by building it, which every later scan lists as a queue,
+  // while a preview writes nothing. A read-only reader's queue no longer writes by being built (issue #1036), so for
+  // the console and the agent's failed read this is the first reason alone.
   const switchPreviewQueues = async (queue, { lookupBound = false } = {}) => {
     const { names, incomplete, found } = await switchQueueNames();
     const readable = names.filter((n) => found.has(n));
@@ -5264,8 +5293,8 @@ export function createFleetReader(
     // may be short, never a switch that did nothing or one that waits.
     // This host's own queue (`own`, issue #964, given only when this is the deployment's Valkey) is in the first set a pause
     // flips and in its fallback: on a Valkey that does not answer, discovery never names it. A resume reaches it only where
-    // discovery found it (`found`): a queue that does not exist has nothing to resume, and one built to resume it writes
-    // its meta key.
+    // discovery found it (`found`): a queue that does not exist has nothing to resume, and a resume of it still writes
+    // (an entry on its events stream, measured; and its meta key where this reader is not read-only).
     const unread = () => ({ names: paused ? [...new Set([...lastNames, ...own])] : [...lastNames], incomplete: SWITCH_SCAN_INCOMPLETE });
     const discover = () => withTimeout(switchQueueNames().catch(unread), switchStepTimeoutMs, null).then((found) => found ?? unread());
     let names;

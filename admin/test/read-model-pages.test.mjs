@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { emptyRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
 import { queueSwitchErrored, queueSwitchUnconfirmed } from "../src/read-model.mjs";
-import { LOOKUP_TOLD_MAX, REFUSALS_TOP, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUNS_WINDOW_PROJECTS_MAX, RUNS_WINDOW_VALUES_MAX, SWITCH_PREVIEW_QUEUES_MAX, SWITCH_SCAN_INCOMPLETE, UNREAD_HOSTS_MAX, WAITING_DISCOVERY_TTL_MS, WAITING_QUEUES_MAX, createFleetReader, fleetQueuesOn, readHosts, readQueueState, replyCodeOf, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
+import { LOOKUP_TOLD_MAX, REFUSALS_TOP, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUNS_WINDOW_PROJECTS_MAX, RUNS_WINDOW_VALUES_MAX, SWITCH_PREVIEW_QUEUES_MAX, SWITCH_SCAN_INCOMPLETE, UNREAD_HOSTS_MAX, WAITING_DISCOVERY_TTL_MS, WAITING_QUEUES_MAX, createFleetReader, fleetQueuesOn, listRunsMerged, readHeldJobs, readHosts, readQueueState, readSchedulers, replyCodeOf, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
 import { spawnSync } from "node:child_process";
 import { parseRunFilter, runMatches, RUN_FILTER_FIELDS, RUN_OUTCOME_VALUES, runVenueOf, triggerValueOf } from "../src/run-filter.mjs";
 import { OUTCOME_KEYS } from "../src/words.mjs";
@@ -874,6 +874,142 @@ test("createFleetReader: a registry read in part names every host it did not rea
   } finally {
     await reader.dispose();
   }
+});
+
+// --- a reader that writes nothing (issue #1036) -------------------------------------------------------------------------
+
+test("createFleetReader hands every queue it builds metaWrite: false when it is read-only, and true when it is not: the shared queue, a host's, a sandbox request queue (#1036)", async () => {
+  const logsDir = tempDir("pd-1036-meta-");
+  for (const [readOnly, metaWrite] of [[true, false], [false, true], [undefined, true]]) {
+    const handed = [];
+    const sandbox = [];
+    const mk = (_c, opts) => (handed.push(opts), quietQueue()(_c, opts));
+    const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") }, {
+      makeQueueFn: mk, parseConnectionFn: () => ({}), redisFn: () => emptyRedis(), readLiveHostsFn: async () => ({ hosts: [{ name: "hostb", routes: true }] }), discoverHostQueuesFn: async () => [], nowFn: () => AT,
+      makeSandboxPrepareQueueFn: (_c, opts) => (sandbox.push(opts), { name: "sandbox", async close() {} }), readSandboxPreparationFn: async () => ({ state: "unknown" }),
+      ...(readOnly === undefined ? {} : { readOnly }),
+    });
+    try {
+      await reader.snapshot();
+      await reader.sandboxPreparationStatus("hostb", "sb-1");
+      assert.deepEqual(handed, [{ metaWrite }, { name: "pi-jobs@hostb", metaWrite }], `readOnly ${readOnly}`);
+      assert.deepEqual(sandbox, [{ host: "hostb", metaWrite }], `readOnly ${readOnly}`);
+    } finally {
+      await reader.dispose();
+    }
+  }
+});
+
+test("createFleetReader on a real Valkey: a read-only reader reads two queues and writes no key, pauses and resumes one that has no meta key, and a reader that is not read-only still writes each queue's meta hash (#1036, VALKEY_TEST_URL)", { skip: live, timeout: 30_000 }, async () => {
+  const { makeQueue } = await import("@edgehero/pi-dispatch/queue");
+  const { makeRedisClient, parseConnection } = await import("@edgehero/pi-dispatch/connection");
+  const direct = makeRedisClient(URL_);
+  direct.on("error", () => {});
+  const logsDir = tempDir("pd-1036-pause-");
+  writeFileSync(join(logsDir, "triggers.json"), '{ "triggers": [] }\n');
+  // Every queue the reader names is one of this test's own (its name prefixed); what the reader hands is passed on.
+  const readerOn = (prefix, seams) => createFleetReader({ valkeyUrl: URL_, logsDir, triggersPath: join(logsDir, "triggers.json") }, {
+    makeQueueFn: (connection, opts) => {
+      const name = opts?.name ?? "pi-jobs";
+      const queue = makeQueue(connection, { ...opts, name: `${prefix}${name}` });
+      return new Proxy(queue, { get: (target, key) => (key === "name" ? name : typeof target[key] === "function" ? target[key].bind(target) : target[key]) });
+    },
+    readLiveHostsFn: async () => ({ hosts: [{ name: "mini1", routes: true }] }), discoverHostQueuesFn: async () => ({ names: [] }), nowFn: () => AT, ...seams,
+  });
+  const quiet = `pd1036r-${process.pid}-${Date.now()}-`;
+  const usual = `pd1036w-${process.pid}-${Date.now()}-`;
+  const keys = async (prefix) => (await direct.keys(`bull:${prefix}*`)).map((k) => k.slice(`bull:${prefix}`.length)).sort();
+  const reader = readerOn(quiet, { readOnly: true });
+  const writer = readerOn(usual, {});
+  try {
+    const first = await reader.snapshot();
+    assert.deepEqual(first.queueCounts.map((q) => [q.queue, q.paused]), [["pi-jobs", false], ["pi-jobs@mini1", false]]);
+    assert.deepEqual(await keys(quiet), [], "two queues built and read, and no key written");
+    // A pause of a queue with no meta key, through the queue the reader holds.
+    assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@mini1", paused: true }), { ok: true, paused: true, queue: "pi-jobs@mini1" });
+    assert.deepEqual([await direct.hgetall(`bull:${quiet}pi-jobs@mini1:meta`), await keys(quiet)], [{ paused: "1" }, ["pi-jobs@mini1:events", "pi-jobs@mini1:meta"]]);
+    // A job added while it is paused waits in the paused list, and the snapshot reads it there.
+    const producer = makeQueue(parseConnection(URL_), { name: `${quiet}pi-jobs@mini1`, metaWrite: false });
+    try {
+      await producer.add("t", { kind: "local" }, { jobId: "job-1036" });
+    } finally {
+      await producer.close();
+    }
+    const held = (await reader.snapshot()).queueCounts.find((q) => q.queue === "pi-jobs@mini1");
+    assert.deepEqual([held.paused, held.counts.paused, held.counts.waiting], [true, 1, 0]);
+    // The resume moves it back and takes the flag away; what is left in the hash is what the add's own script set.
+    assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@mini1", paused: false }), { ok: true, paused: false, queue: "pi-jobs@mini1" });
+    const running = (await reader.snapshot()).queueCounts.find((q) => q.queue === "pi-jobs@mini1");
+    assert.deepEqual([running.paused, running.counts.paused, running.counts.waiting, await direct.hgetall(`bull:${quiet}pi-jobs@mini1:meta`)], [false, 0, 1, { "opts.maxLenEvents": "10000" }]);
+    assert.equal(await direct.exists(`bull:${quiet}pi-jobs:meta`), 0, "the shared queue was read throughout and never written");
+    // The panel's kind of reader builds its queues as before: each writes its meta hash.
+    await writer.snapshot();
+    assert.deepEqual(await keys(usual), ["pi-jobs:meta", "pi-jobs@mini1:meta"]);
+  } finally {
+    await reader.dispose();
+    await writer.dispose();
+    const left = [...(await direct.keys(`bull:${quiet}*`)), ...(await direct.keys(`bull:${usual}*`))];
+    if (left.length > 0) await direct.del(...left);
+    direct.disconnect();
+  }
+});
+
+test("the one-shot readers write nothing when asked to: no meta write, no pruned member, and each default keeps pruning (#1036)", async () => {
+  const logsDir = tempDir("pd-1036-oneshot-");
+  // A Valkey client that records every command that writes, over a registry with one live host and one stale member,
+  // a held index with one stale member, and a run mirror index with one id whose record is gone.
+  const client = () => {
+    const wrote = [];
+    const live = { name: "hosta", routes: "true", beatAt: String(AT), jobs: "[]" };
+    return {
+      wrote,
+      on() {}, disconnect() {},
+      async smembers(key) { return key === "host:live" ? ["hosta", "gone"] : key === "wait:held" ? ["stale-held"] : []; },
+      async hgetall(key) { return key === "host:h:hosta" ? live : {}; },
+      async pttl() { return 60_000; },
+      async srem(key, member) { wrote.push(`srem ${key} ${member}`); return 1; },
+      async scan() { return ["0", []]; },
+      async zrevrangebyscore() { return ["stale-run"]; },
+      async mget(...keys) { return keys.flat().map(() => null); },
+      async eval(_script, _n, key) { wrote.push(`eval ${key}`); return 1; },
+      async get() { return null; },
+    };
+  };
+  const queues = (handed) => (_c, opts) => (handed.push(opts), quietQueue()(_c, opts));
+  const url = "redis://127.0.0.1:1";
+  for (const [readOnly, opts, pruned] of [[true, { name: "pi-jobs", metaWrite: false }, []], [false, { name: "pi-jobs" }, ["srem host:live gone"]], [undefined, { name: "pi-jobs" }, ["srem host:live gone"]]]) {
+    const flag = readOnly === undefined ? {} : { readOnly };
+    let redis = client();
+    let handed = [];
+    const state = await readQueueState({ url, makeQueueFn: queues(handed), parseConnectionFn: () => ({}), redisFn: () => redis, ...flag });
+    assert.deepEqual([state.unreachable, handed[0], handed[1], redis.wrote], [undefined, opts, { ...opts, name: "pi-jobs@hosta" }, pruned], `readQueueState, readOnly ${readOnly}`);
+    redis = client();
+    handed = [];
+    const schedulers = await readSchedulers({ url, makeQueueFn: queues(handed), parseConnectionFn: () => ({}), redisFn: () => redis, now: () => AT, ...flag });
+    assert.deepEqual([Array.isArray(schedulers), handed[0], handed[1], redis.wrote], [true, opts, { ...opts, name: "pi-jobs@hosta" }, pruned], `readSchedulers, readOnly ${readOnly}`);
+  }
+  for (const [prune, wrote] of [[false, []], [true, ["srem wait:held stale-held"]], [undefined, ["srem wait:held stale-held"]]]) {
+    const redis = client();
+    const held = await readHeldJobs({ url, redisFn: () => redis, ...(prune === undefined ? {} : { prune }) });
+    assert.deepEqual([held.rows, redis.wrote], [[], wrote], `readHeldJobs, prune ${prune}`);
+  }
+  for (const [prune, wrote] of [[false, []], [true, ["eval runs:index"]], [undefined, ["eval runs:index"]]]) {
+    const redis = client();
+    const runs = await listRunsMerged({ logsDir, url, redisFn: () => redis, ...(prune === undefined ? {} : { prune }) });
+    assert.deepEqual([runs.runs, redis.wrote], [[], wrote], `listRunsMerged, prune ${prune}`);
+  }
+  // readHosts hands the flag to the registry read; left out, the registry read's own default prunes.
+  for (const [prune, wrote] of [[false, []], [undefined, ["srem host:live gone"]]]) {
+    const redis = client();
+    const hosts = await readHosts({ url, redisFn: () => redis, ...(prune === undefined ? {} : { prune }) });
+    assert.deepEqual([hosts.hosts.map((h) => h.name), redis.wrote], [["hosta"], wrote], `readHosts, prune ${prune}`);
+  }
+});
+
+test("readSchedulers read-only still says a registry read in part, so dispatch_status keeps schedulersReadInPart (#1036)", async () => {
+  const redis = { on() {}, disconnect() {}, smembers: async () => ["hosta", "hostv"], hgetall: (key) => (key === "host:h:hostv" ? new Promise(() => {}) : Promise.resolve({ name: "hosta", routes: "true", beatAt: String(AT) })), pttl: async () => 60_000, srem: async () => assert.fail("a read-only read prunes nothing") };
+  const list = await readSchedulers({ url: "redis://127.0.0.1:1", makeQueueFn: quietQueue(), parseConnectionFn: () => ({}), redisFn: () => redis, now: () => AT, timeoutMs: 600, readOnly: true });
+  assert.deepEqual([Array.isArray(list), list.hostsReadInPart], [true, "1 of 2 host rows not read"]);
 });
 
 // --- the fleet reader: what it costs and what it writes ---------------------------------------------------------------
