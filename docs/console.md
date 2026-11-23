@@ -987,7 +987,10 @@ them." (which then stands in for "Nothing needs you."). On a deployment that has
 many steps stand before the first one ([First run](#first-run)), and when Valkey cannot be read, that it could not be
 and the next refresh tries again. The console keeps running while Valkey is down, restarts, stops answering or is refused,
 started that way or not, and within about 30 seconds of Valkey answering its pages read it again, with no restart of the
-console. While Valkey stays down, a page says "not known" for what it could not read and still shows what the
+console. A page is drawn within about 8 seconds whatever Valkey does: its load asks Valkey for 6 seconds in all, and
+what did not answer by then is said as in any outage, beside what the deployment's files hold (the Insights pages keep
+the bounds of their own reads and can take longer). While Valkey stays down, a page says "not known" for what it
+could not read and still shows what the
 deployment's files hold: a host page says the hosts could not be read rather than that the host has gone, Set up counts
 the steps it could not judge as not known, Triggers lists the file's rules without their next fires, Configuration shows
 its files read-only, and Parked and Sandboxes show no count of what they did not read. The same holds for one read

@@ -317,8 +317,9 @@ const SPLIT_HISTORY_ROWS = 20;
  * key naming an envelope that is not this host's, and an applied split with no row among those 20 (the history read
  * with the clock the spend is read at). Exported for its tests, as `splitCounts` is: the rest of the insights assembly
  * dials the real queue. `envFn` is the deployment's environment (`processEnv`).
+ * `timeoutMs` (issue #988) is the Valkey read's bound where a caller names one, `readAllocations`' own otherwise.
  */
-export async function assembleAllocationView(paths, counts, { fullPaths = false, envFn = processEnv, consoleView = false, role = "viewer", nowMs } = {}) {
+export async function assembleAllocationView(paths, counts, { fullPaths = false, envFn = processEnv, consoleView = false, role = "viewer", nowMs, timeoutMs } = {}) {
   if (!paths.envelopeFile) return { unset: true };
   const read = readEnvelope({ envelopeFile: paths.envelopeFile, projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, maxCostMicros: envelopeJobCap({ settingsFile: paths.settingsFile, env: envFn() }) });
   if (!read.envelope) {
@@ -329,7 +330,7 @@ export async function assembleAllocationView(paths, counts, { fullPaths = false,
   const e = read.envelope;
   const head = { window: e.window, totalMicros: e.totalMicros, floors: { ...e.floors }, delegation: e.delegation?.enabled === true, ...(consoleView ? { envelope: e, digest: read.digest, file: fullPaths && role === "operator" ? paths.envelopeFile : basename(paths.envelopeFile) } : {}) };
   const at = nowMs === undefined ? allocNow() : new Date(nowMs);
-  const alloc = await readAllocations({ url: paths.valkeyUrl, envelope: e, projects: read.projects, now: at, withReasons: consoleView && role === "operator", limit: SPLIT_HISTORY_ROWS, ...allocRedis() });
+  const alloc = await readAllocations({ url: paths.valkeyUrl, envelope: e, projects: read.projects, now: at, withReasons: consoleView && role === "operator", limit: SPLIT_HISTORY_ROWS, ...(timeoutMs === undefined ? {} : { timeoutMs }), ...allocRedis() });
   if (alloc?.unreachable) return { ...head, unreachable: String(alloc.unreachable) };
   const st = alloc.state ?? null;
   return {

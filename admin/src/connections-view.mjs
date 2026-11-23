@@ -78,8 +78,14 @@ export function connectionEnvValue(key, raw, type = CONNECTION_ENV_TYPES[key]) {
   return raw === "" ? "not set" : "set";
 }
 
+/**
+ * How long each publication read of this view may take: the readers' own bounds, named here because a page hands a
+ * reader its bound or what is left of the page's deadline, whichever is sooner (`readConnections`' `within`).
+ */
+export const PUBLICATION_READ_MS = Object.freeze({ endpointStatus: 2_500, slots: 2_500, receivers: 2_000, pollers: 2_000, hookRuns: 2_000 });
+
 /** Only PTTL, never lease holders or writes. Checking all legal indexes also counts a slot held before a cap shrank. */
-export async function readEndpointSlots(redis, endpoints, { timeoutMs = 2500 } = {}) {
+export async function readEndpointSlots(redis, endpoints, { timeoutMs = PUBLICATION_READ_MS.slots } = {}) {
   if (!endpoints.length) return [];
   let timer;
   try {
@@ -183,8 +189,16 @@ function pollerExpectedOf(env) {
   try { return pollerExpected(env); } catch { return null; }
 }
 
-/** Injected sources make every exceptional state independent; no metadata read changes a capability or worker env. */
-export async function readConnections({ deploymentDir, env = {}, paths = {}, snapshot = null, fs = nodeFs, now = Date.now(), redis = null, redisFn = makeRedisClient, reads = {}, publications = true, platform = process.platform, uid = process.geteuid?.() } = {}) {
+/**
+ * Injected sources make every exceptional state independent; no metadata read changes a capability or worker env.
+ *
+ * `within` (issue #988) is a page's deadline: `(ownMs) => ms`, a read's own bound or what is left of the deadline when
+ * that is sooner. Each publication read takes its bound through it, so on a Valkey that does not answer they end
+ * together at the deadline, each as the unknown it already is, and the view is still drawn from the deployment's files.
+ * A caller with no deadline passes none, and each reader is then called as before, with no bound named.
+ */
+export async function readConnections({ deploymentDir, env = {}, paths = {}, snapshot = null, fs = nodeFs, now = Date.now(), redis = null, redisFn = makeRedisClient, reads = {}, publications = true, platform = process.platform, uid = process.geteuid?.(), within = null } = {}) {
+  const bound = (ownMs) => (typeof within === "function" ? { timeoutMs: within(ownMs) } : {});
   let file = {};
   let metadata = null;
   try {
@@ -255,7 +269,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   try {
     if (publications && (redis || typeof paths.valkeyUrl === "string" || reads.endpointStatus)) {
       try {
-        endpointStatus = await (reads.endpointStatus ?? readEndpointStatus)(publicationClient(reads.endpointStatus), { hosts: [...(snapshot?.hostBudgets ?? []), ...(snapshot?.hosts ?? [])], now: () => now });
+        endpointStatus = await (reads.endpointStatus ?? readEndpointStatus)(publicationClient(reads.endpointStatus), { hosts: [...(snapshot?.hostBudgets ?? []), ...(snapshot?.hosts ?? [])], now: () => now, ...bound(PUBLICATION_READ_MS.endpointStatus) });
       } catch { /* Publication failure is unknown, never zero occupancy. */ }
     }
     const endpointHosts = (id) => (endpointStatus.hosts ?? []).flatMap((host) => (host.endpoints ?? []).filter((ep) => ep.id === id).map((ep) => ({ name: host.name, at: host.at, ageMs: host.ageMs, slots: ep.slots, used: ep.used, fleet: ep.fleet })));
@@ -276,25 +290,25 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
     const fleetEndpoints = shownEndpoints.filter((ep) => ep.counting === "fleet");
     if (publications && fleetEndpoints.length) {
       try {
-        const counted = await (reads.slots ?? readEndpointSlots)(publicationClient(reads.slots), fleetEndpoints);
+        const counted = await (reads.slots ?? readEndpointSlots)(publicationClient(reads.slots), fleetEndpoints, bound(PUBLICATION_READ_MS.slots));
         for (const [index, endpoint] of fleetEndpoints.entries()) slots.set(endpoint.id, Number.isInteger(counted?.[index]) ? counted[index] : null);
       } catch { /* Fleet occupancy is unknown; declarations and host occupancy remain readable. */ }
     }
     if (publications && (redis || owned || typeof paths.valkeyUrl === "string" || reads.receivers)) {
       try {
-        receivers = await (reads.receivers ?? readReceiverStatus)(publicationClient(reads.receivers), { names: (snapshot?.hostBudgets ?? []).map((h) => h.name), now: () => now });
+        receivers = await (reads.receivers ?? readReceiverStatus)(publicationClient(reads.receivers), { names: (snapshot?.hostBudgets ?? []).map((h) => h.name), now: () => now, ...bound(PUBLICATION_READ_MS.receivers) });
       } catch { /* Unknown is not an empty, healthy receiver population. */ }
     }
     if (publications && (redis || owned || typeof paths.valkeyUrl === "string" || reads.pollers)) {
       try {
-        const read = await (reads.pollers ?? readPollerStatus)(publicationClient(reads.pollers), { now: () => now });
+        const read = await (reads.pollers ?? readPollerStatus)(publicationClient(reads.pollers), { now: () => now, ...bound(PUBLICATION_READ_MS.pollers) });
         if (read && typeof read === "object") pollers = read;
       } catch { pollers = { hosts: [], complete: false, more: 0 }; }
     }
     if (publications && (redis || owned || typeof paths.valkeyUrl === "string" || reads.hookRuns)) {
       try {
         const names = (snapshot?.hostBudgets ?? []).map((host) => host.name);
-        hookHistory = hookRunsView(await (reads.hookRuns ?? readHookRuns)(publicationClient(reads.hookRuns), { names }));
+        hookHistory = hookRunsView(await (reads.hookRuns ?? readHookRuns)(publicationClient(reads.hookRuns), { names, ...bound(PUBLICATION_READ_MS.hookRuns) }));
       } catch { /* Missing evidence stays unknown; a hook's configuration is independent of its past runs. */ }
     }
   } finally {

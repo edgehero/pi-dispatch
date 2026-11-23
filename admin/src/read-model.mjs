@@ -5175,18 +5175,21 @@ export function createFleetReader(
   let wideRead = null;
   // The last pending-answer scan for the parked rows (issue #647), `{ at, key, got }`, reused for DOLLAR_RECORDS_TTL_MS.
   let parkedPending = null;
+  // The wide window from this host's records (`local`, the index's answer) and the mirror's (`readMirroredRuns`').
+  const wideOf = (at, local, { runs: fromMirror, degraded }) => {
+    const mirrored = Array.isArray(fromMirror) ? fromMirror.map(shownRecord) : fromMirror;
+    const runs = mergeRuns(Array.isArray(local?.records) ? local.records : [], mirrored, { limit: WIDE_RUNS });
+    // Either side unread makes the window partial: a parked run on that side would be missing without a word.
+    const partial = local?.unreachable ?? (typeof degraded === "string" && degraded.startsWith("unreachable") ? "the run mirror could not be read" : null);
+    return { at, runs, mirror: degraded, partial };
+  };
   const wideRuns = async () => {
     const at = nowFn();
     if (wide && at >= wide.at && at - wide.at < DOLLAR_RECORDS_TTL_MS) return wide;
     if (wideRead !== null) return wideRead;
     const read = (async () => {
       const local = localIndex.records();
-      const { runs: fromMirror, degraded } = await readMirroredRuns(redis, { limit: WIDE_RUNS, prune: false, timeoutMs: FLEET_READ_TIMEOUT_MS });
-      const mirrored = Array.isArray(fromMirror) ? fromMirror.map(shownRecord) : fromMirror;
-      const runs = mergeRuns(Array.isArray(local?.records) ? local.records : [], mirrored, { limit: WIDE_RUNS });
-      // Either side unread makes the window partial: a parked run on that side would be missing without a word.
-      const partial = local?.unreachable ?? (typeof degraded === "string" && degraded.startsWith("unreachable") ? "the run mirror could not be read" : null);
-      wide = { at, runs, mirror: degraded, partial };
+      wide = wideOf(at, local, await readMirroredRuns(redis, { limit: WIDE_RUNS, prune: false, timeoutMs: FLEET_READ_TIMEOUT_MS }));
       return wide;
     })();
     // Cleared in the first reaction to the read, on either outcome, before any waiting caller resumes. What the callers
@@ -5860,9 +5863,17 @@ export function createFleetReader(
      * WHAT THE WINDOW CANNOT SEE is `parkedCount`'s: the newest WIDE_RUNS runs, so in a deployment that ran more than
      * that in 24 hours the window ends inside the day, and `floor` says so.
      */
-    async runsWindow() {
+    async runsWindow({ timeoutMs = null } = {}) {
       try {
-        return runsWindowOf(await wideRuns(), nowFn());
+        const whole = wideRuns();
+        if (timeoutMs === null) return runsWindowOf(await whole, nowFn());
+        // Issue #988: a caller with a bound of its own (a page under its deadline) waits that long and no longer. The
+        // read is the shared one and keeps its bound, so its answer is still kept for the next caller; this caller is
+        // answered as the read itself answers when the mirror gave nothing in time, from this host's records alone,
+        // in a window that says it is partial. Never an answer made up by the caller, and never kept.
+        const late = Symbol("late");
+        const got = await withTimeout(whole, timeoutMs, late);
+        return runsWindowOf(got === late ? wideOf(nowFn(), localIndex.records(), { runs: [], degraded: "unreachable (no answer in time)" }) : got, nowFn());
       } catch {
         return null;
       }
@@ -5902,8 +5913,10 @@ export function createFleetReader(
     async runsPage(opts = {}) {
       return readRunsPage(redis, { ...opts, logsDir: paths.logsDir, fs, now: nowFn, localIndex });
     },
-    async runById(jobId, { historyHost = null } = {}) {
-      const local = await readRunById(redis, { logsDir: paths.logsDir, jobId, fs });
+    // `timeoutMs` (issue #988) is the mirror read's bound where a caller names one (a page hands it what is left of its
+    // deadline), `readRunById`'s own otherwise.
+    async runById(jobId, { historyHost = null, timeoutMs } = {}) {
+      const local = await readRunById(redis, { logsDir: paths.logsDir, jobId, fs, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
       if (local.record || local.invalid || !historyHost) return local;
       await fleetQueues();
       if (!lastHosts.some((h) => h.name === historyHost)) return { unreadable: "the host holding this run is not available" };
@@ -7120,6 +7133,11 @@ export function makeLocalRunIndex({ logsDir, fs = nodeFs, now = () => Date.now()
 
 /** The most records one `readRunsPage` examines, both sources together, before it answers with what it has. */
 export const RUNS_PAGE_EXAMINE_MAX = 2000;
+/**
+ * How long `readRunsPage` and `readRunById` wait for the fleet's mirror where a caller names no bound. Exported
+ * (issue #988) for a page that hands the reader this or what is left of its deadline, whichever is sooner.
+ */
+export const RUN_MIRROR_READ_MS = 2_500;
 const RUNS_PAGE_BATCH = 200;
 
 /**
@@ -7148,7 +7166,7 @@ const RUNS_PAGE_BATCH = 200;
  * by the worker's `mergeRuns`, so a retry on another host shows the later attempt exactly as the TUI does. Named
  * residual: a job whose two attempts straddle a page boundary can show its earlier attempt on the later page.
  */
-export async function readRunsPage(redis, { logsDir, before = null, limit = 50, filter = null, match = null, fs = nodeFs, now = () => Date.now(), timeoutMs = 2500, localIndex = null, examineMax = RUNS_PAGE_EXAMINE_MAX } = {}) {
+export async function readRunsPage(redis, { logsDir, before = null, limit = 50, filter = null, match = null, fs = nodeFs, now = () => Date.now(), timeoutMs = RUN_MIRROR_READ_MS, localIndex = null, examineMax = RUNS_PAGE_EXAMINE_MAX } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) return { refusal: "limit must be a whole number from 1 to 100" };
   if (before !== null && before !== undefined && !(Number.isSafeInteger(before) && before >= 0)) return { refusal: "before must be a non-negative whole number of milliseconds" };
   const bound = before === null || before === undefined ? null : before;
@@ -7242,7 +7260,7 @@ export const RUN_RECORD_UNREAD = "the run's record could not be read";
  * record (never shown), or no client to ask it with. A record either side can read is the answer whatever the other
  * said.
  */
-export async function readRunById(redis, { logsDir, jobId, fs = nodeFs, timeoutMs = 2500 } = {}) {
+export async function readRunById(redis, { logsDir, jobId, fs = nodeFs, timeoutMs = RUN_MIRROR_READ_MS } = {}) {
   if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return { invalid: "a run id is letters, digits and . _ : -, at most 200 characters" };
   const local = makeReadRecord({ logsDir, fs })(jobId);
   if (local !== null && local !== UNREADABLE_RECORD) return { record: shownRecord(local), source: "local" };
