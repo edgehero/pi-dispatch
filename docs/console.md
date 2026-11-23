@@ -2517,7 +2517,7 @@ fields are only ever added. Each running job in `active` carries a `progress` ob
 tool's name (never a phase name or note), or null when it has none, and `steer` (whether its trigger arms steering)
 with `inbox`, that job's messages as `{id, mode, source, state, at, bytes}` and never their text (null when the job is
 not steer-armed or its inbox could not be read). A part the console could not read is marked with a boolean (`fleetDegraded`,
-`parkedUnknown`, `activeUnknown`, `unreachable`), never with the error, and when Valkey cannot be read at all the answer is `503` with
+`parkedUnknown`, `activeUnknown`, `schedulersReadInPart`, `unreachable`), never with the error, and when Valkey cannot be read at all the answer is `503` with
 a short `error` sentence.
 
 Sign in once with a token and keep the session in a cookie file. Never put the token on a command line, where the

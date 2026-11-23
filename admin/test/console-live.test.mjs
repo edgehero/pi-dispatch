@@ -1265,6 +1265,15 @@ test("stateOf: an active list a queue did not answer for is activeUnknown, so an
   assert.deepEqual([lost.activeUnknown, lost.active], [true, []]);
 });
 
+test("stateOf: a schedule list that is not whole is schedulersReadInPart, a boolean for both roles, and false for a snapshot without the mark (#986)", () => {
+  assert.equal(stateOf(SNAPSHOT, "viewer", { now: T0 }).schedulersReadInPart, false, "a snapshot from before the mark, or a read every queue answered");
+  for (const role of ["operator", "viewer"]) {
+    const short = stateOf({ ...SNAPSHOT, schedulers: [], schedulersReadInPart: true }, role, { now: T0 });
+    assert.deepEqual([short.schedulersReadInPart, short.schedulers], [true, []]);
+    assert.equal(stateOf({ ...SNAPSHOT, schedulersReadInPart: false }, role, { now: T0 }).schedulersReadInPart, false);
+  }
+});
+
 test("a degraded first draw is told unread before its panels, once; a good render then says fresh, and a later failure stale", async () => {
   let readFailed = true;
   const h = hubOn({ load: async () => ({ readFailed }), pagePanels: async (pageName, ctx) => [{ id: "p-a", html: ctx.data.readFailed ? "could not be read" : "good" }, { id: "p-b", html: ctx.data.readFailed ? `not known ${ctx.data.n ?? ""}` : "good" }] });
@@ -1354,7 +1363,7 @@ test("stateOf: the day's refusals beside its failures, each listed reason held t
 test("stateOf: the named fields only, numbers as numbers, no error text, no host path, and failedReason for an operator alone", () => {
   const op = stateOf(SNAPSHOT, "operator", { now: T0 });
   const viewer = stateOf(SNAPSHOT, "viewer", { now: T0 });
-  assert.deepEqual(Object.keys(op).sort(), ["active", "activeUnknown", "at", "budget", "counts", "dollars", "failed", "failures24h", "failures24hFloor", "fleetDegraded", "hosts", "parked", "parkedUnknown", "paused", "queues", "refusals24h", "role", "schedulerStallMax", "schedulers", "version", "workers"]);
+  assert.deepEqual(Object.keys(op).sort(), ["active", "activeUnknown", "at", "budget", "counts", "dollars", "failed", "failures24h", "failures24hFloor", "fleetDegraded", "hosts", "parked", "parkedUnknown", "paused", "queues", "refusals24h", "role", "schedulerStallMax", "schedulers", "schedulersReadInPart", "version", "workers"]);
   assert.equal(op.version, 1, "the scripts' interface carries its version");
   assert.deepEqual(op.paused, { state: false, partial: true });
   assert.deepEqual(op.counts, { waiting: 3, active: 1, paused: 0, delayed: 2, failed: 4 });

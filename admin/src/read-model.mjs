@@ -5434,8 +5434,10 @@ export function createFleetReader(
         redis.get(monthKey()),
         redis.get(tokenDayKey()), // issue #25 daily token spend (budget:t:YYYY-MM-DD)
         // The shared queue's failure is UNCAUGHT (the panel must not draw a scheduler list it could not read), a host
-        // queue's is caught: one unreachable host degrades one host's triggers, never the view.
-        Promise.all(queues.map((q, i) => (i === 0 ? q.getJobSchedulers(0, -1, true) : q.getJobSchedulers(0, -1, true).catch(() => [])))),
+        // queue's is caught: one unreachable host degrades one host's triggers, never the view. Caught to null, never
+        // `[]` (issue #986): an empty list there said that host has no schedules, which nobody read. The snapshot says
+        // so in `schedulersReadInPart`.
+        Promise.all(queues.map((q, i) => (i === 0 ? q.getJobSchedulers(0, -1, true) : q.getJobSchedulers(0, -1, true).catch(() => null)))),
         // The active jobs, `activePerQueue` per queue (issue #641): one for the TUI, the console's bound for the console.
         // A queue whose read failed answers null, never `[]` (issue #962): an empty list there would say that queue runs
         // nothing, which nobody read. The snapshot says so in `activeUnreachable`.
@@ -5462,7 +5464,7 @@ export function createFleetReader(
       // disagreement out so the header can name it rather than rounding it to one side.
       const pausedState = pausedStates.every(Boolean);
       const pausedPartial = !pausedState && pausedStates.some(Boolean);
-      const schedulerList = schedulerLists.flat();
+      const schedulerList = schedulerLists.flatMap((list) => (Array.isArray(list) ? list : []));
       // ONLY the id, the queue and the start off each active Job -- a Job's `.data` holds issue title/body/username
       // (PII), so it never enters the snapshot (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT). The host is read off
       // the registry rows this tick already holds (a host publishes the ids it runs), never off the Job.
@@ -5677,6 +5679,11 @@ export function createFleetReader(
           const project = typeof trigger?.folder === "string" ? projectOf({ kind: "local", folder: trigger.folder }, projectsView?.projects ?? []) : null;
           return { ...scheduler, project };
         }),
+        // Issue #986: true when `schedulers` is not whole, so it holds only the schedules that were read and one missing
+        // from it is "not known", never "not scheduled" (as `activeUnreachable` says of `active`): a host queue's read
+        // failed, or the registry was never read, since the hosts' own queues are named by it and until it is read once
+        // only the shared queue is asked. False on a read that every queue answered.
+        schedulersReadInPart: schedulerLists.some((list) => !Array.isArray(list)) || (fleetDegraded !== null && lastHostsAt === null),
         // Rebuilt into the `{ id -> count }` shape the drill-in and the LIST badge already index by, so neither reader
         // changes.
         schedulerStalls: Object.fromEntries(cronIds.map((id, i) => [id, stallCounts === null ? null : decimalOf(stallCounts?.[i] ?? "0")])),
