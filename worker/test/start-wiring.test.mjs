@@ -3231,11 +3231,13 @@ test("the default arms the doctor runs daily on the worker's own CLI and registe
 	assert.equal(second.logs.find((l) => l.event === "worker_started").doctorIntervalHours, 0);
 });
 
-test("issue #1040: the doctor runs' afterKill removes the killed child's CPU-reserve helper with one bounded rm -f through the reserve's runner, only where this worker keeps a helper venue; the updates children get none", { skip }, async () => {
+test("issue #1040: the doctor runs' afterKill removes the killed child's CPU-reserve helper with one bounded rm -f through the reserve's runner, where the local venue is in use; the updates children get none", { skip }, async () => {
 	const constructions = [];
 	const runners = [];
 	const docker = [];
-	let states = [{ venue: "local", method: "helper", status: "held" }];
+	// Issue #1049: the worker's own reserve has no state yet (its facts read has not answered), which says nothing of
+	// what the child read: the rm runs all the same.
+	const states = [];
 	let answer = { code: 0, stdout: "" };
 	const reserveArgs = [];
 	await runStart({
@@ -3262,11 +3264,64 @@ test("issue #1040: the doctor runs' afterKill removes the killed child's CPU-res
 	answer = { code: null, stdout: "", stderr: "secret words", error: { timedOut: true } };
 	await constructions[0].afterKill(4243, say);
 	assert.deepEqual(said, [["doctor_helper_not_removed", { pid: 4243, reason: "timeout" }]]);
-	// No helper venue here: no helper was made, so nothing is asked.
+});
+
+test("issue #1049: an unnamed worker's afterKill removes the name its doctor child read under, the empty name's hash; it skips only where its own read of the local venue says no helper runs, or where local is not in use", { skip }, async () => {
+	const constructions = [];
+	const docker = [];
+	let states = [];
+	await runStart({
+		makeDoctorSpawner: (args) => (constructions.push(args), { start() {}, runOnce: async () => {}, close: async () => {} }),
+		makeCpuReserve: () => ({ sync: async () => true, states: () => states }),
+		execDockerBounded: async (args, opts) => (docker.push({ args, opts }), { code: 0, stdout: "" }),
+	});
+	const said = [];
+	// Doctor reads under `declaredWorkerName ?? ""`: with no PI_WORKER_NAME that is sha256("") = e3b0c442, never the
+	// hostname the worker names itself after.
+	await constructions[0].afterKill(4245, (event, data) => said.push([event, data]));
+	assert.deepEqual(docker.map((d) => d.args), [["rm", "-f", "pi-dispatch-cpu-reserve-doctor-e3b0c442-4245"]]);
+	assert.deepEqual(said, []);
+	// The worker's own read of `local` says a helper runs there: removed, as with no read yet.
 	docker.length = 0;
-	states = [{ venue: "podman", method: "user-systemd", status: "held" }];
-	await constructions[0].afterKill(4244, say);
-	assert.deepEqual(docker, []);
+	states = [{ venue: "podman", method: "user-systemd", status: "held" }, { venue: "local", method: "helper", status: "held" }];
+	await constructions[0].afterKill(4247, () => {});
+	assert.deepEqual(docker.map((d) => d.args), [["rm", "-f", "pi-dispatch-cpu-reserve-doctor-e3b0c442-4247"]]);
+	// It says another method (systemd's driver; rootless, for which `reservePlan` names none): the child reads the same daemon, so no
+	// helper was made, and nothing is asked.
+	for (const local of [{ venue: "local", method: "system-systemd", status: "held" }, { venue: "local", method: null, status: "unmanaged" }]) {
+		docker.length = 0;
+		states = [{ venue: "podman", method: "helper", status: "held" }, local];
+		await constructions[0].afterKill(4248, () => {});
+		assert.deepEqual(docker, [], `local ${local.method}`);
+	}
+	// `local` in use beside another venue, named after it, with no read of its own yet: removed.
+	const mixed = [];
+	const mixedDocker = [];
+	await runStart({
+		env: { PI_BACKENDS: "podman,local" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(),
+		readPodmanInfo: PODMAN_INFO(), jobUserIdentity: PODMAN_ID,
+		makeDoctorSpawner: (args) => (mixed.push(args), { start() {}, runOnce: async () => {}, close: async () => {} }),
+		makeCpuReserve: () => ({ sync: async () => true, states: () => [] }),
+		execDockerBounded: async (args, opts) => (mixedDocker.push({ args, opts }), { code: 0, stdout: "" }),
+	});
+	await mixed[0].afterKill(4249, () => {});
+	assert.deepEqual(mixedDocker.map((d) => d.args), [["rm", "-f", "pi-dispatch-cpu-reserve-doctor-e3b0c442-4249"]]);
+	// Podman only: the child reads no docker reserve, so no helper was made and no docker CLI is asked.
+	const podmanOnly = [];
+	const podmanDocker = [];
+	await runStart({
+		env: { PI_BACKENDS: "podman", PI_BACKEND_FLOOR: "isolation=enforced,mountSet=enforced,credentialTransit=enforced", PI_JOB_IMAGE: "pi-job:ci" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(),
+		jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, readPodmanInfo: PODMAN_INFO(),
+		makePodmanReaper: () => async () => ({ reaped: true }),
+		bootImage: { ok: true, image: "pi-job:ci", imageDigest: "sha256:pod", piVersion: "0.80.7", capabilities: ["anyUid"] },
+		makeDoctorSpawner: (args) => (podmanOnly.push(args), { start() {}, runOnce: async () => {}, close: async () => {} }),
+		makeCpuReserve: () => ({ sync: async () => true, states: () => [{ venue: "local", method: "helper", status: "held" }] }),
+		execDockerBounded: async (args, opts) => (podmanDocker.push({ args, opts }), { code: 0, stdout: "" }),
+	});
+	await podmanOnly[0].afterKill(4246, () => {});
+	assert.deepEqual(podmanDocker, []);
 });
 
 test("the sweep re-runs the SAME closures boot already built, so one config read serves both", { skip }, async () => {

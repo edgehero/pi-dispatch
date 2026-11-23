@@ -99,26 +99,29 @@ const VALKEY_STOP_ARGS = ["stop", "pi-dispatch-valkey"];
 const VALKEY_RM_ARGS = ["rm", "pi-dispatch-valkey"];
 
 // Issue #1021: the bounds of the docker steps a daemon that stops answering held `up` at, each for as long as it stayed
-// silent. `DOCKER_STEP_TIMEOUT_MS`, thirty seconds, for every short daemon call before a Valkey starts:
-// `docker version`, the job image's presence read on each engine a venue pulls it into (`docker image inspect`,
-// `podman image exists`, of the image the worker runs, the default or PI_JOB_IMAGE's) and the openshell venues' image
-// capability read on the gateway's engine (both since issue #1040), the ownership reads (`query`: the container
-// inspect, `ps -a --filter volume=`, the volume inspect) and the Valkey owner check's exec, stop (its own 10 s grace
-// inside it) and rm. An image read that overran is said with the engine named as not answering and the command. It
-// stops `up` there, nothing started, where that engine's gate refusal would (the docker venue's read; the podman
-// venue's with no docker venue beside it), and an openshell venue's read where openshell is the only venue or another
-// venue runs on the engine that did not answer, whose every later step asks it again. Otherwise only the venue that
-// read it is skipped, as after its refused gate, and an openshell venue skipped so makes `up` exit non-zero at the end.
+// silent. `DOCKER_STEP_TIMEOUT_MS`, thirty seconds, for these daemon calls before a Valkey starts (not for every one of
+// them: the unbounded ones are listed below): `docker version`, the job image's presence read on each engine a venue
+// pulls it into (`docker image inspect`, `podman image exists`, of the image the worker runs, the default or
+// PI_JOB_IMAGE's) and the openshell venues' image capability read on the gateway's engine (both since issue #1040), the
+// ownership reads (`query`: the container inspect, `ps -a --filter volume=`, the volume inspect) and the Valkey owner
+// check's exec, stop (its own 10 s grace inside it) and rm. An image read that overran is said with the engine named as
+// not answering and the command. It stops `up` there, nothing started, where that engine's gate refusal would (the
+// docker venue's read; the podman venue's with no docker venue beside it), and an openshell venue's read where
+// openshell is the only venue or another venue runs on the engine that did not answer, whose every later step asks it
+// again. Otherwise only the venue that read it is skipped, as after its refused gate, and an openshell venue skipped so
+// makes `up` exit non-zero at the end.
 // `OWNER_CHECK_RUN_TIMEOUT_MS`, two minutes, for the owner check's `docker run`, which creates and starts a Valkey, and
 // on a host that has not got `VALKEY_IMAGE` pulls it first: nothing else in `up` pulls that image, so that pull falls
 // inside this bound (a few megabytes; not measured). The run's refusal names the `docker pull` that takes it out. The
 // marker's wait is `OWNER_CHECK_WAIT_MS` of the clock in all. The openshell gate's own reads (its engine's `version`
-// among them) have that gate's 15 s read bound instead. Unbounded still: the job image's pull and tag on either engine,
-// compose, the Valkey volume's create, and the Valkey and egress proxy containers' runs, stops and removals, all long
-// by nature or streamed for the operator to watch; the egress step's own reads (the proxy's inspect, the network
-// inspect), which come after the Valkey step; and on podman every command of the stack step (its `ps` and `inspect`
-// reads, systemctl and loginctl), which runs after a gate saw podman answer (`podmanGate`'s `podman info`, or the
-// openshell gate's bounded `podman version`) and after the bounded image read.
+// among them) have that gate's 15 s read bound instead, and `podmanGate`'s `podman info` its reader's own 15 s
+// (`PODMAN_INFO_TIMEOUT_MS`). Unbounded still: the job image's pull and tag on either engine, compose, the Valkey
+// volume's create, and the Valkey and egress proxy containers' runs, stops and removals, all long by nature or streamed
+// for the operator to watch; the egress step's own reads (the proxy's inspect, the network inspect), which come after
+// the Valkey step; and on podman every command of the stack step (its `ps` and `inspect` reads, systemctl and
+// loginctl), which runs after a gate saw podman answer (`podmanGate`'s `podman info`, or the openshell gate's bounded
+// `podman version`) and after the bounded image read. An engine that stops answering at one of these holds `up` there
+// with nothing more said than what came before it (issue #1049).
 const OWNER_CHECK_RUN_TIMEOUT_MS = 120_000;
 const DOCKER_STEP_TIMEOUT_MS = 30_000;
 const OWNER_CHECK_WAIT_MS = 20_000;
