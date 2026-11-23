@@ -32,7 +32,7 @@ import { RUN_FILTER_FIELDS, runVenueOf } from "../../run-filter.mjs";
 import { OUTCOME_KEYS, OUTCOME_KEY_WORDS, VENUE_LABEL, rowNumber } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
-import { RUN_ID_RE, capMicrosOf, costText, count, moneyHtml, msOf, outcomeCell, runCost, utcText } from "./common.mjs";
+import { RUN_ID_RE, capMicrosOf, costText, count, mirrorUnread as mirrorWordUnread, moneyHtml, msOf, outcomeCell, runCost, utcText } from "./common.mjs";
 
 // ---- the sentences ---------------------------------------------------------------------------------------------------
 
@@ -383,7 +383,7 @@ export function runsTableModel(view) {
   const foot = [];
   // An empty page is "No run matches." only where every side answered: with the mirror or this host's files unread,
   // the sentence for the unread side says what is known instead.
-  const mirrorUnread = typeof page.mirror === "string" && page.mirror !== "ok" && page.mirror !== "off";
+  const mirrorUnread = mirrorWordUnread(page.mirror);
   // With this host's files unread the reader answers no run and a mirror it never asked: its `mirror` word is not a fact.
   const hostOnly = runs.length === 0 && Boolean(page.unreachable);
   if (runs.length === 0) {

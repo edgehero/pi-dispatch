@@ -47,7 +47,7 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
     // it showed. The reader answers `unreachable` for a read that timed out, one its client refused and one Valkey
     // answered with an error alike, and does not say which.
     if (kept?.unreachable) throw Object.assign(new Error("sandbox inventory unreadable"), { valkeyNotSent: true });
-    return { hosts: kept?.hosts ?? [], sessions: open?.sessions ?? [], sessionsUnavailable: Boolean(open?.unreachable), sessionsMore: open?.more ?? 0, sessionsUnreadable: open?.unreadable ?? 0, notices: open?.notices ?? [], noticesUnavailable: Boolean(open?.noticesUnavailable), more: kept?.more ?? 0 };
+    return { hosts: kept?.hosts ?? [], sessions: open?.sessions ?? [], sessionsUnavailable: Boolean(open?.unreachable), sessionsMore: open?.more ?? 0, sessionsUnreadable: open?.unreadable ?? 0, notices: open?.notices ?? [], noticesUnavailable: Boolean(open?.noticesUnavailable), noticesUnread: Boolean(open?.noticesUnread), noticesMore: Boolean(open?.noticesMore), noticesUnreadable: Boolean(open?.noticesUnreadable), more: kept?.more ?? 0 };
   }
   function configuration() {
     let triggersText;
@@ -91,7 +91,10 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
       const kept = inventoryRead.status === "fulfilled" ? inventoryRead.value : null;
       const open = sessionsRead.status === "fulfilled" ? sessionsRead.value : null;
       const shell = open?.sessions?.find((s) => s.host === record.host && s.id === record.jobId) ?? null;
-      const observed = { shell, sessionsUnknown: !open || Boolean(open.unreachable || open.more || open.unreadable) };
+      // `sessionsUnknown`: this run's shell cannot be told absent from the list, for any of three reasons. Which one is
+      // said beside it (issue #988): the read did not answer (`sessionsUnread`), the list is cut at its cap
+      // (`sessionsMore`), or a registration in it does not parse (`sessionsUnreadable`). Only the first is unread.
+      const observed = { shell, sessionsUnknown: !open || Boolean(open.unreachable || open.more || open.unreadable), sessionsUnread: !open || Boolean(open.unreachable), sessionsMore: open?.more ?? 0, sessionsUnreadable: open?.unreadable ?? 0 };
       const host = kept?.hosts?.find((h) => h.name === record.host);
       if (kept?.unreachable || !host || host.stale || host.unreadable || !Array.isArray(host.rows)) return { ...observed, unknown: true };
       const row = host.rows.find((r) => (r.id ?? r.jobId) === record.jobId);

@@ -38,7 +38,7 @@ import { ARTIFACT_DROP_REASONS, ARTIFACT_DROP_TEXT, artifactSizeText } from "@ed
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { STEER_MAX_MESSAGES, STEER_TOTAL_MAX_BYTES } from "@edgehero/pi-dispatch/steer-inbox";
-import { plural, SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread, registryReadInPart } from "./common.mjs";
+import { plural, SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread, registryReadInPart, SHELLS_SHOWN, shellsShort } from "./common.mjs";
 
 const titled = (title, body) => ui.card({ title, body });
 const facts = (pairs) => ui.facts(pairs.filter(([, value]) => value !== null && value !== undefined));
@@ -631,6 +631,21 @@ const FORK_REFUSAL_WORDS = Object.freeze({
 const forkRefusalWords = (refusal) => FORK_REFUSAL_WORDS[refusal] ?? refusal;
 
 /** One decision for the row and its action. Tracking loss is unknown, never evidence that a shell or workspace ended. */
+/**
+ * Under the Workspace row, why an absent watcher is not inferred (issue #988, `shellsShort`): the shells or the
+ * browser sessions were not read, or the list is cut at its cap, or a registration in it does not parse. One sentence,
+ * "could not be read", said all three, so a deployment with more open shells than the list holds said it for good.
+ */
+const SHELLS_NOTE = Object.freeze({
+  unread: "Some shell or browser status could not be read; an absent watcher is not inferred.",
+  cut: `More shells are open than the first ${SHELLS_SHOWN} this list holds; an absent watcher is not inferred.`,
+  rows: "A registration in the open shells' list does not parse and is left out; an absent watcher is not inferred.",
+});
+const shellsNote = (data) => {
+  const why = shellsShort(data);
+  return why === null ? null : html`<p class="note" role="status">${SHELLS_NOTE[why]}</p>`;
+};
+
 export function runWorkspaceState(view) {
   const r = recordOf(view), data = view.data ?? {};
   const id = r?.jobId ?? view.query?.id;
@@ -680,7 +695,7 @@ export function runWorkspace(view) {
   const found = r && !view.readOnly && !["nothing", "running"].includes(state.kind) ? html`<p class="ws-found"><b>Found something?</b><a class="link" href="/triggers">Add it to a trigger’s instructions</a>${canFork ? html`<a class="link" href="#run-fork">Fork it with a message</a>` : html`<span>Fork unavailable: ${(r.forkSource?.saved === false ? forkRefusalWords(forkArchiveFact(r.forkSource).reason) : forkRefusalWords(points?.refusal)) ?? "no exact retained point is available"}.</span>`}</p>` : null;
   // A gone workspace has no "kept until", and "not verified" would contradict the row beneath it.
   const sub = !state.host ? null : state.kind === "prepare" ? html`on ${state.host}` : state.until && Number.isFinite(state.until) ? html`kept on ${state.host} until ${timeHtml(state.until)}` : html`on ${state.host}, retention not verified`;
-  return ui.card({ title: "Workspace", sub, body: html`<div class="ws-row"><p class="ws-row__t"><span class="dot ${state.kind === "open" ? "tone-running" : "tone-idle"}"></span><span>${line}</span></p><div class="ws-row__a">${actions}</div></div>${below}${view.data?.workspace?.sessionsUnknown || view.data?.browserGateways?.partial ? html`<p class="note" role="status">Some shell or browser status could not be read; an absent watcher is not inferred.</p>` : null}${more}${found}` });
+  return ui.card({ title: "Workspace", sub, body: html`<div class="ws-row"><p class="ws-row__t"><span class="dot ${state.kind === "open" ? "tone-running" : "tone-idle"}"></span><span>${line}</span></p><div class="ws-row__a">${actions}</div></div>${below}${shellsNote(view.data)}${more}${found}` });
 }
 
 /**
@@ -1088,7 +1103,8 @@ export function runSandbox(view) {
   const r = record ?? view.data?.activeRun;
   if (!r || (!record && !runningWithoutRecord(view))) return html``;
   // Only a historical record can predate venue attribution. Missing live facts are unknown, never legacy local.
-  if (!record && !r.backend) return titled("Sandbox", html`<p>This running job's venue could not yet be read. Its host's default is not known here.</p>`);
+  // A job at work that has published no venue yet: absent, which is not a read that failed (issue #988).
+  if (!record && !r.backend) return titled("Sandbox", html`<p>This running job has not published its venue yet. Its host's default is not known here.</p>`);
   const venue = r.backend ?? UNATTRIBUTED_BACKEND;
   const serves = servesOf(venue), custody = venueCustody(venue);
   const check = view.data?.sandboxCheck;
@@ -1157,6 +1173,7 @@ const REFUSED_WORDS = Object.freeze({
   noDoctor: "no doctor result published",
   doctorRefused: "its newest result does not load",
   noQueue: "no queue of this host is listed",
+  partWindow: ": part of the run history could not be read",
 });
 
 /**
@@ -1189,11 +1206,13 @@ export function runWhy(view) {
   // The day's window, read: a reason it does not count had no run in it, which is 0 and not a read that failed.
   const windowRead = window !== null && typeof window === "object";
   const n = windowRead && token ? window.byReason?.[token] ?? 0 : null;
+  // A count over a window that ended inside the day, or that was folded without a side of the history, is a floor.
+  const least = windowRead && (window.partial === true || window.floor === true) ? "at least " : null;
   const { host, doctor, floorGap, doctorGap } = hostFacts(view, r.host);
   const floor = host?.backends?.floor;
   const properties = floor && typeof floor === "object" ? Object.entries(floor) : [];
   const said = token ? explainReason(token, { why: r.why }) : null;
-  return titled("Why it was refused", html`${facts([["Rule", said?.known ? ui.withCode(said.sentence) : "No explanation is recorded for this rule yet."], ["Venue floor (PI_BACKEND_FLOOR)", properties.length ? properties.map(([name, want]) => html`<span>${PROPERTY_LABEL[name] ?? name}: ${want}; ${r.backend ?? UNATTRIBUTED_BACKEND} declares ${DECLARATION_TEXT[declarationOf(r.backend ?? UNATTRIBUTED_BACKEND, name)?.word] ?? "unknown"}. </span>`) : floorGap ?? "This host has not published a floor."], ["Same reason in the last 24 hours", Number.isFinite(n) && n > 0 ? html`<a href="/runs?reason=${encodeURIComponent(token)}">${count(n)}</a>` : Number.isFinite(n) ? count(n) : REFUSED_WORDS.unread], ["Newest doctor result", doctorGap === null ? `${doctorCountsText(doctor)}, ${ageText(doctor.ageMs)} ago` : doctorGap]])}${said?.known && docsHref(said.anchor) ? ui.outLink({ href: docsHref(said.anchor), label: "Read the rule in the reasons docs" }) : null}${view.role === "operator" ? ui.cmd(["pi-dispatch", "doctor"], { host: `Run it on ${r.host ?? "the worker host"}; the console runs nothing on a host.` }) : html`<p>Ask an operator to run the host's doctor checks.</p>`}`);
+  return titled("Why it was refused", html`${facts([["Rule", said?.known ? ui.withCode(said.sentence) : "No explanation is recorded for this rule yet."], ["Venue floor (PI_BACKEND_FLOOR)", properties.length ? properties.map(([name, want]) => html`<span>${PROPERTY_LABEL[name] ?? name}: ${want}; ${r.backend ?? UNATTRIBUTED_BACKEND} declares ${DECLARATION_TEXT[declarationOf(r.backend ?? UNATTRIBUTED_BACKEND, name)?.word] ?? "unknown"}. </span>`) : floorGap ?? "This host has not published a floor."], ["Same reason in the last 24 hours", Number.isFinite(n) ? html`${least}${n > 0 ? html`<a href="/runs?reason=${encodeURIComponent(token)}">${count(n)}</a>` : count(n)}${window.partial === true ? REFUSED_WORDS.partWindow : null}` : REFUSED_WORDS.unread], ["Newest doctor result", doctorGap === null ? `${doctorCountsText(doctor)}, ${ageText(doctor.ageMs)} ago` : doctorGap]])}${said?.known && docsHref(said.anchor) ? ui.outLink({ href: docsHref(said.anchor), label: "Read the rule in the reasons docs" }) : null}${view.role === "operator" ? ui.cmd(["pi-dispatch", "doctor"], { host: `Run it on ${r.host ?? "the worker host"}; the console runs nothing on a host.` }) : html`<p>Ask an operator to run the host's doctor checks.</p>`}`);
 }
 
 export function runHost(view) {

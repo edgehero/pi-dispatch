@@ -83,9 +83,6 @@ test("each read of these pages that fails is said by a panel and by the pill, in
     ["run", "id=gh-2", "operator", () => ({ redis: failing(healthy(HOST), ["mget"]), records: [REFUSED] }), [/p-host: .*Newest failing doctor check could not be read/], (d) => [Boolean(d.snapshot.doctor.unreachable)]],
     // Sandboxes: the report arrived, its open shells did not.
     ["sandboxes", "", "operator", () => ({ redis: failing(healthy(HOST), ["time"]) }), [/p-sb-open: .*Open shells could not be read/], (d) => [d.sandboxes.sessionsUnavailable]],
-    // The record of the run a kept workspace came from. The card that says so is drawn for a kept workspace, which a
-    // deployment with no sandbox host has none of: the mark is the reader's all the same.
-    ["sandboxes", "id=gh-far", "operator", () => ({ redis: failing(healthy(HOST), ["get"]) }), [], (d) => [d.sandboxRunUnread]],
     // The browser terminals, where the console's read of them threw.
     ["sandboxes", "", "operator", () => ({ redis: healthy(HOST), gateway: async () => { throw new Error("Command timed out"); } }), [/p-sb-browser: .*Browser-terminal information could not be read/], (d) => [/could not be read/.test(d.browserGateways.problem)]],
     // A host with no row: its run records are all that can say when it was last seen, and the mirror did not answer.
@@ -126,14 +123,21 @@ const STATES = [
  */
 const SAYS_UNDER_A_LIVE_PILL = new Map([]);
 const EVERY_PAGES_PARTS = "one of the three parts of a snapshot every page is judged by (issue #962), on a page that draws nothing of that part: goes when those three are held page by page, as the reads beside them are";
-const AN_OPERATORS_CARDS = "a read only an operator's cards are drawn from (the chain, a refused run's two cards), on a viewer's page: goes when the rule knows who looks, or when the loader makes no such read for a viewer";
+const AN_OPERATORS_CARDS = "a read only an operator's cards are drawn from (the chain, a refused run's two cards), on a viewer's or an agent's page: goes when the rule knows who looks, or when the loader makes no such read for them";
 const NOT_LIVE_AND_SILENT = new Map([
   ["smembers is not answered | /parked for operator", EVERY_PAGES_PARTS],
   ["smembers is not answered | /parked for viewer", EVERY_PAGES_PARTS],
+  ["smembers is not answered | /parked for agent", EVERY_PAGES_PARTS],
   ["hgetall is not answered | /parked for operator", EVERY_PAGES_PARTS],
   ["hgetall is not answered | /parked for viewer", EVERY_PAGES_PARTS],
   ...["/setup", "/fleet"].flatMap((page) => ["operator", "viewer"].map((role) => [`zrevrangebyscore is not answered | ${page} for ${role}`, EVERY_PAGES_PARTS])),
   ["zrevrangebyscore is not answered | /run?id=gh-1 for viewer", AN_OPERATORS_CARDS],
+  // An agent's page draws what a viewer's does, from its own copy of the data, which holds a registry read in part as
+  // read: so no entry for it where the hosts' rows did not answer.
+  ["zrevrangebyscore is not answered | /run?id=gh-1 for agent", AN_OPERATORS_CARDS],
+  ...["smembers", "get", "mget", "zrevrangebyscore"].map((command) => [`${command} is not answered | /run?id=gh-2 for agent`, AN_OPERATORS_CARDS]),
+  ...["getJobCounts", "getJobSchedulers", "isPaused"].map((call) => [`the queue's ${call} is not answered | /run?id=gh-2 for agent`, AN_OPERATORS_CARDS]),
+  ...["/setup", "/parked", "/run?id=gh-2"].map((page) => [`the queue's getActive is not answered | ${page} for agent`, EVERY_PAGES_PARTS]),
   ["smembers is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
   ["hgetall is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
   ["get is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
@@ -143,7 +147,6 @@ const NOT_LIVE_AND_SILENT = new Map([
   ...["/setup", "/parked", "/run?id=gh-2"].flatMap((page) => ["operator", "viewer"].map((role) => [`the queue's getActive is not answered | ${page} for ${role}`, EVERY_PAGES_PARTS])),
   ...["/setup", "/fleet"].flatMap((page) => ["operator", "viewer"].map((role) => [`this host's run files cannot be listed | ${page} for ${role}`, EVERY_PAGES_PARTS])),
   ...["operator", "viewer"].map((role) => [`this host's run files cannot be listed | /host?name=build9 for ${role}`, "a host with no row whose page says no retained run record names it, of run files that could not be listed: goes when that page says its run records could not be read"]),
-  ["zrevrangebyscore is not answered | /run?id=gh-2 for operator", "a refused run's count of its reason is drawn as a fact from a day's window that was read in part: goes when that count says it is a floor"],
 ]);
 
 test("the pill agrees with the page on the real reader: a page that says could not be read is Not live, and a page that is Not live says what it lacks", { timeout: 240_000 }, async () => {

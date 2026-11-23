@@ -232,7 +232,28 @@ test("operator presentation separates native opener from driver and strips room 
   for (const value of [room.driverIntentId, room.driverConnectionId, room.epoch, room.driverActor.session, room.watchers.one.connectionId, f.session.id]) assert.equal(JSON.stringify(first).includes(value), false);
   f.advance(1001); f.store.readRoom = async () => { throw new Error("PRIVATE"); };
   const unavailable = await f.broker.view(); assert.equal(unavailable.partial, true); assert.equal(unavailable.drivers.length, 0);
+  // Which way the view is partial (issue #988): a room that did not answer is a read that failed; the first view, whole,
+  // is neither partial nor unread.
+  assert.deepEqual([first.partial, first.unread, first.more, first.unreadable, unavailable.unread], [false, false, 0, 0, true]);
   await f.broker.close();
+});
+
+test("a view that is partial says which way: a read that did not answer, a list cut at its cap, or registrations that do not parse (issue #988)", async () => {
+  const view = async (shells) => {
+    const f = fixture();
+    const broker = makeGatewayBroker({ sessions: f.sessions ?? { peek: () => null }, readTokens: () => ({ refusal: "unreadable" }), findToken: () => null, readRegistry: () => f.registry, readSessions: shells, readRun: async () => null, readOnly: () => false, store: { readRoom: async () => null }, now: () => 1 });
+    try { return await broker.view(); } finally { await broker.close(); await f.broker.close(); }
+  };
+  const whole = await view(async () => ({ sessions: [], more: 0, unreadable: 0 }));
+  assert.deepEqual([whole.partial, whole.unread, whole.more, whole.unreadable], [false, false, 0, 0]);
+  const cut = await view(async () => ({ sessions: [], more: 1, unreadable: 0 }));
+  assert.deepEqual([cut.partial, cut.unread, cut.more, cut.unreadable], [true, false, 1, 0]);
+  const rows = await view(async () => ({ sessions: [], more: 0, unreadable: 2 }));
+  assert.deepEqual([rows.partial, rows.unread, rows.more, rows.unreadable], [true, false, 0, 2]);
+  for (const shells of [async () => ({ sessions: [], unreachable: true }), async () => { throw new Error("Command timed out"); }]) {
+    const unread = await view(shells);
+    assert.deepEqual([unread.partial, unread.unread, unread.more, unread.unreadable], [true, true, 0, 0]);
+  }
 });
 
 test("a step-up from a tab that never followed its own link arms nobody", async () => {

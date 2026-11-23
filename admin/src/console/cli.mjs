@@ -914,7 +914,7 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
         const read = gatewayRegistry();
         if (!read.config) return { enabledHosts: [], sessions: [], ...(read.refusal ? { problem: read.refusal } : {}) };
         const shells = await fleet.sandboxSessions();
-        return { enabledHosts: Object.keys(read.config.hosts), sessions: shells?.sessions ?? [], partial: Boolean(shells?.unreachable || shells?.more || shells?.unreadable) };
+        return { enabledHosts: Object.keys(read.config.hosts), sessions: shells?.sessions ?? [], partial: Boolean(shells?.unreachable || shells?.more || shells?.unreadable), unread: Boolean(shells?.unreachable), more: shells?.more ?? 0, unreadable: shells?.unreadable ?? 0 };
       },
       answerer,
       modelsView,

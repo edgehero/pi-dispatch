@@ -136,6 +136,8 @@ test("queued jobs claim no sandbox and an unread live venue is unknown rather th
   const data = { run: { missing: true }, activeRun: { target: "acme/web#42", host: null, backend: null }, chat: { state: "queued", jobState: "waiting" } };
   assert.equal(String(runSandbox(view(data))), "");
   const running = String(runSandbox(view({ ...data, chat: { state: "active", jobState: "active" } })));
-  assert.match(running, /venue could not yet be read/);
+  // Absent, not unread (issue #988): the job is at work and has published no venue yet. It said "could not yet be read".
+  assert.match(running, /This running job has not published its venue yet\. Its host's default is not known here\./);
+  assert.doesNotMatch(running, /could not/);
   assert.doesNotMatch(running, /local run from before|Kept on|Who holds the credentials/);
 });

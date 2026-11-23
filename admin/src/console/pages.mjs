@@ -982,6 +982,8 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     // failed is not a record with nothing in it, so it says so rather than "not recorded". `readRunById` answers that and does not
     // throw: `{ unreadable }` or `{ invalid }`, and only `{ missing }` means both places were read and hold none.
     if (privateReads && name === "sandboxes" && typeof q.id === "string" && typeof deps.fleet?.runById === "function") {
+      // Which kept workspace the page was opened for, for the pill's rule: the card that draws this read is that row's.
+      data.sandboxPicked = { id: q.id, host: typeof q.host === "string" ? q.host : null };
       let found = null;
       try { found = await runByIdOf(q.id); } catch { found = { unreadable: true }; }
       data.sandboxRun = found?.record ?? null;
@@ -1242,7 +1244,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   };
   const workspaceRead = async () => {
     if (name === "run" && data.run?.record && (who?.role === "operator" || who?.live === true && who?.role === undefined) && typeof deps.sandboxes?.workspace === "function") {
-      try { data.workspace = await asked(() => deps.sandboxes.workspace(data.run.record)); } catch { data.workspace = { unknown: true, sessionsUnknown: true }; }
+      try { data.workspace = await asked(() => deps.sandboxes.workspace(data.run.record)); } catch { data.workspace = { unknown: true, sessionsUnknown: true, sessionsUnread: true, sessionsMore: 0, sessionsUnreadable: 0 }; }
     }
   };
   // The records of the run's recoveries, as `relatedRead` read them: the progress of the run that continues this one

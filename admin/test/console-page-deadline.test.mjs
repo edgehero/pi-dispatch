@@ -397,7 +397,7 @@ test("two shapes of not read are one drawing: a run's page and a trigger's page 
   const loads = await outage("hostLoads")();
   const progress = await outage("fleet.progressOfRun")("gh-1", RECORD);
   const workspace = await outage("sandboxes.workspace")(RECORD);
-  assert.deepEqual([loads, progress.progress, workspace], [{ unreachable: true, hosts: [], more: 0 }, { unreachable: "the progress key could not be read" }, { shell: null, sessionsUnknown: true, unknown: true }], "what the real services say in an outage");
+  assert.deepEqual([loads, progress.progress, workspace], [{ unreachable: true, hosts: [], more: 0 }, { unreachable: "the progress key could not be read" }, { shell: null, sessionsUnknown: true, sessionsUnread: true, sessionsMore: 0, sessionsUnreadable: 0, unknown: true }], "what the real services say in an outage");
   const drawings = async (page, qs, data) => {
     const out = [];
     for (const role of ["operator", "viewer"]) out.push((await pagePanels(page, { query: parsePageQuery(page, new URLSearchParams(qs)).query, session: { name: "ada", role }, data, readOnly: false })).map((panel) => String(panel.html)));
@@ -406,7 +406,7 @@ test("two shapes of not read are one drawing: a run's page and a trigger's page 
   const goesOn = CASES.find((one) => one.label === "a run that goes on as a recovery");
   const run = (await loaded("run", queryOf(goesOn), OP, { answers: goesOn.answers })).data;
   const theirs = { ...run, hostLoads: loads, progress: progress.progress, recoveryProgress: progress, workspace };
-  const pages = { ...run, hostLoads: null, hostLoadsUnread: true, progress: { unreachable: true }, recoveryProgress: null, workspace: { unknown: true, sessionsUnknown: true } };
+  const pages = { ...run, hostLoads: null, hostLoadsUnread: true, progress: { unreachable: true }, recoveryProgress: null, workspace: { unknown: true, sessionsUnknown: true, sessionsUnread: true, sessionsMore: 0, sessionsUnreadable: 0 } };
   assert.notDeepEqual(theirs, pages);
   assert.deepEqual(asDrawn(theirs), asDrawn(pages));
   assert.deepEqual(await drawings("run", "id=gh-1", theirs), await drawings("run", "id=gh-1", pages), "a run's page");

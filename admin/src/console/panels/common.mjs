@@ -175,11 +175,20 @@ export const REGISTRY_PART_TEXT = "The host registry was read in part: some host
 const unreached = (read) => read !== null && typeof read === "object" && Boolean(read.unreachable);
 
 /**
- * A page of the run history read without one of its sides: this host's files (`unreachable`), or a fleet mirror that
- * is on and did not answer (a `mirror` word that is neither "ok" nor "off"). A mirror that is off is a whole answer:
- * there are no other hosts' runs to hold.
+ * Whether the fleet mirror's word says it did not answer whole: any word but the three of a mirror that answered or
+ * is off, which are "ok", "off" and "bounded", an agent's copy of "ok" (`agentReadProjection`; its copy of the
+ * reader's "unreachable (why)" is "unreachable"). The rule knew two of the three (issue #988), so an agent's `/runs`
+ * said other hosts' runs could not be read, with a Not live pill, over a healthy mirror for good.
  */
-const historyPartUnread = (page) => page !== null && typeof page === "object" && (Boolean(page.unreachable) || (typeof page.mirror === "string" && page.mirror !== "ok" && page.mirror !== "off"));
+const MIRROR_ANSWERED = Object.freeze(["ok", "off", "bounded"]);
+export const mirrorUnread = (word) => typeof word === "string" && !MIRROR_ANSWERED.includes(word);
+
+/**
+ * A page of the run history read without one of its sides: this host's files (`unreachable`), or a fleet mirror that
+ * is on and did not answer (`mirrorUnread`). A mirror that is off is a whole answer: there are no other hosts' runs
+ * to hold.
+ */
+const historyPartUnread = (page) => page !== null && typeof page === "object" && (Boolean(page.unreachable) || mirrorUnread(page.mirror));
 
 /** The 24 hours' window that could not be folded (null), or was folded without a side of the history (`partial`). */
 const windowUnread = (window) => window === null || window?.partial === true;
@@ -189,8 +198,43 @@ const windowUnread = (window) => window === null || window?.partial === true;
  * not read (the reader does not throw in an outage, it answers no runs and a mirror that is neither "ok" nor "off").
  * Neither is a host no record names. The host page's sentence and the pill's mark are this one rule.
  */
-export const hostHistoryUnread = (history) =>
-  history === null || (history !== undefined && !history.records?.length && typeof history.mirror === "string" && !["ok", "off"].includes(history.mirror));
+export const hostHistoryUnread = (history) => history === null || (history !== undefined && !history.records?.length && mirrorUnread(history.mirror));
+
+/**
+ * Why a run's page cannot tell that its shell is absent from the open shells (issue #988), from what the sandbox
+ * service and the browser gateway say of their lists: "unread", a read that did not answer; "cut", the list holds the
+ * first `SHELLS_SHOWN` of more; "rows", a registration in it does not parse; null where the lists are whole. Only the
+ * first is a read that failed: a full list said "could not be read", with a Not live pill, for as long as that many
+ * shells stayed open. A list that says only that it is not whole (no reason beside it) is taken as unread.
+ */
+export const SHELLS_SHOWN = 256;
+export function shellsShort(data) {
+  const w = data?.workspace, g = data?.browserGateways;
+  if (!(w?.sessionsUnknown === true || g?.partial === true)) return null;
+  const more = Math.max(Number(w?.sessionsMore) || 0, Number(g?.more) || 0), rows = Math.max(Number(w?.sessionsUnreadable) || 0, Number(g?.unreadable) || 0);
+  if (w?.sessionsUnread === true || g?.unread === true || (more === 0 && rows === 0)) return "unread";
+  return more > 0 ? "cut" : "rows";
+}
+
+/**
+ * The same for Sandboxes' cleanup notices: "unread", "cut" or "rows" from what the report says beside
+ * `noticesUnavailable`, null where the notices are whole.
+ */
+export function noticesShort(report) {
+  if (!report?.noticesUnavailable) return null;
+  if (report.noticesUnread === true || (report.noticesMore !== true && report.noticesUnreadable !== true)) return "unread";
+  return report.noticesMore === true ? "cut" : "rows";
+}
+
+/**
+ * The kept workspace Sandboxes was opened for (`sandboxPicked`, the id and host its query names), where the report
+ * holds a row for it: the card that says what its run loaded is drawn for that row alone.
+ */
+const pickedWorkspace = (d) => {
+  const want = d.sandboxPicked;
+  if (want === null || typeof want !== "object" || typeof want.id !== "string") return false;
+  return (Array.isArray(d.sandboxes?.hosts) ? d.sandboxes.hosts : []).some((h) => (!want.host || h?.name === want.host) && (Array.isArray(h?.rows) ? h.rows : []).some((r) => (r?.id ?? r?.jobId) === want.id));
+};
 
 /**
  * What the hosts last published about their doctor runs, for Sandboxes' cards that say what a host could load: the
@@ -215,15 +259,22 @@ const overlayUnread = (s) => {
 };
 
 /**
+ * The overview's day, as the reader holds it when the fold of the run history failed (`failures24h`, `runsDay` or
+ * `spendByHour` null) or was made without a side of it (`runsDay.partial`): what its day's failures, its timeline and
+ * its spend per hour then say could not be read. The parked runs come from the same fold and their mark is judged on
+ * every page, but an agent's copy of the data does not hold that mark's words, and holds these.
+ */
+const dayUnread = (s) => s !== null && typeof s === "object" && (s.failures24h === null || s.runsDay === null || s.runsDay?.partial === true || s.spendByHour === null);
+
+/**
  * What each live page reads beside the three parts of a snapshot the rule holds for every page, and when one of those
  * reads failed in a way a panel of that page words as "could not be read" (issue #988): the marks are the readers'
  * own, held to the real readers over a Valkey that fails a read, and no sentence is new. A key the data lacks is a
  * read the page did not make, never a mark: the loader sets each key a page reads.
  *
  *   - overview, fleet: the waiting jobs, the failed jobs and the doctor results, which their cards draw; on the
- *     overview the settings overlay too, which its Caps card draws. The overview's other unread sentences (the day's
- *     failures, the run history, the spend per hour) come from the fold the parked runs come from, and are marked
- *     with them.
+ *     overview the settings overlay too, which its Caps card draws, and the day's fold (`dayUnread`), which its
+ *     other unread sentences come from (the day's failures, the run history, the spend per hour).
  *   - setup: the doctor results, which four of its steps are told from, and a triggers file that could not be read
  *     (one that does not load, or does not exist, is read and says so).
  *   - parked: the answer rules' results (any state but "ok", drawn as one banner where the parked runs were read), the
@@ -233,11 +284,14 @@ const overlayUnread = (s) => {
  *     the progress, the inbox, the chat facts and the planner's check of a reply (`unreachable`); an inbox whose
  *     messages or whose open flag could not be read; a chat that cannot tell whether its question still waits
  *     (`CHAT_REFUSALS.parkedUnknown`); a search for child runs that was incomplete; the open shells and browser
- *     sessions behind an operator's Workspace row; and for a run refused before it started, which draws no
+ *     sessions behind an operator's Workspace row where their read did not answer (`shellsShort`: a list cut at its
+ *     cap, or with a registration that does not parse, is read); and for a run refused before it started, which draws no
  *     transcript, progress or chat, the snapshot, its doctor results and the window its two cards are drawn from.
- *   - sandboxes: the open shells and the cleanup notices of a report that did arrive; the record of the run a kept
- *     workspace came from; the hosts' doctor runs behind what a fresh sandbox would load; the browser terminals where
- *     their read failed; and the deployment's configuration where the report could not read it.
+ *   - sandboxes: the open shells and the cleanup notices of a report that did arrive, where their read did not
+ *     answer; the record of the run a kept workspace came from and the hosts' doctor runs, each where its card is
+ *     drawn (the kept workspace the page was opened for; a sandbox being prepared);
+ *     the browser terminals where their read failed; and the deployment's configuration where the report could not
+ *     read it.
  *   - host: the run records of a host that has no row, the waiting jobs and the doctor results.
  *
  * NOT MARKS, each because it would hold the pill at Not live for good, or is not the console's read: where a run was
@@ -247,7 +301,7 @@ const overlayUnread = (s) => {
  * says.
  */
 const PAGE_UNREAD = Object.freeze({
-  overview: (d) => partUnread(d.snapshot, ["waiting", "failed", "doctor"]) || overlayUnread(d.snapshot),
+  overview: (d) => partUnread(d.snapshot, ["waiting", "failed", "doctor"]) || overlayUnread(d.snapshot) || dayUnread(d.snapshot),
   fleet: (d) => partUnread(d.snapshot, ["waiting", "failed", "doctor"]),
   setup: (d) => partUnread(d.snapshot, ["doctor"]) || Boolean(d.snapshot?.triggers?.unreadable),
   parked: (d) => {
@@ -267,7 +321,7 @@ const PAGE_UNREAD = Object.freeze({
     if (Boolean(d.run?.unreadable) || unreached(d.inbox)) return true;
     // An inbox that was found and is a steer-armed run's: its messages, or whether it takes one now, not read.
     if (d.inbox?.found === true && d.inbox.steer === true && (d.inbox.entries === null || d.inbox.open === null)) return true;
-    if (d.childrenIncomplete === true || d.workspace?.sessionsUnknown === true || d.browserGateways?.partial === true) return true;
+    if (d.childrenIncomplete === true || shellsShort(d) === "unread") return true;
     if (refused) return d.snapshot === null || unreached(d.snapshot?.doctor) || windowUnread(d.runsWindow);
     if ([d.transcript, d.chat, d.chatAnswer].some(unreached) || d.chat?.says === CHAT_REFUSALS.parkedUnknown) return true;
     // The progress key is the page's only source of progress while there is no record; with one, the card draws the
@@ -277,8 +331,11 @@ const PAGE_UNREAD = Object.freeze({
   },
   sandboxes: (d) => {
     // A report that did not arrive is the page's primary read failing (`readFailed`), which the rule knows on any page.
-    if (Boolean(d.sandboxes?.sessionsUnavailable) || Boolean(d.sandboxes?.noticesUnavailable)) return true;
-    if (d.sandboxRunUnread === true || unreached(hostLoadsOf(d))) return true;
+    if (Boolean(d.sandboxes?.sessionsUnavailable) || noticesShort(d.sandboxes) === "unread") return true;
+    // Two reads that one card each says were not read: the record of the run a kept workspace came from, on the card
+    // of the kept workspace the page was opened for; and the hosts' doctor runs, on the card of a sandbox being
+    // prepared (`plan`). On a page without that card nothing says so, and the pill is the page's.
+    if ((d.sandboxRunUnread === true && pickedWorkspace(d)) || (unreached(hostLoadsOf(d)) && Boolean(d.sandboxes?.plan))) return true;
     // Two reads that answer in words: the gateway's where its read failed (`pages.mjs`; a registry it refuses says
     // something else), and the report's where the deployment's configuration could not be read (`sandbox-data.mjs`;
     // a triggers file that does not exist, or a host that published no settings, says something else).
