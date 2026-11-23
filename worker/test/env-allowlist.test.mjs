@@ -133,7 +133,9 @@ test("a provider id that is a prototype key yields no candidate, not a coerced o
 	// pi looks providers up in a plain object literal, so these resolve up the prototype chain to a
 	// non-string. Doctor prints candidates in its fix line, so an unfiltered one becomes the advice
 	// "set [object Object] in .env".
-	for (const id of ["__proto__", "constructor", "toString"]) assert.deepEqual(providerKeyCandidates(id), [], id);
+	// Since pi 1.6.0 its own lookup throws on these (it hands the prototype member back and calls .filter on it), so
+	// an empty list here also says pi was never asked.
+	for (const id of ["__proto__", "constructor", "toString", "hasOwnProperty", "valueOf"]) assert.deepEqual(providerKeyCandidates(id), [], id);
 });
 
 test("pi's catalog covers every id findEnvKeys answers for at the 0.99.1 pin, and the question order stays anyway", { skip }, async () => {
@@ -152,7 +154,8 @@ test("pi's catalog covers every id findEnvKeys answers for at the 0.99.1 pin, an
 	const { dirname, join } = await import("node:path");
 	const { fileURLToPath } = await import("node:url");
 	const src = readFileSync(join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"))), "env-api-keys.js"), "utf8");
-	const keyed = [...src.matchAll(/^\s+"?([a-z0-9-]+)"?: "[A-Z0-9_]+",$/gm)].map((m) => m[1]).concat(["anthropic", "github-copilot"]);
+	// An entry is one name or, since 1.6.0, a list of names.
+	const keyed = [...src.matchAll(/^\s+"?([a-z0-9-]+)"?: (?:"[A-Z0-9_]+"|\["[A-Z0-9_]+"(?:, "[A-Z0-9_]+")*\]),$/gm)].map((m) => m[1]).concat(["anthropic", "github-copilot"]);
 	assert.ok(keyed.length > 30, `read only ${keyed.length} ids off pi's key table, so the scan is reading the wrong thing`);
 	for (const id of keyed) assert.ok(providerKeyCandidates(id).length > 0, `${id}: the scan found an id pi reads no key for`);
 	const catalog = new Set(piProviders());
@@ -705,15 +708,15 @@ test("the write path goes through the shared selection, and never lands on an OA
 	// that bolt, where doctor's real output is available to compare against. AGENTS.md's rule is to say so
 	// rather than manufacture the relation.
 	//
-	// The loop's real content is `anthropic`, the only id in pi's table with more than one candidate; for
-	// the other 33 `apiKeyVariable(c) === c[0]` trivially and the assertion degrades to "an injection
-	// happened". That is still worth running: it is the sweep that would catch a new multi-candidate
-	// provider appearing in a pi bump.
-	let multiCandidate = 0;
+	// The loop's real content is `anthropic`, whose first candidates are its two logins, and since pi 1.6.0 the
+	// four Qwen Token Plan ids, which have two api-key candidates each; for the others `apiKeyVariable(c) === c[0]`
+	// trivially and the assertion degrades to "an injection happened". That is still worth running: it is the
+	// sweep that would catch a new multi-candidate provider appearing in a pi bump.
+	const multiCandidate = [];
 	for (const id of [...piProviders(), "radius"]) {
 		const candidates = providerKeyCandidates(id);
 		if (candidates.length === 0) continue; // no key variable at all: the worker refuses, tested above
-		if (candidates.length > 1) multiCandidate += 1;
+		if (candidates.length > 1) multiCandidate.push(id);
 		const expected = apiKeyVariable(candidates);
 		const env = buildContainerEnv({
 			...authBase,
@@ -728,7 +731,10 @@ test("the write path goes through the shared selection, and never lands on an OA
 		assert.ok(!/_AUTH_TOKEN$/.test(expected), `${id}: ${expected} is not a bearer token (issue #509)`);
 		assert.equal(Object.keys(env).filter((k) => env[k] === `sk-${id}`).length, 1, `${id}: the key lands in exactly one variable`);
 	}
-	assert.equal(multiCandidate, 1, "anthropic is still the only provider whose choice is a real choice");
+	// pi 1.6.0 reads each Qwen Token Plan key from its per-plan variable first, then the regional one both plans
+	// shared; the per-plan one is pi's first and an api key, so it is the one written and named.
+	assert.deepEqual(multiCandidate, ["anthropic", "qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual", "qwen-token-plan-individual-cn"], "a provider whose choice is a real choice joined or left");
+	for (const id of multiCandidate.filter((id) => id.startsWith("qwen-token-plan"))) assert.equal(apiKeyVariable(providerKeyCandidates(id)), providerKeyCandidates(id)[0], id);
 });
 
 test("PI_FORWARD_ENV cannot blank the provider credential with an empty host value", { skip }, () => {

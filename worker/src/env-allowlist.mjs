@@ -81,12 +81,15 @@ const EVERY_VAR_SET = new Proxy({}, { get: (_target, name) => (typeof name === "
  * `secrets.mjs` reserves what a trigger may not name.
  */
 export function providerKeyCandidates(provider) {
-	// The string filter is on the RESULT, not just on the trap. pi looks its provider up in a plain object
-	// literal, so `__proto__` and `constructor` resolve up the prototype chain and hand back a non-string
-	// "variable name"; against a real environment that candidate reads as undefined and pi drops it, but
-	// an environment where everything is present keeps it, and doctor would print `set [object Object] in
-	// .env`. pricing.mjs guards pi's other generated lookups the same way and for the same reason.
-	return (findEnvKeys(provider, EVERY_VAR_SET) ?? []).filter((name) => typeof name === "string");
+	// pi looks its provider up in a plain object literal, so an id that names an Object.prototype member
+	// (`__proto__`, `constructor`, `toString`) resolves up the prototype chain. Up to 1.5.2 pi wrapped that
+	// value in a list, so doctor would print `set [object Object] in .env`; since 1.6.0 (where an entry may be
+	// a list of names) pi hands the value back as is and its own `.filter` throws. No provider is named like
+	// that, so such an id is answered here, before pi is asked. The string filter stays on the RESULT for
+	// anything else that is not a name. pricing.mjs guards pi's other generated lookups for the same reason.
+	if (typeof provider !== "string" || provider in Object.prototype) return [];
+	const found = findEnvKeys(provider, EVERY_VAR_SET);
+	return Array.isArray(found) ? found.filter((name) => typeof name === "string") : [];
 }
 
 /**

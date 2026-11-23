@@ -2035,8 +2035,13 @@ const SERVICE_TIER_APIS = new Set(["openai-responses", "openai-codex-responses"]
 const MIN_OUTPUT_APIS = new Set(["openai-responses", "azure-openai-responses"]);
 const MIN_OUTPUT_TOKENS = 16;
 /**
- * The apis that never put the caller's maxTokens on the request (pinned by needle): the provider then answers up
- * to the model's own limit, so a small options.maxTokens bounds nothing there.
+ * The apis whose output the bound takes as the model's own limit, whatever the caller's maxTokens (pinned by needle).
+ * Three never put the caller's cap on the request, so the provider answers up to that limit and a small
+ * options.maxTokens bounds nothing there. openai-codex-responses does since pi 1.6.0 (`max_output_tokens`, at least
+ * 16, unless compat.supportsMaxOutputTokens is false), but it goes to the ChatGPT backend, whose honouring it is not
+ * measured, and pi itself drops that field for a ChatGPT sign-in on openai-responses. So the bound keeps the model's
+ * limit there, which is never below what the call can cost. Rejected: trusting the cap sent there, which a backend
+ * that ignores it would turn into a bound below the bill.
  */
 const MAX_TOKENS_UNSENT_APIS = new Set(["openai-codex-responses", "cloudflare-workers-ai-system-one", "openai-decisions", "typesafe-system-one"]);
 /**
@@ -2074,8 +2079,8 @@ export const COMPLETIONS_CATALOG_HOSTS = Object.freeze([
 	"token-plan-ams.xiaomimimo.com",
 	"token-plan-cn.xiaomimimo.com",
 	"token-plan-sgp.xiaomimimo.com",
-	"token-plan.ap-southeast-1.maas.aliyuncs.com",
-	"token-plan.cn-beijing.maas.aliyuncs.com",
+	"token-plan.maas.qianwenaiapi.com",
+	"token-plan.maas.qwencloudapi.com",
 ]);
 
 /**

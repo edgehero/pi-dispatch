@@ -191,7 +191,9 @@ const MIRRORED_PI_FILES = Object.freeze({
 	// pi-ai, so the two files they live in are part of what the mirror transcribes. Relative to PI: the hoisted pi-ai.
 	// Re-transcribed at 1.5.2: requiresNonNullAssistantContent, requiresToolsWithToolHistory, promptCacheKeyMode and
 	// supportsMessageThreads are new typed compat keys.
-	"../pi-ai/dist/providers/compat-schema.js": "962a8e5cb874fb8ecbf713665c2bfd2ce937456e47dbec115a97f3e709a68df9",
+	// Re-verified at 1.6.0: the Mistral schema gains supportsStrictMode, a boolean as in the four other schemas and the
+	// generic one, so the merged ProviderCompat already holds it exactly; the rest is description text.
+	"../pi-ai/dist/providers/compat-schema.js": "3aad400a8b4548a03be3d5be5e3aa3ec3e262f26f3773caabd26b3436add301c",
 	"../pi-ai/dist/providers/model-schema.js": "a8013ceaedd0105cbd2af886779d62f2691fbe202b16588ef2a977f35fa5270e",
 });
 

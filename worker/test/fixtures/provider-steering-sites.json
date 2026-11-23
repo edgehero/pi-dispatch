@@ -122,8 +122,8 @@
 		"dBedrockCredentials(env) { const accessKeyI": 1
 	},
 	"@earendil-works/pi-ai/dist/api/google-vertex.js": {
-		", options?.headers, options?.env, options?.identity);": 1,
-		"on, optionsHeaders, env, identity) { const": 1,
+		", options?.headers, options?.env, options?.identity, opt": 1,
+		"on, optionsHeaders, env, identity, fetch) {": 1,
 		"ldGoogleAuthOptions(env); return new Google": 1,
 		"ldGoogleAuthOptions(env) { const keyFilenam": 1
 	},
@@ -332,6 +332,8 @@
 		") { env[entry.slice(0, idx)] = entry.sli": 1,
 		"} return env; } catch {": 1,
 		"ch { return process.env; } } import { basen": 1,
+		"onInteractiveGitEnv(env) { return {": 1,
+		"return { ...env, GIT_TERMINAL_P": 1,
 		"OUT_MS, env: { GIT_": 1,
 		"ns) { const env = getEnv(); ret": 1,
 		"herit\", env, }); }": 1,
@@ -339,6 +341,7 @@
 		"const env = options?.env ? { ...baseEnv, ...opti": 1,
 		"env ? { ...baseEnv, ...options.env } : baseEnv; re": 1,
 		"pipe\"], env, }); }": 1,
+		"pipe\"], env: getNonInteractiveGitEn": 1,
 		"gs) { const env = getEnv(); con": 1,
 		"utf-8\", env, }); if": 1
 	},
@@ -446,6 +449,10 @@
 		": { ...process.env, ...this.options.env }, stdio: [": 1
 	},
 	"@earendil-works/pi-coding-agent/dist/package-manager-cli.js": {
+		"thKey = Object.keys(process.env).find((key) => key.toLo": 1,
+		"const currentPath = process.env[pathKey] ?? \"\";": 1,
+		"?? \"\"; return { ...process.env, [pathKey]: [nodeDir, c": 1,
+		"\", \"pipe\"], env: getManagedReleaseVerif": 1,
 		"_PACKAGE_DIR: _, ...env } = process.env; co": 1,
 		"\", \"pipe\"], env, }); return res": 1
 	},
