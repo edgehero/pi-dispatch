@@ -23,7 +23,7 @@ export const SANDBOX_END_UNCONFIRMED = "The End request was written, but the ter
  * have been made (a slot claim or the request itself can land when Valkey answers again; a lookup that got no answer
  * sent nothing).
  */
-export const SANDBOX_REQUEST_UNCONFIRMED = unconfirmedWrite({ what: "The sandbox request", done: "made", asked: "it", next: "Reload the Sandboxes page once Valkey answers before asking again." }).invalid;
+export const SANDBOX_REQUEST_UNCONFIRMED = unconfirmedWrite({ what: "The sandbox request", done: "made", asked: "it", next: "Reload the Sandboxes page once Valkey answers before asking again." });
 const refusalOf = (out) => out?.refusal ?? out?.message ?? out?.refused ?? "The sandbox request was refused.";
 
 export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs = nodeFs, now = Date.now, random = randomBytes, planFn = planSandboxPreparation } = {}) {

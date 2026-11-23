@@ -602,8 +602,11 @@ The bar's other states:
   changed, or that it was done. The bar never says nothing was changed here: it says some of it may have been done, and Look again
   reloads the page so you see what did. The audit log has no outcome for a change that partly landed, so such a
   write's line reads `failed` (for the kill switch, its reason says what it reached). An Undo of a zero touch
-  instruction whose file was written and whose fix could not then be marked undone is done, with the note that its
-  accounting is pending: the instruction is out of the file, so do not repeat the Undo.
+  instruction whose file was written and whose fix could not then be marked undone is one of these too: "The
+  instruction was put back as it was before this fix, but the fix could not be marked undone: Zero touch still shows
+  it as applied until its row expires. Do not undo it again." A second Undo of it is refused, since the trigger's
+  instructions already are what it would write. A fix's accounting that Valkey answered with an error says its row
+  may have been staged in part.
 - **No answer at all**: the bar says the change may or may not have been made. Reload to see; the audit log says
   which. The same confirmation is never sent twice.
 
@@ -3124,7 +3127,10 @@ source-linked instruction/configuration fixes and incomplete-accounting repair.
 
 The touched-run view uses `touched=1` with `days=7`, `30` or `90` and optional opaque `scope`; these page controls
 persist through pagination and live updates. Configuration pages may carry `becauseRun=<retained refusal id>` to
-link their confirmed changes to that refusal. Ordinary record-field filters remain unchanged.
+link their confirmed changes to that refusal. That is for a change to a file: the envelope, a priorities plan and an
+allocation revert write Valkey and take no `becauseRun` (the field is refused by name, 2026-11-23, #987). What tracks
+such a fix never answers in the change's place: a change that was refused, or that failed, says so in its own words
+whatever became of its accounting. Ordinary record-field filters remain unchanged.
 
 
 ## Delegated agent control

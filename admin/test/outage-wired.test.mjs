@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { connect as netConnect, createServer } from "node:net";
 import { join } from "node:path";
@@ -17,6 +17,7 @@ import { hostQueueName, makeQueue } from "@edgehero/pi-dispatch/queue";
 import { buildRecord, makeRecordWriter } from "@edgehero/pi-dispatch/run-history";
 import { makeSandboxInventory, sandboxInventoryKey, SANDBOX_INVENTORY_HOSTS } from "@edgehero/pi-dispatch/sandbox-inventory";
 import { sandboxPrepareQueueName, sandboxPrepareSlotKey } from "@edgehero/pi-dispatch/sandbox-prepare-requests";
+import { TOUCH_PENDING } from "@edgehero/pi-dispatch/touch-state";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { VALKEY_UNREACHABLE } from "../src/console/actions.mjs";
 import { DRAFT_DROP_UNCONFIRMED } from "../src/answerer-data.mjs";
@@ -127,7 +128,16 @@ async function valkeyFront(target) {
     refuse,
     async accept() {
       if (listening) return;
-      await listen(port);
+      // The port is this front's own, but for a moment something else can hold it: tried again rather than failed.
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          await listen(port);
+          break;
+        } catch (error) {
+          if (error?.code !== "EADDRINUSE" || attempt >= 40) throw error;
+          await sleep(50);
+        }
+      }
       listening = true;
     },
     freeze: () => (frozen = true),
@@ -550,6 +560,71 @@ test("a configuration fix on a real console whose Valkey stops answering at its 
     // The stage landed at the wake, for a change that was never made: it stays pending, and the page's fixes read partial.
     assert.deepEqual((await mine()).map((row) => [row.kind, row.state]), [["config", "pending"]]);
     assert.equal(JSON.parse(readFileSync(c.env.PI_SETTINGS_FILE, "utf8")).maxTurns, 30);
+  }, {
+    files: ({ dir }) => {
+      writeFileSync(join(dir, "settings.json"), JSON.stringify({ maxTurns: 30, maxCostUsd: "2" }));
+      return { PI_SETTINGS_FILE: join(dir, "settings.json") };
+    },
+  });
+});
+
+test("a configuration fix on a real console that its file refuses, with Valkey stopping at the refusal of its staged row, answers with the change's own refusal and takes its touch intent back; and a write to Valkey takes no becauseRun", live, async () => {
+  await withConsole(async (c) => {
+    const runId = `gh-${c.host}-refusal`;
+    const record = buildRecord({ job: { id: runId, data: { kind: "github", repo: "acme/web", target: { type: "issue", number: 42 }, trigger: { matched: { index: 0, type: "label" } } } }, result: { outcome: "policy", reason: "secret-unresolved" }, startedAt: new Date(c.now - 2000).toISOString(), endedAt: new Date(c.now - 1000).toISOString() });
+    record.touchScopeId = "a".repeat(64);
+    makeRecordWriter({ logsDir: c.env.PI_LOGS_DIR })(record);
+    const mine = async () => {
+      const out = [];
+      for (const id of await c.direct.zrange("zero-touch:fixes:index", 0, -1)) {
+        const row = JSON.parse((await c.direct.get(`zero-touch:fixes:meta:${id}`)) ?? "null");
+        if (row?.runId === runId) out.push(row);
+      }
+      return out;
+    };
+    c.cleanup.push(async () => {
+      for (const row of await mine()) {
+        await c.direct.del(`zero-touch:fixes:meta:${row.id}`, `zero-touch:fixes:private:${row.id}`);
+        await c.direct.zrem("zero-touch:fixes:index", row.id);
+      }
+    });
+    // The split's plan, its revert and the envelope write Valkey: none takes the field, refused by name before any read.
+    for (const [name, body] of [["envelope-set", { envelope: { totalUsd: "80" } }], ["priorities-set", { projects: [{ id: "web", weight: 2 }] }], ["allocation-revert", { index: 0 }]]) {
+      const res = await c.act(name, "preview", { ...body, becauseRun: runId });
+      assert.equal(res.status, 400, `${name}: ${res.text.slice(0, 300)}`);
+      assert.match(res.json.error, new RegExp(`^${name} takes .* only; becauseRun is not one of them, so nothing was changed$`), name);
+    }
+    // The touch intents this console began and Valkey still holds: an entry carries its console's clock, which no other
+    // console has. Whatever this case finds, none is left behind in a hash the other files' consoles share by name.
+    const begun = async () => Object.entries(await c.direct.hgetall(TOUCH_PENDING)).filter(([, at]) => Number(at) === c.now).map(([id]) => id);
+    c.cleanup.push(async () => {
+      const left = await begun();
+      if (left.length) await c.direct.hdel(TOUCH_PENDING, ...left);
+    });
+    // A file action takes it. Its file changes between the preview and the confirm, so the change is refused, and Valkey
+    // stops answering at the read that the refusal of its staged row begins with.
+    const preview = await c.act("setting-set", "preview", { key: "maxTurns", value: "35", becauseRun: runId });
+    assert.equal(preview.status, 200, preview.text.slice(0, 300));
+    writeFileSync(c.env.PI_SETTINGS_FILE, JSON.stringify({ maxTurns: 31, maxCostUsd: "2" }));
+    const frozen = c.front.freezeAt(commandOn("get", "zero-touch:fixes:meta:"));
+    const confirm = await clocked(c.act("setting-set", "confirm", { ticket: preview.json.ticket }));
+    assert.equal(await Promise.race([frozen.then(() => "stopped"), sleep(1000).then(() => "never sent")]), "stopped", "Valkey stopped answering at the staged row's refusal");
+    // It answered 500, "the setting-set change could not be made; nothing was changed, and the console's log has the
+    // reason", with the row "the write threw (error)": the fix store's error in place of the change's own answer.
+    assert.equal(confirm.res.status, 409, confirm.res.text.slice(0, 300));
+    assert.match(confirm.res.json.error, /changed/, confirm.res.text.slice(0, 300));
+    assert.doesNotMatch(confirm.res.text, /could not be made|console&#39;s log/);
+    assert.deepEqual(c.rows().slice(-2).map((r) => [r.kind, r.outcome, r.reason ?? null]), [["setting-set", "ok", null], ["setting-set", "failed", confirm.res.json.error]]);
+    assert.ok(confirm.ms > 1500 && confirm.ms < 8000, `the store's own bounds decided (${Math.round(confirm.ms)} ms)`);
+    assert.equal(JSON.parse(readFileSync(c.env.PI_SETTINGS_FILE, "utf8")).maxTurns, 31, "the file is as the other writer left it");
+    // The touch intent was taken back all the same: its file is gone at once, and its entry in Valkey when Valkey wakes.
+    const outbox = join(c.env.PI_LOGS_DIR, "touch-outbox");
+    assert.deepEqual(existsSync(outbox) ? readdirSync(outbox) : [], [], "no intent is left for a later read of the page to begin again");
+    assert.equal((await begun()).length, 1, "the intent this confirm began is still Valkey's while it does not answer");
+    await c.thawed();
+    assert.deepEqual(await begun(), [], "its abort landed when Valkey woke");
+    // What stays: the staged row, whose refusal was never sent. It reads pending until it expires.
+    assert.deepEqual((await mine()).map((row) => [row.kind, row.state]), [["config", "pending"]]);
   }, {
     files: ({ dir }) => {
       writeFileSync(join(dir, "settings.json"), JSON.stringify({ maxTurns: 30, maxCostUsd: "2" }));

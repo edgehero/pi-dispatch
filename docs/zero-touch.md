@@ -104,7 +104,10 @@ why it is unavailable there. Undo restores the previous instructions only while 
 
 From a refusal's run page, **Fix configuration** opens Configuration with that source explicitly attached. Navigation
 within Configuration retains the context. Normal preview and Confirm apply the selected write and record its link
-to the refusal. An unrelated edit has no attribution merely because it followed a refusal.
+to the refusal. An unrelated edit has no attribution merely because it followed a refusal. A budget change (the
+envelope, a priorities plan, an allocation revert) is a write to Valkey and not to a configuration file, so it is
+never recorded as a fix. What records a fix never answers in the change's place: a change that was refused or that
+failed says so in its own words.
 
 The fixes log compares occurrences of the same refusal reason or question group over equal elapsed spans before
 and after the change. Untouched refusals and unanswered questions still count. It shows workload exposure and

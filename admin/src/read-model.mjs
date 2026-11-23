@@ -2170,33 +2170,48 @@ export function writeTracking(redis) {
   };
 }
 
+/** A queue's calls that change nothing in Valkey: the lookups a helper makes before and after its write. */
+const QUEUE_LOOKUPS = Object.freeze(["getJob", "getJobs", "getJobCounts", "getJobState", "getJobScheduler", "isPaused"]);
+/** The same for a job such a lookup hands back. */
+const JOB_LOOKUPS = Object.freeze(["getState", "isCompleted", "isFailed", "isActive", "isWaiting", "isDelayed", "toJSON", "asJSON"]);
+
 /**
  * `writeTracking` for a helper that is handed a BullMQ queue and not a client (issue #987, the worker's
- * `enqueueSandboxPreparation`): `{ queue, wrote }`. `queue` forwards everything to the queue it was given; `wrote`
- * turns true before `add` is called and before any command but a read leaves through the queue's own client (which the
- * helper takes for its slot claim), by `writeTracking`'s list. The queue's lookups (`getJob`) change nothing. So a
- * helper that swallows what its own timers threw can still be answered for by what it had asked of Valkey.
+ * `enqueueSandboxPreparation`): `{ queue, wrote }`. `queue` forwards everything to the queue it was given. `wrote`
+ * turns true before any call on the queue leaves that is not a named lookup (`QUEUE_LOOKUPS`), before any call on a job
+ * a lookup handed back that is not one either (`JOB_LOOKUPS`), and before any command but a read leaves through the
+ * queue's own client (which the helper takes for its slot claim), by `writeTracking`'s list. FAIL CLOSED, as
+ * `writeTracking` is: a method these lists do not know (`remove`, `pause`, `addBulk`, a job's `update`, one BullMQ adds
+ * later) counts as a write, since "only looked up" is what lets a confirm say nothing was changed. So a helper that
+ * swallows what its own timers threw can still be answered for by what it had asked of Valkey.
  */
 export function queueWriteTracking(queue) {
-  let added = false;
+  let called = false;
   let client = null;
-  const tracked = new Proxy(queue, {
-    get(target, name) {
-      if (name === "add") {
+  const counting = (target, lookups, wrap = (value) => value) =>
+    new Proxy(target, {
+      get(inner, name) {
+        const value = Reflect.get(inner, name);
+        if (typeof name !== "string" || typeof value !== "function") return value;
         return (...args) => {
-          added = true;
-          return target.add(...args);
+          if (!lookups.includes(name)) called = true;
+          const out = value.apply(inner, args);
+          return typeof out?.then === "function" ? out.then(wrap) : wrap(out);
         };
-      }
-      if (name === "client") return Promise.resolve(target.client).then((redis) => (client ??= writeTracking(redis)).redis);
-      const value = Reflect.get(target, name);
-      return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  /** A job a lookup handed back, tracked the same way; anything else as it is. */
+  const jobOf = (value) => (value !== null && typeof value === "object" && typeof value.getState === "function" ? counting(value, JOB_LOOKUPS) : value);
+  const tracked = new Proxy(counting(queue, QUEUE_LOOKUPS, jobOf), {
+    get(target, name) {
+      if (name === "client") return Promise.resolve(queue.client).then((redis) => (client ??= writeTracking(redis)).redis);
+      return Reflect.get(target, name);
     },
   });
   return {
     queue: tracked,
     get wrote() {
-      return added || client?.wrote === true;
+      return called || client?.wrote === true;
     },
   };
 }

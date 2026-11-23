@@ -20,7 +20,7 @@ const READ_LATE = Symbol("read-late");
  * command was sent, and the drop threw it on: the confirm then said the change could not be made and that nothing was
  * changed, of a drop that landed when Valkey woke (measured on a real console: the row read `dropped` after the wake).
  */
-export const DRAFT_DROP_UNCONFIRMED = unconfirmedWrite({ what: "The draft", done: "dropped", asked: "the drop", next: "Reload its run page once Valkey answers before trying again." }).invalid;
+export const DRAFT_DROP_UNCONFIRMED = unconfirmedWrite({ what: "The draft", done: "dropped", asked: "the drop", next: "Reload its run page once Valkey answers before trying again." });
 
 const hash = text => createHash("sha256").update(text).digest("hex");
 const RUN_RE = /^[A-Za-z0-9._:-]{1,200}$/;

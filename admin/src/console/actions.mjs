@@ -2480,7 +2480,7 @@ function withRules(a) {
   if (r.danger && a.paid) throw new Error(`console action ${a.name} is paid and destructive; it is one or the other`);
   // `atConfirm` is carried as the rule says it, false when absent: the action test holds it a boolean and never on a
   // bulk act (a bulk confirm asks no rule for its Undo again, `confirmBulk`, so one would keep its preview's in silence).
-  const linked = configActions.includes(a);
+  const linked = CONFIG_FIX_ACTIONS.includes(a.name);
   const tracked = ["cancel-held", "cancel-all-held", "cancel-queued", "retry-failed", "retry-all-failed", "rerun"].includes(a.name);
   const wrapped = { ...a, agent: actionAgentPolicy(a.name), fields: Object.freeze([...r.fields, ...(linked ? ["becauseRun"] : [])]), danger: r.danger, atConfirm: r.atConfirm ?? false, undo: r.undo, inverse: r.inverse, confirmLabel: r.confirmLabel, done: r.done,
     ...(linked ? {
@@ -2839,8 +2839,19 @@ function adoptable(facts, { name, version }) {
   return { row };
 }
 
+/**
+ * The configuration actions whose change is a write to VALKEY and to no file a fix could be proven by (issue #987): the
+ * applied split's plan and its revert, and the envelope, whose confirm records its digest in Valkey first. A fix's
+ * accounting is about a file: its row is proven applied, repaired and undone by the changed file's own digest
+ * (`trackConfiguration`'s `privateUndo`, the fix store's `repair`), which these do not have (their target is the split,
+ * or their digest is the envelope's and not the file's), so a row staged for one could never be settled. And their own
+ * answer can be "may or may not", which the tracking around it once replaced with "nothing was changed". They take no
+ * `becauseRun`: it is refused by name with every other field they do not take. No page sends it for them.
+ */
+const VALKEY_CONFIG_ACTIONS = Object.freeze(["envelope-set", "priorities-set", "allocation-revert"]);
+/** The configuration actions that can be made because of a refusal (`becauseRun`), whose fix is then tracked: every one that changes a file alone. The page script sends the field for these and no other. */
+export const CONFIG_FIX_ACTIONS = Object.freeze(configActions.map((action) => action.name).filter((name) => !VALKEY_CONFIG_ACTIONS.includes(name)));
 /** Every action the console can take, by name. The routes, the pages' forms and the tests all read this table. */
-export const CONFIG_FIX_ACTIONS = Object.freeze(configActions.map((action) => action.name));
 export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions, ...deviceActions, ...packageActions, ...modelRoleActions, ...triggerEnvironmentActions, ...ANSWERER_ACTIONS, ...SETUP_HTTP_ACTIONS].map(withRules));
 
 /** The action named `name`, or null. */
