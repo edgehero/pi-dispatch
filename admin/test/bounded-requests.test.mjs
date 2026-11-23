@@ -8,8 +8,9 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFi
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeRedisClient } from "@edgehero/pi-dispatch/connection";
-import { DISPATCH_RUN_ALLOWANCE_LOST, applyPriorities, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planEnvelopeWrite, planParkedAnswer, planRerun, readEnvelope, revertAllocation, writeEnvelope } from "../src/read-model.mjs";
-import { ALREADY_CUT, ALREADY_MATCH, ALREADY_PER_STATE, ALREADY_UNCHECKED, LOOK_FIRST, CONFIRM_READ_TIMEOUT_MS, PAID_PLAN_TIMEOUT_MS, alreadyQueuedLine, connectedQueue, dispatchRunAlready, enqueueUnconfirmed, enqueueUnread, queuedAlready } from "../src/job-actions.mjs";
+import { DISPATCH_RUN_ALLOWANCE_LOST, QUEUE_CLOSE_TIMEOUT_MS, applyPriorities, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planEnvelopeWrite, planParkedAnswer, planRerun, readEnvelope, revertAllocation, writeEnvelope } from "../src/read-model.mjs";
+import { ALREADY_CUT, ALREADY_MATCH, ALREADY_PER_STATE, ALREADY_UNCHECKED, APPROVAL_NOT_PENDING, APPROVAL_UNREAD, CONNECT_ENDED, LOOK_FIRST, CONFIRM_READ_TIMEOUT_MS, PAID_PLAN_TIMEOUT_MS, alreadyQueuedLine, connectedQueue, dispatchRunAlready, enqueueUnconfirmed, enqueueUnread, queuedAlready } from "../src/job-actions.mjs";
+import { approvalTargetKey } from "@edgehero/pi-dispatch/approval-state";
 import { enqueueTriggerFire, FIRE_UNCONFIRMED, planTriggerFire } from "../src/trigger-fire.mjs";
 import { CONSOLE_AUDIT_FIELD_MAX } from "@edgehero/pi-dispatch/console-audit";
 import { GROUP_STATUS_UNANSWERED, GROUP_UNCONFIRMED } from "../src/zero-touch-data.mjs";
@@ -138,6 +139,190 @@ for (const [name, what, readsBack, enqueue] of ENQUEUES) {
     assert.ok(res.invalid.indexOf(res.jobId) < 200, "the job's id comes before an audit row's cut");
   });
 }
+
+// Issue #987: what a paid enqueue says is what it sent. A queue whose client settled ENDED never connected, and a forge
+// enqueue's own checks come before its add (its builder, its read of a durable approval, the connect of the queue an
+// approval is routed to), so each of them is "nothing was queued" with its own reason, never "may or may not". The
+// helper is the real one (`enqueueForgeJob`, with the real approval store) over a fake client.
+
+for (const [name, , , enqueue] of ENQUEUES) {
+  test(`${name} whose queue's client settled ended answers unreachable, and its add is never sent (#987)`, async () => {
+    // BullMQ's wait for a ready client resolves, with the client, when it ended with no error event.
+    const q = fakeQueue({ client: Promise.resolve({ status: "end" }) });
+    const got = await timed(enqueue(q.seams));
+    assert.deepEqual(got.res, { unreachable: "the queue's connection closed before it was ready; nothing was queued" });
+    assert.equal(got.res.unreachable, CONNECT_ENDED);
+    assert.equal(q.calls.add, 0, "nothing was sent, so nothing was queued is true");
+    await sleep(20);
+    assert.equal(q.calls.close, 1, "and the queue is closed");
+    // Any other status is a client to send on: a reconnecting one still takes the add, and says what it threw.
+    const dropped = fakeQueue({ client: Promise.resolve({ status: "reconnecting" }), add: () => Promise.reject(new Error("Connection is closed.")) });
+    assert.equal((await enqueue(dropped.seams)).partial, true);
+    assert.equal(dropped.calls.add, 1);
+  });
+}
+
+/** The durable approval a parked run waits on, as the approval store keeps it, and the answer the console planned for it. */
+const APPROVAL = { version: 1, requestId: "a".repeat(64), runId: "gh-parked", kind: "github", repo: "o/r", target: { type: "issue", number: 7 }, action: "deploy:staging", toolCallId: "call-1", configDigest: "digest", sessionKey: "session-key", host: "host-1", createdAt: 123456, state: "pending" };
+const APPROVAL_PLAN = { ...PARKED_PLAN, job: { ...PARKED_PLAN.job, parkedReply: false, approvalRequestId: APPROVAL.requestId } };
+/** A forge re-run of a gated comment job: the helper reads the item's approval for it too, and binds a pending one. */
+const GATED_RERUN = { kind: "forge", forge: "github", jobId: "gh-gated", deliveryId: "console-0123456789abcdef", queue: "pi-jobs", job: { repo: "o/r", target: { type: "issue", number: 7, title: "t", body: "b" }, flow: "fix", gates: ["deploy:staging"], trigger: { event: "issue_comment", action: "created", deliveryId: "console-0123456789abcdef", sender: { id: 1 }, comment: { body: "/pi fix" } } } };
+/** A queue client the approval store reads through: the item's active request is `request` (null for none). */
+const approvalClient = (request) => ({
+  eval() {
+    throw new Error("an enqueue only reads the approval");
+  },
+  get: async (key) => (key === approvalTargetKey(APPROVAL) ? (request?.requestId ?? null) : request ? JSON.stringify(request) : null),
+});
+const FORGE_ENQUEUES = [
+  ["a parked answer", "the answer to gh-parked", (seams, plan = APPROVAL_PLAN) => enqueueParkedAnswer(plan, { url: "redis://x", ...seams, connectTimeoutMs: BOUND })],
+  ["a forge re-run", "the re-run of gh-gated", (seams, plan = GATED_RERUN) => enqueueRerun(plan, { url: "redis://x", ...seams, connectTimeoutMs: BOUND })],
+];
+
+test("a parked answer whose approval is no longer the pending one, or could not be read, is refused in the preview's words with nothing sent (#987)", async () => {
+  assert.deepEqual([APPROVAL_NOT_PENDING, APPROVAL_UNREAD], ["the approval request is no longer pending for this run; nothing was queued", "the durable approval request could not be read; nothing was queued, try again"]);
+  // Stale: the item has no active request any more, or another one.
+  for (const active of [null, { ...APPROVAL, requestId: "b".repeat(64) }]) {
+    const q = fakeQueue({ client: Promise.resolve(approvalClient(active)) });
+    assert.deepEqual(await enqueueParkedAnswer(APPROVAL_PLAN, { url: "redis://x", ...q.seams, connectTimeoutMs: BOUND }), { refusal: APPROVAL_NOT_PENDING });
+    assert.equal(q.calls.add, 0);
+    await sleep(10);
+    assert.equal(q.calls.close, 1);
+  }
+  // Unread: the read threw, with the mark of a command Valkey took and never answered. A read's error carries that
+  // mark as a write's does, and it says nothing of an add that was never started.
+  for (const [, , enqueue] of FORGE_ENQUEUES) {
+    const lost = fakeQueue({ client: Promise.resolve({ eval() {}, get: () => Promise.reject(lostAnswer()) }) });
+    assert.deepEqual(await enqueue(lost.seams), { refusal: APPROVAL_UNREAD });
+    assert.equal(lost.calls.add, 0);
+  }
+  // The same request, still the item's active one: queued, on the plan's queue.
+  const q = fakeQueue({ client: Promise.resolve(approvalClient(APPROVAL)) });
+  assert.deepEqual(await enqueueParkedAnswer(APPROVAL_PLAN, { url: "redis://x", ...q.seams, connectTimeoutMs: BOUND }), { ok: true, jobIds: ["gh-console-0123456789abcdef"], queue: "pi-jobs" });
+  assert.equal(q.calls.add, 1);
+});
+
+test("a forge enqueue whose builder refuses the job is a refusal that names what it threw, never Valkey unreachable and never may or may not (#987)", async () => {
+  const unsigned = { ...PARKED_PLAN, job: { ...PARKED_PLAN.job, console: { by: "Not A Token" } } };
+  const merging = { ...GATED_RERUN, job: { ...GATED_RERUN.job, gates: undefined, mayMerge: "yes" } };
+  for (const [enqueue, plan, words] of [[FORGE_ENQUEUES[0][2], unsigned, /^the job could not be built \(enqueueForgeJob: console\.by must be a console token name .*\); nothing was queued$/], [FORGE_ENQUEUES[1][2], merging, /^the job could not be built \(merge-policy-invalid\); nothing was queued$/]]) {
+    const q = fakeQueue({ client: Promise.resolve({}) });
+    const res = await enqueue(q.seams, plan);
+    assert.deepEqual(Object.keys(res), ["refusal"], JSON.stringify(res));
+    assert.match(res.refusal, words);
+    assert.equal(q.calls.add, 0);
+    await sleep(10);
+    assert.equal(q.calls.close, 1);
+  }
+});
+
+/** Two queues by name, as an approval routed to its owner host's queue needs: the plan's own and the routed one. */
+function routedQueues({ routedClient = Promise.resolve({}), routedAdd } = {}) {
+  const request = { ...APPROVAL, hostQueue: "pi-jobs@host-1" };
+  const first = fakeQueue({ client: Promise.resolve(approvalClient(request)) });
+  const routed = fakeQueue({ client: routedClient, add: routedAdd });
+  routed.queue.name = request.hostQueue;
+  const built = [];
+  const queueFn = (_connection, options) => (built.push(options.name), options.name === request.hostQueue ? routed.queue : first.queue);
+  return { first, routed, built, seams: { queueFn, parseConnectionFn: first.seams.parseConnectionFn } };
+}
+
+for (const [name, what, enqueue] of FORGE_ENQUEUES) {
+  test(`${name} routed to another host's queue connects that queue under the connect bound too, and says nothing was queued when it does not (#987)`, async () => {
+    // It never connects: the bound ends it, nothing was asked of either queue, and both are closed without a wait.
+    const never = routedQueues({ routedClient: neverAnswers() });
+    never.routed.queue.close = () => ((never.routed.calls.close += 1), neverAnswers());
+    const late = await timed(enqueue(never.seams));
+    assert.deepEqual(late.res, { unreachable: "the queue did not connect within 0.06 seconds; nothing was queued" });
+    assert.ok(late.ms < 1500, `${late.ms} ms`);
+    assert.deepEqual(never.built, ["pi-jobs", "pi-jobs@host-1"]);
+    assert.deepEqual(never.first.calls.conns, [{ failFast: true, commandTimeoutMs: 5000 }, { failFast: true, commandTimeoutMs: 5000 }], "both are the console's bounded kind");
+    assert.deepEqual([never.first.calls.add, never.routed.calls.add], [0, 0]);
+    await sleep(20);
+    assert.deepEqual([never.first.calls.close, never.routed.calls.close], [1, 1]);
+    // It ended before it was ready, or its connect failed: the same, each with its own words.
+    const ended = routedQueues({ routedClient: Promise.resolve({ status: "end" }) });
+    assert.deepEqual(await enqueue(ended.seams), { unreachable: CONNECT_ENDED });
+    const failing = Promise.reject(new Error("connect ECONNREFUSED"));
+    failing.catch(() => {});
+    const refused = routedQueues({ routedClient: failing });
+    assert.deepEqual(await enqueue(refused.seams), { unreachable: "connect ECONNREFUSED; nothing was queued" });
+    assert.deepEqual([ended.routed.calls.add, refused.routed.calls.add, ended.first.calls.add, refused.first.calls.add], [0, 0, 0, 0]);
+  });
+
+  test(`${name} routed to another host's queue adds there alone, waits for no close of it, and says may or may not once that add was started and lost (#987)`, async () => {
+    const landed = routedQueues();
+    // The routed queue's close never answers, as a QUIT to a Valkey that stopped answering.
+    landed.routed.queue.close = () => ((landed.routed.calls.close += 1), neverAnswers());
+    const ok = await timed(enqueue(landed.seams), 1500);
+    assert.equal(ok.res.ok, true, JSON.stringify(ok.res));
+    assert.equal(ok.res.queue, "pi-jobs@host-1", "the answer names the queue the job is on, which is where its cancel looks");
+    assert.deepEqual([landed.first.calls.add, landed.routed.calls.add], [0, 1], "the plan's own queue never receives the job");
+    assert.ok(ok.ms < QUEUE_CLOSE_TIMEOUT_MS / 2, `the answer did not wait for the routed queue's close (${ok.ms} ms)`);
+    await sleep(20);
+    assert.deepEqual([landed.first.calls.close, landed.routed.calls.close], [1, 1], "each closed once, by the console");
+    // The add was started and its answer lost: not known. Valkey's own refusal of it: nothing was queued.
+    const lost = routedQueues({ routedAdd: () => Promise.reject(lostAnswer()) });
+    assert.deepEqual(await enqueue(lost.seams), enqueueUnconfirmed(what));
+    const refusing = routedQueues({ routedAdd: () => Promise.reject(refusal()) });
+    assert.deepEqual(await enqueue(refusing.seams), { unreachable: "READONLY You can't write against a read only replica.; nothing was queued" });
+  });
+}
+
+test("the routed queue's close is started and never waited for, and a close that is not answered ends in a dropped connection at the close bound (#987)", async () => {
+  // Both forge enqueues at once, each with a routed queue whose close never answers: one wait covers the close bound.
+  const cases = FORGE_ENQUEUES.map(([name, , enqueue]) => {
+    const q = routedQueues();
+    q.routed.queue.close = () => ((q.routed.calls.close += 1), neverAnswers());
+    return { name, q, answer: timed(enqueue(q.seams), QUEUE_CLOSE_TIMEOUT_MS * 3) };
+  });
+  for (const { name, q, answer } of cases) {
+    const got = await answer;
+    assert.equal(got.res.ok, true, `${name}: ${JSON.stringify(got.res)}`);
+    assert.ok(got.ms < QUEUE_CLOSE_TIMEOUT_MS / 2, `${name}: answered before the close bound, not at it (${got.ms} ms)`);
+    assert.equal(q.routed.calls.disconnect, 0, `${name}: the close has its bound still`);
+  }
+  await sleep(QUEUE_CLOSE_TIMEOUT_MS + 200);
+  for (const { name, q } of cases) {
+    // A bare close would leave the socket of a Valkey that never answers its QUIT open for as long as that lasts.
+    assert.deepEqual([q.routed.calls.close, q.routed.calls.disconnect], [1, 1], `${name}: closed once, and dropped when the close was not answered`);
+    assert.deepEqual([q.first.calls.close, q.first.calls.disconnect], [1, 0], `${name}: the plan's own queue closed and was left alone`);
+  }
+});
+
+test("a forge re-run refused before any add takes its touch intent back before it answers, and waits for no abort where Valkey did not answer (#987)", async () => {
+  const tracked = { ...GATED_RERUN, touchSource: { runId: "gh-gated", cause: "rerun", scopeId: "a".repeat(64) } };
+  // An abort that takes a while and says when it is done, and one that never answers.
+  const tracker = (abort) => {
+    const seen = [];
+    return { seen, touchOutbox: { begin: async (event) => (seen.push("begin"), { event }), applied: async () => (seen.push("applied"), { ok: true }), abort: () => (seen.push("abort"), abort(seen)) } };
+  };
+  const slowly = async (seen) => (await sleep(40), seen.push("aborted"));
+  // Refused with Valkey answering: the builder's refusal. The intent is gone when "nothing was queued" is said.
+  const refused = tracker(slowly);
+  const built = fakeQueue({ client: Promise.resolve({}) });
+  const res = await enqueueRerun({ ...tracked, job: { ...tracked.job, gates: undefined, mayMerge: "yes" } }, { url: "redis://x", ...built.seams, connectTimeoutMs: BOUND, touchOutbox: refused.touchOutbox });
+  assert.match(res.refusal, /^the job could not be built \(merge-policy-invalid\); nothing was queued$/);
+  assert.deepEqual(refused.seen, ["begin", "abort", "aborted"], "no tracker is left begun behind a refusal");
+  assert.equal(built.calls.add, 0);
+  // Valkey did not answer the approval's read, or the routed queue's connect: the abort is started, and an abort that
+  // never answers does not hold the answer.
+  const unread = tracker(neverAnswers);
+  const lost = fakeQueue({ client: Promise.resolve({ eval() {}, get: () => Promise.reject(lostAnswer()) }) });
+  const first = await timed(enqueueRerun(tracked, { url: "redis://x", ...lost.seams, connectTimeoutMs: BOUND, touchOutbox: unread.touchOutbox }), 1500);
+  assert.deepEqual(first.res, { refusal: APPROVAL_UNREAD });
+  const unreached = tracker(neverAnswers);
+  const never = routedQueues({ routedClient: neverAnswers() });
+  const second = await timed(enqueueRerun(tracked, { url: "redis://x", ...never.seams, connectTimeoutMs: BOUND, touchOutbox: unreached.touchOutbox }), 1500);
+  assert.deepEqual(second.res, { unreachable: "the queue did not connect within 0.06 seconds; nothing was queued" });
+  await sleep(10);
+  assert.deepEqual([unread.seen, unreached.seen], [["begin", "abort"], ["begin", "abort"]]);
+  // Queued: the intent is applied, never aborted.
+  const queued = tracker(slowly);
+  const landed = routedQueues();
+  const done = await enqueueRerun(tracked, { url: "redis://x", ...landed.seams, connectTimeoutMs: BOUND, touchOutbox: queued.touchOutbox });
+  assert.deepEqual([done.ok, done.queue, queued.seen], [true, "pi-jobs@host-1", ["begin", "applied"]], JSON.stringify(done));
+});
 
 test("connectedQueue waits for a queue's connection and for nothing else, and a queue with none to wait for is handed back at once (#961)", async () => {
   const client = { id: "client" };

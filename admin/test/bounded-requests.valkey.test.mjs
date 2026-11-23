@@ -3,6 +3,9 @@
 // before its connect, the allowance at its count, Fire now at its latch, the package facts at a canary's read, and the
 // budget writes at their own command. After the thaw the number of jobs is what the sentence allowed: none where it
 // said nothing was queued, none or one where it said may or may not.
+// Issue #987 adds what a forge enqueue says before its add was ever sent: through a forwarder that takes the connection
+// and closes it, with an approval that is no longer the pending one, and with the queue an approval is routed to
+// stopped at its connect.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
@@ -12,11 +15,13 @@ import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connecti
 import { makeQueue } from "@edgehero/pi-dispatch/queue";
 import { publishLook, updatesCanaryKey } from "@edgehero/pi-dispatch/updates";
 import { makeQuestionGroupStore } from "@edgehero/pi-dispatch/question-groups";
+import { approvalTargetKey, makeApprovalStore } from "@edgehero/pi-dispatch/approval-state";
 import { freezingProxy } from "../../worker/test/helpers/freezing-proxy.mjs";
 import { commandOn, trippingProxy } from "./helpers/tripping-proxy.mjs";
+import { closingForwarder } from "./helpers/closing-forwarder.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { DISPATCH_RUN_COUNT_SCRIPT, applyPriorities, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planEnvelopeWrite, planParkedAnswer, planRerun, readEnvelope, revertAllocation, writeEnvelope } from "../src/read-model.mjs";
-import { dispatchRunAlready, enqueueUnconfirmed } from "../src/job-actions.mjs";
+import { DISPATCH_RUN_COUNT_SCRIPT, applyPriorities, cancelQueuedJob, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planCancelQueued, planEnvelopeWrite, planParkedAnswer, planRerun, readEnvelope, revertAllocation, writeEnvelope } from "../src/read-model.mjs";
+import { APPROVAL_NOT_PENDING, CONNECT_ENDED, dispatchRunAlready, enqueueUnconfirmed } from "../src/job-actions.mjs";
 import { enqueueTriggerFire, FIRE_UNCONFIRMED, planTriggerFire } from "../src/trigger-fire.mjs";
 import { readUpdates } from "../src/updates-view.mjs";
 import { GROUP_STATUS_UNANSWERED, GROUP_UNCONFIRMED, makeZeroTouchService } from "../src/zero-touch-data.mjs";
@@ -50,9 +55,9 @@ const clocked = async (promise) => {
 const stoppedAt = (frozen) => Promise.race([frozen.then(() => "stopped"), sleep(1000).then(() => "never sent")]);
 
 /** One test's own corner of the database: a tag, a direct client, direct queues, and the deletion of what it wrote. */
-async function scene() {
+async function scene(issue = "t961") {
   const url = databaseUrl();
-  const tag = `t961-${randomBytes(5).toString("hex")}`;
+  const tag = `${issue}-${randomBytes(5).toString("hex")}`;
   const redis = makeRedisClient(url, {});
   const closers = [];
   const patterns = [`bull:pi-jobs@${tag}:*`, `*${tag}*`];
@@ -148,6 +153,131 @@ for (const enqueue of ENQUEUES) {
     }
   });
 }
+
+// Any script as it leaves, by its text or by its digest: BullMQ's add is one of them, and so is every other write of a queue.
+const ANY_SCRIPT = /\r\n\$(?:4\r\neval|7\r\nevalsha)\r\n/i;
+
+/** A forge job as the console builds one for an issue of this test's own repository. */
+const forgeJob = (s, extra = {}) => ({ repo: `acme/${s.tag}`, target: { type: "issue", number: 7, title: "t", body: "b" }, flow: "fix", trigger: { event: "issue_comment", action: "created", deliveryId: "console-0123456789abcdef", sender: { id: null }, matched: { index: 0, type: "comment", phrase: "/pi" }, comment: { body: "yes" } }, ...extra });
+
+/** The two forge enqueues of the console, each as `(scene, url, extra) => answer` (a re-run of a forge job, a parked answer). */
+const FORGE_ENQUEUES = [
+  ["a parked answer", (s, url, extra = {}) => enqueueParkedAnswer({ kind: "parked-answer", jobId: `gh-${s.tag}`, forge: "github", queue: s.queueName, job: forgeJob(s, { resume: true, parkedReply: true, console: { by: "ops" } }) }, { url, ...extra })],
+  ["a forge re-run", (s, url, extra = {}) => enqueueRerun({ kind: "forge", forge: "github", jobId: `gh-${s.tag}`, deliveryId: "console-0123456789abcdef", queue: s.queueName, job: forgeJob(s) }, { url, ...extra })],
+];
+
+for (const [name, run] of FORGE_ENQUEUES) {
+  test(`${name} through a forwarder that takes each connection and closes it says nothing was queued, at once, with no add on the wire (#987)`, live, async () => {
+    const s = await scene("t987");
+    // The console's own command bound here, never this file's short one: nothing waits on it, and a short one ends the
+    // connect with a command that timed out before the client has run out of retries, which is another answer.
+    const forwarder = await closingForwarder(s.url);
+    try {
+      // Three times, as a person who tries again: the answer is the same each time.
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const got = await clocked(run(s, forwarder.url));
+        assert.deepEqual(got.res, { unreachable: CONNECT_ENDED }, `attempt ${attempt}: ${JSON.stringify(got.res?.thrown?.message ?? got.res)}`);
+        assert.ok(got.ms < 1500, `attempt ${attempt}: ${got.ms} ms`);
+      }
+      const sent = forwarder.bytes();
+      assert.ok(forwarder.connections() >= 3 && /\r\n\$6\r\nselect\r\n/i.test(sent), "the queue's client reached the forwarder and greeted it each time");
+      assert.equal(THE_ADD.test(sent), false, "no add left the console");
+      assert.equal(ANY_SCRIPT.test(sent), false, "nor any other script of a queue");
+      assert.equal(await s.jobs(), 0);
+    } finally {
+      forwarder.close();
+      await s.done();
+    }
+  });
+}
+
+/**
+ * A durable approval of this test's own, pending on its issue and owned by another host than the plan's queue names,
+ * in the real approval store, and the console's answer to it. The store's keys carry no tag, so they are named here
+ * for the scene to delete.
+ */
+async function pendingApproval(s) {
+  const T0 = 1_800_000_000_000;
+  const store = makeApprovalStore({ redis: s.redis, now: () => T0 });
+  const requestId = createHash("sha256").update(`approval:${s.tag}`).digest("hex");
+  const host = `${s.tag}-owner`;
+  const request = { requestId, runId: `gh-${s.tag}`, kind: "github", repo: `acme/${s.tag}`, target: { type: "issue", number: 7 }, action: "deploy:staging", toolCallId: "call-1", configDigest: "digest", sessionKey: "session-1", host, hostQueue: `pi-jobs@${host}`, createdAt: T0 };
+  s.own(`run:approval:request:${requestId}`, approvalTargetKey(request));
+  assert.equal((await store.publish(request)).ok, true);
+  const plan = (deliveryId = "console-0123456789abcdef") => ({ kind: "parked-answer", jobId: request.runId, forge: "github", queue: s.queueName, job: forgeJob(s, { resume: true, parkedReply: false, approvalRequestId: requestId, console: { by: "ops" }, trigger: { ...forgeJob(s).trigger, deliveryId, comment: { body: "/approve" } } }) });
+  return { store, request, requestId, hostQueue: request.hostQueue, plan };
+}
+
+test("an answer to an approval is queued on its owner host's queue alone, and one whose approval is no longer the pending one says so and queues nothing (#987)", live, async () => {
+  const s = await scene("t987");
+  try {
+    const approval = await pendingApproval(s);
+    const queued = await enqueueParkedAnswer(approval.plan(), { url: s.url, parseConnectionFn: boundedHere });
+    assert.deepEqual(queued, { ok: true, jobIds: ["gh-console-0123456789abcdef"], queue: approval.hostQueue }, JSON.stringify(queued));
+    assert.deepEqual([await s.jobs(), await s.jobs(approval.hostQueue)], [0, 1], "on the owner's queue, never on the plan's");
+    // The request ends (the worker revoked it): the item has no active request, and a second answer binds a stale one.
+    assert.equal((await approval.store.cancel({ requestId: approval.requestId, jobId: `gh-${s.tag}-revoked` })).ok, true);
+    const stale = await clocked(enqueueParkedAnswer(approval.plan("console-fedcba9876543210"), { url: s.url, parseConnectionFn: boundedHere }));
+    assert.deepEqual(stale.res, { refusal: APPROVAL_NOT_PENDING }, JSON.stringify(stale.res?.thrown?.message ?? stale.res));
+    assert.ok(stale.ms < 2000, `${stale.ms} ms`);
+    await sleep(300);
+    assert.deepEqual([await s.jobs(), await s.jobs(approval.hostQueue)], [0, 1], "nothing was queued by the refused answer");
+  } finally {
+    await s.done();
+  }
+});
+
+test("a forge re-run that an approval routes to its owner host's queue answers that queue, and the cancel its Undo opens finds the job there and removes it (#987)", live, async () => {
+  const s = await scene("t987");
+  try {
+    const approval = await pendingApproval(s);
+    // A re-run of a gated comment job on the item the approval waits on: the helper binds it and routes it. Its
+    // delivery id carries this test's tag, so every key named after the job is this test's to delete.
+    const deliveryId = `console-${s.tag}`;
+    const plan = { kind: "forge", forge: "github", jobId: `gh-${s.tag}`, deliveryId, queue: s.queueName, job: forgeJob(s, { gates: ["deploy:staging"], trigger: { ...forgeJob(s).trigger, deliveryId, comment: { body: "/pi fix" } } }) };
+    const queued = await enqueueRerun(plan, { url: s.url, parseConnectionFn: boundedHere });
+    assert.deepEqual(queued, { ok: true, jobId: `gh-${deliveryId}`, queue: approval.hostQueue }, JSON.stringify(queued));
+    assert.deepEqual([await s.jobs(), await s.jobs(approval.hostQueue)], [0, 1], "on the owner's queue, never on the plan's");
+    // The banner's Undo is the cancel of that job by the id and the queue the re-run answered: its preview finds the
+    // job on that queue, and its confirm, which refuses a job found on another queue than the preview's, removes it.
+    const seams = { url: s.url, redisFn: clientHere, parseConnectionFn: boundedHere };
+    const preview = await planCancelQueued({ ...seams, jobId: queued.jobId, queue: queued.queue });
+    assert.equal(preview.plan?.queue, approval.hostQueue, JSON.stringify(preview));
+    const cancelled = await cancelQueuedJob({ ...seams, jobId: queued.jobId, expect: { queue: preview.plan.queue, attemptsMade: preview.plan.attemptsMade, stalledCounter: preview.plan.stalledCounter }, touchStore: null });
+    assert.deepEqual(cancelled, { ok: true, jobId: queued.jobId, queue: approval.hostQueue, held: false }, JSON.stringify(cancelled));
+    await sleep(300);
+    assert.deepEqual([await s.jobs(), await s.jobs(approval.hostQueue)], [0, 0]);
+  } finally {
+    await s.done();
+  }
+});
+
+test("an answer to an approval whose owner queue Valkey stops answering at its connect says nothing was queued at the connect bound, and nothing is queued after the wake (#987)", live, async () => {
+  const s = await scene("t987");
+  const proxy = await trippingProxy(s.url);
+  try {
+    const approval = await pendingApproval(s);
+    let frozen = null;
+    // Armed as the routed queue is built: the plan's own queue is connected by then and the approval was read on it, so
+    // the next ready check to leave is the routed queue's.
+    const queueFn = (connection, options) => {
+      if (options.name === approval.hostQueue) frozen = proxy.freezeAt(/\r\n\$4\r\ninfo\r\n/i);
+      return makeQueue(connection, options);
+    };
+    const got = await clocked(enqueueParkedAnswer(approval.plan(), { url: proxy.url, parseConnectionFn: boundedHere, queueFn, connectTimeoutMs: CONNECT }));
+    assert.ok(frozen, "the routed queue was built through the console's own seam");
+    assert.equal(await stoppedAt(frozen), "stopped", "Valkey stopped answering at the routed queue's connect");
+    assert.deepEqual(got.res, { unreachable: `the queue did not connect within ${CONNECT / 1000} seconds; nothing was queued` }, JSON.stringify(got.res?.thrown?.message ?? got.res));
+    assert.ok(got.ms >= CONNECT - 50 && got.ms < CONNECT + 2000, `one connect bound past the first queue's connect (${got.ms} ms)`);
+    proxy.thaw();
+    await sleep(1500);
+    assert.deepEqual([await s.jobs(), await s.jobs(approval.hostQueue)], [0, 0], "nothing was sent, and nothing is sent when the connection comes up");
+  } finally {
+    proxy.thaw();
+    proxy.close();
+    await s.done();
+  }
+});
 
 test("a re-run's add that Valkey took before it stopped answering is a job after the wake: may or may not was the true sentence (#961)", live, async () => {
   const s = await scene();

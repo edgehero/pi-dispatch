@@ -1059,7 +1059,17 @@ its log says each queue's error once a minute, and an outage after Valkey came b
 A re-run, an answer to a parked run, a started run, Fire now and a zero touch grouping job do not wait on such a Valkey
 either (2026-11-21, #961). Each connects its queue first, within 6 seconds, and says nothing was queued when it could not.
 Once the job was sent, an answer that did not come back says the run "may or may not have been queued" (Fire now and a
-canary: "A run may have been queued and one start of this hour was used") and to preview it again first. No page lists
+canary: "A run may have been queued and one start of this hour was used") and to preview it again first. An answer to a
+parked run, a re-run of a forge run and a fork say that only once they started to send the job (2026-11-23, #987).
+Before that nothing was queued, and the bar says why: Valkey could not be reached, with Try again, when the queue of
+the host that owns an approval did not connect (it gets 6 seconds of its own, counted after the first queue connected
+and the approval was read); "the approval request is no longer pending for this run" when that request ended, or
+another took its place, since the preview; "the durable approval request could not be read" when its state could not
+be read; and what the queue refused about the job when it could not be built. Every paid start (these, a re-run of any
+kind, a started run, Fire now, a canary and a grouping job) says nothing was queued when its connection was closed
+before it was ready: that Valkey could not be reached, or, where a start of the hour was already counted, that the
+start was used. Each could say there that a run may have been queued. A re-run that lands on the queue of the host
+that owns an approval names that queue, so its Undo cancels the job where it is. No page lists
 every waiting job: Runs lists a run only once it has ended, the overview names the first few waiting jobs of each reason
 and Fleet counts them. So the next preview looks for a run like it and says when one is already queued or running, with
 the job's id and when it was queued. Confirming then asks for another: the queue refuses it while it takes it as a
