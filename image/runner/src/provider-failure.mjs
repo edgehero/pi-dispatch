@@ -1,7 +1,9 @@
 /** Measured, closed failover evidence (issue #716). No provider text or headers leave this module. */
 export const FAILURE_KINDS = Object.freeze(["rate-limited", "quota-exhausted", "overloaded", "context-overflow"]);
 export const MAX_RESET_MS = 6 * 60 * 60 * 1000;
-// These pinned HTTP adapters accept a per-call fetch. Google and Bedrock explicitly do not.
+// The pinned HTTP adapters whose per-call fetch this observer wraps. Bedrock takes none. pi 1.6.0's two Google adapters
+// take one too (up to 1.5.2 they threw on it), but their answers have not been measured through this observer, so they
+// stay out and their failures are read from what outcome.mjs sees.
 const FETCH_APIS = new Set(["anthropic-messages", "openai-completions", "openai-responses", "azure-openai-responses"]);
 /**
  * The closed subscription quota codes, exported so the worker's copy (worker/src/model-failover-protocol.mjs) is pinned to

@@ -38,8 +38,8 @@ export const COMPLETIONS_CATALOG_HOSTS = Object.freeze([
 	"token-plan-ams.xiaomimimo.com",
 	"token-plan-cn.xiaomimimo.com",
 	"token-plan-sgp.xiaomimimo.com",
-	"token-plan.ap-southeast-1.maas.aliyuncs.com",
-	"token-plan.cn-beijing.maas.aliyuncs.com",
+	"token-plan.maas.qianwenaiapi.com",
+	"token-plan.maas.qwencloudapi.com",
 ]);
 
 /** The runner's `COMPLETIONS_EXTRA_HOSTS`, copied: api.openai.com reads the field pi sends it. */

@@ -68,5 +68,9 @@ export async function loadRenderer() {
  * Re-verified at 1.5.2: the one change is in `sliceWithWidth` (behind `sliceByColumn`), which no longer carries an
  * APC sequence from before the cut range into it; the width functions are byte-identical, and the panel still draws
  * no APC sequence.
+ * Re-verified at 1.6.0: `graphemeWidth` keeps its body (now `clusterWidth`) and memoizes a one-unit cluster's width
+ * by its code, which is all that width depends on; `sliceWithWidth` and `getGraphemeCellRange` take printable ASCII
+ * one cell per character and send only the stretches around a unit that can join its neighbour through
+ * `Intl.Segmenter`, which cuts the same clusters; `visibleWidth` is byte-identical.
  */
-export const PI_TUI_UTILS_SHA256 = "8a116df57e08b670742aef85fec547314b90bd25ddb564ed1ccd4687f7969055";
+export const PI_TUI_UTILS_SHA256 = "953a1d6eb4000642469db59d10d3d602b10db88f23b6d1db309dcdb8a2ca0018";

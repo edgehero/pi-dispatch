@@ -67,8 +67,11 @@ const SITES_FILE = new URL("./fixtures/provider-steering-sites.json", import.met
 // `options && "sessionId" in options`; it is not an environment variable. WINDIR is no longer read.
 // 1.5.2 adds ALACRITTY_WINDOW_ID: pi-tui's terminal-image.js reads it only to tell Alacritty's image and colour support
 // apart, so it steers what pi draws in a terminal and nothing a provider or a job's spend depends on.
+// 1.6.0 adds GIT_SSH_COMMAND: package-manager.js reads it only to keep a user's own value when it makes git
+// non-interactive for a captured install (else `ssh -o BatchMode=yes`). git reads that variable itself either way, so pi
+// reading it adds no way in, and it steers no provider and nothing a job's spend depends on.
 const OUTSIDE_PI_NAMESPACE = [
-	"ALACRITTY_WINDOW_ID", "CI", "COLORFGBG", "COLORTERM", "COLUMNS", "DISPLAY", "EDITOR", "GHOSTTY_RESOURCES_DIR", "HF_HOME",
+	"ALACRITTY_WINDOW_ID", "CI", "COLORFGBG", "COLORTERM", "COLUMNS", "DISPLAY", "EDITOR", "GHOSTTY_RESOURCES_DIR", "GIT_SSH_COMMAND", "HF_HOME",
 	"HF_TOKEN", "HF_TOKEN_PATH", "HTTPS_PROXY", "HTTP_PROXY", "ITERM_SESSION_ID", "KITTY_WINDOW_ID", "LINES",
 	"LLAMA_API_KEY", "LLAMA_BASE_URL", "MOSH_CONNECTION", "ORCA_IMAGE_PROTOCOL", "PNPM_HOME", "ProgramFiles", "SHELL", "SSH_CLIENT",
 	"SSH_CONNECTION", "SSH_TTY", "STY", "SystemRoot", "TERM", "TERMINAL_EMULATOR", "TERMUX_VERSION",

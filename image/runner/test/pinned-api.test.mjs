@@ -1962,11 +1962,18 @@ test("the output-bound rules: who sends maxTokens, the 16 floor, the reasoning c
 	assert.match(responses, /if \(options\?\.maxTokens && compat\.supportsMaxOutputTokens && !omitUnsupportedFields\) \{/, "when openai-responses drops the caller's cap");
 	assert.match(responses, /const omitUnsupportedFields = isChatGPTSignIn\(model, options\?\.apiKey\);/);
 	assert.match(responses, /return \(model\.provider === "openai" &&\s*model\.baseUrl === "https:\/\/api\.openai\.com\/v1" &&\s*apiKey !== undefined &&\s*!apiKey\.startsWith\("sk-"\)\);/);
-	// The four that never put the caller's cap on the request: no maxTokens anywhere in their source, nor in the two
+	// The three that never put the caller's cap on the request: no maxTokens anywhere in their source, nor in the two
 	// classifier modules they share.
-	for (const file of ["openai-codex-responses.js", "cloudflare-workers-ai-system-one.js", "openai-decisions.js", "typesafe-system-one.js", "system-one-shared.js", "classifier-shared.js"]) {
+	for (const file of ["cloudflare-workers-ai-system-one.js", "openai-decisions.js", "typesafe-system-one.js", "system-one-shared.js", "classifier-shared.js"]) {
 		assert.doesNotMatch(nestedPiAi("api", file), /maxTokens|max_output_tokens|max_tokens/, `${file} now sends an output cap -- callCostBound may use the caller's maxTokens there`);
 	}
+	// pi 1.6.0's codex sends the caller's cap, floored at 16, as its one output field. The bound still takes the model's
+	// limit there (MAX_TOKENS_UNSENT_APIS says why), so a change to this line, or a second place that sets a cap, is
+	// read again before the bound trusts it.
+	const codex = nestedPiAi("api", "openai-codex-responses.js");
+	assert.match(codex, /const MIN_OUTPUT_TOKENS = 16;/);
+	assert.match(codex, /if \(options\?\.maxTokens && \(model\.compat\?\.supportsMaxOutputTokens \?\? true\)\) \{\s*body\.max_output_tokens = Math\.max\(options\.maxTokens, MIN_OUTPUT_TOKENS\);\s*\}/);
+	assert.equal(codex.match(/maxTokens|max_output_tokens|max_tokens/g)?.length, 4, "openai-codex-responses.js names an output cap in a second place (its one comment and the two lines above make 4)");
 	// openai-completions drops a falsy cap; the bound reads only a positive one as asked.
 	assert.match(nestedPiAi("api", "openai-completions.js"), /if \(options\?\.maxTokens\) \{/);
 });
@@ -2399,6 +2406,10 @@ test("pi's agent loop: the parallel executor persists after the whole batch, the
 	assert.match(parallel, /const orderedFinalizedCalls = await Promise\.all\([\s\S]*?for \(const finalized of orderedFinalizedCalls\) \{[\s\S]*?await emitToolResultMessage\(/, "the parallel executor now emits results before the whole batch settles: re-read whether run.recover still needs sequential");
 	assert.match(piFunction(loop, "emitToolResultMessage"), /await emit\(\{ type: "message_end", message: toolResultMessage \}\);/);
 	// pi 1.4.0 adds request identity; executor choice and persistence ordering are unchanged.
+	// pi 1.6.0 (#9986): neither executor stops at an abort any more; prepareToolCall checks the signal first, before
+	// the hooks, so every call after the abort gets an immediate "Operation aborted" result, emitted in order. The
+	// sequential one still persists each result before the next call starts, so recovery's reading holds: a crash
+	// leaves orphans only after the last persisted result, and the first of them is the only one that can have run.
 	const loopConfig = piMethod(agent, "createLoopConfig");
 	assert.match(loopConfig, /\n {12}toolExecution: this\.toolExecution,\n {12}beforeToolCall: this\.beforeToolCall,\n {12}afterToolCall: this\.afterToolCall,/, "Agent no longer reads toolExecution and the hooks off itself at each run");
 	assert.match(agent, /\n {8}this\.toolExecution = runtimeOptions\.toolExecution \?\? "parallel";\n/, "the default is no longer parallel");
@@ -2416,8 +2427,8 @@ test("pi's agent loop: the parallel executor persists after the whole batch, the
 		},
 		{
 			executeToolCalls: "c74a7a024a3dd029c49239d8082845557291d5baa0f5e2f212cc2fca01ad2f0a",
-			executeToolCallsSequential: "7bddf4983cc0cc970a8c7e917454818aa6fabdaae6f04d9fb9e5609ac2af8f79",
-			executeToolCallsParallel: "4e32722424ca76f291134029ecb001309c5b711ba69f97a15498d5ad32c7de1c",
+			executeToolCallsSequential: "d4759b369ba1c1e8758d079b99d237536ad1c0ba819f19700f38b3a6634734be",
+			executeToolCallsParallel: "b3b4b4f0faa2024f7f9f6fd6fe83460c295de5ecc7977a5bedaeb37820d0ca2a",
 			createLoopConfig: "6d601c0f9a1d4870e46da7f85029f6bae7a951aa4ea31e64d375ab0be3eb5aa7",
 		},
 		"a function run.recover's sequential execution rests on changed at this pin: re-read it and src/recover.mjs",
