@@ -908,20 +908,45 @@ export const refusedByValkey = (err) => err?.name === "ReplyError" || err?.valke
 export const unconfirmedWrite = ({ what, done, asked, next }) => ({ invalid: `${what} may or may not have been ${done}: ${asked} was asked for and Valkey did not answer. ${next}`, partial: true });
 
 /**
- * A read of Valkey on a path that WRITES NOTHING (a preview, issue #987): `reading`'s answer, or what it rejected with
- * thrown on as a new error marked `valkeyNotSent`, which the console's preview answers as Valkey unreachable, with Try
- * again, where it said the preview failed and to read the console's log. The mark is set HERE, where the read is asked,
- * and not read off the error: a store's own timer ends its read before the client's bound does, with an error that
- * names no Valkey and carries no code. The mark of a command that may still run is dropped, as `writeTracking`'s
- * `unsent` drops it: a read changes nothing whenever it runs. Handed on as they are: Valkey's own reply
- * (`refusedByValkey`: it was reached, and what it said belongs in the console's log), and an error the language raised
- * (a fault of this code, never Valkey's silence). NEVER for a read on a path that also writes: there the client's own
- * mark has to reach the confirm.
+ * The one word each store's own timer rejects with (the worker's question groups, fixes and answer drafts). Such a
+ * timer ends a read before the client's bound does, and its error carries no code and no name, so the word is the only
+ * handle; a test holds each store to its word.
+ */
+const STORE_TIMEOUTS = Object.freeze(["question-store-timeout", "fix-store-timeout", "answer-store-timeout"]);
+/** What a client rejects a command with when no Valkey answered it: its own bound, and a connection refused, reset or broken under the command. */
+const SILENT_CODES = Object.freeze(["ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EPIPE"]);
+/** ioredis' words for the same, where it gives no code: a command its bound ended, one on a connection that closed, one on a client with no connection and no offline queue. */
+const SILENT_WORDS = Object.freeze(["Command timed out", "Connection is closed.", "Stream isn't writeable and enableOfflineQueue options is false"]);
+
+/**
+ * Whether `err` is KNOWN to be Valkey's silence (issue #987): a mark this project set (`valkeyNotSent`,
+ * `valkeyMayStillRun`), a client's timeout or lost connection (`SILENT_CODES`, `SILENT_WORDS`, ioredis' retries run
+ * out), or a store's own timer (`STORE_TIMEOUTS`). An allowlist on purpose: anything else a read throws (a row that is
+ * not a record, a file that is not there, a configuration that does not load, a fault of the code, a rejection that is
+ * no error at all) is not Valkey out of reach, and neither is Valkey's own reply.
+ */
+export function valkeySilence(err) {
+  if (err === null || typeof err !== "object" || refusedByValkey(err)) return false;
+  if (err.valkeyNotSent === true || err.valkeyMayStillRun === true) return true;
+  if (typeof err.code === "string" && SILENT_CODES.includes(err.code)) return true;
+  if (err.name === "MaxRetriesPerRequestError") return true;
+  return typeof err.message === "string" && (SILENT_WORDS.includes(err.message) || STORE_TIMEOUTS.includes(err.message));
+}
+
+/**
+ * A read of Valkey on a path that WRITES NOTHING (a preview, issue #987): `reading`'s answer, or, where it rejected
+ * with what is known to be Valkey's silence (`valkeySilence`), that thrown on as a new error marked `valkeyNotSent`,
+ * which the console's preview answers as Valkey unreachable, with Try again, where it said the preview failed and to
+ * read the console's log. The mark is set HERE, where the read is asked: a store's own timer ends its read before the
+ * client's bound does, with an error that names no Valkey. The mark of a command that may still run is dropped, as
+ * `writeTracking`'s `unsent` drops it: a read changes nothing whenever it runs. Everything else is handed on as it is,
+ * the same value, for the caller's own answer and the console's log. NEVER for a read on a path that also writes:
+ * there the client's own mark has to reach the confirm.
  */
 export function valkeyRead(reading) {
   return Promise.resolve(reading).catch((err) => {
-    if (refusedByValkey(err) || err?.valkeyNotSent === true || [TypeError, RangeError, ReferenceError, SyntaxError].some((kind) => err instanceof kind)) throw err;
-    throw Object.assign(new Error(boundedText(err?.message ?? String(err))), { valkeyNotSent: true, ...(typeof err?.code === "string" ? { code: err.code } : {}) });
+    if (!valkeySilence(err) || err.valkeyNotSent === true) throw err;
+    throw Object.assign(new Error(boundedText(err.message ?? String(err))), { valkeyNotSent: true, ...(typeof err.code === "string" ? { code: err.code } : {}) });
   });
 }
 

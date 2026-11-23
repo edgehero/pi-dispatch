@@ -280,14 +280,17 @@ export function makeQueue(connection, { name = QUEUE } = {}) {
  *
  * The console's raw clients take the same bound by another door, the admin's `boundedClient` (`makeRedisClient`'s
  * `commandTimeoutMs`, with the offline queue kept and the socket dropped at once on disconnect): the steer inbox, a
- * re-run's and a parked answer's preview, the count of a `dispatch_run`, Fire now's latch, the zero touch and
- * answerer services, and since issue #987 the three cancels (a queued job's preview and confirm, a held job's). What
- * still runs on a raw client with no command bound are reads, each ended by a timer of its own and its client dropped
- * after it: the queue discovery (`readFleetQueues`), the split and its history (`readAllocations`), the registry and
- * the held jobs (`readHosts`, `readHeldJobs`), the budget and capacity reads (`readBudget`, `readScopedBudget`,
- * `readDollarCounters`, `readCapacity`), the run mirror (`listRunsMerged`), the triggers' stalls
- * (`readTriggersWithStalls`), the connections and models views where no client is lent to them (`readConnections`,
- * `readModelsView`) and the schedule page's host read (`readScheduleHosts`).
+ * re-run's and a parked answer's preview, Fire now's latch, the zero touch and answerer services, and since issue #987
+ * the three cancels (a queued job's preview and confirm, a held job's). The budget writes, and since issue #987 the
+ * hour's count of a `dispatch_run` and the `envelope-set` preview's read of the split, use the admin's fail fast
+ * client instead (`writeClient`: the same bound, no offline queue, connected first), so a Valkey that refuses the
+ * connection answers them at once. What still runs on a raw client with no command bound are reads, each ended by a
+ * timer of its own and its client dropped after it: the queue discovery (`readFleetQueues`), the split and its
+ * history for every other caller (`readAllocations`), the registry and the held jobs (`readHosts`, `readHeldJobs`),
+ * the budget and capacity reads (`readBudget`, `readScopedBudget`, `readDollarCounters`, `readCapacity`), the run
+ * mirror (`listRunsMerged`), the triggers' stalls (`readTriggersWithStalls`), the connections and models views where
+ * no client is lent to them (`readConnections`, `readModelsView`) and the schedule page's host read
+ * (`readScheduleHosts`).
  */
 export function consoleQueueConnection(url, parseConnectionFn = parseConnection) {
 	return parseConnectionFn(url, { failFast: true, commandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS });

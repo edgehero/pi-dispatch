@@ -1710,6 +1710,9 @@ test("a preview whose Valkey read got no answer says Valkey could not be reached
   const slow = await start({ paths, a: { zeroTouch: makeZeroTouchService({ paths, now: () => T0, redisFn: client(never), stepTimeoutMs: 60 }), answerer: makeAnswererService({ paths, now: () => T0, redisFn: client(never), readTimeoutMs: 60 }) } });
   await unreachable(slow, "zero-touch-group", run, "zero-touch-group, no answer within the step");
   await unreachable(slow, "answer-draft-drop", draft, "answer-draft-drop, no answer within the read's bound");
+  // A configuration change made because of a refusal reads that refusal's record first (the run mirror, where this host
+  // has no file of it), on the same kind of step: its preview is Valkey's refusal too.
+  await unreachable(slow, "setting-set", { key: "maxTurns", value: "35", becauseRun: "gh-refusal" }, "a configuration fix, its refusal's record not answered within the step");
   // The sandbox End, prepare and pin read the kept workspaces first; the host target's preview reads no Valkey.
   const inv = sandboxFixture(T0), shell = inv.sessions[0];
   const sandboxes = (sandboxInventory) => makeSandboxService({ paths, deploymentDir: dir, fleet: { sandboxInventory, sandboxSessions: async () => ({ sessions: inv.sessions }) }, now: () => T0 });
