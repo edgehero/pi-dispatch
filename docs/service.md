@@ -42,7 +42,10 @@ From any terminal:
   `.env` does not, or the `.env` cannot be read, the line says so (`[this host's queue not added: ...]`) and leaves that queue out. When the registry or the look could not be read
   (`[registry unreadable: ...]`, `[queue scan incomplete]`), or some of the registry's host rows were not read in time
   (`[registry incomplete: 2 of 3 host rows not read]`), a second line says the list of queues may be short and to pause (or resume)
-  again once Valkey answers; the exit code stays 0. The registry's rows are read side by side within one bound, so a
+  again once Valkey answers; the exit code stays 0. A host row Valkey answered with an error (its key is not a hash) is one of
+  those rows, and the words name it with what Valkey answered: `[registry incomplete: 1 of 3 host rows not read, of which
+  Valkey answered with an error: hostw (WRONGTYPE)]`. Waiting does not read such a row: `pi-dispatch doctor` names the key
+  to remove or repair. The registry's rows are read side by side within one bound, so a
   Valkey that holds them costs that bound once, however many hosts are registered, and leaves the rest of the five
   seconds for the writes.
   Both wait about five seconds on a Valkey, as `status` does. When a queue is not confirmed, the command exits 1
@@ -114,7 +117,9 @@ When the host registry or the look for queues could not be read whole, the list 
 find is in none of the sums. The line then has `queuesMayBeShort: true`, and a `warning:` line under it says so and to run
 `pi-dispatch status` again once Valkey answers. Registry rows that were not read in time count the same, and the line
 names them in `fleetIncomplete` ("2 of 3 host rows not read"), as `fleet` names a registry that could not be read. That alone does not change the exit code; a queue it found that did not
-answer still does. `status --target` says the same.
+answer still does. `status --target` says the same. A host row Valkey answered with an error is one of them: `fleetIncomplete`
+names it, and `hostErrors` gives each such host with the code of Valkey's reply (`{"hostw":"WRONGTYPE"}`), on both lines. That
+row is not read on the next run either, until its key (`host:h:<name>`) is removed or repaired.
 
 `waitingDetails.rows` explains a bounded sample of delayed entries. A row contains `jobId`, `queue`, `dueAt`,
 `bucket`, `why` and `until`; the two times are epoch milliseconds, and absent reason fields are `null`. For example,

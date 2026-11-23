@@ -6936,6 +6936,11 @@ test("issue #645: the host-lost sweep is built over the recovery queues and the 
 	assert.equal(await built[0].liveHosts(), null, "a listing that is not whole is never a fleet without the host it could not read");
 	registry.hgetall = async (key) => row(key.slice("host:h:".length));
 	assert.deepEqual([...(await built[0].liveHosts())].sort(), ["h1", "h2"], "a whole listing names its hosts");
+	// Issue #1036: h2's row is a key of the wrong type, which anyone with the Valkey's URL can write. Valkey answered, and
+	// answers the same every time: h2 counts as live and the listing still says who is gone, where null extended every
+	// recovery's deadline for as long as that key existed.
+	registry.hgetall = (key) => (key === "host:h:h2" ? Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" })) : Promise.resolve(row("h1")));
+	assert.deepEqual([...(await built[0].liveHosts())].sort(), ["h1", "h2"], "a row answered with an error is a live host's, and the listing is known");
 	await settleDurable();
 	assert.equal(swept, 1, "run once at boot");
 	await handed.reapers.find((r) => r.name === "recovery_host_lost").reap();

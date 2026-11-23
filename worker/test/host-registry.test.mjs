@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { defaultWorkerName, loadConfig, sanitizeWorkerName, WORKER_NAME_RE } from "../src/config.mjs";
 import { HOST_BEAT_MS, HOST_SET, HOST_SKEW_CLAIM_MS, HOST_TTL_MS, hostKey, liveHostNamesOf, makeHostRegistry, readLiveHosts } from "../src/host-registry.mjs";
+import { replyErrorCode } from "../src/connection.mjs";
 
 // A fake Valkey: a Map of hashes plus one set, recording every call so the ORDER and the SHAPE of what
 // the registry writes can be asserted, not just its end state. Same hand-rolled style as the wait-state
@@ -654,15 +655,63 @@ test("the registry read ends within its one bound however many rows do not answe
 	assert.equal(Object.hasOwn(await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 }), "incomplete"), false);
 });
 
-test("a row Valkey answers with an error degrades that row alone: the listing stays whole and the member is not pruned (#1062)", async () => {
+/** Valkey's error reply as ioredis rejects with it. */
+const replyError = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+const WRONGTYPE = "WRONGTYPE Operation against a key holding the wrong kind of value";
+
+test("a row Valkey answers with an error is a row not read, named with the reply's code, and never pruned (#1036)", async () => {
 	const redis = fakeRedis();
-	rowsFor(redis, ["hosta", "hostb"]);
+	rowsFor(redis, ["hosta", "hostb", "hostc"]);
 	const hgetall = redis.hgetall;
-	redis.hgetall = (key) => (key === hostKey("hostb") ? Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" })) : hgetall.call(redis, key));
+	redis.hgetall = (key) => (key === hostKey("hostb") ? Promise.reject(replyError(WRONGTYPE)) : hgetall.call(redis, key));
 	const read = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
-	assert.deepEqual(read.hosts.map((h) => h.name), ["hosta"]);
-	assert.equal(Object.hasOwn(read, "incomplete"), false, "Valkey answered about that key: no host's self-description, not a host it could not read");
-	assert.deepEqual([...redis.sets.get(HOST_SET)].sort(), ["hosta", "hostb"], "never pruned: only a row Valkey answered as empty is stale");
+	assert.deepEqual(read.hosts.map((h) => h.name), ["hosta", "hostc"], "the other rows are read as usual");
+	assert.deepEqual([read.incomplete, read.unreadHosts, read.hostErrors], ["1 of 3 host rows not read, of which Valkey answered with an error: hostb (WRONGTYPE)", ["hostb"], { hostb: "WRONGTYPE" }]);
+	assert.ok(!JSON.stringify(read).includes("Operation against"), "the reply's code alone, never its words");
+	assert.deepEqual([...redis.sets.get(HOST_SET)].sort(), ["hosta", "hostb", "hostc"], "never pruned: only a row Valkey answered as empty is stale");
+	// Beside a row that got no answer: both are not read, and only the one Valkey answered has a code.
+	redis.hgetall = (key) => (key === hostKey("hostb") ? Promise.reject(replyError(WRONGTYPE)) : key === hostKey("hostc") ? new Promise(() => {}) : hgetall.call(redis, key));
+	const both = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
+	assert.deepEqual([both.hosts.map((h) => h.name), both.incomplete, both.unreadHosts, both.hostErrors], [["hosta"], "2 of 3 host rows not read, of which Valkey answered with an error: hostb (WRONGTYPE)", ["hostb", "hostc"], { hostb: "WRONGTYPE" }]);
+	// A row that got no answer alone: no `hostErrors` at all, and the words are as they were.
+	redis.hgetall = (key) => (key === hostKey("hostc") ? new Promise(() => {}) : hgetall.call(redis, key));
+	const late = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
+	assert.deepEqual([late.incomplete, late.unreadHosts, Object.hasOwn(late, "hostErrors")], ["1 of 3 host rows not read", ["hostc"], false]);
+});
+
+test("the words name at most five rows answered with an error and count the rest, while hostErrors holds every one (#1036)", async () => {
+	const redis = fakeRedis();
+	const names = ["h1", "h2", "h3", "h4", "h5", "h6", "h7"];
+	rowsFor(redis, names);
+	redis.hgetall = () => Promise.reject(replyError("ERR broken"));
+	const read = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
+	assert.equal(read.incomplete, "7 of 7 host rows not read, of which Valkey answered with an error: h1 (ERR), h2 (ERR), h3 (ERR), h4 (ERR), h5 (ERR) and 2 more");
+	assert.deepEqual([Object.keys(read.hostErrors), read.unreadHosts], [names, names]);
+});
+
+test("the index itself answered with an error is unreachable with the reply's code beside the words; any other failure has none (#1036)", async () => {
+	const redis = fakeRedis();
+	redis.smembers = () => Promise.reject(replyError(WRONGTYPE));
+	assert.deepEqual(await readLiveHosts(redis, { timeoutMs: 300 }), { unreachable: WRONGTYPE, error: "WRONGTYPE" });
+	redis.smembers = () => Promise.reject(new Error("Connection is closed."));
+	assert.deepEqual(await readLiveHosts(redis, { timeoutMs: 300 }), { unreachable: "Connection is closed." });
+	redis.smembers = () => new Promise(() => {});
+	assert.deepEqual(await readLiveHosts(redis, { timeoutMs: 60 }), { unreachable: "registry timeout" });
+});
+
+test("a row's error code is replyErrorCode's, for every shape of reply and for an error that is no reply (#1036)", async () => {
+	// The registry module keeps a copy of the rule (it imports two leaves and nothing else): held equal here, through
+	// what the read answers for a row and for the index.
+	for (const error of [replyError(WRONGTYPE), replyError("ERR Error running script (call to f_0123): @user_script:12: WRONGTYPE Operation against a key"), replyError("NOPERM this user has no permissions to run the 'hgetall' command"), replyError("NOSCRIPT"), replyError("something a proxy said"), replyError(""), new Error("Connection is closed."), Object.assign(new Error("WRONGTYPE x"), { name: "Error" })]) {
+		const redis = fakeRedis();
+		rowsFor(redis, ["hosta"]);
+		redis.hgetall = () => Promise.reject(error);
+		const row = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
+		const code = replyErrorCode(error);
+		assert.deepEqual(row.hostErrors ?? null, code === null ? null : { hosta: code }, `a row: ${error.name} ${error.message}`);
+		redis.smembers = () => Promise.reject(error);
+		assert.equal((await readLiveHosts(redis, { timeoutMs: 300 })).error ?? null, code, `the index: ${error.name} ${error.message}`);
+	}
 });
 
 test("a stale member found late in the bound is pruned within what is left of it, and the read still ends by the bound (#1062)", async () => {
@@ -683,6 +732,22 @@ test("a stale member found late in the bound is pruned within what is left of it
 	assert.equal(pruned, "ghost", "the empty row's member is pruned");
 	assert.ok(ms < 420, `within the one bound (took ${Math.round(ms)} ms)`);
 	assert.deepEqual([read.hosts.map((h) => h.name), Object.hasOwn(read, "incomplete")], [["hosta"], false]);
+});
+
+test("liveHostNamesOf: a host whose row Valkey answered with an error is live, and a row that got no answer still makes the listing not known (#1036)", async () => {
+	const redis = fakeRedis();
+	rowsFor(redis, ["Mini1", "mini2", "mini3"]);
+	const hgetall = redis.hgetall;
+	// mini2's key is not a hash. The read finished and will answer the same next time: mini2 is named as live, and the
+	// listing still vouches for who is gone (a host that is in neither list).
+	redis.hgetall = (key) => (key === hostKey("mini2") ? Promise.reject(replyError(WRONGTYPE)) : hgetall.call(redis, key));
+	const errored = await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 });
+	assert.deepEqual([...liveHostNamesOf(errored, (n) => n.toLowerCase())].sort(), ["mini1", "mini2", "mini3"]);
+	// Beside a row that got no answer, the listing is not known, as before.
+	redis.hgetall = (key) => (key === hostKey("mini2") ? Promise.reject(replyError(WRONGTYPE)) : key === hostKey("mini3") ? new Promise(() => {}) : hgetall.call(redis, key));
+	assert.equal(liveHostNamesOf(await readLiveHosts(redis, { now: () => NOW, timeoutMs: 300 })), null);
+	// A listing that says it is not whole and does not say which rows: not known.
+	assert.equal(liveHostNamesOf({ hosts: [{ name: "mini1" }], incomplete: "1 of 2 host rows not read", hostErrors: { mini2: "WRONGTYPE" } }), null);
 });
 
 test("liveHostNamesOf: a listing that is not whole is not known, never a fleet without the hosts it could not read (#1062)", () => {

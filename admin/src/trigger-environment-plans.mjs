@@ -1048,8 +1048,14 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     }
     if (!Array.isArray(read?.hosts)) return refuse("The live hosts could not be read, so nothing says each reads what this change needs. Nothing was written; try again.", 503);
     // A listing whose rows were not all read in time (issue #1062) is "unknown" too: the host whose row was not read
-    // may read less, and the gate would pass the change over it.
-    if (read.incomplete) return refuse(`Not every live host could be read (${read.incomplete}), so nothing says each reads what this change needs. Nothing was written; try again.`, 503);
+    // may read less, and the gate would pass the change over it. A row Valkey answered with an error (issue #1036,
+    // `hostErrors`, which the listing's words name with its code) is not read on the next try either, so that refusal
+    // does not say to try again: it says what has to be put right first, and is a conflict, not a read to repeat.
+    if (read.incomplete) {
+      const lasting = read.hostErrors !== null && typeof read.hostErrors === "object" && Object.keys(read.hostErrors).length > 0;
+      if (lasting) return refuse(`Not every live host could be read (${read.incomplete}), so nothing says each reads what this change needs. Nothing was written. A row Valkey answers with an error reads the same on the next try: remove or repair its key first (pi-dispatch doctor on a worker host names it).`, 409);
+      return refuse(`Not every live host could be read (${read.incomplete}), so nothing says each reads what this change needs. Nothing was written; try again.`, 503);
+    }
     const hosts = read.hosts.filter((host) => typeof host?.name === "string");
     const silent = hosts.filter((host) => wanted.some(([field]) => host[field] === undefined || host[field] === null || host[field] === ""));
     const older = hosts.filter((host) => !silent.includes(host) && wanted.some(([field, version]) => !(Number.isSafeInteger(Number(host[field])) && Number(host[field]) >= version)));

@@ -6288,6 +6288,29 @@ test("an unreadable registry is SAID, never silently absent", async () => {
 	assert.equal(c.ok, true, "not knowing is not a fault of this host");
 });
 
+test("a host row Valkey answered with an error is named with its code and the key to repair, a warning beside the line that the registry was read in part (#1036)", async () => {
+	const { readLiveHosts } = await import("../src/host-registry.mjs");
+	// The real read over a client whose HGETALL of one row is answered with WRONGTYPE, as `SET host:h:hostw x` leaves it.
+	const rows = { "host:h:mini2": { name: "mini2", tz: Intl.DateTimeFormat().resolvedOptions().timeZone, beatAt: String(Date.now()) } };
+	const client = {
+		smembers: async () => ["mini2", "hostw"],
+		hgetall: (key) => (key === "host:h:hostw" ? Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" })) : Promise.resolve(rows[key] ?? {})),
+	};
+	const checks = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, fleetSeams([], { readHosts: () => readLiveHosts(client, { prune: false }) }));
+	const part = checks.find((c) => /read in part/.test(c.label));
+	assert.equal(part.label, "Fleet: the host registry was read in part (1 of 2 host rows not read, of which Valkey answered with an error: hostw (WRONGTYPE)); the fleet's checks leave those hosts out");
+	const row = checks.find((c) => /answered the read of its row/.test(c.label));
+	assert.ok(row, JSON.stringify(checks.map((x) => x.label).filter((l) => /Fleet/.test(l))));
+	assert.deepEqual([row.ok, row.warn, row.label], [false, true, "Fleet: host:live lists hostw, and Valkey answered the read of its row with an error (WRONGTYPE): that key is not a host's row"]);
+	assert.match(row.fix, /^remove or repair the key host:h:hostw; /);
+	assert.ok(!JSON.stringify(checks).includes("Operation against"), "the reply's code alone");
+	// A row that got no answer has no such line: waiting may read it.
+	client.hgetall = (key) => (key === "host:h:hostw" ? new Promise(() => {}) : Promise.resolve(rows[key] ?? {}));
+	const late = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, fleetSeams([], { readHosts: () => readLiveHosts(client, { prune: false, timeoutMs: 80 }) }));
+	assert.ok(late.some((c) => /read in part \(1 of 2 host rows not read\)/.test(c.label)));
+	assert.ok(!late.some((c) => /answered the read of its row/.test(c.label)));
+});
+
 test("a registry read in part is SAID: the hosts whose rows were not read are in none of the fleet's checks (#1062)", async () => {
 	const checks = await collectChecks(
 		{ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" },

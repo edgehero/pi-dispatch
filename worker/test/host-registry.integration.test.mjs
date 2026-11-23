@@ -120,7 +120,7 @@ test("through a real Valkey whose connection holds every row's read, the registr
 	for (const { name } of mine) assert.equal(await w.redis.sismember(w.HOST_SET, name), 1, `${name} stays indexed`);
 });
 
-test("through a real Valkey, a row that is not a hash is that row alone: the listing stays whole and its member stays (#1062)", { skip }, async (t) => {
+test("through a real Valkey, a row that is not a hash is a row not read, named with WRONGTYPE, and its member stays (#1036)", { skip }, async (t) => {
 	const w = await world(t);
 	const { name, reg } = w.host("hashed");
 	await reg.start({});
@@ -130,7 +130,13 @@ test("through a real Valkey, a row that is not a hash is that row alone: the lis
 	await w.redis.sadd(w.HOST_SET, broken);
 	const read = await w.readLiveHosts(w.redis, { prune: false });
 	assert.ok(read.hosts.some((h) => h.name === name), "the readable row is listed");
-	assert.ok(!read.hosts.some((h) => h.name === broken), "the string is no host's row");
-	assert.equal(Object.hasOwn(read, "incomplete"), false, `Valkey answered for it (${read.incomplete})`);
+	assert.ok(!read.hosts.some((h) => h.name === broken), "the string is no row to list");
+	// Other files' hosts may be in this database's index too: this test's two are what it judges.
+	assert.ok(read.unreadHosts.includes(broken), `listed and not read (${read.incomplete})`);
+	assert.equal(read.hostErrors[broken], "WRONGTYPE");
+	assert.match(read.incomplete, /host rows not read, of which Valkey answered with an error: /);
+	assert.equal(await w.redis.sismember(w.HOST_SET, broken), 1);
+	// A pruning read leaves it too: only a row Valkey answered as empty is stale.
+	await w.readLiveHosts(w.redis);
 	assert.equal(await w.redis.sismember(w.HOST_SET, broken), 1);
 });

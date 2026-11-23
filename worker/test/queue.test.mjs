@@ -618,6 +618,17 @@ test("a queue does not keep a scheduler child whose INFO got no answer within th
 	}
 });
 
+test("the look for queues says when Valkey answered its scan with an error, by the reply's code, and has none for a scan that failed or ran out of time (#1036)", async () => {
+	const { discoverHostQueuesReporting } = await import("../src/queue.mjs");
+	const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+	const noperm = "NOPERM this user has no permissions to run the 'scan' command";
+	assert.deepEqual(await discoverHostQueuesReporting({ scan: () => Promise.reject(reply(noperm)) }, { timeoutMs: 200 }), { names: [], incomplete: noperm, error: "NOPERM" });
+	assert.deepEqual(await discoverHostQueuesReporting({ scan: () => Promise.reject(new Error("Connection is closed.")) }, { timeoutMs: 200 }), { names: [], incomplete: "Connection is closed." });
+	assert.deepEqual(await discoverHostQueuesReporting({ scan: () => new Promise(() => {}) }, { timeoutMs: 60 }), { names: [], incomplete: "scan timed out" });
+	// A scan that answers is as it was.
+	assert.deepEqual(await discoverHostQueuesReporting({ scan: async () => ["0", ["bull:pi-jobs@hostb:meta", "bull:pi-jobs:meta"]] }, { timeoutMs: 200 }), { names: ["pi-jobs@hostb"], incomplete: null });
+});
+
 // Integration against a real Valkey. Runs when VALKEY_TEST_URL is set (CI provides a service).
 const url = process.env.VALKEY_TEST_URL;
 const skip = url ? false : "VALKEY_TEST_URL not set; the queue integration test needs a Valkey";

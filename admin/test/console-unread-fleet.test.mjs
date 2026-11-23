@@ -130,6 +130,11 @@ test("the overview over a registry that was never read says the hosts are not kn
 const partQueue = (over = {}) => ({ ...snap().queue, fleetDegraded: "1 of 4 host rows not read", registryReadInPart: true, ...over });
 const COULD_NOT = [REGISTRY_UNREAD_TEXT, HOSTS_UNREAD_TEXT, HOSTS_UNREAD, "The host registry could not be read", "Registry not read"];
 
+test("the pages' sentence for a registry read in part promises nothing about waiting: a row Valkey answers with an error is not read on the next try either (#1036)", () => {
+  assert.doesNotMatch(REGISTRY_PART_TEXT, /in time|try again|once Valkey answers|did not answer/);
+  assert.match(REGISTRY_PART_TEXT, /^The host registry was read in part: some hosts' rows were not read, /);
+});
+
 test("/fleet and the overview over a registry read in part say so, draw the rows that were read, and never say it could not be read (#1062)", async () => {
   const fleet = await panelsOf("fleet", snap({ queue: partQueue(), hostsReadAt: NOW - 1_000 }));
   assert.ok(fleet["p-hosts"].includes(REGISTRY_PART_TEXT) && fleet["p-hosts"].includes("build3"), fleet["p-hosts"]);

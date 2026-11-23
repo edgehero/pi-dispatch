@@ -100,7 +100,7 @@ import { beatAgeOf } from "../doctor-view.mjs";
 import { scrubControls } from "../panel.mjs";
 import { LIVE_TOOL_RE } from "@edgehero/pi-dispatch/live-transcript";
 import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES } from "@edgehero/pi-dispatch/steer-inbox";
-import { compareTranscriptIds, TRANSCRIPT_ID_RE, TRANSCRIPT_PAGE_MAX } from "../read-model.mjs";
+import { compareTranscriptIds, replyCodeOf, TRANSCRIPT_ID_RE, TRANSCRIPT_PAGE_MAX } from "../read-model.mjs";
 import { outcomeWord, recordReason } from "../words.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
 import { dataUnread } from "./panels/common.mjs";
@@ -891,6 +891,15 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
     queues: (Array.isArray(s.queueCounts) ? s.queueCounts : []).map((c) => ({ queue: str(c?.queue), paused: Boolean(c?.paused), counts: countsOf(c?.counts) })),
     workers: typeof q.workers === "number" ? q.workers : null,
     fleetDegraded: Boolean(q.fleetDegraded),
+    // Beside `fleetDegraded` (issue #1036; `registryReadInPart` is issue #1062's flag, which this document did not yet
+    // carry). `registryReadInPart`: the registry answered and some hosts' rows were not read, so `hosts` holds the rows
+    // read and the last rows of the others. `fleetError`: the code Valkey answered the registry's index with, or null.
+    // `unreadHosts`: the hosts whose rows were not read, each with the code Valkey answered its row with, or null for a
+    // row that got no answer; `unreadHostsMore` counts those past the ones named. A code is one word, never the reply.
+    registryReadInPart: q.registryReadInPart === true,
+    fleetError: replyCodeOf(q.fleetError),
+    unreadHosts: (Array.isArray(q.unreadHosts) ? q.unreadHosts : []).map((u) => ({ name: str(u?.name), error: replyCodeOf(u?.error) })),
+    unreadHostsMore: num(q.unreadHostsMore) ?? 0,
     hosts: (Array.isArray(s.hostBudgets) ? s.hostBudgets : []).map((h) => ({
       name: str(h?.name),
       // How long ago the host last beat, by the overview's rule: Valkey's measure of the row's last refresh where known.

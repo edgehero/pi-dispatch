@@ -54,6 +54,11 @@ export function waitingForAgent(read) {
  * old read's instant. Never read: `{ unavailable: true, readAt: null, hosts: null }`, never `[]`, which says no host
  * exists. A row carries no beat instant, so `beat` is the read's instant less the row's age at it (`beatAgeOf`), or
  * null. A host's `jobs` and `kept` are null where its row says the list is not known, never `[]`.
+ *
+ * A read in part also NAMES the hosts it did not read (issue #1036): `unreadHosts`, their names, at most the
+ * snapshot's (`unreadHostsMore` counts the rest, when there is one), and `hostErrors`, `{ <host>: <code> }` for those
+ * whose row Valkey answered with an error, present only when not empty. Such a host may have no row in `hosts` at all
+ * (this reader never read it), and a row Valkey answers with an error is not read on the next call either.
  */
 export function hostsForAgent(snapshot) {
   if (hostsUnread(snapshot) || !Array.isArray(snapshot.hostBudgets)) return { unavailable: true, readAt: null, hosts: null };
@@ -62,7 +67,10 @@ export function hostsForAgent(snapshot) {
   // A registry read in part (issue #1062) is read, not unavailable: `readInPart` says some rows did not answer, and
   // each of those rows (`notRead`, its last one read) has no beat, since `readAt` is not the instant it was read.
   const part = Boolean(snapshot.queue?.fleetDegraded) && snapshot.queue?.registryReadInPart === true;
-  return { unavailable: Boolean(snapshot.queue?.fleetDegraded) && !part, ...(part ? { readInPart: true } : {}), readAt, hosts: snapshot.hostBudgets.map((h) => ({
+  const unread = part && Array.isArray(snapshot.queue?.unreadHosts) ? snapshot.queue.unreadHosts.filter((u) => typeof u?.name === "string").map((u) => ({ name: id(u.name, 64), error: rm.replyCodeOf(u.error) })) : [];
+  const hostErrors = Object.fromEntries(unread.filter((u) => u.error !== null).map((u) => [u.name, u.error]));
+  const more = n(snapshot.queue?.unreadHostsMore);
+  return { unavailable: Boolean(snapshot.queue?.fleetDegraded) && !part, ...(part ? { readInPart: true, unreadHosts: unread.map((u) => u.name), ...(more ? { unreadHostsMore: more } : {}), ...(Object.keys(hostErrors).length > 0 ? { hostErrors } : {}) } : {}), readAt, hosts: snapshot.hostBudgets.map((h) => ({
     name: id(h.name, 64), version: id(h.version, 64), ...(h.notRead === true ? { notRead: true } : {}), beat: readAt !== null && h.notRead !== true && beatAgeOf(h) !== null ? readAt - beatAgeOf(h) : null, beatAgeMs: beatAgeOf(h), noExpiry: h.noExpiry === true, skewMs: Number.isFinite(h.skewMs) ? h.skewMs : null,
     capacity: fields(h, ["concurrency", "budgetMemMiB", "budgetCpuCenti", "budgetRunning", "usedMemMiB", "usedCpuCenti", "heldMemMiB", "heldCpuCenti", "waiters", "jobsMore"]),
     // A live job row names its venue as `v` (the worker's `liveJobsOf`, an orphan's alone), a known venue name or nothing.
