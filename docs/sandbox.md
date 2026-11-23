@@ -79,6 +79,11 @@ that the worker is about to delete. The other side of the same rule: **raising**
 that is already retained, which keeps the deadline it was retained with; only runs retained after the change get
 the longer one. Pin a run to keep it longer.
 
+One kind of trigger can keep nothing whatever the window is: a local command trigger that sets
+`"retainSandbox": false` ([keeping no sandbox](triggers.md#keeping-no-sandbox-for-a-local-command)). Its runs leave
+no directory when they end, on any outcome, so there is none to reopen and none for the sweep to remove. Every other
+run is kept as described here.
+
 `pi-dispatch doctor` reports how many directories are being kept and where.
 
 ## Read this before you leave it on
@@ -380,8 +385,9 @@ at another daemon is invisible to it, and only the rules above protect it.
   With a container always starting and a runtime that takes 25 seconds to list what is open, it was 0.5 a minute,
   some 770 runs a day. The host this was built for kept about 640 runs a day, so a worker that is always starting
   containers on a runtime that slow removes little more than it creates. If that is your host, stop keeping
-  sandboxes for the runs nobody opens: a trigger with `run.retainSandbox: false` keeps none, which takes the load
-  away where it starts.
+  sandboxes for the runs nobody opens: a local command trigger with `"retainSandbox": false` keeps none
+  ([keeping no sandbox](triggers.md#keeping-no-sandbox-for-a-local-command)), which takes the load away where it
+  starts.
 
   The sweep at boot is not slowed, since no job runs yet. A pass that waited says for how long in its line
   (`waitedForStartsMs`, which is part of the time the pass took) and how many times it asked the runtime again after

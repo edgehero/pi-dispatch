@@ -358,8 +358,19 @@ scope is asked at the same pace, whichever of the worker's queues it is on. The 
 a job takes the scope, and when no job has been deferred on it for 30 seconds. So a job behind one long run wakes
 about a quarter as often, and a freed scope is taken within one delay, 20 seconds at most. A wait for a scope that
 has only just become busy is over as soon as before. A job that arrives where others already wait gets their pace:
-its own wait can end up to 20 seconds after the scope came free, and a few more if another waiting job takes the
-scope first, where it ended within 5.
+it can ask again up to 20 seconds after the scope came free, where that was 5. If another waiting job has taken the
+scope by then, it waits out that job's whole run and then up to 5 seconds more (24 seconds were measured behind a
+job that ran for 1 second).
+
+Starting over after 30 quiet seconds has a cost. A waiting job that comes back more than 10 seconds late, because
+the worker had no free slot or a pause held it, is asked at 5 seconds again although its scope is still busy. And
+when a paused queue is resumed, every job that was waiting for a scope comes back at the 5 second pace together,
+which lasts about 100 seconds before the pace is at 20 again.
+
+The worker remembers a waiting job until it takes its scope, ends on this worker, or is pushed out by the bound of
+1,000 waits a worker. A job that another host ran, or that was cancelled, is remembered until then, and its scope's
+pace with it, so what is remembered of a scope can outlive every job still waiting for it. That is memory only, and
+it is forgotten when the worker restarts.
 
 The worker's log says `scope_busy_deferred` once, when a job starts to wait for a busy scope, and
 `scope_busy_ended` once, when it takes it, with how many times it was deferred (`deferrals`) and `waitedMs`: the

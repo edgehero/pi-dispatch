@@ -973,6 +973,24 @@ export function makeFindSecretBundle({ triggersPath, fs = nodeFs, log = () => {}
  * job asks again every few minutes.
  */
 export function makeCheckQuotaReserve({ triggersPath, fs = nodeFs } = {}) {
+	const entryOf = makeLiveTriggerEntry({ triggersPath, fs });
+	return function checkQuotaReserve(job) {
+		return entryOf(job)?.run?.quotaReserve === true;
+	};
+}
+
+/**
+ * `(job) => entry | null`: the RAW entry of the live triggers file that queued `job`, or null on every doubt. The one
+ * lookup the worker's live reads of a hand-set `run` flag share (`makeCheckQuotaReserve`, `makeCheckRetainSandbox`), so
+ * the two cannot come to disagree on which trigger a job is of.
+ *
+ * By the trigger's identity, never by position alone (`makeCheckQuotaReserve` says each rule): a local event job by its
+ * `on.id`, `on.forge`, folder, command and worker; a forge job by its matched index through `isForgeTriggerOf`; a cron
+ * job, and one `pi-dispatch run --trigger` fired by hand, by its cron id, folder, flow, command and task. Null for no
+ * path, no file, a file the shared validator refuses or a newer pi-dispatch wrote, a job with no trigger, and no entry
+ * that is the job's (deleted, or edited since the job was queued). Never throws. Cached by mtime and size.
+ */
+function makeLiveTriggerEntry({ triggersPath, fs = nodeFs } = {}) {
 	let cache = null; // { mtimeMs, size, entries }
 	const entriesOf = () => {
 		if (typeof triggersPath !== "string" || triggersPath === "") return null;
@@ -990,11 +1008,11 @@ export function makeCheckQuotaReserve({ triggersPath, fs = nodeFs } = {}) {
 			return null;
 		}
 	};
-	return function checkQuotaReserve(job) {
+	return function liveTriggerEntry(job) {
 		const trigger = job?.trigger;
-		if (trigger === null || typeof trigger !== "object") return false;
+		if (trigger === null || typeof trigger !== "object") return null;
 		const entries = entriesOf();
-		if (entries === null) return false;
+		if (entries === null) return null;
 		let entry;
 		if (job.kind === "local" && validLocalEvent(job.localEvent)) {
 			entry = entries.find((t) => t?.run?.kind === "local" && t?.on?.id === job.localEvent.id && t.on.forge === job.localEvent.forge && ["folder", "command", "worker"].every((key) => t.run?.[key] === job[key]));
@@ -1004,7 +1022,45 @@ export function makeCheckQuotaReserve({ triggersPath, fs = nodeFs } = {}) {
 		} else if (job.kind === "local" && typeof trigger.id === "string") {
 			entry = entries.find((t) => t?.on?.type === "cron" && t.on.id === trigger.id && ["folder", "flow", "command", "task"].every((key) => t.run?.[key] === job[key]));
 		}
-		return entry?.run?.quotaReserve === true;
+		return entry ?? null;
+	};
+}
+
+/**
+ * Issue #1023: `(job) => boolean`, whether the run of `job` that has just ended KEEPS its sandbox. False only when the
+ * trigger that queued the job says `run.retainSandbox: false` in the LIVE triggers file, right now; the worker's
+ * cleanup (`makeCleanup`, prepare.mjs) then removes the job directory where it would have kept it.
+ *
+ * READ HERE, WHEN THE RUN ENDS, NEVER CARRIED ON THE JOB, `run.quotaReserve`'s way and through its lookup
+ * (`makeLiveTriggerEntry`): the worker that ran the job reads its own triggers file, so an edit takes effect for every
+ * run that ends after it, a run already queued or running included, and no receiver, poller or job builder needs the
+ * field or can drop it.
+ *
+ * EVERY DOUBT KEEPS THE SANDBOX, since a kept directory is swept at the end of its window and a removed one cannot be
+ * brought back. True, the default, for:
+ *   - no path, no file, a file that cannot be read, one the shared validator refuses or a newer pi-dispatch wrote;
+ *   - a job with no trigger: one a person queued with `pi-dispatch run` and a folder, which belongs to no entry;
+ *   - a job that is not the trigger's own local command run: any forge job, a local flow, a chained child (an
+ *     agent's request, with a flow and a task of its own), a fork, a recovery, a watch rule's job;
+ *   - no entry that is the job's: the trigger was deleted, or its folder, command or worker was edited since the
+ *     job was queued, or it runs a flow now;
+ *   - an entry that says `true`, or nothing.
+ * A run a person fires by hand from the trigger (`pi-dispatch run --trigger`) IS the trigger's run and follows its
+ * flag, as does every retry of a job. Never throws.
+ */
+export function makeCheckRetainSandbox({ triggersPath, fs = nodeFs } = {}) {
+	const entryOf = makeLiveTriggerEntry({ triggersPath, fs });
+	return function checkRetainSandbox(job) {
+		try {
+			// A job another job or a person made of the trigger's run is not that run, though it may carry its trigger.
+			if (["parentJobId", "chainDepth", "fork", "recoveryOf", "watch"].some((key) => job[key] !== undefined)) return true;
+			// The entry is the job's own by its folder and command (`makeLiveTriggerEntry`), and the loader lets only a
+			// local command trigger carry the flag: so a forge job, a local flow and a job with no trigger find none.
+			return entryOf(job)?.run?.retainSandbox !== false;
+		} catch {
+			// No job at all, or one that cannot be read.
+			return true;
+		}
 	};
 }
 

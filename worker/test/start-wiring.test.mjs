@@ -1802,6 +1802,38 @@ test("portfolio wiring: deps.checkPortfolioFlag reads the live PI_TRIGGERS_FILE 
 	}
 });
 
+test("sandbox wiring: the worker's cleanup reads run.retainSandbox from its own live PI_TRIGGERS_FILE, so a flagged trigger's run keeps nothing (#1023)", { skip }, async () => {
+	const dir = tempDir("pi-retain-path-");
+	const triggersPath = join(dir, "triggers.json");
+	const sandboxDir = join(dir, "sandboxes");
+	const entry = (run) => ({ on: { type: "cron", id: "sync", pattern: "*/5 * * * *" }, run: { kind: "local", folder: dir, command: "sync now", ...run } });
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [entry({ retainSandbox: false })] }));
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const { deps } = await runStart({ env: { PI_TRIGGERS_FILE: triggersPath, PI_SANDBOX_DIR: sandboxDir, PI_SANDBOX_RETENTION_HOURS: "24" }, makeAuth, makeHost: () => fakeHost() });
+	const job = { kind: "local", folder: dir, command: "sync now", trigger: { id: "sync", pattern: "*/5 * * * *" } };
+	const prepared = (jobId) => {
+		const jobDir = join(dir, "jobs", jobId.replaceAll(":", "-"));
+		mkdirSync(jobDir, { recursive: true });
+		writeFileSync(join(jobDir, "prompt.md"), "/sync now\n");
+		return { jobDir, workspace: dir, sandbox: { jobId, kind: "local", image: "pi-job:ci", backend: "local" } };
+	};
+	const kept = () => (existsSync(sandboxDir) ? readdirSync(sandboxDir) : []);
+	const first = prepared("repeat:sync:1");
+	const from = bootLines.length;
+	await deps.cleanup(first, { job });
+	assert.equal(existsSync(first.jobDir), false, "the job directory is gone");
+	assert.deepEqual(kept(), [], "and nothing was kept: it can only have read the file PI_TRIGGERS_FILE names");
+	assert.deepEqual(parseLines(bootLines.slice(from)).filter((l) => l.event === "sandbox_not_kept").map((l) => l.jobId), ["repeat:sync:1"], "said in the worker's own log");
+	// Read live, never from a boot copy: with the flag taken off, the next run of the same trigger is kept.
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [entry({})] }, null, 1));
+	await deps.cleanup(prepared("repeat:sync:2"), { job });
+	assert.equal(kept().length, 1, "kept, as every run is by default");
+	// And a job that is not this trigger's own run is kept whatever the file says.
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [entry({ retainSandbox: false })] }));
+	await deps.cleanup(prepared("repeat:sync:3"), { job: { ...job, parentJobId: "repeat:sync:1", chainDepth: 1 } });
+	assert.equal(kept().length, 2);
+});
+
 test("portfolio wiring: the plan collector is wired into deps beside collectChain, and a job with no plan file collects nothing (#505)", { skip }, async () => {
 	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
 	const { deps } = await runStart({ makeAuth, makeHost: () => fakeHost() });

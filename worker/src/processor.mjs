@@ -3403,7 +3403,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		if (prepared && job.watch) await collectWatch({ job, prepared, completed: watchCompleted, policyRefused: watchPolicyRefused, usage: watchUsage }).catch(() => {});
 		if (prepared && job.questionGrouping) await deps.questionGroupRuntime?.collect({ job, prepared, completed: watchCompleted }).catch(() => {});
 		if (prepared && job.answerDraft) await deps.answerDraftRuntime?.collect({ job, prepared, completed: watchCompleted, result: answerUsage }).catch(() => {});
-		if (prepared) await cleanup(prepared).catch(() => {});
+		// The job goes with it (issue #1023): the cleanup asks whether this job's own trigger keeps a sandbox for its runs.
+		if (prepared) await cleanup(prepared, { job }).catch(() => {});
 	}
 }
 

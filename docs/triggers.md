@@ -334,6 +334,47 @@ successor, preserving delivery receipts; it does not assert success or write a r
 command's answer is uncertain. Resume with `pi-dispatch resume` only when recovery is complete and the runtime is
 known to be safe. Do not delete the state or receipt keys to recover: that loses execution and replay evidence.
 
+## Keeping no sandbox for a local command
+
+Every run keeps its job directory for `PI_SANDBOX_RETENTION_HOURS` (24 unless you change it), so that you can reopen
+it with `pi-dispatch sandbox <job id>` ([sandboxes](sandbox.md)). A local command that runs every few minutes makes
+hundreds of those a day that nobody opens, and the worker then has to delete them beside your jobs. A local command
+trigger can say its runs keep none:
+
+```json
+{ "on": { "type": "cron", "id": "sync", "pattern": "*/5 * * * *" },
+  "run": { "kind": "local", "folder": "/srv/app", "command": "sync", "retainSandbox": false } }
+```
+
+- **What it does.** When a run of this trigger ends, the worker removes the run's job directory where it would have
+  kept it, and writes `sandbox_not_kept` with the job id to its log. That holds on every outcome: a run that
+  completed, failed, timed out or was stopped keeps nothing. To look at a failing command, take the flag off, or set
+  it to `true`, and let it run again.
+- **When to use it.** On a short local command that runs often and that you never reopen.
+- **What you lose.** `pi-dispatch sandbox <job id>` has nothing to reopen for these runs, and a run's page says its
+  workspace is not kept. What stays is everything that is not in that directory: the run's record and its page, the
+  worker's log lines, the live transcript and progress for as long as they are kept, and any artifacts the run
+  saved. Your folder is your own and is never touched either way.
+- **Where it is allowed.** Only on a local command trigger: `"kind": "local"` with `"command"`, on a cron trigger
+  or on [a forge event that starts a local command](#a-forge-event-running-a-local-command). The file refuses it
+  everywhere else when it loads (a flow on a schedule, a forge job, a watch rule), because a kept sandbox is what
+  lets those runs be reopened and continued. It is `true` or `false`; anything else, such as `"false"`, is refused.
+  Absent and `true` both mean the default: kept.
+- **When it is read.** When the run ends, by the worker that ran it, from its own triggers file (`PI_TRIGGERS_FILE`,
+  else `./triggers.json` where it runs). So an edit takes effect for every run that ends after it, one that was
+  already queued or running included.
+- **When in doubt the worker keeps the sandbox.** That is: the file cannot be read or does not load, the trigger is
+  gone, or its folder, command or worker changed after the job was queued. A kept directory is swept at the end of
+  its window, and a removed one cannot be brought back.
+- **Which runs follow it.** The trigger's own: each scheduled or event-started run, every retry of one, and a run
+  you fire by hand with `pi-dispatch run --trigger`. A job you queue with `pi-dispatch run <folder>` belongs to no
+  trigger and is kept, and so is a job that a run chains through its outbox.
+- **Versions.** It needs no `version`, and no receiver reads it. A worker from before this release ignores it and
+  keeps the sandbox ([upgrading](upgrading.md)).
+- **No tool can set it.** `dispatch_trigger_add` refuses a call that carries it and `dispatch_trigger_edit` leaves
+  it as it is. The trigger's page shows "Sandbox: not kept after a run" and has no field for it. Write it in the
+  file by hand.
+
 ## When another event starts a job
 
 Ordinary forge jobs have two duplicate checks. Sending the same delivery again finds its original job while that job
@@ -579,6 +620,10 @@ how a run is followed or picked up, and that page's Edit form and `dispatch_trig
 - `"worker": "runner-a"` selects a named worker for a local trigger. It is required for event-started local
   commands and optional for cron. Use the same worker for a cron and event trigger sharing a folder. A forge
   job cannot name it; its existing routing rules apply. See [multi-host placement](multi-host.md#where-work-runs).
+
+- `"retainSandbox": false` on a local command trigger keeps no sandbox for its runs: the worker removes a run's
+  job directory when the run ends, whatever its outcome. Only a cron trigger that runs a `command`, or a forge event
+  that starts a local command, takes it. See [keeping no sandbox](#keeping-no-sandbox-for-a-local-command).
 
 - `"portfolio": true` on a cron trigger makes its jobs portfolio jobs: the one kind of job that may send a
   budget priorities plan back ([`docs/allocation.md`](allocation.md)). Cron only. The file refuses it on a webhook

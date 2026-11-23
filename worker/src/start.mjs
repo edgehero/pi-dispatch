@@ -103,7 +103,7 @@ import { artifactsComment } from "./artifacts-comment.mjs";
 import { terminalReceipt } from "./terminal-receipt.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { scrubCredentials } from "./redact.mjs";
-import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckPrivateEndpoints, makeCheckQuotaReserve, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
+import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckPrivateEndpoints, makeCheckQuotaReserve, makeCheckRetainSandbox, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
 import { makeBundleResolver } from "./secret-bundles.mjs";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, PAUSE_WINDOWS_VERSION, pauseUntilMs } from "./pause-windows.mjs";
@@ -3604,7 +3604,10 @@ export async function startWorker(
 			}),
 			// REQ-RESURRECTABLE-SANDBOX. With the window at 0 this IS the old bare `cleanup`, by the same
 			// `rm` on the same path -- a deployment that wants no retention keeps today's behaviour exactly.
-			cleanup: makeCleanup({ sandboxDir: config.sandboxDir, retentionHours: config.sandboxRetentionHours, log }),
+			// Issue #1023: `retains` is this worker's read of the job's trigger in its own triggers file when the run ends, the
+			// file the quota reserve and the one-shot checks read. A local command trigger that says `run.retainSandbox:
+			// false` keeps nothing; every doubt keeps the run.
+			cleanup: makeCleanup({ sandboxDir: config.sandboxDir, retentionHours: config.sandboxRetentionHours, log, retains: makeCheckRetainSandbox({ triggersPath: onceTriggersFile }) }),
 			comment,
 			log,
 			// Resolved per job so the credential always comes from the job's OWN forge. A job whose forge has

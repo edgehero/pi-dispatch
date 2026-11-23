@@ -599,6 +599,7 @@ function normalizeTrigger(entry, index, path, state) {
 
 	validateMayMerge(run, on.type, at, path);
 	validateQuotaReserve(run, on.type, at, path);
+	validateRetainSandbox(run, on.type, at, path);
 	const localEvent = run.kind === "local" && !["cron", "watch"].includes(on.type);
 	if (!localEvent) {
 		for (const key of ["forge", "debounceSeconds", "reviewAuthors", "closeActors"]) {
@@ -1195,6 +1196,39 @@ function validateQuotaReserve(run, onType, at, path) {
 	if (run.quotaReserve === undefined) return;
 	if (typeof run.quotaReserve !== "boolean") throw configError(`${at}: run.quotaReserve must be true or false: ${path}`);
 	if (onType === "watch") throw configError(`${at}: run.quotaReserve is not available on a watch rule: ${path}`);
+}
+
+/**
+ * `run.retainSandbox` (issue #1023, optional boolean): `false` says this trigger's runs keep no sandbox. The worker
+ * then removes a run's job directory when the run ends, whatever its outcome, where it otherwise keeps it for
+ * `PI_SANDBOX_RETENTION_HOURS` so the run can be reopened. `true` and absent are the same thing, the default. Strictly
+ * boolean, `run.github`'s rule: a string `"false"` is truthy, and read loosely it would be a trigger whose operator
+ * believes nothing is kept while everything is.
+ *
+ * ONLY ON A LOCAL COMMAND TRIGGER: `run.kind: "local"` with `run.command`, which is a cron trigger that runs a command
+ * or a forge event that starts one (`normalizeLocalEvent`). Refused, by key, everywhere else. A kept sandbox is what
+ * lets a run be reopened and looked at, and a flow's run is the kind a person comes back to; for a forge job it is
+ * also the only place the run's clone lives. A local command run has none of
+ * that to lose. Its folder is the operator's own and is never in the job directory, it cannot be resumed, recovered,
+ * parked for an answer or held for an approval (`run.resume`, `run.recover`, `run.awaitInput` and `run.gates` are each
+ * refused on it by their own rules), and a host that runs one every few minutes keeps hundreds of directories nobody
+ * opens, which the retention sweep must then remove beside the jobs (the issue's host: about 640 a day).
+ *
+ * NOT CARRIED, AND NOT NORMALIZED, `run.quotaReserve`'s way: the worker that ran the job reads the flag from its own
+ * triggers file when the run ends (triggers-file.mjs `makeCheckRetainSandbox`), so an edit takes effect for every run
+ * that ends after it and no receiver, poller or job builder needs the field. No version row
+ * (`TRIGGER_RUN_FIELD_VERSIONS`): every older loader DROPS an unknown `run` key on a cron trigger and on a local event
+ * (measured at 5.4.2), so an older worker or receiver loads the file and the older worker keeps the sandbox, which is
+ * the default. A watch rule is the one place an older loader refuses an unknown `run` key (`normalizeWatch` takes a
+ * closed set), and the field is refused there by this loader too, with every other kind that is not a local command.
+ */
+function validateRetainSandbox(run, onType, at, path) {
+	if (run.retainSandbox === undefined) return;
+	if (typeof run.retainSandbox !== "boolean") throw configError(`${at}: run.retainSandbox must be true or false: ${path}`);
+	if (onType === "watch") throw configError(`${at}: run.retainSandbox is not available on a watch rule: ${path}`);
+	if (run.kind !== "local" || run.command === undefined) {
+		throw configError(`${at}: run.retainSandbox is only available on a local command trigger (run.kind "local" with run.command, on a cron trigger or a forge event): a kept sandbox is what lets a flow's run or a forge job be reopened and continued, and only a local command run has nothing there to come back to: ${path}`);
+	}
 }
 
 /**

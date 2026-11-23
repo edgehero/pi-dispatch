@@ -320,12 +320,32 @@ export async function cleanup(prepared) {
  *
  * NEVER THROWS -- the processor already swallows this in a `finally`, and a retention fault must not be
  * the thing that turns a paid, completed run into a failure.
+ *
+ * `retains(job)` (issue #1023) is the worker's read of the job's own trigger when the run ends
+ * (`makeCheckRetainSandbox`, triggers-file.mjs): `false` only for a local command run whose trigger says
+ * `run.retainSandbox: false` right now. The run's directory then goes the way it goes with the window at 0, by that
+ * same `rm`, on EVERY outcome of the run (it completed, it failed, it timed out, it was stopped): the flag says nothing
+ * is kept, and an operator who wants to look at a failing command turns it off. One line says so,
+ * `sandbox_not_kept { jobId }`, after the directory is gone. Anything else keeps the run: no reader (every caller but
+ * the worker), a reader that throws, an answer that is not exactly `false`, and no job handed in. The run's record,
+ * its log lines, its live transcript and its artifacts are not in this directory's keeping and stay as they were.
  */
-export function makeCleanup({ sandboxDir, retentionHours = 0, log = () => {} } = {}) {
-	return async function cleanupWithRetention(prepared) {
+export function makeCleanup({ sandboxDir, retentionHours = 0, log = () => {}, retains = () => true } = {}) {
+	return async function cleanupWithRetention(prepared, { job = null } = {}) {
 		if (!prepared?.jobDir) return;
 		if (!sandboxDir || retentionHours <= 0) {
 			await cleanup(prepared);
+			return;
+		}
+		let keep = true;
+		try {
+			keep = job === null || retains(job) !== false;
+		} catch {
+			keep = true;
+		}
+		if (!keep) {
+			await cleanup(prepared);
+			log("sandbox_not_kept", { jobId: prepared.sandbox?.jobId ?? null });
 			return;
 		}
 		retainJobDir(prepared, { sandboxDir, retentionHours, log });
