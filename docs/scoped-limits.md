@@ -354,17 +354,27 @@ misconfigured, gives back every slot the job took.
 
 A deferred job is asked again after 5 seconds, and less often the longer its scope stays busy: every 10 seconds
 once jobs have waited for that scope for 50, every 20 once they have waited 100. Every job waiting for the same
-scope is asked at the same pace, and the pace starts over at 5 seconds when a job takes the scope. So a short wait
-is over as soon as before, a job behind one long run wakes about a quarter as often, and a freed scope is taken
-within one delay, 20 seconds at most.
+scope is asked at the same pace, whichever of the worker's queues it is on. The pace starts over at 5 seconds when
+a job takes the scope, and when no job has been deferred on it for 30 seconds. So a job behind one long run wakes
+about a quarter as often, and a freed scope is taken within one delay, 20 seconds at most. A wait for a scope that
+has only just become busy is over as soon as before. A job that arrives where others already wait gets their pace:
+its own wait can end up to 20 seconds after the scope came free, and a few more if another waiting job takes the
+scope first, where it ended within 5.
 
 The worker's log says `scope_busy_deferred` once, when a job starts to wait for a busy scope, and
 `scope_busy_ended` once, when it takes it, with how many times it was deferred (`deferrals`) and `waitedMs`: the
 sum of the delays those deferrals gave it. That is the time its scope cost it, not the time between the two
 lines: a pause window that held the job meanwhile is not in it. A job that waits one re-check says both lines.
-Three cases say the first line and never the second: a job that one host deferred and another host ran (each
-worker knows only its own pickups, so the host that ran it never saw it wait), a job cancelled or removed while
-it waited, and a job handed back to the worker while its first attempt was still running there.
+
+Not every first line gets its second:
+
+- A job that one host deferred and another host ran. Each worker knows only its own pickups, so the host that ran
+  it never saw it wait, and no host says the end line.
+- A job cancelled or removed while it waited.
+- A wait the worker forgot: the job failed or ended before it had its scope, it was handed back to the worker
+  while its first attempt was still running there, more than 1,000 jobs waited on that worker at once (the one
+  deferred longest ago is forgotten), or the worker restarted. If such a job comes back to a scope that is still
+  busy it says the first line again, and its end line then counts from that second line.
 
 There is no per-scope queue: a newer job can take a freed
 scope ahead of an older deferred one, and the only promise is that a deferred job is never dropped and

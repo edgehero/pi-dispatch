@@ -1403,3 +1403,68 @@ test("createWorker's settled record carries reservedIn.valkey, the tag of the co
 		await Promise.resolve(worker?.close()).catch(() => {});
 	}
 });
+
+// Issue #1023: a named worker runs two processors, one per queue, over one set of slots. What it remembers of the jobs
+// waiting for a busy scope has to be one memory as well: with one per processor a scope had two cadences, and a take on
+// one queue left the other queue's waiters asking at the ceiling. Driven through the processors createWorker hands
+// BullMQ's Workers (read back as each Worker keeps its own), on `Date.now` moved by the test, which is the clock a
+// processor reads when createWorker builds it.
+test("createWorker gives the processors of both its queues one memory of the jobs waiting for a scope (#1023)", { skip }, async (t) => {
+	const { makeInFlight, parseScopedLimits } = await import("../src/scoped-limits.mjs");
+	const NOW = Date.UTC(2026, 7, 29, 12, 0);
+	const S = 1000;
+	const hostQueue = "pi-jobs@mini1";
+	const limits = parseScopedLimits(JSON.stringify({ version: 2, limits: [{ scope: "project:shop", concurrent: 1 }] }), "sl.json");
+	const projects = [{ id: "shop", members: ["/srv/shop-a", "github:acme/web"] }];
+	const jobOf = (id, queueName, data) => {
+		const moves = [];
+		return { job: { id, queueName, attemptsMade: 0, name: data.kind, data, moveToDelayed: async (ts) => moves.push(ts) }, moves };
+	};
+	const inFlight = makeInFlight();
+	const logs = [];
+	const beforeTerm = new Set(process.listeners("SIGTERM"));
+	const beforeInt = new Set(process.listeners("SIGINT"));
+	let worker;
+	t.mock.timers.enable({ apis: ["Date"], now: NOW });
+	/** One pickup at `at` that a gate defers: how far out the job was moved. */
+	const deferredAt = async (processFn, spy, at) => {
+		t.mock.timers.setTime(at);
+		await assert.rejects(() => processFn(spy.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+		return spy.moves.at(-1) - at;
+	};
+	try {
+		worker = mod.createWorker({
+			connection: parseConnection("redis://127.0.0.1:1"),
+			name: "mini1",
+			hostQueue,
+			concurrency: 1,
+			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+			redis: { async incr() { return 1; }, async decr() { return 0; }, async expire() {} },
+			inFlight,
+			scopedLimits: () => limits,
+			projects: () => projects,
+			deps: { log: (event, fields) => logs.push({ event, fields }) },
+			stopContainer: async () => {},
+		});
+		worker.on("error", () => {});
+		worker.hostWorker.on("error", () => {});
+		assert.notEqual(worker.hostWorker.processFn, worker.processFn, "a processor per queue");
+		assert.ok(inFlight.tryAcquire("project:shop", 1), "the project's one slot is held");
+		// A local run of the project waits on the host queue: ten deferrals of 5s, so the slot has been waited for 50s.
+		const local = jobOf("c-1", hostQueue, { kind: "local", folder: "/srv/shop-a", flow: "tidy", task: "t" });
+		for (let at = NOW; at < NOW + 50 * S; at += 5 * S) assert.equal(await deferredAt(worker.hostWorker.processFn, local, at), 5 * S);
+		// A forge job of the project then arrives on the shared queue, through the other processor.
+		const forge = jobOf("f-1", "pi-jobs", { kind: "github", repo: "acme/web", target: { number: 1 }, flow: "fix", trigger: { deliveryId: "f-1", sender: { id: 1 } } });
+		assert.equal(await deferredAt(worker.processFn, forge, NOW + 52 * S), 10 * S, "the slot's delay, not a first 5s of the shared queue's own");
+		assert.deepEqual(logs.filter((l) => l.event === "scope_busy_deferred").map((l) => l.fields), [
+			{ jobId: "c-1", kind: "local", delayMs: 5 * S, ledger: "project" },
+			{ jobId: "f-1", kind: "forge", delayMs: 10 * S, ledger: "project" },
+		]);
+		assert.equal(inFlight.count("project:shop"), 1, "and no deferral kept a slot");
+	} finally {
+		for (const l of process.listeners("SIGTERM")) if (!beforeTerm.has(l)) process.removeListener("SIGTERM", l);
+		for (const l of process.listeners("SIGINT")) if (!beforeInt.has(l)) process.removeListener("SIGINT", l);
+		await Promise.resolve(worker?.close()).catch(() => {});
+		await Promise.resolve(worker?.hostWorker?.close()).catch(() => {});
+	}
+});
