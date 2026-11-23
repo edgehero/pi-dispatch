@@ -1097,9 +1097,14 @@ marked pending: one is queued or running, an earlier request or its status write
 grouping ended without recording a result. The mark stays until a grouping records a result or the question's record
 expires, and confirming can pay for another classification. A start or a
 Fire now whose count against the hour was sent and not answered says one start of the hour may have been used, and a
-Fire now whose latch was lost says the minute may be taken. On a Valkey that refuses the connection, a started run, Fire
-now, a canary and an agent's re-run say at once that the hourly allowance could not be read and that nothing was
-queued, where a started run's confirm took 5 seconds (2026-11-23, #987). A preview that could not read Valkey says
+Fire now whose latch was lost says the minute may be taken. On a Valkey that refuses the connection a started run no
+longer waits out a bound (2026-11-23, #987): its preview says "The dispatch_run hourly allowance could not be read.
+Nothing was queued.", and its confirm says "the deployment's Valkey could not be reached, so nothing was changed; try
+again", each at once, where the confirm took 5 seconds. Fire now and a canary stop at their first read, within half a
+second: their preview says the deployment's queue could not be read, so it could not be previewed, and their confirm
+that Valkey could not be reached. A re-run's preview says, after its read's 2.5 seconds, that the fleet's run mirror
+could not be read. An agent's re-run whose run was read and whose allowance then was not says the allowance sentence
+too. A preview that could not read Valkey says
 "the deployment's Valkey could not be reached, so nothing was changed; try again", with Try again: a zero touch
 grouping or its Undo, dropping an answer draft, a sandbox End, prepare or pin, and a started run's allowance ("The
 dispatch_run hourly allowance could not be read. Nothing was queued."). It said that the preview failed and that the

@@ -840,6 +840,15 @@ test("a budget write refused before it left says nothing was changed only when n
   assert.deepEqual(marks(afterSeed), [undefined, true, words]);
   assert.ok(fresh.fake.store.has(ALLOC_PLAN_KEY), "the seed landed, so something was changed");
   assert.deepEqual(fresh.sent.slice(0, 2), ["get", "eval"], "the plan's read, then the seed");
+  // A READ refused right after the call's ONE write landed: the expected key was absent, its SET NX was answered, and
+  // the read of it back never left. Something was written, so this is may or may not too. Counting the writes alone
+  // (one write, so "the first write never left") called it nothing changed.
+  const afterOne = await seeded();
+  afterOne.fake.store.delete(ALLOC_EXPECTED_KEY);
+  afterOne.refuse("get", 3);
+  assert.deepEqual(marks(await thrown(applyPriorities({ ...common, plan, keepOther: true, redisFn: over(afterOne) }))), [undefined, true, words]);
+  assert.deepEqual(afterOne.sent, ["get", "get", "set", "get"], "the plan, the absent key, its SET NX, and the read that never left");
+  assert.equal(afterOne.fake.store.get(ALLOC_EXPECTED_KEY), read.digest, "the key's seed landed");
   // Valkey's own reply to a write is an answer, and is thrown on as it is.
   const replied = await seeded();
   replied.fake.set = () => Promise.reject(refusal());

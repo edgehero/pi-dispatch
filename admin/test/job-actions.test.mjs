@@ -1783,3 +1783,74 @@ test("planRerun of a forge run whose trigger sets run.maxSubscriptionUsd: the re
     await v.done();
   }
 });
+
+test("a preview's read is marked as Valkey out of reach only for what is known to be Valkey's silence: a store's own timer, a client's timeout, a refused or closed connection, the marks (#987)", async (t) => {
+  const { valkeyRead, valkeySilence } = await import("../src/job-actions.mjs");
+  const { makeQuestionGroupStore } = await import("@edgehero/pi-dispatch/question-groups");
+  const { makeZeroTouchFixStore } = await import("@edgehero/pi-dispatch/zero-touch-fixes");
+  const { makeAnswerDraftStore } = await import("@edgehero/pi-dispatch/answerer");
+  const thrown = (reading) => valkeyRead(reading).then((value) => ({ value }), (error) => ({ error }));
+  const coded = (message, code) => Object.assign(new Error(message), { code });
+  // Known to be Valkey's silence: thrown on as a new error with the mark, its words and its code, and no other mark.
+  const silent = [
+    ["a command the client's bound ended", coded("Command timed out", "ETIMEDOUT")],
+    ["the same with no code", new Error("Command timed out")],
+    ["a command that was sent and lost", lostAnswer()],
+    ["a refused connection", coded("connect ECONNREFUSED 127.0.0.1:1", "ECONNREFUSED")],
+    ["a connection that was reset", coded("read ECONNRESET", "ECONNRESET")],
+    ["a write on a broken connection", coded("write EPIPE", "EPIPE")],
+    ["a connection that closed under the command", new Error("Connection is closed.")],
+    ["a client with no connection and no offline queue", new Error("Stream isn't writeable and enableOfflineQueue options is false")],
+    ["a client whose retries ran out", Object.assign(new Error("Reached the max retries per request limit (which is 1)."), { name: "MaxRetriesPerRequestError" })],
+    ["the question store's timer", new Error("question-store-timeout")],
+    ["the fix store's timer", new Error("fix-store-timeout")],
+    ["the answer store's timer", new Error("answer-store-timeout")],
+  ];
+  for (const [what, error] of silent) {
+    assert.equal(valkeySilence(error), true, what);
+    const got = await thrown(Promise.reject(error));
+    assert.notEqual(got.error, error, what);
+    assert.deepEqual([got.error.valkeyNotSent, got.error.valkeyMayStillRun, got.error.message, got.error.code], [true, undefined, error.message, error.code], what);
+  }
+  // Already marked: the same error, as it is.
+  const marked = Object.assign(new Error("Valkey did not connect within 6 seconds"), { valkeyNotSent: true });
+  assert.equal((await thrown(Promise.reject(marked))).error, marked);
+  // Everything else a read can reject with is handed on as it is, the same value: none of it says Valkey was silent. It
+  // was all marked but Valkey's reply and four classes of the language's errors, which the next caller would inherit.
+  const other = [
+    ["a row that is not a record", new Error("the stored row is not a record")],
+    ["a file that is not there", coded("ENOENT: no such file or directory, open 'triggers.json'", "ENOENT")],
+    ["a configuration that does not load", coded("triggers file: unknown field", "CONFIG")],
+    ["Valkey's own reply", Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" })],
+    ["a refusal this project raised", Object.assign(new Error("Valkey has no database 9"), { valkeyRefused: true })],
+    ["a fault of the code", new TypeError("x is not a function")],
+    ["a range fault", new RangeError("Invalid count value")],
+    ["a URI fault", new URIError("URI malformed")],
+    ["several failures at once", new AggregateError([new Error("a"), new Error("b")], "all promises were rejected")],
+    ["a timeout that is nobody's store", new Error("timeout")],
+    ["a rejected string", "nope"],
+    ["a rejection with nothing", undefined],
+    ["a rejected null", null],
+  ];
+  for (const [what, error] of other) {
+    assert.equal(valkeySilence(error), false, what);
+    assert.equal((await thrown(Promise.reject(error))).error, error, what);
+  }
+  // An answer is an answer.
+  assert.deepEqual(await thrown(Promise.resolve({ ok: 1 })), { value: { ok: 1 } });
+  // Each store is held to its word: its own timer, on a client that never answers, rejects with what is marked. The fix
+  // store's timer is fixed at 2 seconds, so the clock is the test's.
+  const never = () => new Promise(() => {});
+  const silentClient = { get: never, zrevrangebyscore: never };
+  for (const [what, read] of [
+    ["question-store-timeout", () => makeQuestionGroupStore({ redis: silentClient, timeoutMs: 20 }).readMeta("gh-1")],
+    ["answer-store-timeout", () => makeAnswerDraftStore({ redis: silentClient, timeoutMs: 20 }).privateDraft("gh-1")],
+  ]) {
+    const got = await thrown(read());
+    assert.deepEqual([got.error?.message, got.error?.valkeyNotSent], [what, true], what);
+  }
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fix = thrown(makeZeroTouchFixStore({ redis: silentClient }).read("f".repeat(32)));
+  t.mock.timers.tick(2000);
+  assert.deepEqual([(await fix).error?.message, (await fix).error?.valkeyNotSent], ["fix-store-timeout", true]);
+});

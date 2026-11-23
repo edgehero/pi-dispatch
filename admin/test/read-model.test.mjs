@@ -1556,6 +1556,46 @@ test("enqueueDispatchRun counts a start and sets its hour's expiry in one script
   assert.deepEqual(reads, made);
 });
 
+test("the hour's allowance gives its client's connect the command bound's 5 seconds, or the bound it is handed, and counts nothing past it (#987)", async (t) => {
+  const { checkDispatchRun } = await import("../src/read-model.mjs");
+  const { root, folder } = tempRootAndFolder("dr-connect-");
+  const env = { VALKEY_URL: "redis://x", PI_DISPATCH_RUN_ROOTS: root, PI_DISPATCH_RUN_PER_HOUR: "5" };
+  // A Valkey that takes the connection and answers nothing: the client's connect never settles.
+  let asked = 0;
+  let dropped = 0;
+  const { fakes } = dispatchFakes({ env, redisFn: () => ({ status: "wait", on() {}, connect: () => new Promise(() => {}), eval: async () => ((asked += 1), 1), get: async () => ((asked += 1), "0"), disconnect() { dropped += 1; } }) });
+  const started = (extra) => {
+    let settled = null;
+    checkDispatchRun({ folder, flow: "fix", ...fakes, ...extra }).then((value) => (settled = value));
+    return () => settled;
+  };
+  const turn = () => new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  // The bound it is handed.
+  const short = started({ connectTimeoutMs: 80 });
+  await turn();
+  t.mock.timers.tick(79);
+  await turn();
+  assert.equal(short(), null, "not before its bound");
+  t.mock.timers.tick(1);
+  await turn();
+  assert.deepEqual(short(), { unreachable: "Valkey did not connect within 0.08 seconds" });
+  // Its own: the client's command bound, 5 seconds, which is when a count that waited in an offline queue ended. A
+  // longer one held a paid start's confirm on such a Valkey for as long as it was.
+  for (const consumeRate of [true, false]) {
+    const usual = started({ consumeRate });
+    await turn();
+    t.mock.timers.tick(4999);
+    await turn();
+    assert.equal(usual(), null, "not before 5 seconds");
+    t.mock.timers.tick(1);
+    await turn();
+    assert.deepEqual(usual(), { unreachable: "Valkey did not connect within 5 seconds" });
+  }
+  assert.equal(asked, 0, "nothing was counted or read on a client that never connected");
+  assert.equal(dropped, 3, "and each client was dropped at its bound");
+});
+
 test("a dispatch run's allowance on a Valkey that refuses the connection answers at once with nothing counted, at the count and at the preview's read (#987)", async () => {
   const { checkDispatchRun } = await import("../src/read-model.mjs");
   const { makeRedisClient } = await import("@edgehero/pi-dispatch/connection");
