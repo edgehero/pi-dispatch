@@ -336,3 +336,28 @@ test("every forge's trigger is a preparation option, a run of each fills its rep
   const names = FORGE_KINDS.join("|");
   for (const file of ["../src/sandbox-data.mjs", "../src/console/panels/sandboxes.mjs"]) assert.doesNotMatch(readFileSync(new URL(file, import.meta.url), "utf8"), new RegExp(`\\b(?:${names})\\b\\W+\\b(?:${names})\\b`), file);
 });
+
+test("a prepare or a pin whose request was not confirmed says may or may not once Valkey had been asked for it, and Valkey unreachable while it had only been looked up (#987)", async () => {
+  const { SANDBOX_REQUEST_UNCONFIRMED } = await import("../src/sandbox-data.mjs");
+  const unknown = { state: "unknown", message: "the host request could not be confirmed; refresh its status before preparing again" };
+  const applied = async (name, params, answer) => {
+    const s = setup();
+    const preview = await s.service.preview(name, params);
+    assert.ok(preview.payload, JSON.stringify(preview));
+    s.fleet.sandboxPrepare = async (request) => ({ id: request.id, ...answer });
+    return s.service.apply(name, preview, "ops");
+  };
+  const row = sandboxFixture().hosts[0].rows[0];
+  for (const [name, params] of [["sandbox-prepare", { repo: "acme/web", index: 0, ref: "HEAD", host: "mini1", pin: false }], ["sandbox-pin", { host: "mini1", id: row.id }]]) {
+    // Asked for and not answered: it said `ok`, with a warning that zero touch accounting was incomplete.
+    assert.deepEqual(await applied(name, params, { ...unknown, asked: true }), { invalid: SANDBOX_REQUEST_UNCONFIRMED, partial: true }, name);
+    // Only looked up: nothing was sent.
+    assert.deepEqual(await applied(name, params, { ...unknown, asked: false }), { unreachable: true }, name);
+    // A reader that does not say is taken as asked: never done, never nothing changed.
+    assert.deepEqual(await applied(name, params, unknown), { invalid: SANDBOX_REQUEST_UNCONFIRMED, partial: true }, name);
+    const done = await applied(name, params, { state: "pending" });
+    assert.deepEqual([done.ok, done.warning], [true, undefined], name);
+  }
+  assert.equal(SANDBOX_REQUEST_UNCONFIRMED, "The sandbox request may or may not have been made: it was asked for and Valkey did not answer. Reload the Sandboxes page once Valkey answers before asking again.");
+  assert.ok([...SANDBOX_REQUEST_UNCONFIRMED].length <= 200, "an audit row keeps the whole sentence");
+});

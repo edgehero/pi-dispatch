@@ -594,9 +594,16 @@ The bar's other states:
 - **Did not finish**, with Look again: the change stopped after doing part of its work. The kill switch can reach
   some queues and not others (a Valkey that did not answer, a queue whose pause was sent and not answered) or fail before it says which,
   a bulk action can fail part-way through its jobs, and the cancel of a held or a queued job can be asked for and not
-  finish (below). The bar never says nothing was changed here: it says some of it may have been done, and Look again
+  finish (below). A change that goes through one of the console's own stores is the same when Valkey was asked for
+  it and did not answer (2026-11-23, #987): dropping an answer draft ("The draft may or may not have been dropped"),
+  a sandbox prepare or pin ("The sandbox request may or may not have been made"), and the accounting of a
+  configuration fix or a zero touch instruction ("The fix's accounting row may or may not have been staged", with
+  the file itself not changed). Each could land when Valkey answers again, and each said before that nothing was
+  changed, or that it was done. The bar never says nothing was changed here: it says some of it may have been done, and Look again
   reloads the page so you see what did. The audit log has no outcome for a change that partly landed, so such a
-  write's line reads `failed` (for the kill switch, its reason says what it reached).
+  write's line reads `failed` (for the kill switch, its reason says what it reached). An Undo of a zero touch
+  instruction whose file was written and whose fix could not then be marked undone is done, with the note that its
+  accounting is pending: the instruction is out of the file, so do not repeat the Undo.
 - **No answer at all**: the bar says the change may or may not have been made. Reload to see; the audit log says
   which. The same confirmation is never sent twice.
 

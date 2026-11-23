@@ -380,17 +380,19 @@ test("the touch outbox drops an aborted action's file whatever its store answers
   assert.deepEqual(await files(), [], "left behind, it was begun again on every read of the page");
 });
 
-test("a configuration fix on a Valkey that answers none of its accounting ends on the bounded client, says nothing was changed and never runs its change (#961)", async () => {
+test("a configuration fix on a Valkey that answers none of its accounting ends on the bounded client, never runs its change, and says its accounting may or may not have been staged (#961, #987)", async () => {
   const dir = tempDir("pd-961-track-");
   const made = [];
-  // Every command is one Valkey took and never answered: the mark of a write, on what is only bookkeeping here.
+  // Every command is one Valkey took and never answered. The change itself is never run, so no file is written; the
+  // accounting's stage was asked for, though, and a staged row that lands stays pending, so "nothing was changed",
+  // which this answered until issue #987, was not known to be true.
   const lose = losingClient();
   const redisFn = (_url, options) => (made.push(options), Object.assign(Object.create(lose), { on() {}, disconnect() {} }));
   const service = makeZeroTouchService({ paths: { valkeyUrl: "redis://x", triggersPath: join(dir, "triggers.json"), logsDir: dir }, redisFn, now: () => 1_800_000_000_000 });
   let applied = 0;
   const entry = { ticketDigest: "b".repeat(64), afterDigest: "c".repeat(64), payload: { touchContext: { runId: "gh-refused", scopeId: "a".repeat(64), project: "web", reason: "secret-unresolved", groupId: null, triggerIndex: 0 } } };
   const got = await timed(service.trackConfiguration(entry, async () => ((applied += 1), { ok: true })).then((value) => value, (error) => ({ thrown: error })));
-  assert.deepEqual(got.res, { invalid: "Fix accounting could not be prepared. Nothing was changed; try again when Valkey is available." });
+  assert.deepEqual(got.res, { invalid: "The fix's accounting row may or may not have been staged: it was asked for and Valkey did not answer. The configuration was not changed; preview the change again once Valkey answers.", partial: true });
   assert.equal(applied, 0);
   assert.deepEqual(made, [{ commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }], "on the bounded client, with no timer of the service's own over a path that writes");
   assert.deepEqual(readdirSync(dir).filter((name) => name === "touch-outbox").flatMap((name) => readdirSync(join(dir, name))), [], "and no pending file is left to be begun again");

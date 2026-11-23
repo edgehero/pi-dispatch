@@ -8,7 +8,7 @@ import { parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { makeAnswerDraftStore, answerStandingSource, answerRuleConfigDigest, answerApiRoot } from "@edgehero/pi-dispatch/answerer";
 import { planStandingAnswerAdd, applyStandingAnswerAdd, planAnswerDraftDrop } from "./answerer-actions.mjs";
-import { boundedClient, CONFIRM_READ_TIMEOUT_MS, refusedByValkey, valkeyRead, within } from "./job-actions.mjs";
+import { boundedClient, CONFIRM_READ_TIMEOUT_MS, refusedByValkey, unconfirmedWrite, valkeyRead, within } from "./job-actions.mjs";
 import { writeTracking } from "./read-model.mjs";
 
 /** What a read that ran out of time answers inside the service, told apart from every value a store returns. */
@@ -20,7 +20,7 @@ const READ_LATE = Symbol("read-late");
  * command was sent, and the drop threw it on: the confirm then said the change could not be made and that nothing was
  * changed, of a drop that landed when Valkey woke (measured on a real console: the row read `dropped` after the wake).
  */
-export const DRAFT_DROP_UNCONFIRMED = "The draft may or may not have been dropped: the drop was asked for and Valkey did not answer. Reload its run page once Valkey answers before trying again.";
+export const DRAFT_DROP_UNCONFIRMED = unconfirmedWrite({ what: "The draft", done: "dropped", asked: "the drop", next: "Reload its run page once Valkey answers before trying again." }).invalid;
 
 const hash = text => createHash("sha256").update(text).digest("hex");
 const RUN_RE = /^[A-Za-z0-9._:-]{1,200}$/;

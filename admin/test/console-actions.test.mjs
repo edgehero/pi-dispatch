@@ -35,10 +35,11 @@ import { fleetActive, fleetFailed, fleetHeld, fleetQueues, configTriggers, parke
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as RM from "../src/read-model.mjs";
 import * as WP from "../src/write-plans.mjs";
-import { makeZeroTouchService } from "../src/zero-touch-data.mjs";
+import { FIX_STAGE_UNCONFIRMED, UNDO_UNMARKED, makeZeroTouchService } from "../src/zero-touch-data.mjs";
 import { makeAnswererService } from "../src/answerer-data.mjs";
 import { makeQuestionGroupStore } from "@edgehero/pi-dispatch/question-groups";
 import { makeTouchStore } from "@edgehero/pi-dispatch/touch-state";
+import { makeZeroTouchFixStore } from "@edgehero/pi-dispatch/zero-touch-fixes";
 import { createModelRoleActions, MODEL_ROLE_EDIT_FIELDS } from "../src/model-role-plans.mjs";
 import { createTriggerEnvironmentActions } from "../src/trigger-environment-plans.mjs";
 import { triggerEntryDigest } from "../src/trigger-edit-core.mjs";
@@ -4476,6 +4477,96 @@ test("Zero touch real actions bind private-source references, exact instructions
     const newer = JSON.parse(read(paths.triggersPath)); newer.triggers[0].run.instructions = "A later operator edit."; writeFileSync(paths.triggersPath, JSON.stringify(newer));
     assert.equal((await c.confirm("zero-touch-instruction", stale.json().ticket)).status, 409);
     assert.equal(JSON.parse(read(paths.triggersPath)).triggers[0].run.instructions, "A later operator edit.");
+  } finally { await f.done(); }
+});
+
+test("a fix's accounting that the store asked for and Valkey did not answer is never said as nothing changed: a stage says may or may not, and an Undo whose file is written says done with a warning (#987)", live, async () => {
+  const f = await freshValkey();
+  try {
+    const { paths } = deployment(URL13);
+    const now = () => T0;
+    const scope = "a".repeat(64);
+    const record = buildRecord({ job: { id: "gh-refusal", data: { kind: "github", repo: "acme/web", target: { type: "issue", number: 42 }, trigger: { matched: { index: 0, type: "label" } } } }, result: { outcome: "policy", reason: "secret-unresolved" }, startedAt: new Date(T0 - 2000).toISOString(), endedAt: new Date(T0 - 1000).toISOString() });
+    record.touchScopeId = scope;
+    makeRecordWriter({ logsDir: paths.logsDir })(record);
+    // The real stores over a real Valkey, through a client that loses one answer: the command named in `lose`, at its
+    // nth call on the confirm's own client. `landed` sends it first (Valkey ran it, the answer is what was lost).
+    let lose = null;
+    const lostAnswer = () => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true });
+    const redisFn = (url, options) => {
+      const real = makeRedisClient(url, options);
+      const plan = lose;
+      const seen = new Map();
+      const failing = (name, call) => {
+        const n = (seen.get(name) ?? 0) + 1;
+        seen.set(name, n);
+        if (!plan || plan.command !== name || plan.nth !== n) return call();
+        if (plan.reply) return Promise.reject(plan.reply);
+        return plan.landed ? Promise.resolve(call()).then(() => Promise.reject(lostAnswer())) : Promise.reject(lostAnswer());
+      };
+      return new Proxy(real, {
+        get(target, name) {
+          const value = Reflect.get(target, name);
+          if (typeof value !== "function") return value;
+          // A transaction's answer is its EXEC's.
+          if (name === "multi") return (...args) => { const tx = value.apply(target, args); const exec = tx.exec.bind(tx); tx.exec = () => failing("exec", exec); return tx; };
+          return ["get", "set"].includes(name) ? (...args) => failing(name, () => value.apply(target, args)) : value.bind(target);
+        },
+      });
+    };
+    const service = makeZeroTouchService({ paths, now, redisFn, triggerBindingFn: async ({ jobId, index }) => ({ ok: true, runId: jobId, index, triggerDigest: sha256(JSON.stringify(JSON.parse(read(paths.triggersPath)).triggers[index])) }) });
+    const c = await start({ paths, a: { zeroTouch: service } });
+    const fixes = makeZeroTouchFixStore({ redis: f.redis, now });
+    const held = async () => {
+      const ids = await f.redis.zrange("zero-touch:fixes:index", 0, -1);
+      return Promise.all(ids.map(async (id) => JSON.parse(await f.redis.get(`zero-touch:fixes:meta:${id}`)).state));
+    };
+    const confirmed = async (name, body, plan) => {
+      const p = await c.act(name, body);
+      assert.equal(p.status, 200, p.text);
+      lose = plan;
+      try { return await c.confirm(name, p.json().ticket); } finally { lose = null; }
+    };
+    const instructions = () => JSON.parse(read(paths.triggersPath)).triggers[0].run.instructions;
+    const sentence = { runId: "gh-refusal", index: 0, sentence: "Use pnpm for all test commands." };
+
+    // A stage whose answer was lost after Valkey ran it: the file is not written, and the row that landed stays pending.
+    const staged = await confirmed("zero-touch-instruction", sentence, { command: "exec", nth: 1, landed: true });
+    assert.equal(staged.status, 409, staged.text);
+    assert.equal(staged.json().error, FIX_STAGE_UNCONFIRMED);
+    assert.equal(FIX_STAGE_UNCONFIRMED, "The fix's accounting row may or may not have been staged: it was asked for and Valkey did not answer. The configuration was not changed; preview the change again once Valkey answers.");
+    assert.ok([...FIX_STAGE_UNCONFIRMED].length <= 200, "an audit row keeps the whole sentence");
+    assert.ok(staged.json().html.includes("The change did not finish") && !/nothing was changed/i.test(staged.json().html), staged.json().html);
+    assert.deepEqual(lastTwo(c), [["write", "ok", null], ["write", "failed", FIX_STAGE_UNCONFIRMED]]);
+    assert.equal(instructions(), undefined, "the file was not written");
+    // It said "Fix accounting could not be prepared. Nothing was changed", of this row.
+    assert.deepEqual(await held(), ["pending"]);
+    assert.equal((await fixes.publicSnapshot()).partial, true, "which the page reads as fixes that are partial");
+    // The same for a configuration change made because of a refusal.
+    const linked = await confirmed("setting-set", { key: "maxTurns", value: "35", becauseRun: "gh-refusal" }, { command: "exec", nth: 1, landed: false });
+    assert.deepEqual([linked.status, linked.json().error], [409, FIX_STAGE_UNCONFIRMED]);
+    assert.equal(JSON.parse(read(paths.settingsFile)).maxTurns, 30, "the settings file was not written");
+    assert.deepEqual(await held(), ["pending"], "a stage that never reached Valkey leaves no row");
+    // Valkey's own answer to the stage is an answer: nothing was staged, and it says what it said.
+    const replied = await confirmed("zero-touch-instruction", sentence, { command: "exec", nth: 1, reply: Object.assign(new Error("READONLY You can't write against a read only replica."), { name: "ReplyError" }) });
+    assert.deepEqual([replied.status, replied.json().error], [409, "Fix accounting could not be prepared. Nothing was changed; try again when Valkey is available."]);
+    assert.equal(instructions(), undefined);
+
+    // An instruction that is saved, then its Undo. The Undo writes the file first and marks the fix after: whatever
+    // the mark's read or write does, the instruction is out of the file, and that is what the answer says.
+    for (const [what, plan] of [["the mark's write, lost after it landed", { command: "set", nth: 1, landed: true }], ["the mark's write, never answered", { command: "set", nth: 1, landed: false }], ["the mark's read of the fix", { command: "get", nth: 3, landed: false }]]) {
+      const saved = await confirmed("zero-touch-instruction", sentence, null);
+      assert.equal(saved.status, 200, `${what}: ${saved.text}`);
+      assert.equal(instructions(), sentence.sentence, what);
+      const undone = await confirmed("zero-touch-undo", { fixId: saved.json().fixId }, plan);
+      // It answered 500, "the zero-touch-undo change could not be made; nothing was changed, and the console's log has the reason".
+      assert.equal(undone.status, 200, `${what}: ${undone.text}`);
+      assert.equal(undone.json().warning, "tracking-incomplete", what);
+      assert.ok(undone.json().change.summary.includes("The action succeeded; do not repeat it"), `${what}: ${undone.json().change.summary}`);
+      assert.equal(instructions(), undefined, `${what}: the instruction is out of the file`);
+      assert.deepEqual(lastTwo(c).at(-1), ["write", "ok", null], what);
+    }
+    assert.equal(UNDO_UNMARKED, "The instruction was removed; its fix could not be marked undone. Do not repeat the Undo.");
   } finally { await f.done(); }
 });
 

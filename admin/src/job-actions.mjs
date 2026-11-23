@@ -896,6 +896,18 @@ export function boundedClient(redisFn, url) {
 export const refusedByValkey = (err) => err?.name === "ReplyError" || err?.valkeyRefused === true;
 
 /**
+ * What a confirm answers for a write that was asked for and that Valkey did not answer (issue #987): `partial`, never
+ * "nothing was changed" and never done. One shape for every write the console makes through a store or a helper that
+ * ends a command by a timer of its own (the answer drafts, the fix accounting, the sandbox requests): such a timer
+ * fires before the client's bound, with an error that cannot say whether the command was sent, so the command may land
+ * when Valkey answers again. `what` is the thing as a sentence starts ("The draft"), `done` what may have become of it
+ * ("dropped"), `asked` what was asked for ("the drop"), and `next` what to do, a whole sentence. The rule beside it:
+ * while only reads had left, Valkey unreachable and nothing changed (`writeTracking` says which); Valkey's own reply is
+ * an answer and is handed on as it is.
+ */
+export const unconfirmedWrite = ({ what, done, asked, next }) => ({ invalid: `${what} may or may not have been ${done}: ${asked} was asked for and Valkey did not answer. ${next}`, partial: true });
+
+/**
  * A read of Valkey on a path that WRITES NOTHING (a preview, issue #987): `reading`'s answer, or what it rejected with
  * thrown on as a new error marked `valkeyNotSent`, which the console's preview answers as Valkey unreachable, with Try
  * again, where it said the preview failed and to read the console's log. The mark is set HERE, where the read is asked,

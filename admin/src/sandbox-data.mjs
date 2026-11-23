@@ -10,11 +10,20 @@ import { readSandboxHosts, planSandboxHost, sandboxHostsPath, writeSandboxHost }
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
 import { parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
 import { repoOfTarget } from "./costs.mjs";
+import { unconfirmedWrite } from "./job-actions.mjs";
 export const SANDBOX_READ_DEPS = Object.freeze({ makeSandboxPrepareQueueFn: makeSandboxPrepareQueue, enqueueSandboxPreparationFn: enqueueSandboxPreparation, readSandboxPreparationFn: readSandboxPreparation });
 const sha = (x) => createHash("sha256").update(typeof x === "string" ? x : JSON.stringify(x)).digest("hex");
 /** What a sandbox End says when nothing acknowledged it in time, and when the read of the acknowledgment failed after the request was written (issue #843): Valkey not answering, or answering that read with an error, so the sentence names neither. */
 export const SANDBOX_END_TIMEOUT = "The terminal did not acknowledge End. Reload before trying again; the request may still take effect.";
 export const SANDBOX_END_UNCONFIRMED = "The End request was written, but the terminal's answer could not be read from Valkey. Reload once Valkey answers before trying again; the request may still take effect.";
+/**
+ * What a sandbox prepare and a pin say when the request was asked of the host's queue and not confirmed (issue #987).
+ * The worker's helper ends each step by a timer of its own and answers that as a request whose state is unknown, and
+ * the confirm said it was done, with a note that zero touch accounting was incomplete, of a request that may never
+ * have been made (a slot claim or the request itself can land when Valkey answers again; a lookup that got no answer
+ * sent nothing).
+ */
+export const SANDBOX_REQUEST_UNCONFIRMED = unconfirmedWrite({ what: "The sandbox request", done: "made", asked: "it", next: "Reload the Sandboxes page once Valkey answers before asking again." }).invalid;
 const refusalOf = (out) => out?.refusal ?? out?.message ?? out?.refused ?? "The sandbox request was refused.";
 
 export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs = nodeFs, now = Date.now, random = randomBytes, planFn = planSandboxPreparation } = {}) {
@@ -158,7 +167,10 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
       if (current.refusal || current.beforeDigest !== entry.beforeDigest) return { invalid: current.refusal ?? "The sandbox settings changed since preview. Preview again." };
       const result = await fleet.sandboxPrepare({ ...p.request, by });
       if (result.refused) return { invalid: refusalOf(result) };
-      return { ok: true, requestId: result.id, host: p.request.host, ...(result.state === "unknown" ? { warning: result.message } : {}) };
+      // Not confirmed: Valkey unreachable while the helper had only looked the request up, and may or may not once it
+      // had asked for the slot or the request (`asked`, the fleet reader's; a reader that does not say is taken as asked).
+      if (result.state === "unknown") return result.asked === false ? { unreachable: true } : { invalid: SANDBOX_REQUEST_UNCONFIRMED, partial: true };
+      return { ok: true, requestId: result.id, host: p.request.host };
     },
   };
 }
