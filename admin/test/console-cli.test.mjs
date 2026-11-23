@@ -14,7 +14,7 @@ import * as sandboxData from "../src/sandbox-data.mjs";
 import { readTriggerEditor, configLocationsOf, deploymentOwnQueue, panelEnv, PANEL_SERVICE_KEYS } from "../src/read-model.mjs";
 import * as realWhatif from "../src/console/whatif.mjs";
 import { RESTART_CLEARED, RESTART_RECHECK_MS, RESTART_TITLE } from "../src/console/restart-notice.mjs";
-import { VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
+import { makeRedisClient, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
 import { restartBannerHtml } from "../src/console/shell.mjs";
 
 // `pi-dispatch-console` (issue #640) on injected modules: the token, session, code, ticket and audit modules are fakes
@@ -25,6 +25,8 @@ const T0 = Date.UTC(2026, 9, 14, 12, 0, 0);
 const TOKEN = `pdc_${"t".repeat(43)}`;
 const CODE = "k".repeat(43);
 const SHORT = "K7QX9M2D";
+// The Valkey a fake deployment names: one that no client can be built for (see `resolvePaths` in `fakeModules`).
+const NO_VALKEY_URL = "not-a-url";
 
 function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".repeat(64), createdAt: "2026-10-01T00:00:00.000Z" }], kept = [], tokensRefusal = null, auditFails = false, verify = { ok: true, rows: 3, startsAt: null } } = {}) {
   const rows = [];
@@ -116,7 +118,10 @@ function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".
       writePauseWindows: () => ({ ok: true }),
       panelEnv: ({ env }) => ({ env: { ...env }, dir: null, notice: undefined }),
       panelValkeyContext: (args) => (calls.push(["panel-context", args.pointerDir]), {}),
-      resolvePaths: (env) => ({ valkeyUrl: env.VALKEY_URL ?? "redis://127.0.0.1:6379", logsDir: env.PI_LOGS_DIR ?? "./logs", triggersPath: env.PI_TRIGGERS_FILE ?? "./triggers.json", subscriptionsPath: "./subscriptions.json" }),
+      // Never the real default, redis://127.0.0.1:6379 (issue #1060): a test whose page deps reach a real Valkey read
+      // would send it to CI's shared Valkey or a developer's own Redis. No client can be built for this one, so such a
+      // read fails at once, before any connection. A test that wants a Valkey names it in its deployment's env.
+      resolvePaths: (env) => ({ valkeyUrl: env.VALKEY_URL ?? NO_VALKEY_URL, logsDir: env.PI_LOGS_DIR ?? "./logs", triggersPath: env.PI_TRIGGERS_FILE ?? "./triggers.json", subscriptionsPath: "./subscriptions.json" }),
       createFleetReader: (paths, seams) => (fleet.built.push({ paths, seams }), fleet),
       readSubscriptions: (args) => (calls.push(["subscriptions", args.subscriptionsPath]), { version: 1, subscriptions: [] }),
       scanRunRecords: (args) => (calls.push(["scan", args.logsDir, args.sinceMs]), []),
@@ -784,8 +789,12 @@ test("serve wires one fleet reader on the deployment, answers /api/state and a l
   // Over the deps serve built, pages.mjs's own load asks the reader for the waiting jobs on the overview alone.
   for (const name of ["overview", "fleet", "parked", "config"]) {
     const from = modules.fleet.asked.length;
-    await realPages.loadPageData(name, {}, deps);
+    const data = await realPages.loadPageData(name, {}, deps);
     assert.deepEqual(modules.fleet.asked.slice(from), [["overview", "fleet"].includes(name) ? { waiting: true } : null], name);
+    // The Parked page also reads the answerer's rows with a client of its own, on the deployment's Valkey (issue
+    // #1060: here that was the default address, dialled for real). This deployment names none a client can be built
+    // for, so the read fails before it connects; an answer from a Valkey would be that Valkey's state, not this one.
+    if (name === "parked") assert.deepEqual(data.answerer, { state: "unavailable", partial: true, rows: [] });
   }
   await deps.insights("7d");
   await deps.insights("7d");
@@ -850,6 +859,18 @@ test("serve wires one fleet reader on the deployment, answers /api/state and a l
   assert.equal(await running, 0);
   assert.equal(modules.fleet.disposed, 1, "the reader is disposed on stop");
   assert.deepEqual(modules.calls.filter((c) => c[0] === "valkey-context").at(-1).slice(0, 2), ["valkey-context", "object"], "the context is put back");
+});
+
+test("a fake deployment names no Valkey a client can be built for, so no test here dials the default one (#1060)", () => {
+  // The rule, not the site: every serve test in this file runs on `fakeModules` and `deployment()`, and real page deps
+  // built over them open their own clients on `paths.valkeyUrl` (the Parked page's read does). With the real default
+  // there, one test sent that read to 127.0.0.1:6379. Held here: the client factory itself refuses the fake's address,
+  // synchronously, so nothing built on it can reach a socket.
+  const paths = fakeModules().readModel.resolvePaths(deployment().env);
+  assert.equal(paths.valkeyUrl, NO_VALKEY_URL);
+  assert.equal(Object.hasOwn(deployment().env, "VALKEY_URL"), false, "and a test deployment sets none of its own");
+  assert.throws(() => makeRedisClient(paths.valkeyUrl), { code: "ERR_INVALID_URL" });
+  assert.throws(() => makeRedisClient(paths.valkeyUrl, { commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }), { code: "ERR_INVALID_URL" }, "the console's bounded client too");
 });
 
 // Issue #842: a stop of the console on a Valkey that stopped answering. The reader's dispose waits on Valkey, and one
