@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { BACKENDS, OPENSHELL_BACKEND } from "../src/backends.mjs";
 import { READ_BACK_BY_A_LIVE_PROBE, runBackendConformance } from "../src/backend-conformance.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { makeContainerActivity } from "../src/container-activity.mjs";
 import { transcriptRecord } from "../../image/runner/src/transcript-mirror.mjs";
 
 /**
@@ -214,6 +215,41 @@ test("a policy read back different from the one written never starts the job, an
 	assert.ok(!fake.state.calls.some((c) => c[2] === "exec" || c[2] === "upload"), "no upload and no exec");
 	assert.ok(fake.state.calls.some((c) => c[2] === "delete"), "the sandbox it made is deleted");
 	assert.ok(logs.some(([e]) => e === "openshell_policy_mismatch"));
+});
+
+test("an openshell run is counted where local's are, from before the sandbox is created to the end of its delete (issue #1023)", { skip }, async () => {
+	// The sandbox retention sweep waits for a starting job container and takes small passes beside a running one. Here
+	// the start is the sandbox's create, policy read-back and upload, all before the exec.
+	const count = makeContainerActivity({ now: () => 0 });
+	let built = null;
+	const seam = (options) => ((built = options), async () => ({ code: 0 }));
+	for (const mode of ["copy", "bind"]) {
+		bundle(fakeOpenshell(), { mode, containerActivity: count, makeRunContainer: seam });
+		assert.equal(built.containerActivity, count, `${mode}: the same object, not a copy`);
+		bundle(fakeOpenshell(), { mode, makeRunContainer: seam });
+		assert.equal(Object.hasOwn(built, "containerActivity"), false, `${mode}: none handed in, none handed on`);
+	}
+	// A run through the bundle's real run function.
+	const fake = fakeOpenshell();
+	const seen = [];
+	const exec = async (cmd, args, opts) => (seen.push([args.filter((a) => !a.startsWith("-")).slice(0, 2).join(" "), count.starting(), count.running()]), fake.exec(cmd, args, opts));
+	const dirs = jobDirs();
+	const result = await bundle({ ...fake, exec }, { containerActivity: count }).runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal });
+	assert.equal(result.code, 0);
+	const at = (step) => seen.find(([what]) => what === step);
+	assert.deepEqual(at("sandbox create"), ["sandbox create", 1, 0], "the create is part of the start");
+	assert.deepEqual(at("sandbox upload"), ["sandbox upload", 1, 0], "and so is the upload");
+	assert.deepEqual(at("sandbox download"), ["sandbox download", 0, 1], "the download is beside a run");
+	assert.deepEqual(at("sandbox delete"), ["sandbox delete", 0, 1], "and the delete");
+	assert.deepEqual([count.starting(), count.running()], [0, 0]);
+	// A create that fails: counted while it was tried, never as running, and no more once the attempt has ended.
+	const failing = fakeOpenshell({ failCreate: true });
+	const tried = [];
+	const failExec = async (cmd, args, opts) => (tried.push([count.starting(), count.running()]), failing.exec(cmd, args, opts));
+	const dirs2 = jobDirs();
+	await assert.rejects(bundle({ ...failing, exec: failExec }, { containerActivity: count }).runContainer({ job: JOB, prepared: { jobDir: dirs2.jobDir, workspace: dirs2.workspace, live: dirs2.live }, name: "pi-job-j1", signal: new AbortController().signal }), (err) => err.reason === "container-never-started");
+	assert.ok(tried.length > 0 && tried.every(([starting, running]) => starting === 1 && running === 0));
+	assert.deepEqual([count.starting(), count.running()], [0, 0]);
 });
 
 test("a create that fails or is not Ready is never-started, refunded and retried, and the name is deleted anyway (#683)", { skip }, async () => {

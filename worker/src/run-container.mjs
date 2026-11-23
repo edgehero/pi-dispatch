@@ -30,6 +30,9 @@ import { stageSecretFiles, removeSecretFiles, SECRET_FILES_SUBDIR, SECRET_FILES_
 import { checkSecretFileSources } from "./secret-files-placement.mjs";
 import { AUTH_RENEWABLE_MIN_RUNWAY_MS } from "./auth-connections.mjs";
 
+/** A run nothing counts (issue #1023): what an attempt reports through when no `containerActivity` was handed in. */
+const NOT_COUNTED = Object.freeze({ started() {}, ended() {} });
+
 /**
  * The real `runContainer` the processor injects. Launches one job container and returns
  * `{ code, aborted, turns, tokens, session, usage, context, exitReason, resources?, exitOomKilled?, memoryLimit?, progress? }`, where `aborted` records whether the WORKER initiated the stop (docker stop on
@@ -176,6 +179,13 @@ export function makeRunContainer({
 	// every attempt gets PI_RUNNER_OBSERVABLE=1 and its key holders start from the readable node. Every other venue
 	// leaves it off and its env is byte-identical.
 	observableRunner = false,
+	// Issue #1023: the worker's one count of the job containers it is starting and running (container-activity.mjs),
+	// which the sandbox retention sweep reads so that it waits for a start and takes small passes beside a run. Every
+	// venue's run function is handed the SAME object (start.mjs), and each run reports through it: it enters as the run
+	// begins, says started at the container's first output or at its CLI child's end, and ends on every exit. Null (every
+	// caller that predates it, every test that passes none) counts nothing, and the function returned is the attempt
+	// itself, unwrapped. Named apart from the `activity*` seams above, which are a job's own activity counters (issue #888).
+	containerActivity = null,
 }) {
 	// Refused at construction rather than written into a job's env: a guessed layout reads nothing.
 	const paths = layoutFor(layout);
@@ -221,7 +231,13 @@ export function makeRunContainer({
 	// credential, so buildContainerEnv writes that value as the credential and reads no host key for the provider. Off the
 	// call bag, never off `job`, for `secrets`' reason. Null (every job that declares none) builds the env as before.
 	// `secondaryCredential` (issue #997) is the same for the role model's provider (a watch rule's `decide` model).
-	return async function runContainer({ job, token, prepared, checkSecretFilesPlacement = null, secrets = {}, mainCredential = null, secondaryCredential = null, secretFiles = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, privateEndpoints = [], size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null }) {
+	const attempt = async function runContainer({ job, token, prepared, checkSecretFilesPlacement = null, secrets = {}, mainCredential = null, secondaryCredential = null, secretFiles = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, privateEndpoints = [], size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null }, counted = NOT_COUNTED) {
+		// Issue #1023: this run's report that its container is up. Never a throw: it runs inside the child's listeners.
+		const containerUp = () => {
+			try {
+				counted.started();
+			} catch {}
+		};
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// A host source may have moved after preparation. Check even an ungranted job, which must not see another attempt's files.
 		// Bare callers also keep the exact sibling private. Only the wired worker knows the configured jobs root,
@@ -1070,6 +1086,10 @@ export function makeRunContainer({
 				} catch {}
 			};
 			child.stdout?.on("data", tee);
+			// Issue #1023: the container is up at its first output (or at the child's end, below), which is when this run
+			// stops being a start the retention sweep waits for. On every chunk, since the report is idempotent and a
+			// spawn seam need not have `once`.
+			child.stdout?.on("data", containerUp);
 			// Review round 1, M1: a stdin-steered attempt's pipe is ended as soon as the runner's exit line is out, so a CLI
 			// that waited for EOF before it exits could never wait on the relay (OpenShell 0.1.4 does not wait, measured on
 			// the real gateway; this is the defence, and the close at the relay's stop stays). A line that VERIFIES under the
@@ -1140,6 +1160,7 @@ export function makeRunContainer({
 			// (CONST-RETRY-INFRA-ONLY). `reason` also cues the processor to release the budget slot,
 			// since a container that never started spent nothing.
 			child.on("error", (err) => {
+				containerUp();
 				disarmActivity();
 				stderrOut(endDemux());
 				finishOutput();
@@ -1150,6 +1171,7 @@ export function makeRunContainer({
 			});
 			child.on("close", async (code) => {
 				const aborted = signal?.aborted === true; // capture BEFORE the await
+				containerUp();
 				disarmActivity();
 				// Issue #686: the demux's held tail (a last line with no newline) goes out before anything closes, and every
 				// record it completed is in the publisher before the final flush below.
@@ -1368,6 +1390,27 @@ export function makeRunContainer({
 			await stopRelay();
 			removeInbox();
 			removeCredentials();
+		}
+	};
+	if (containerActivity === null) return attempt;
+	// Issue #1023: counted from here, around the WHOLE attempt, so every exit ends the count by construction: the early
+	// returns (a job stopped before it began, a stage the stop cut short), every throw before the spawn (a network that
+	// would not build, a grant, a stage), the child's error and its close, the teardown after it. The attempt has many
+	// exits and gains more; a call at each would be the one that is forgotten. It enters before anything else, so
+	// before the attempt's first daemon call (the job network's create, the venue's stage, or the run itself), with only
+	// the attempt's own file work in between. The count is the sweep's courtesy, never the job's business: a fault in
+	// it neither stops a run nor replaces its answer.
+	return async function runContainer(bag) {
+		let counted = NOT_COUNTED;
+		try {
+			counted = containerActivity.enter();
+		} catch {}
+		try {
+			return await attempt(bag, counted);
+		} finally {
+			try {
+				counted.ended();
+			} catch {}
 		}
 	};
 }

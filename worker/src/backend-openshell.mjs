@@ -807,7 +807,7 @@ export const BIND_GATE_REFUSED_MS = 60_000;
 export const BIND_SETTLE_MS = 60_000;
 const BIND_SETTLE_POLL_MS = 1_000;
 
-const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["mode", "euid", "egid", "now", "jobsDir", "readDaemonFacts", "image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "openLiveTranscript", "openInboxRelay", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "readPtraceScope", "platform", "delay", "reap", "makeRunContainer"]);
+const OPENSHELL_BACKEND_OPTIONS = Object.freeze(["mode", "euid", "egid", "now", "jobsDir", "readDaemonFacts", "image", "gateway", "engine", "readAllowlist", "readEndpoints", "hostEnv", "openJobLog", "openLiveTranscript", "openInboxRelay", "containerActivity", "onOutput", "globalPiDir", "allowGlobalExtensions", "packagePaths", "forwardEnv", "authFromPi", "forgeHosts", "log", "spawnFn", "exec", "fs", "readLsm", "readPtraceScope", "platform", "delay", "reap", "makeRunContainer"]);
 
 /**
  * Build the `openshell` bundle. `engine` is the gateway's compute driver, `docker` or `podman` (the only two in v1),
@@ -841,6 +841,9 @@ export function makeOpenshellBackend(opts = {}) {
 		// Issue #686: the steer inbox relay's opener (start.mjs's, shared with every venue), whose relay writes frames on
 		// the exec's stdin here. Absent, a steer job here runs unsteered (`steerSkipped: "no-transcript"`).
 		openInboxRelay = null,
+		// Issue #1023: the worker's count of its job containers (start.mjs's, shared with every venue), which the sandbox
+		// sweep reads. A run here is counted from before the sandbox is created (`stageRun`) to the end of its teardown.
+		containerActivity = null,
 		onOutput,
 		globalPiDir = null,
 		allowGlobalExtensions = true,
@@ -1300,6 +1303,7 @@ export function makeOpenshellBackend(opts = {}) {
 		...(binding ? { layout: "mounts", transcript: "file", settleRun: ({ opts: built }) => settleAttempt(built, { signal: attempts.get(built)?.signal ?? null }) } : { layout: "sandbox", stageLive: null, transcript: "stdio" }),
 		...(typeof openLiveTranscript === "function" ? { openLiveTranscript } : {}),
 		...(typeof openInboxRelay === "function" ? { openInboxRelay } : {}),
+		...(containerActivity ? { containerActivity } : {}),
 		stageRun,
 		collectRun,
 		teardownRun,

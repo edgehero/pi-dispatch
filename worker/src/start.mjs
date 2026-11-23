@@ -127,6 +127,7 @@ import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, 
 import { makePodmanServiceReader, onceFs, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
+import { makeContainerActivity } from "./container-activity.mjs";
 import { declaredProviderKey, piProviders, providerKeyCandidates, resolveProviderCredential } from "./env-allowlist.mjs";
 import { isOAuthTokenValue } from "./provider-key.mjs";
 import { parseAllowlist } from "./egress-allowlist.mjs";
@@ -1743,6 +1744,11 @@ export async function startWorker(
 	// re-issues `listRunning` every call, so a docker outage costs one interval of retention overshoot
 	// rather than latching the sweep off until the next boot.
 	let reapSandboxes = async () => {};
+	// Issue #1023: the ONE count of the job containers this worker is starting and running. Every venue's run function
+	// reports through it (local's below, podman's and openshell's through their bundles), and the sandbox sweep reads it,
+	// so a pass waits for a start and takes small steps beside a run. Built here, before the sweep that reads it; at the
+	// boot pass it counts nothing, so that pass is the one it always was.
+	const containerActivity = makeContainerActivity();
 	// Issue #978: the boot pass's result, handed to the follow-up passes once the worker takes jobs.
 	let firstSandboxPass = null;
 	try {
@@ -1772,6 +1778,8 @@ export async function startWorker(
 			sweepNetworks: watch.sweepNetworks,
 			// Issue #446, gate round 1: each expired run's own runtime is asked once more right before it is renamed aside.
 			isOpen: watch.isOpen,
+			// Issue #1023: the worker's own job containers, starting and running.
+			activity: containerActivity,
 			log,
 		});
 		// AWAITED, as it always was: the boot order (retained runs swept before the worker takes a job) is a guarantee a
@@ -2444,6 +2452,8 @@ export async function startWorker(
 				forwardEnv: config.forwardEnv,
 				authFromPi: config.authFromPi,
 				forgeHosts: { gitlab: config.gitlab?.apiUrl ?? null, forgejo: config.forgejo?.apiUrl ?? null, azure: config.azure?.orgUrl ?? null },
+				// Issue #1023: the same count local's run function reports through.
+				containerActivity,
 				backendFloor: config.backendFloor,
 				reap: backendReaps[PODMAN_BACKEND],
 				// Issue #681: the budget's leftover listing, through the same seam local's takes.
@@ -2524,6 +2534,8 @@ export async function startWorker(
 		forwardEnv: config.forwardEnv,
 		authFromPi: config.authFromPi,
 		forgeHosts: { gitlab: config.gitlab?.apiUrl ?? null, forgejo: config.forgejo?.apiUrl ?? null, azure: config.azure?.orgUrl ?? null },
+		// Issue #1023: the same count local's run function reports through.
+		containerActivity,
 		reap: backendReaps[mode === "bind" ? OPENSHELL_BIND_BACKEND : OPENSHELL_BACKEND],
 		log,
 	});
@@ -2886,6 +2898,8 @@ export async function startWorker(
 						// Issue #596: Docker refused a job's `--cpus` as above its CPU count, so the count the resolver cached is
 						// stale (a resized Docker Desktop VM); the next pickup reads the daemon again.
 						onCpuCeilingStale: () => resolveJobUser.invalidate?.(),
+						// Issue #1023: this venue's runs are counted in the worker's one count, which the sandbox sweep reads.
+						containerActivity,
 					}),
 				}),
 				observationPreflight: localObservationPreflight,

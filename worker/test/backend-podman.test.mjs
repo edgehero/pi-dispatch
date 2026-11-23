@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { ASSERTED, BACKENDS, ENFORCED, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, effectiveWord } from "../src/backends.mjs";
 import { CONTAINER_HOME } from "../src/container-spec.mjs";
+import { makeContainerActivity } from "../src/container-activity.mjs";
 
 // backend-podman builds on run-container, which imports env-allowlist -> @earendil-works/pi-ai, so this skips below the
 // node floor and runs in CI (PI_DISPATCH_REQUIRE_WORKER_TESTS=1 makes a skip a hard failure), as run-container's own
@@ -887,6 +888,30 @@ test("every spawn the podman bundle makes is `podman`, and the run is keep-id as
 	for (const call of fake.calls) assert.equal(call[0], "podman", call.join(" "));
 	assert.ok(fake.calls.some((c) => c[1] === "stop" && c.includes("pi-job-j1")), "the stop goes to podman");
 	assert.ok(fake.calls.some((c) => c[1] === "network" && c[2] === "create"), "the job network is podman's");
+});
+
+test("a podman run is counted where local's are: the bundle hands the worker's count to its run function (issue #1023)", { skip }, async () => {
+	// The sandbox retention sweep waits for a starting job container and takes small passes beside a running one. A venue
+	// whose run function was built without the count would read there as nothing starting.
+	const count = makeContainerActivity({ now: () => 0 });
+	let built = null;
+	const seam = (options) => ((built = options), async () => ({ code: 0 }));
+	bundle({ spawnFn: fakePodman().spawnFn, containerActivity: count, makeRunContainer: seam });
+	assert.equal(built.containerActivity, count, "the same object, not a copy");
+	bundle({ spawnFn: fakePodman().spawnFn, makeRunContainer: seam });
+	assert.equal(Object.hasOwn(built, "containerActivity"), false, "none handed in, none handed on");
+	// And a run through the bundle's real run function: counted as starting at its first runtime call (the job network),
+	// through the `podman run`, and no more once the run has ended.
+	const fake = fakePodman({ runExit: 0 });
+	const seen = [];
+	const spawnFn = (cmd, args) => (seen.push([args[0] === "run" ? "run" : args.slice(0, 2).join(" "), count.starting(), count.running()]), fake.spawnFn(cmd, args));
+	const b = bundle({ spawnFn, egress: true, containerActivity: count });
+	const run = await b.runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j1", signal: new AbortController().signal, user: "1234:1234", home: CONTAINER_HOME, relabel: true });
+	assert.equal(run.code, 0);
+	assert.deepEqual(seen[0], ["network create", 1, 0]);
+	assert.deepEqual(seen.find(([what]) => what === "run"), ["run", 1, 0]);
+	assert.ok(seen.slice(seen.findIndex(([what]) => what === "run") + 1).every(([, starting, running]) => starting === 0 && running === 1), "its teardown is still beside the sweep");
+	assert.deepEqual([count.starting(), count.running()], [0, 0]);
 });
 
 test("the podman reaper detaches nothing RUNNING from a leftover job network on 4.x while the keeper does not hold (#452 with #458, gate round 2)", { skip }, async () => {

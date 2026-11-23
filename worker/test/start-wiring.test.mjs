@@ -5387,6 +5387,35 @@ test("the sandbox network sweep visits each runtime present, built through the s
 	assert.deepEqual(proxies, ["my-proxy", "my-proxy"]);
 });
 
+test("one count of the worker's job containers reaches the sandbox sweep and every venue's run function (issue #1023)", { skip }, async () => {
+	// The sweep waits for a starting job container and takes small passes beside a running one, by a count every run
+	// reports through. A venue built without it would start containers the sweep reads as nothing starting, so every
+	// venue this boot blesses must be handed the SAME object the sweep reads.
+	const { sandboxReaperCalls, runContainerCalls, podmanBackendCalls, openshellBackendCalls } = await runStart({
+		env: { PI_BACKENDS: "local,podman,openshell,openshell-bind", PI_OPENSHELL_GATEWAY: "lab", PI_JOB_IMAGE: "pi-job:ci", PI_SANDBOX_DIR: tempDir("count-sbx-") },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		jobUserIdentity: PODMAN_ID,
+		observationFs: PODMAN_FILES,
+		readPodmanInfo: PODMAN_INFO({}),
+		bootImage: { ok: true, capabilities: ["anyUid"] },
+	});
+	assert.equal(sandboxReaperCalls.length, 1);
+	const count = sandboxReaperCalls[0].activity;
+	for (const fn of ["enter", "starting", "running"]) assert.equal(typeof count?.[fn], "function", `the sweep is handed a count with ${fn}()`);
+	assert.deepEqual([count.starting(), count.running()], [0, 0], "which counts nothing at the boot pass");
+	assert.equal(runContainerCalls.length, 1);
+	assert.equal(runContainerCalls[0].containerActivity, count, "local's run function");
+	assert.equal(podmanBackendCalls.length, 1);
+	assert.equal(podmanBackendCalls[0].containerActivity, count, "podman's bundle");
+	assert.deepEqual(openshellBackendCalls.map((o) => o.mode), ["copy", "bind"]);
+	for (const opts of openshellBackendCalls) assert.equal(opts.containerActivity, count, `openshell's ${opts.mode} bundle`);
+	// What a run reports there is what the sweep reads.
+	const run = count.enter();
+	assert.deepEqual([sandboxReaperCalls[0].activity.starting(), sandboxReaperCalls[0].activity.running()], [1, 0]);
+	run.ended();
+});
+
 // Issue #458 (PR #463 round 2): on Podman 4.x with egress armed, the keeper is read ONCE at boot through the bundle's own
 // egress preflight, and a keeper that does not hold is said as its own event with the WHOLE sentence, since a
 // deployment that upgraded without re-running `service install` would otherwise learn it only from retried jobs. Never
