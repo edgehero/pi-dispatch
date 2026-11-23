@@ -4927,6 +4927,68 @@ test("a parked answer whose draft cannot be read at the confirm says Valkey coul
   assert.equal(queued, 0);
 });
 
+test("a parked answer's confirm says what was sent: an approval that is stale or unread is a 409 that says nothing was queued, and a connection that ended before it was ready is a 503 (#987)", async () => {
+  const { paths } = deployment();
+  const plan = { kind: "parked-answer", forge: "github", jobId: "gh-p", queue: "pi-jobs", job: { repo: "o/r", target: { type: "issue", number: 7, title: "t", body: "b" }, flow: "fix", resume: true, parkedReply: false, approvalRequestId: "a".repeat(64), console: { by: "ops" }, trigger: { event: "issue_comment", action: "created", deliveryId: "console-0123456789abcdef", sender: { id: null }, matched: { index: 0, type: "comment", phrase: "/pi" }, comment: { body: "/approve" } } }, runFields: { flow: "fix" }, reserve: null };
+  // The real enqueue, and the real forge helper and approval store under it, over a queue whose client is the case's.
+  const over = (client) => {
+    const seen = { adds: 0 };
+    const queue = { name: "pi-jobs", client, add: async (_kind, _data, options) => ((seen.adds += 1), { id: options.jobId }), close: async () => {}, disconnect() {} };
+    return { seen, rm: { ...RM, planParkedAnswer: async () => ({ plan }), enqueueParkedAnswer: (p, options) => RM.enqueueParkedAnswer(p, { ...options, queueFn: () => queue, parseConnectionFn: () => ({}) }) } };
+  };
+  const refusals = [
+    // The item has no active request any more.
+    [{ eval() {}, get: async () => null }, "the approval request is no longer pending for this run; nothing was queued"],
+    // The read threw with the mark of a command Valkey took: a read's, which says nothing of an add.
+    [{ eval() {}, get: async () => { throw lostWrite(); } }, "the durable approval request could not be read; nothing was queued, try again"],
+  ];
+  for (const [client, sentence] of refusals) {
+    const q = over(Promise.resolve(client));
+    const c = await start({ paths, a: { rm: q.rm } });
+    const out = await c.both("parked-answer", { jobId: "gh-p", decision: "approve" });
+    assert.equal(out.confirm.status, 409, out.confirm.text);
+    assert.equal(out.confirm.json().error, sentence);
+    assert.match(out.confirm.json().html, /data-reload>Look again</);
+    assert.doesNotMatch(out.confirm.json().html, /may or may not|Nothing was changed/);
+    assert.deepEqual(lastTwo(c), [["write", "ok", null], ["write", "failed", sentence]]);
+    assert.equal(q.seen.adds, 0);
+  }
+  const ended = over(Promise.resolve({ status: "end" }));
+  const c = await start({ paths, a: { rm: ended.rm } });
+  const out = await c.both("parked-answer", { jobId: "gh-p", decision: "approve" });
+  assert.equal(out.confirm.status, 503, out.confirm.text);
+  assert.equal(out.confirm.json().error, VALKEY_UNREACHABLE);
+  assert.equal(ended.seen.adds, 0);
+});
+
+test("a forge re-run that an approval routes to its owner host's queue offers its Undo for that queue: the cancel is asked for the job where it is (#987)", async () => {
+  const { paths } = deployment();
+  const plan = { kind: "forge", forge: "github", jobId: "gh-old", deliveryId: "console-0123456789abcdef", queue: "pi-jobs", job: { repo: "o/r", target: { type: "issue", number: 7, title: "t", body: "b" }, flow: "fix", gates: ["deploy:staging"], trigger: { event: "issue_comment", action: "created", deliveryId: "console-0123456789abcdef", sender: { id: 1 }, comment: { body: "/pi fix" } } }, runFields: null, reserve: null };
+  // The real enqueue, forge helper and approval store: the item has a pending approval owned by another host.
+  const request = { version: 1, requestId: "a".repeat(64), runId: "gh-parked", kind: "github", repo: "o/r", target: { type: "issue", number: 7 }, action: "deploy:staging", toolCallId: "call-1", configDigest: "digest", sessionKey: "session-key", host: "host-1", hostQueue: "pi-jobs@host-1", createdAt: 123456, state: "pending" };
+  const adds = [];
+  const queueOf = (name, client) => ({ name, client: Promise.resolve(client), add: async (_kind, _data, options) => (adds.push(name), { id: options.jobId }), close: async () => {}, disconnect() {} });
+  const queues = { "pi-jobs": queueOf("pi-jobs", { eval() {}, get: async (key) => (key.startsWith("run:approval:target:") ? request.requestId : JSON.stringify(request)) }), "pi-jobs@host-1": queueOf("pi-jobs@host-1", {}) };
+  const plans = [];
+  const rm = {
+    ...RM,
+    planRerun: async () => ({ plan }),
+    enqueueRerun: (p, options) => RM.enqueueRerun(p, { ...options, queueFn: (_connection, { name }) => queues[name], parseConnectionFn: () => ({}) }),
+    planCancelQueued: async (args) => (plans.push(args), queuedPlan(args.jobId, waitingRow(args.jobId, { queue: args.queue, why: null, known: false, bucket: "slot", state: "waiting" }), { queue: args.queue, state: "waiting" })),
+  };
+  const c = await start({ paths, a: { rm } });
+  const out = await c.both("rerun", { jobId: "gh-old" });
+  assert.equal(out.confirm.status, 200, out.confirm.text);
+  assert.deepEqual(adds, ["pi-jobs@host-1"], "the job is on the owner's queue alone");
+  const { change } = out.confirm.json();
+  assert.equal(change.undo, "Cancel gh-console-0123456789abcdef before it starts");
+  assert.deepEqual(change.inverse, { action: "cancel-queued", body: { jobId: "gh-console-0123456789abcdef", queue: "pi-jobs@host-1" } });
+  // Pressing it previews the cancel of that job on the queue it is on.
+  const undo = await c.act(change.inverse.action, change.inverse.body);
+  assert.equal(undo.status, 200, undo.text);
+  assert.deepEqual([plans.at(-1).jobId, plans.at(-1).queue], ["gh-console-0123456789abcdef", "pi-jobs@host-1"]);
+});
+
 test("Adopt does not write after one of its own reads went unanswered, and Undo depends only on the desired rows it reads (#961)", async () => {
   const { paths } = deployment();
   const input = { name: "pi-lint", version: "1.4.3" };

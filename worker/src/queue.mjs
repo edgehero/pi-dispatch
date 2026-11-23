@@ -457,9 +457,13 @@ const semanticStateError = (code) => Object.assign(new Error(code), { code });
  *
  * Returns `{ added, owner }`: `owner` is what that read found of the job that kept the window (`{ ended, pttlMs }`,
  * issue #932), null when nothing was swallowed or the queue has no client to read it with.
+ *
+ * `onAdd` (issue #987), when given, is called right before EACH add, the first and every one a repair asks for: the
+ * caller's mark that an add is about to leave, so what is thrown before the first call was thrown with nothing sent.
  */
-async function addForgeWithSemanticRepair(queue, kind, data, opts) {
+async function addForgeWithSemanticRepair(queue, kind, data, opts, onAdd = null) {
 	for (let repairs = 0; ; repairs++) {
+		if (onAdd) onAdd();
 		const added = await queue.add(kind, data, opts);
 		if (!added?.id || added.id === opts.jobId) return { added, owner: null };
 		// Old dependency-injected queues have only add; a real BullMQ queue always has a client. Their historical
@@ -554,8 +558,20 @@ export async function enqueueGitLabJob(queue, fields, options) {
  * already ENDED, also add a notice job the worker answers with a comment, so the item says the request was dropped.
  * The receiver's arms and the poller ask for it; the console does not, since it tells its own person on the page. A
  * notice that cannot be added is answered `noticeFailed` and never fails the enqueue: the swallow already happened.
+ *
+ * `routeFn` and `onAdd` (issue #987) are for a caller that must say what it sent within a bound, the operator
+ * console. Left out, as the receiver, the poller and the held-reply settle leave them, nothing here changes: a
+ * decision routed to the queue of the host that owns its session goes through a queue this function builds on the
+ * caller's own connection and closes, waiting for that close. That queue is built after the caller connected its
+ * own, and on a Valkey that takes connections and answers none its add waits for as long as the connection takes to
+ * give up, which a persistent producer rides out and a person's confirm cannot. So `routeFn(name)`, when given, hands
+ * back the routed queue instead (connected under the caller's own bound, or it throws and nothing was sent), and
+ * whoever built that queue closes it: this function does not. `onAdd()` is called right before each add of the job,
+ * the first and each one the semantic repair asks for, and never for a throw of the checks before them (a builder's
+ * refusal, an approval that is stale or whose state could not be read, a routed queue that was not reached), so its
+ * caller knows whether an add was ever started when this throws.
  */
-export async function enqueueForgeJob(queue, kind, fields, { dataVersions, noticeOnDrop = false, now = Date.now } = {}) {
+export async function enqueueForgeJob(queue, kind, fields, { dataVersions, noticeOnDrop = false, now = Date.now, routeFn = null, onAdd = null } = {}) {
 	const { jobId, data: built, dedupId } = forgeJobOf(kind, fields, { dataVersions });
 	let data = built;
 	let routedName = null;
@@ -575,7 +591,10 @@ export async function enqueueForgeJob(queue, kind, fields, { dataVersions, notic
 	}
 	// Only the host owning the retained session can consume this decision. Central routing also covers console
 	// answers and held replies, whose callers may have selected the shared queue before a request existed.
-	const routed = routedName !== null && routedName !== queue.name ? makeQueue(queue.opts.connection, { name: routedName }) : null;
+	// Issue #987: a caller that owes its answer within a bound opens the routed queue itself (`routeFn`) and closes it.
+	const routed = routedName !== null && routedName !== queue.name ? (routeFn ? await routeFn(routedName) : makeQueue(queue.opts.connection, { name: routedName })) : null;
+	// A route that handed back no queue must not fall through to the caller's: that host cannot consume this decision.
+	if (routeFn && routedName !== null && routedName !== queue.name && !routed) throw new TypeError("approval-route-unavailable");
 	let added;
 	let owner = null;
 	let notice = null;
@@ -584,10 +603,10 @@ export async function enqueueForgeJob(queue, kind, fields, { dataVersions, notic
 			jobId,
 			deduplication: { id: dedupId, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
 			...forgeJobOpts(),
-		}));
+		}, onAdd));
 		if (noticeOnDrop && added?.id && added.id !== jobId && owner?.ended === true) notice = await addDuplicateNotice(routed ?? queue, kind, data, { survivingJobId: added.id, pttlMs: owner.pttlMs, now, dataVersions });
 	} finally {
-		if (routed) await routed.close();
+		if (routed && !routeFn) await routed.close();
 	}
 	// Issue #289: WHICH of the two dedup layers spoke is readable off `queue.add`'s return, and only one
 	// of them is. Verified at bullmq 5.80.4's own Lua: a jobId collision (the GUID shield,

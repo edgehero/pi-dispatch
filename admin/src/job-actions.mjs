@@ -897,6 +897,9 @@ export const refusedByValkey = (err) => err?.name === "ReplyError" || err?.valke
 
 const CONNECT_LATE = Symbol("connect-late");
 
+/** What `connectedQueue` answers for a queue whose connection ended before it was ever ready (issue #987). */
+export const CONNECT_ENDED = "the queue's connection closed before it was ready; nothing was queued";
+
 /**
  * The first phase of a paid enqueue (issue #961): one queue of the console's bounded kind (`consoleQueueConnection`),
  * CONNECTED, or `{ unreachable }`. BullMQ connects inside the queue, and on a Valkey that takes the connection and
@@ -905,6 +908,12 @@ const CONNECT_LATE = Symbol("connect-late");
  * `connectTimeoutMs`, BEFORE anything is asked of the queue: past it nothing was sent, the queue is closed so nothing
  * is sent later, and "nothing was queued" is true. The add that follows then needs no timer of its own, and must not
  * have one: it goes out on a connected client at once, and that client's command bound says whether it was answered.
+ *
+ * A client that settled ENDED is a connect that failed too (issue #987). BullMQ's wait for a ready client resolves
+ * when the client ended with no error event (read at 5.80.4, `RedisConnection.waitUntilReady`), which is what a
+ * connection that is taken and then closed leaves once the retries ran out: a forwarder in front of a Valkey that is
+ * gone. Taken as connected, the add that followed was refused by the client itself with nothing on the wire, and read
+ * as sent and not confirmed.
  *
  * Returns `{ queue, client }` (`client` null for a queue that has none to wait for, a test's) or `{ unreachable }`.
  * `options` is the queue's own (`{ name }`).
@@ -915,9 +924,9 @@ export async function connectedQueue({ url, options = {}, queueFn = makeQueue, p
     queue = queueFn(consoleQueueConnection(url, parseConnectionFn), options);
     if (queue.client === undefined) return { queue, client: null };
     const client = await within(Promise.resolve(queue.client), connectTimeoutMs, () => CONNECT_LATE);
-    if (client !== CONNECT_LATE) return { queue, client };
+    if (client !== CONNECT_LATE && client?.status !== "end") return { queue, client };
     void closeWithin(queue, closeTimeoutMs);
-    return { unreachable: `the queue did not connect within ${connectTimeoutMs / 1000} seconds; nothing was queued` };
+    return { unreachable: client === CONNECT_LATE ? `the queue did not connect within ${connectTimeoutMs / 1000} seconds; nothing was queued` : CONNECT_ENDED };
   } catch (err) {
     if (queue) void closeWithin(queue, closeTimeoutMs);
     return { unreachable: `${boundedText(err?.message ?? String(err))}; nothing was queued` };
@@ -930,6 +939,67 @@ export async function connectedQueue({ url, options = {}, queueFn = makeQueue, p
  * the same minute, a forge run within the semantic window), so a retry after that can pay for the same run twice.
  */
 export const enqueueUnconfirmed = (what) => ({ invalid: `${what} may or may not have been queued: the queue did not confirm it. ${LOOK_FIRST}`, partial: true });
+
+/**
+ * What an answer to an approval says when its request is not the pending one for its run any more, and when the
+ * request could not be read: the preview's two refusals (`planParkedAnswer`), and since issue #987 the confirm's too,
+ * for what `enqueueForgeJob` finds when it reads the request again right before its add. The two do not ask the same:
+ * the preview asks that the request is pending and this run's, the helper only that it is still the item's active
+ * request, by its id. So a request decided since the preview under the same id is queued, as it always was, and the
+ * worker judges that decision.
+ */
+export const APPROVAL_NOT_PENDING = "the approval request is no longer pending for this run; nothing was queued";
+export const APPROVAL_UNREAD = "the durable approval request could not be read; nothing was queued, try again";
+
+/**
+ * The routed queue of one forge enqueue, opened and closed by the console (issue #987). `enqueueForgeJob` sends a
+ * decision on a durable approval to the queue of the host that owns its session, and unless it is handed a `routeFn`
+ * it builds that queue itself, after the caller's connect phase: built while Valkey takes connections and answers
+ * none, the add waited for as long as that connection took to give up (30.4 s measured), and the queue's close was
+ * awaited. `open` is that `routeFn`: the routed queue through `connectedQueue`, under the same connect bound as the
+ * first, or a throw tagged `routeUnreached` whose message is `connectedQueue`'s own sentence. The throw carries no
+ * `valkeyMayStillRun`: nothing was asked of the routed queue, so nothing was sent. `close()` starts the close of the
+ * queue that was opened and never waits for it, as every close of a paid enqueue.
+ */
+function routedQueueOf({ url, queueFn, parseConnectionFn, connectTimeoutMs }) {
+  const opened = [];
+  return {
+    async open(name) {
+      const connected = await connectedQueue({ url, options: { name }, queueFn, parseConnectionFn, connectTimeoutMs });
+      if (!connected.queue) throw Object.assign(new Error(connected.unreachable), { routeUnreached: true });
+      opened.push(connected.queue);
+      return connected.queue;
+    },
+    close() {
+      for (const queue of opened.splice(0)) void closeWithin(queue, QUEUE_CLOSE_TIMEOUT_MS);
+    },
+  };
+}
+
+/**
+ * What a forge enqueue that threw BEFORE any add was started answers (issue #987): nothing was queued, and why.
+ * `enqueueForgeJob` checks before it adds, and each check throws with nothing sent: the routed queue that did not
+ * connect is Valkey's (`{ unreachable }`); an approval whose request is not the item's active one any more, or whose
+ * state could not be read, is a refusal in the preview's own words; anything else is a builder that refused the
+ * job's fields, a refusal that names what it threw. Each of these read as "may or may not have been queued" while
+ * the mark was set before the helper was called, and a builder's refusal as Valkey unreachable before that. Never
+ * called once an add was started: from there only Valkey's own reply says nothing was queued.
+ */
+function forgeUnsent(err) {
+  if (err?.routeUnreached === true) return { unreachable: err.message };
+  if (err?.message === "approval-request-stale") return { refusal: APPROVAL_NOT_PENDING };
+  if (err?.message === "approval-state-unavailable") return { refusal: APPROVAL_UNREAD };
+  return { refusal: `the job could not be built (${boundedText(err?.message ?? String(err))}); nothing was queued` };
+}
+
+/**
+ * Whether a forge enqueue's throw before any add came of a Valkey that did not answer (issue #987): the routed queue
+ * that did not connect, and an approval state that could not be read (a read that failed or was not answered; a state
+ * Valkey answered and the store could not use throws the same, and is taken the same way). After one of these no
+ * further Valkey command is waited for, as after a lost answer. Every other throw there is a refusal Valkey had no
+ * part in (a builder's, a stale approval read off an answer), after which a command is answered as any other.
+ */
+const unansweredBeforeAdd = (err) => err?.routeUnreached === true || err?.message === "approval-state-unavailable";
 
 /**
  * A local or cron enqueue whose add was answered and whose read back was not (`enqueueLocalJobReporting`'s
@@ -1576,7 +1646,10 @@ export async function planRerun({
  * since the preview). Returns `{ ok: true, jobId, queue }` for a job created, or, when a dedup answered and NOTHING was
  * queued, `{ refusal, deduplicated: true, jobId, survivingJobId? }` naming why: the local one-minute window, the cron
  * minute's, or a forge job's 10-minute semantic window (the same target and flow ran or is running). `{ refusal }` for a
- * plan that is not one, `{ unreachable }` for Valkey.
+ * plan that is not one, and for a forge job its helper refused before any add (`forgeUnsent`, issue #987);
+ * `{ unreachable }` for Valkey, with nothing sent; `{ invalid, partial }` once an add was started and not confirmed.
+ * A fork of a run is queued through here as a forge plan (`enqueueRunFork`), so all of it holds for a fork. `queue` is
+ * the queue the job is on: the plan's, or the queue of an approval's owner host when the helper routed the job there.
  */
 export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection, localRepoProblemFn = localRepoProblem, gitDirtyFn = gitDirty, now = () => Date.now(), touchStore = null, touchOutbox = null, interventionOrigin = "human", connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS } = {}) {
   const kind = plan?.kind;
@@ -1591,12 +1664,15 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
   const connected = await connectedQueue({ url, options: { name: plan.queue }, queueFn, parseConnectionFn, connectTimeoutMs });
   if (!connected.queue) return { unreachable: connected.unreachable };
   const { queue, client } = connected;
+  const route = routedQueueOf({ url, queueFn, parseConnectionFn, connectTimeoutMs });
   let intent = null;
   let tracker = null;
   // Whether the add was started, and whether an answer was lost: after the first no error says "nothing was queued"
-  // but Valkey's own, and after the second no further command is waited for.
+  // but Valkey's own, and after the second no further command is waited for. `forging` is a forge job handed to its
+  // helper, whose own checks come before its add (issue #987).
   let sent = false;
   let lost = false;
+  let forging = false;
   const done = async (result) => {
     if (!intent) return result;
     const pending = intent;
@@ -1617,8 +1693,8 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
     }
     // Phase two, NOT timed (issue #961): the queue's client bounds each command, and a timer that fired first could
     // only say less than its error does.
-    sent = true;
     if (kind === "local" || kind === "cron") {
+      sent = true;
       const { id, existing } = kind === "local"
         ? await enqueueLocalJobReporting(queue, { folder: plan.job.folder, flow: plan.job.flow, task: plan.job.task, ...randomRerunFields(plan.job), now: new Date(now()) })
         : await enqueueTriggerRunReporting(queue, plan.schedule, { now: new Date(now()) });
@@ -1629,16 +1705,27 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
       if (existing) return { refusal: swallowedRunSentence(id, existing), deduplicated: true, jobId: id };
       return await done({ ok: true, jobId: id, queue: plan.queue });
     }
-    const res = await enqueueForgeJob(queue, plan.forge, plan.job);
+    // A forge job's mark is set by the helper, right before each add (issue #987): its builder, its read of a durable
+    // approval and its routed queue's connect come first, and each throws with nothing sent (`forgeUnsent`).
+    forging = true;
+    const res = await enqueueForgeJob(queue, plan.forge, plan.job, { routeFn: route.open, onAdd: () => { sent = true; } });
     if (res.deduplicated) return { refusal: `the same target and flow ran or is running within the last 10 minutes (job ${res.survivingJobId}), so the queue's semantic window took this re-run as a duplicate and nothing was queued. Try again once that window has passed`, deduplicated: true, jobId: res.jobId, survivingJobId: res.survivingJobId };
-    return await done({ ok: true, jobId: res.jobId, queue: plan.queue });
+    // The queue the job is on: the routed one where the helper sent it to an approval's owner host, which is where its
+    // cancel (the banner's Undo) has to look.
+    return await done({ ok: true, jobId: res.jobId, queue: res.queue ?? plan.queue });
   } catch (err) {
-    if (!sent || refusedByValkey(err)) {
-      lost = !refusedByValkey(err);
-      return { unreachable: `${boundedText(err?.message ?? String(err))}; nothing was queued` };
+    if (forging && !sent) {
+      // A forge job refused before any add (issue #987). A refusal Valkey had no part in takes its intent back BEFORE
+      // the answer leaves, so "nothing was queued" is never said over a tracker still begun (left begun, it is what
+      // makes the Zero touch page read unavailable). Where Valkey did not answer, the abort is started and not waited
+      // for, as after a lost answer.
+      lost = unansweredBeforeAdd(err);
+      return forgeUnsent(err);
     }
-    lost = true;
-    return enqueueUnconfirmed(what);
+    // Only Valkey's own reply is an answer: after any other throw no further command is waited for.
+    lost = !refusedByValkey(err);
+    if (sent && lost) return enqueueUnconfirmed(what);
+    return { unreachable: `${boundedText(err?.message ?? String(err))}; nothing was queued` };
   } finally {
     // The intent of a run that was not queued is taken back. After a lost answer that is started and not waited for:
     // its command would wait out the same bound on the Valkey that just did not answer.
@@ -1647,6 +1734,7 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
       if (!lost) await aborting;
     }
     // Started, never awaited: the answer does not wait for a QUIT.
+    route.close();
     void closeWithin(queue, QUEUE_CLOSE_TIMEOUT_MS);
   }
 }
@@ -1805,8 +1893,8 @@ export async function planParkedAnswer({
     let approvalQueue = null;
     if (approval) {
       const current = await within(makeApprovalStore({ redis, now }).read(record.approval.requestId), timeoutMs, () => ({ error: "timeout" }));
-      if (!current.ok) return { refusal: "the durable approval request could not be read; nothing was queued, try again" };
-      if (!current.request || current.request.state !== "pending" || current.request.runId !== jobId) return { refusal: "the approval request is no longer pending for this run; nothing was queued" };
+      if (!current.ok) return { refusal: APPROVAL_UNREAD };
+      if (!current.request || current.request.state !== "pending" || current.request.runId !== jobId) return { refusal: APPROVAL_NOT_PENDING };
       // Only the worker's private request knows where its canonical session lives. A host name in a public record
       // is display data, not a routing declaration; inferring a queue from it could resume on the wrong filesystem.
       approvalQueue = current.request.hostQueue ?? null;
@@ -1872,6 +1960,12 @@ async function answeredWindow(redis, { logsDir, fs, now, timeoutMs }) {
  * fans out; see `planParkedAnswer`). Returns `{ ok: true, jobIds: [id], queue }` when it was created, or `{ refusal,
  * deduplicated: true, jobId, survivingJobId }` when the 10-minute semantic window took it (an answer to this issue is
  * already queued or running), `{ refusal }` for a plan that is not one, `{ unreachable }`.
+ *
+ * What it says is what was sent (issue #987). Before any add: `{ unreachable }` for a queue that did not connect, its
+ * own or the one an approval is routed to, and `{ refusal }` for an approval that is no longer the pending one
+ * (`APPROVAL_NOT_PENDING`), one whose state could not be read (`APPROVAL_UNREAD`) and a job its builder refused, each
+ * ending "nothing was queued". Once an add was started only Valkey's own reply says that; anything else is
+ * `enqueueUnconfirmed`.
  */
 export async function enqueueParkedAnswer(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS } = {}) {
   if (plan?.kind !== "parked-answer" || !(plan.job?.parkedReply === true || /^[a-f0-9]{64}$/.test(plan.job?.approvalRequestId ?? "")) || !COMMENT_DELIVERY[plan.forge]) return { refusal: "not a parked-answer plan" };
@@ -1880,16 +1974,22 @@ export async function enqueueParkedAnswer(plan, { url, queueFn = makeQueue, pars
   const connected = await connectedQueue({ url, options: { name: plan.queue }, queueFn, parseConnectionFn, connectTimeoutMs });
   if (!connected.queue) return { unreachable: connected.unreachable };
   const { queue } = connected;
+  const route = routedQueueOf({ url, queueFn, parseConnectionFn, connectTimeoutMs });
+  // Whether an add was started (issue #987). The helper sets it, right before each add: its builder, its read of the
+  // approval and its routed queue's connect come first, and each throws with nothing sent (`forgeUnsent`). Set before
+  // the helper was called, a stale approval read as "may or may not have been queued".
   let sent = false;
   try {
-    sent = true;
-    const res = await enqueueForgeJob(queue, plan.forge, plan.job);
+    const res = await enqueueForgeJob(queue, plan.forge, plan.job, { routeFn: route.open, onAdd: () => { sent = true; } });
     if (res.deduplicated) return { refusal: `an answer to this issue is already queued or running (job ${res.survivingJobId}), so the queue's semantic window took this one as a duplicate and nothing was queued`, deduplicated: true, jobId: res.jobId, survivingJobId: res.survivingJobId };
     return { ok: true, jobIds: [res.jobId], queue: res.queue ?? plan.queue };
   } catch (err) {
-    if (!sent || refusedByValkey(err)) return { unreachable: `${boundedText(err?.message ?? String(err))}; nothing was queued` };
+    if (!sent) return forgeUnsent(err);
+    if (refusedByValkey(err)) return { unreachable: `${boundedText(err?.message ?? String(err))}; nothing was queued` };
     return enqueueUnconfirmed(`the answer to ${String(plan.jobId)}`);
   } finally {
+    // Started, never awaited: the routed queue the console opened, and its first.
+    route.close();
     void closeWithin(queue, QUEUE_CLOSE_TIMEOUT_MS);
   }
 }

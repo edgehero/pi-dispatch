@@ -719,6 +719,161 @@ test("two different GUIDs, same repo#issue:flow within the window -> one active 
 	}
 });
 
+// --- the routed queue and the mark of an add (issue #987) ---
+// A producer that must say what it sent within a bound (the operator console) hands the forge enqueue a route and a
+// mark. Left out, as every other producer leaves them, the path is the one it was.
+
+const gatedReply = () => ({ repo: "org/repo", target: { type: "issue", number: 649 }, flow: "work", resume: true, gates: ["deploy:staging"], trigger: { deliveryId: "reply-987", comment: { body: "/approve" }, sender: { id: 123 } } });
+
+/** A caller's queue as the forge enqueue sees it, over the REAL approval store: `request` is the target's active one. */
+async function approvalSource(request = null, { get = null } = {}) {
+	const { approvalTargetKey } = await import("../src/approval-state.mjs");
+	const stored = request && {
+		version: 1, runId: "requesting-run", kind: "github", repo: "org/repo", target: gatedReply().target,
+		action: "deploy:staging", toolCallId: "call-1", configDigest: "digest", sessionKey: "session-key", host: "host-1", createdAt: 123456, state: "pending",
+		...request,
+	};
+	const adds = [];
+	const redis = {
+		eval() { throw new Error("binding must only read"); },
+		get: get ?? (async (key) => (key === approvalTargetKey({ kind: "github", ...gatedReply() }) ? (stored?.requestId ?? null) : stored ? JSON.stringify(stored) : null)),
+	};
+	return { name: "pi-jobs", adds, client: Promise.resolve(redis), async add(kind, data, options) { adds.push({ kind, data, options }); return { id: options.jobId }; } };
+}
+
+/** A routed queue a caller built: it counts what it is asked. */
+function ownerQueue(name = "pi-jobs@host-1") {
+	const q = { name, adds: [], closed: 0, async add(kind, data, options) { q.adds.push({ kind, data, options }); return { id: options.jobId }; }, async close() { q.closed += 1; } };
+	return q;
+}
+
+test("a route handed in is asked exactly once, for the owner's queue, takes the add, and is not closed by the enqueue (#987)", async () => {
+	const { enqueueForgeJob } = await import("../src/queue.mjs");
+	const source = await approvalSource({ requestId: "request-1", hostQueue: "pi-jobs@host-1" });
+	const owner = ownerQueue();
+	const asked = [];
+	const res = await enqueueForgeJob(source, "github", gatedReply(), { routeFn: async (name) => (asked.push(name), owner) });
+	assert.deepEqual(asked, ["pi-jobs@host-1"]);
+	assert.deepEqual(res, { jobId: "gh-reply-987", deduplicated: false, queue: "pi-jobs@host-1" });
+	assert.equal(owner.adds.length, 1);
+	assert.equal(owner.adds[0].data.approvalRequestId, "request-1");
+	assert.equal(source.adds.length, 0, "the caller's queue never receives this paid continuation");
+	assert.equal(owner.closed, 0, "whoever built the routed queue closes it");
+	// No route is asked for where nothing is routed: a request with no owner queue, and a caller already on the owner's.
+	for (const [request, name] of [[{ requestId: "request-1" }, "pi-jobs"], [{ requestId: "request-1", hostQueue: "pi-jobs@host-1" }, "pi-jobs@host-1"], [null, "pi-jobs"]]) {
+		const direct = await approvalSource(request);
+		direct.name = name;
+		const out = await enqueueForgeJob(direct, "github", gatedReply(), { routeFn: async () => assert.fail("nothing is routed here") });
+		assert.equal(out.queue, undefined);
+		assert.equal(direct.adds.length, 1);
+	}
+	// A route that could not be opened throws its own error through, and one that hands back no queue is refused:
+	// neither falls through to the caller's queue, whose host cannot consume the decision.
+	const unreached = await approvalSource({ requestId: "request-1", hostQueue: "pi-jobs@host-1" });
+	const late = Object.assign(new Error("the queue did not connect"), { routeUnreached: true });
+	await assert.rejects(enqueueForgeJob(unreached, "github", gatedReply(), { routeFn: async () => { throw late; } }), (err) => err === late);
+	await assert.rejects(enqueueForgeJob(unreached, "github", gatedReply(), { routeFn: async () => null }), { name: "TypeError", message: "approval-route-unavailable" });
+	assert.equal(unreached.adds.length, 0);
+});
+
+test("the mark of an add is called right before each add, each of the semantic repair's too, and never for a throw that comes before the first (#987)", async () => {
+	const { enqueueForgeJob } = await import("../src/queue.mjs");
+	let marks = 0;
+	const onAdd = () => { marks += 1; };
+	// The checks that come before any add: a stale binding, an approval state that cannot be read, a builder's refusal
+	// and a routed queue that was not reached.
+	const stale = await approvalSource(null);
+	await assert.rejects(enqueueForgeJob(stale, "github", { ...gatedReply(), approvalRequestId: "request-1" }, { onAdd }), { name: "TypeError", message: "approval-request-stale" });
+	const unread = await approvalSource(null, { get() { throw new Error("private payload"); } });
+	await assert.rejects(enqueueForgeJob(unread, "github", gatedReply(), { onAdd }), { message: "approval-state-unavailable" });
+	const refused = await approvalSource(null);
+	await assert.rejects(enqueueForgeJob(refused, "github", { ...gatedReply(), approvalRequestId: "bad/id" }, { onAdd }), { name: "TypeError", message: "approval-request-invalid" });
+	const unreached = await approvalSource({ requestId: "request-1", hostQueue: "pi-jobs@host-1" });
+	await assert.rejects(enqueueForgeJob(unreached, "github", gatedReply(), { onAdd, routeFn: async () => { throw new Error("not reached"); } }), /not reached/);
+	assert.equal(marks, 0, "nothing was sent by any of these");
+	assert.deepEqual([stale, unread, refused, unreached].map((q) => q.adds.length), [0, 0, 0, 0]);
+	// One add: marked first, on the caller's queue and on a routed one alike.
+	const seen = [];
+	const plain = { name: "pi-jobs", async add(_kind, _data, options) { seen.push("add"); return { id: options.jobId }; } };
+	await enqueueForgeJob(plain, "github", { ...gatedReply(), gates: undefined }, { onAdd: () => seen.push("mark") });
+	assert.deepEqual(seen, ["mark", "add"]);
+	const routed = await approvalSource({ requestId: "request-1", hostQueue: "pi-jobs@host-1" });
+	const owner = ownerQueue();
+	const order = [];
+	owner.add = async (_kind, _data, options) => (order.push("add"), { id: options.jobId });
+	await enqueueForgeJob(routed, "github", gatedReply(), { onAdd: () => order.push("mark"), routeFn: async () => (order.push("route"), owner) });
+	assert.deepEqual(order, ["route", "mark", "add"]);
+	// The semantic repair: the first add is swallowed against an owner that ended refused, the window is released, and
+	// the add is asked again. Each add has its own mark before it, so a throw between them is one after an add started.
+	const steps = [];
+	let adds = 0;
+	const repairing = {
+		name: "pi-jobs",
+		client: Promise.resolve({ async eval(_script, keys) {
+			steps.push(keys === 4 ? "read" : "release");
+			return keys === 4 ? ["completed", JSON.stringify({ outcome: "policy", reason: "operator-cancel" }), 1000] : 1;
+		} }),
+		async add(_kind, _data, options) {
+			steps.push("add");
+			adds += 1;
+			return { id: adds === 1 ? "gh-the-owner" : options.jobId };
+		},
+	};
+	const repaired = await enqueueForgeJob(repairing, "github", { ...gatedReply(), gates: undefined }, { onAdd: () => steps.push("mark") });
+	assert.deepEqual(steps, ["mark", "add", "read", "release", "mark", "add"]);
+	assert.deepEqual(repaired, { jobId: "gh-reply-987", deduplicated: false });
+	// Without a mark the same repair runs as it always did.
+	adds = 0;
+	steps.length = 0;
+	await enqueueForgeJob(repairing, "github", { ...gatedReply(), gates: undefined });
+	assert.deepEqual(steps, ["add", "read", "release", "add"]);
+});
+
+test("with no route handed in, a routed decision goes through a queue built on the caller's own connection, and the enqueue waits for its close (#987)", { skip }, async () => {
+	const { randomBytes } = await import("node:crypto");
+	const { Queue } = await import("bullmq");
+	const { makeRedisClient, parseConnection } = await import("../src/connection.mjs");
+	const { approvalDueKey, approvalTargetKey, makeApprovalStore } = await import("../src/approval-state.mjs");
+	const { enqueueForgeJob, makeQueue } = await import("../src/queue.mjs");
+	const id = randomBytes(12).toString("hex");
+	const host = `route987-${id}`;
+	const hostQueue = `pi-jobs@${host}`;
+	const source = makeQueue(parseConnection(url), { name: `route987-shared-${id}` });
+	const owner = makeQueue(parseConnection(url), { name: hostQueue });
+	const redis = makeRedisClient(url);
+	redis.on("error", () => {});
+	const input = { ...gatedReply(), repo: `org/${id}` };
+	const request = { requestId: id, runId: `run-${id}`, kind: "github", repo: input.repo, target: input.target, action: "deploy:staging", toolCallId: "call-1", configDigest: "digest", sessionKey: "session-1", host, hostQueue, createdAt: 123456 };
+	// Every close of a queue in this process, and whether it had settled when it was last looked at: the routed queue is
+	// the enqueue's own, so its class's close is the one place a test can see it.
+	const closes = [];
+	const close = Queue.prototype.close;
+	Queue.prototype.close = function observedClose(...args) {
+		const seen = { queue: this, settled: false };
+		closes.push(seen);
+		return close.apply(this, args).finally(() => { seen.settled = true; });
+	};
+	try {
+		assert.equal((await makeApprovalStore({ redis, now: () => 123456 }).publish(request)).ok, true);
+		const res = await enqueueForgeJob(source, "github", input);
+		// Read in the same turn the answer came back in.
+		const atAnswer = closes.map(({ queue, settled }) => ({ name: queue.name, settled, onCallersConnection: queue.opts.connection === source.opts.connection, callersKind: queue.constructor === source.constructor }));
+		assert.deepEqual(atAnswer, [{ name: hostQueue, settled: true, onCallersConnection: true, callersKind: true }]);
+		assert.equal(res.queue, hostQueue);
+		assert.ok(await owner.getJob(res.jobId), "the decision is on its owner's queue");
+		assert.equal(await source.getJob(res.jobId), undefined);
+	} finally {
+		Queue.prototype.close = close;
+		await source.obliterate({ force: true }).catch(() => {});
+		await owner.obliterate({ force: true }).catch(() => {});
+		await Promise.all([source.close(), owner.close()]);
+		await redis.del(`run:approval:request:${id}`, approvalTargetKey(request));
+		await redis.zrem("run:approval:due", id);
+		await redis.zrem(approvalDueKey(host), id);
+		await redis.quit();
+	}
+});
+
 // --- a parked run's window (DES-AWAIT-INPUT-ENDS-THE-JOB) ---
 
 test("releaseSemanticWindow asks the job's own compare-and-delete, fails open with a named line, and skips a job with no key", async () => {
