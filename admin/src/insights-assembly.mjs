@@ -155,7 +155,7 @@ export async function assembleGraph(paths, { pricing, project, fullPaths = false
   const triggers = readGraphTriggers({ triggersPath: paths.triggersPath, fullPaths });
   if (triggers.missing || triggers.invalid) return buildGraphModel({ triggers, nowMs });
   const triggerList = Array.isArray(triggers?.triggers) ? triggers.triggers : [];
-  const schedulers = await readSchedulersFn({ url: paths.valkeyUrl });
+  const schedulers = await readSchedulersFn({ url: paths.valkeyUrl, readOnly: true });
   const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs: nowMs - GRAPH_LIMITS.windowDays * 24 * 60 * 60 * 1000, nowMs });
   // A newer release's record is left out of every count below (issue #761): its trigger, chain and target are past the
   // stable core.
@@ -362,7 +362,7 @@ export async function assembleAllocationView(paths, counts, { fullPaths = false,
  * `envFn` is the deployment's environment (`processEnv`).
  */
 export async function assembleSizingView(paths, nowMs, { readHostsFn = readHosts, envFn = processEnv } = {}) {
-  const read = await readHostsFn({ url: paths.valkeyUrl });
+  const read = await readHostsFn({ url: paths.valkeyUrl, prune: false });
   const rows = Array.isArray(read?.hosts) ? read.hosts : [];
   // A registry read in part (issue #1062): the rows that answered are drawn, `readInPart` says how many did not, and a
   // raise offers no call, as over an unread registry, since the host it would fit on may be one not read.
@@ -715,7 +715,7 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
   const out = { window, view, project, nowMs };
   if (view === "capacity") {
     out.capacity = await io.capacity(paths, window, nowMs, { envFn, consoleDetails: true });
-    const registry = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs });
+    const registry = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs, prune: false });
     const live = Array.isArray(registry?.hosts) ? registry.hosts : null;
     const byName = new Map((live ?? []).map((row) => [row.name, row]));
     const reportHosts = Array.isArray(out.capacity?.hosts) ? out.capacity.hosts : [];
@@ -746,7 +746,7 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
   };
   if (view === "budget-split") {
     out.allocation = await io.allocation(paths, null, { consoleView: true, role, fullPaths: role === "operator" && fullPaths, envFn, nowMs });
-    const hosts = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs });
+    const hosts = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs, prune: false });
     out.hosts = Array.isArray(hosts?.hosts) ? hosts.hosts : [];
     if (hosts?.unreachable) out.hostsUnreadable = true;
     // Issue #1062: the hosts it lists are the rows that answered; a host whose row did not is not among them.
@@ -786,7 +786,7 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
   const subs = io.subscriptions({ subscriptionsPath: paths.subscriptionsPath });
   const subscriptions = subs?.subscriptions ?? [];
   out.budget = await io.budget(paths, { env, nowMs });
-  const hosts = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs });
+  const hosts = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs, prune: false });
   out.hosts = Array.isArray(hosts?.hosts) ? hosts.hosts : [];
   if (hosts?.unreachable) out.hostsUnreadable = true;
   // Issue #1062: read in part, the money held is that of the hosts whose rows answered, so its total is not known.

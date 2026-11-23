@@ -1882,8 +1882,9 @@ function fleetSwitch({ name, kind, paused }) {
           short = switchShortOf(s.snapshot);
           shortLines = switchShortLines(s.snapshot, short);
           const sum = (key) => all.reduce((n, row) => n + (Number.isSafeInteger(row.counts?.[key]) ? row.counts[key] : 0), 0);
-          // Issue #964: this host's own queue where no discovery named it is paused too and never read (a queue built to
-          // read it would write its meta key), so it is named, and named as left out of the counts.
+          // Issue #964: this host's own queue where no discovery named it is paused too and never read (a queue no
+          // whole scan found holds no job, and the reader builds none for it), so it is named, and named as left out
+          // of the counts.
           const unread = Array.isArray(s.snapshot.switchUnread) ? s.snapshot.switchUnread.map(String) : [];
           // Issue #1053: a queue Valkey answered with an error is listed too, and named as left out of the counts.
           const errored = queueErrorsOf(s.snapshot);

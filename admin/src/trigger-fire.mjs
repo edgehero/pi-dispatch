@@ -80,7 +80,7 @@ export async function planTriggerFire({
   };
   const reads = (async () => {
     try {
-      queue = queueFn(consoleQueueConnection(url, parseConnectionFn), { name: queueName });
+      queue = queueFn(consoleQueueConnection(url, parseConnectionFn), { name: queueName, metaWrite: false });
       const scheduler = await queue.getJobScheduler(schedule.schedulerId);
       if (!scheduler) return { refusal: "This cron trigger's schedule is not in this deployment's queue. Nothing was queued." };
       // A hand-fired run of this trigger that is already queued or running (issue #961): said beside the plan, never

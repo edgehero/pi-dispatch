@@ -1,13 +1,14 @@
 import { withOperatorDiagnosis } from "./helpers/tool-diagnosis.mjs";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { executeToolAction, TOOL_ACTIONS } from "../src/tool-actions.mjs";
 import * as readModel from "../src/read-model.mjs";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { request } from "node:http";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { panelWrite } from "../src/audited-write.mjs";
 import { stripAnsi } from "../src/style.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -17,6 +18,15 @@ import { escapeControls } from "@edgehero/pi-dispatch/projects";
 import { HOST_SET, hostKey } from "@edgehero/pi-dispatch/host-registry";
 import { REPLY_ERROR_CLASSES } from "@edgehero/pi-dispatch/reply-error-class";
 import { queueErrorsLine, switchShortCause, switchShortNote } from "../src/words.mjs";
+import { PRUNE_SCRIPT, READ_SCRIPT, TRIM_SCRIPT } from "@edgehero/pi-dispatch/run-mirror";
+import { HELD_SET, jobKey as heldKey } from "@edgehero/pi-dispatch/wait-state";
+import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
+import { makeQueue } from "@edgehero/pi-dispatch/queue";
+import { parseConnection } from "@edgehero/pi-dispatch/connection";
+import { ACTIONS } from "../src/console/actions.mjs";
+import { runCli } from "../src/console/cli.mjs";
+import { PAGES } from "../src/console/pages.mjs";
+import { recordingProxy, scriptCommands } from "./helpers/recording-proxy.mjs";
 
 // Issue #642's review: EVERY panel write surface, driven through the real extension the way pi drives it, appends its
 // audit row (actor role `panel`) before its write lands, and a `failed` row after one that did not land. One table row
@@ -56,6 +66,47 @@ const LIVE = process.env.VALKEY_TEST_URL
       return u.toString();
     })()
   : null;
+
+/**
+ * Database 9 as this file found it, and put back so at its end (`after`): every key the file's tests made is deleted,
+ * and a key that was there and holds something else now is restored. The tests that take the database for themselves
+ * (the census, the wire) do the same around their own bodies; this is for what the others leave, the meta hash and the
+ * events stream of each queue a `/dispatch` command built. A key with an expiry is left to go by itself.
+ */
+const asFound = { keys: null };
+async function everyKey(r) {
+  const keys = [];
+  let cursor = "0";
+  do {
+    const [next, batch] = await r.scan(cursor, "COUNT", 1000);
+    cursor = String(next);
+    keys.push(...batch);
+  } while (cursor !== "0");
+  return keys;
+}
+before(async () => {
+  if (!LIVE) return;
+  const { default: IORedis } = await import("ioredis");
+  const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  try {
+    asFound.keys = new Map();
+    for (const key of await everyKey(r)) asFound.keys.set(key, (await r.pttl(key)) < 0 ? await r.dumpBuffer(key) : null);
+  } finally {
+    r.disconnect();
+  }
+});
+after(async () => {
+  if (!LIVE || asFound.keys === null) return;
+  const { default: IORedis } = await import("ioredis");
+  const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  try {
+    const made = (await everyKey(r)).filter((key) => !asFound.keys.has(key));
+    if (made.length > 0) await r.del(...made);
+    for (const [key, dump] of asFound.keys) if (dump !== null && !(await r.dumpBuffer(key))?.equals(dump)) await r.restore(key, 0, dump, "REPLACE");
+  } finally {
+    r.disconnect();
+  }
+});
 
 const ENV_KEYS = ["PI_DISPATCH_AGENT_WRITES", "PI_DISPATCH_RUN_ROOTS", "PI_DISPATCH_RUN_PER_HOUR", "PI_LOGS_DIR", "PI_TRIGGERS_FILE", "PI_SETTINGS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "VALKEY_URL", "PI_WORKER_NAME"];
 const ALLOC_NOW = Date.parse("2026-10-05T12:00:00Z");
@@ -783,9 +834,11 @@ test("a tool's paid start that was sent and not confirmed is audited as action-u
 });
 
 // Issue #1036: a read tool writes nothing to Valkey. Every tool the extension registers as "Read-only", through the
-// real extension, against a real Valkey: database 9, which in the admin suite is this file's alone (its tests run one
-// after another and no other admin test file names it), because the tools read the deployment's own key names and no
-// prefix can stand in for them. The census is every key of the database with its value, taken before and after each
+// real extension, against a real Valkey: database 9, which is this file's alone in all five trees of tests (CI runs
+// every workspace in one `node --test` on one Valkey, and no other test file of the worker, the receiver, the admin,
+// the runner or the launcher names it; this file's tests run one after another), because the tools read the
+// deployment's own key names and no prefix can stand in for them. The file leaves the database as it found it
+// (`leaveAsFound`, at its end). The census is every key of the database with its value, taken before and after each
 // tool. Three things a pruning reader removes are planted first and must still be there after every tool: a
 // `host:live` member with no row, a `wait:held` member with no hash, and a run mirror id with no record. The person's
 // surfaces then prune them, as they always have.
@@ -794,6 +847,9 @@ test("a tool's paid start that was sent and not confirmed is audited as action-u
 // or counts: a function that takes its answer over a queue Valkey answered with an error and gives the map that names
 // the queue and whether the tool's own key says the answer is not whole; or null for a tool whose answer none of those
 // enters (the files, the run records, the host registry's rows, Valkey's counters), which answers as over any fleet.
+/** The read tools whose answer is a file's alone, so they send Valkey nothing: the pause windows. */
+const FILE_ONLY_READ_TOOLS = Object.freeze(["dispatch_pauses"]);
+
 const READ_TOOLS = Object.freeze([
   ["dispatch_status", {}, (out) => [out.queue?.queueErrors, out.queue?.partial === true && Array.isArray(out.queue?.unavailableQueues)]],
   ["dispatch_runs", {}, null], ["dispatch_costs", {}, null], ["dispatch_capacity", {}, null], ["dispatch_triggers", {}, null],
@@ -809,8 +865,12 @@ test("every tool registered as read-only is in the census of tools that write no
   assert.deepEqual(READ_TOOLS.map(([name]) => name).sort(), registered, "a tool that says Read-only joins READ_TOOLS, and the census below");
 });
 
-test("the read tools write nothing to Valkey: no key appears, goes or changes, and what a pruning reader removes stays until a person's surface reads (#1036)", { timeout: 180_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
-  const fx = deployment({ valkey: LIVE });
+test("the read tools write nothing to Valkey: no key appears, goes or changes, every command each sends is a read, and what a pruning reader removes stays until a person's surface reads (#1036)", { timeout: 180_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  // Through the recording proxy (the wire test's, below), so each tool is also held to the commands it sends, and a
+  // tool that sends none is seen: the census alone passed for two tools that never asked Valkey anything.
+  const named = await namedReadScripts();
+  const proxy = await recordingProxy(LIVE);
+  const fx = deployment({ valkey: proxy.url });
   const { default: IORedis } = await import("ioredis");
   const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
   const tag = `${process.pid}-${Date.now().toString(36)}`;
@@ -849,9 +909,15 @@ test("the read tools write nothing to Valkey: no key appears, goes or changes, a
   const taken = [];
   for (const key of await queueKeys()) taken.push([key, await r.dumpBuffer(key), await r.pttl(key)]);
   try {
-    // An envelope and its projects, so dispatch_allocations reads Valkey too, on the real client.
+    // An envelope and its projects, so dispatch_allocations reads Valkey too, on the real client: with the per-job cap
+    // an envelope needs to be valid (`maxCostUsd`), which the fixture lacked, so the tool answered from the file alone.
     writeFileSync(fx.files.projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
     writeFileSync(fx.files.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", _other: "0" }, defaultWeights: { shop: 1, _other: 0 }, delegation: { enabled: false } }));
+    writeFileSync(fx.files.settings, JSON.stringify({ model: "m", maxCostUsd: "2", secretProfiles: { prod: "/opt/pi/resolve.sh" } }));
+    // A cron trigger beside the label one, so dispatch_triggers reads its stall counter: over a file with no cron
+    // trigger it has nothing to ask Valkey.
+    mkdirSync(join(fx.files.logs, "..", "repo"), { recursive: true });
+    writeFileSync(fx.files.triggers, JSON.stringify({ triggers: [{ on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix" } }, { on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: join(fx.files.logs, "..", "repo"), flow: "fix", task: "look" } }] }));
     indexMod._setAllocationSeamsForTests({});
     await r.sadd(HOST_SET, liveHost, staleHost);
     await r.hset(`host:h:${liveHost}`, { name: liveHost, routes: "true", beatAt: String(Date.now()), jobs: "[]" });
@@ -859,13 +925,24 @@ test("the read tools write nothing to Valkey: no key appears, goes or changes, a
     await r.zadd("runs:index", Date.now(), staleRun);
 
     const wrote = {};
+    const sentNotReads = {};
+    const asked = {};
+    // What a connection sends for itself, which is no question a tool asks.
+    const CONNECTION = new Set(["SELECT", "CLIENT SETINFO", "CLIENT SETNAME", "INFO", "PING", "QUIT"]);
     for (const [name, params] of READ_TOOLS) {
       // No queue of this deployment exists when a tool starts, so a read that builds one shows as its meta key: writing
       // a meta hash that is already there with the same fields changes nothing a census can see.
       const left = await queueKeys();
       if (left.length > 0) await r.del(...left);
       const before = await census();
+      await settle(60);
+      proxy.take();
       const out = await tool(name, params);
+      await settle(60);
+      const sent = proxy.take();
+      const bad = notReads(sent, named);
+      if (bad.length > 0) sentNotReads[name] = bad;
+      asked[name] = sent.filter((c) => !CONNECTION.has(c.name)).length;
       const changes = changesOf(before, await census());
       const still = await planted();
       const pruned = Object.entries(still).filter(([, there]) => there !== 1).map(([what]) => `pruned ${what}`);
@@ -877,8 +954,33 @@ test("the read tools write nothing to Valkey: no key appears, goes or changes, a
       await r.zadd("runs:index", Date.now(), staleRun);
     }
     assert.deepEqual(wrote, {}, "each read tool against the keys it added (+), removed (-) or changed (~), and what it pruned");
+    assert.deepEqual(sentNotReads, {}, "each read tool against the commands it sent that are not reads");
+    // Every tool but the one that answers from a file alone asked Valkey something, so none passed by asking nothing.
+    assert.deepEqual(Object.entries(asked).filter(([, n]) => n === 0).map(([name]) => name).sort(), FILE_ONLY_READ_TOOLS, JSON.stringify(asked));
     assert.deepEqual(await planted(), { host: 1, held: 1, run: 1 });
     assert.deepEqual(await queueKeys(), [], "and no queue's key was made by reading");
+
+    // The held index behind a crowd of stale members (issue #1036): 1,996 members with no hash (the one planted above
+    // among them) and four real holds, 2,000 in all, as many as one read looks at.
+    // Nothing a deployment run from the tools and the web console does prunes this index, and the read cut it at 200
+    // members before it skipped the stale ones, so `dispatch_waits` answered no hold at all, on every call.
+    const crowd = Array.from({ length: 1995 }, (_, i) => `gone1036-${tag}-${i}`);
+    const holds = ["a", "b", "c", "d"].map((h) => `hold1036-${tag}-${h}`);
+    await r.sadd("wait:held", ...crowd, ...holds);
+    for (const id of holds) await r.hset(`wait:job:${id}`, { since: String(Date.now() - 60_000), target: "acme/web#7", label: "ci" });
+    try {
+      const waits = JSON.parse((await tool("dispatch_waits", {})).content[0].text);
+      assert.deepEqual([waits.complete, waits.jobs.map((j) => j.jobId).sort()], [true, [...holds].sort()], "the four holds, and the list is whole");
+      assert.equal(await r.scard("wait:held"), 2000, "and nothing was removed");
+      // One member more is past what a read looks at: the list then says it is not whole, and still removes nothing.
+      await r.sadd("wait:held", `gone1036-${tag}-past`);
+      const past = JSON.parse((await tool("dispatch_waits", {})).content[0].text);
+      assert.deepEqual([past.complete, await r.scard("wait:held")], [false, 2001]);
+      await r.srem("wait:held", `gone1036-${tag}-past`);
+    } finally {
+      await r.srem("wait:held", ...crowd, ...holds);
+      await r.del(...holds.map((id) => `wait:job:${id}`));
+    }
 
     // A person's surface still prunes: /dispatch status the registry's and the held index's stale members, and the
     // panel's reader the run mirror's.
@@ -900,8 +1002,308 @@ test("the read tools write nothing to Valkey: no key appears, goes or changes, a
     if (made.length > 0) await r.del(...made).catch(() => {});
     for (const [key, dump, ttl] of taken) if (dump) await r.restore(key, ttl > 0 ? ttl : 0, dump, "REPLACE").catch(() => {});
     r.disconnect();
+    proxy.close();
     indexMod._setAllocationSeamsForTests({});
     fx.restore();
+  }
+});
+
+// Issue #1036: the person's surfaces keep the default, and two of them were held to it by no test: with `readOnly`
+// passed at either, everything stayed green. Seen on the wire, since a meta hash written again and a member pruned
+// and planted back leave no key changed.
+test("/dispatch triggers and the setup wizard's probe keep the default: each builds its queues with the meta write and prunes a stale registry member, as before (#1036)", { timeout: 60_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  const proxy = await recordingProxy(LIVE);
+  const fx = deployment({ valkey: proxy.url });
+  const { default: IORedis } = await import("ioredis");
+  const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  const stale = `gone1036-${process.pid}-${Date.now().toString(36)}`;
+  const { detectDeployment } = await jiti.import(fileURLToPath(new URL("../src/setup-wizard.ts", import.meta.url)));
+  /** What `surface` sent that writes: the meta hash of a queue it built, and the stale member it removed. */
+  const writesOf = async (surface) => {
+    await r.sadd(HOST_SET, stale);
+    await settle(60);
+    proxy.take();
+    await surface();
+    await settle(120);
+    const sent = proxy.take();
+    return { meta: sent.some((c) => c.name === "HSET" && c.args[0] === "bull:pi-jobs:meta"), pruned: sent.some((c) => c.name === "SREM" && c.args[0] === HOST_SET && c.args.includes(stale)), member: await r.sismember(HOST_SET, stale) };
+  };
+  try {
+    assert.deepEqual(await writesOf(() => command("triggers")), { meta: true, pruned: true, member: 0 }, "/dispatch triggers");
+    const empty = tempDir("pd-1036-probe-");
+    let state = null;
+    assert.deepEqual(await writesOf(async () => { state = (await detectDeployment({ env: { PI_DISPATCH_DEPLOYMENT_FILE: join(empty, "absent.json"), VALKEY_URL: proxy.url }, cwd: empty })).state; }), { meta: true, pruned: true, member: 0 }, "the wizard's probe");
+    assert.equal(state, "reachable", "and the probe found the queue");
+  } finally {
+    await r.srem(HOST_SET, stale).catch(() => {});
+    r.disconnect();
+    proxy.close();
+    fx.restore();
+  }
+});
+
+// ---- the rule on the wire: a read writes nothing, and a page view and a preview are reads (issue #1036) ----
+//
+// A real console (`serve`, as a person starts it) behind a proxy that records every command it sends to a real Valkey,
+// database 9 as above. EVERY page of the console's own page table is opened, the state document and each live page's
+// event stream are read, and EVERY action of its own action table is previewed, first on a Valkey that holds nothing
+// and then on a seeded fleet that holds what a pruning reader removes (a `host:live` member with no row, a `wait:held`
+// member with no hash, a run mirror id with no record). Every command sent must be a read. A page or an action added
+// later joins by itself: the walk is over `PAGES` and `ACTIONS`, and a page that needs a query, or an action whose
+// preview needs a body to reach its reads, is given one in the two tables below.
+//
+// The wire, not a census of keys: an HSET of the fields a hash already holds and an SREM of a member that comes back
+// leave no key changed, and both were what the pages and previews sent.
+
+/** The commands a read sends, by name. Anything else on the wire is a write, or a command this list has to be told of. */
+const WIRE_READS = new Set([
+  // a connection's own: its database, its name for CLIENT LIST, the server's facts, and its end
+  "SELECT", "CLIENT SETINFO", "CLIENT SETNAME", "INFO", "PING", "QUIT",
+  // reads
+  "CLIENT LIST", "TIME", "EXISTS", "TYPE", "PTTL", "SCAN", "GET", "MGET", "HEXISTS", "HGET", "HGETALL", "HMGET", "LLEN", "LRANGE", "SCARD", "SISMEMBER", "SMEMBERS", "SSCAN",
+  "ZCARD", "ZRANGE", "ZREVRANGE", "ZRANGEBYSCORE", "ZREVRANGEBYSCORE", "ZSCORE", "XLEN", "XRANGE", "XREVRANGE",
+]);
+/** The commands a script may call and still be a read. */
+const SCRIPT_READS = new Set(["EXISTS", "TYPE", "GET", "HEXISTS", "HGET", "HGETALL", "HLEN", "HMGET", "LINDEX", "LLEN", "LPOS", "LRANGE", "SCARD", "SISMEMBER", "SMEMBERS", "ZCARD", "ZRANGE", "ZREVRANGE", "ZRANGEBYSCORE", "ZREVRANGEBYSCORE", "ZSCORE"]);
+
+/** One of BullMQ's own scripts, by the name of its file, as the installed BullMQ sends it. */
+async function bullmqScript(name) {
+  const dir = join(dirname(createRequire(import.meta.url).resolve("bullmq/package.json")), "dist", "esm", "scripts");
+  const file = readdirSync(dir).find((f) => new RegExp(`^${name}-\\d+\\.js$`).test(f));
+  assert.ok(file, `BullMQ ships a ${name} script`);
+  return (await import(pathToFileURL(join(dir, file)).href))[name].content;
+}
+
+/**
+ * THE THREE NAMED READ SCRIPTS: scripts a read runs whose BODY holds a write that the read never reaches. Each is
+ * matched by its whole body, and held here to holding no other write than the one named, so a new one is seen.
+ *   - BullMQ's `getCounts` and `getRanges` (a queue's counts and its job lists): an RPOP of the marker BullMQ 4 kept at
+ *     the tail of the wait and paused lists. This repository has pinned BullMQ 5 since its first commit, so no
+ *     deployment's list holds one and the RPOP never runs (`DES-QUEUE-BULLMQ-OVER-CUSTOM`).
+ *   - the run mirror's `READ_SCRIPT`: it starts with the helper functions it shares with the trim and prune scripts,
+ *     which hold their DEL and HSET; the read calls `sinceIsHash` alone, and what follows the shared part is reads.
+ */
+async function namedReadScripts() {
+  const writesOf = (body) => [...new Set(scriptCommands(body).filter((c) => !SCRIPT_READS.has(c)))].sort();
+  const counts = await bullmqScript("getCounts");
+  const ranges = await bullmqScript("getRanges");
+  assert.deepEqual([writesOf(counts), writesOf(ranges)], [["RPOP"], ["RPOP"]], "BullMQ's two list scripts hold the marker's RPOP and no other write");
+  let shared = 0;
+  while (shared < READ_SCRIPT.length && READ_SCRIPT[shared] === PRUNE_SCRIPT[shared] && READ_SCRIPT[shared] === TRIM_SCRIPT[shared]) shared += 1;
+  assert.deepEqual([writesOf(READ_SCRIPT.slice(0, shared)), writesOf(READ_SCRIPT.slice(shared))], [["DEL", "HSET"], []], "the run mirror's read holds a write only in the helpers it shares, and calls none");
+  return new Set([counts, ranges, READ_SCRIPT]);
+}
+
+/** What of `commands` is not a read: each such command as "NAME key", a script as the commands it calls that are none. */
+function notReads(commands, named) {
+  const out = [];
+  for (const c of commands) {
+    if (c.name === "EVAL") {
+      if (named.has(c.script)) continue;
+      const writes = [...new Set(scriptCommands(c.script).filter((x) => !SCRIPT_READS.has(x)))];
+      if (writes.length > 0) out.push(`EVAL calling ${writes.join(", ")}: ${c.script.replace(/\s+/g, " ").trim().slice(0, 70)}`);
+    } else if (!WIRE_READS.has(c.name)) out.push(`${c.name} ${c.args.slice(0, 2).join(" ")}`.trim());
+  }
+  return [...new Set(out)];
+}
+
+/** The query a page needs to draw its subject; a page not listed is opened at its path alone. */
+const WIRE_PAGE_QUERY = Object.freeze({ run: "?id=local-wire-done", host: "?name=wirehost", venue: "?name=local", trigger: "?index=1", project: "?id=shop" });
+
+/**
+ * The body an action's preview needs to get past its input checks and reach its reads, over the seeded fleet; an
+ * action not listed is previewed with an empty body. `digest` is the trigger page's own, read off the page.
+ */
+const wirePreviewBodies = ({ repo, digest }) => ({
+  "run-enqueue": { folder: repo, flow: "fix", task: "look" },
+  "cancel-active": { jobId: "local-wire-none" },
+  "cancel-held": { jobId: "gh-wire-held" },
+  "cancel-queued": { jobId: "local-wire-w1", queue: "pi-jobs" },
+  "retry-failed": { jobId: "local-wire-f1", queue: "pi-jobs@wirehost" },
+  "remove-failed": { jobId: "local-wire-f1", queue: "pi-jobs@wirehost" },
+  "retry-all-failed": { queue: "pi-jobs@wirehost" },
+  "remove-all-failed": { queue: "pi-jobs@wirehost" },
+  "trigger-fire": { index: 1 },
+  rerun: { jobId: "local-wire-done" },
+  "parked-answer": { jobId: "gh-wire-parked", text: "yes" },
+  steer: { jobId: "local-wire-w1", mode: "steer", text: "go on" },
+  "steer-withdraw": { jobId: "local-wire-w1", id: "a".repeat(32) },
+  "queue-pause": { queue: "pi-jobs@wirehost" },
+  "queue-resume": { queue: "pi-jobs@wirehost" },
+  "trigger-edit": { index: 1, flow: "check" },
+  // A field that needs a later version of the job data, so the edit's version gate reads the live hosts.
+  "trigger-environment-edit": { index: 1, pageDigest: digest, excludeExtensions: ["some-extension"] },
+  "package-canary": { index: 1, name: "pi-lint", version: "1.0.0" },
+});
+
+/**
+ * THE KNOWN EXCEPTIONS, by name, each with why it is one. Neither is judged as a page read below.
+ *   - Signing in appends its row to the audit log. It is the one request here that is not a read, so what it sends is
+ *     not judged; the walk starts after it.
+ *   - The zero touch page (`/runs/zero-touch`) repairs a pending entry of its accounting outbox, and a pending fix,
+ *     before it reads: a write, when one is pending. Not changed here. This deployment has none pending, so on this
+ *     walk the page sends reads only, and it is held to that like every other page.
+ */
+const WIRE_EXCEPTIONS = Object.freeze(["POST /login", "GET /runs/zero-touch with an accounting entry or a fix pending repair"]);
+
+test("on the wire, every page of the console, its state document and streams, and every action's preview send reads only, on an empty Valkey and on a seeded fleet (#1036)", { timeout: 300_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  const named = await namedReadScripts();
+  const { default: IORedis } = await import("ioredis");
+  const { Worker } = await import("bullmq");
+  const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const scanAll = async () => {
+    const keys = [];
+    let cursor = "0";
+    do {
+      const [next, batch] = await r.scan(cursor, "COUNT", 1000);
+      cursor = String(next);
+      keys.push(...batch);
+    } while (cursor !== "0");
+    return keys.sort();
+  };
+  // The database as found, taken away for the walk and put back after it: the first walk is over a Valkey that holds nothing.
+  const taken = [];
+  for (const key of await scanAll()) taken.push([key, await r.dumpBuffer(key), await r.pttl(key)]);
+  if (taken.length > 0) await r.del(...taken.map(([key]) => key));
+  const dir = tempDir("pd-1036-wire-");
+  const repo = join(dir, "repo");
+  const logs = join(dir, "logs");
+  mkdirSync(repo);
+  mkdirSync(logs, { recursive: true });
+  writeFileSync(join(dir, "triggers.json"), JSON.stringify({ triggers: [
+    { on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "triage" } },
+    { on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: repo, flow: "fix", task: "look", maxCostUsd: "1" } },
+  ] }));
+  writeFileSync(join(dir, "projects.json"), JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
+  let proxy = null;
+  const opened = [];
+  /** One console over the proxy: started, signed in, walked by `fn(call)`, stopped. Returns what the walk found. */
+  const withConsole = async (fn) => {
+    const env = { PATH: process.env.PATH, HOME: dir, VALKEY_URL: proxy.url, PI_LOGS_DIR: logs, PI_TRIGGERS_FILE: join(dir, "triggers.json"), PI_PROJECTS_FILE: join(dir, "projects.json"), PI_CONSOLE_LISTEN: "127.0.0.1:0", PI_WORKER_NAME: "wirehost", PI_MAX_COST_USD: "2", PI_DISPATCH_RUN_ROOTS: dir, PI_DISPATCH_DEPLOYMENT_FILE: join(dir, "no-pointer.json") };
+    const err = [];
+    const io = { env, now: () => Date.now(), uid: process.geteuid?.(), err: (line) => err.push(line) };
+    const printed = [];
+    if (!existsSync(join(dir, "console-tokens.json"))) assert.equal(await runCli(["token", "add", "--name", "ops", "--role", "operator", "--deployment", dir], { ...io, out: (line) => printed.push(line) }), 0, err.join("\n"));
+    else assert.equal(await runCli(["token", "rotate", "--name", "ops", "--deployment", dir], { ...io, out: (line) => printed.push(line) }), 0, err.join("\n"));
+    const token = printed.join("\n").match(/pdc_[A-Za-z0-9_-]+/)?.[0];
+    assert.ok(token, "the token is printed once");
+    let stop = () => {};
+    const until = new Promise((resolve) => (stop = resolve));
+    let listening;
+    const up = new Promise((resolve) => (listening = resolve));
+    const running = runCli(["serve", "--deployment", dir], { ...io, out: () => {}, until, onListening: listening });
+    try {
+      const port = (await up).address().port;
+      const call = (method, path, { body, cookie, stream = false } = {}) => new Promise((resolve, reject) => {
+        const data = body === undefined ? null : JSON.stringify(body);
+        const headers = { host: `127.0.0.1:${port}`, ...(cookie ? { cookie } : {}), ...(data !== null ? { "content-type": "application/json", "content-length": Buffer.byteLength(data) } : {}), ...(stream ? { accept: "text/event-stream" } : {}), origin: `http://127.0.0.1:${port}`, "sec-fetch-site": "same-origin" };
+        const req = request({ host: "127.0.0.1", port, method, path, headers }, (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString() }));
+          // An event stream never ends by itself: it is read for a moment and dropped.
+          if (stream) setTimeout(() => { req.destroy(); resolve({ status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString() }); }, 400);
+        });
+        req.on("error", (e) => (stream ? resolve({ status: 0, text: String(e) }) : reject(e)));
+        req.end(data ?? undefined);
+      });
+      // The console's start is held to the rule too: it read the fleet before anyone asked.
+      await settle(1200);
+      const started = notReads(proxy.take(), named);
+      const login = await call("POST", "/login", { body: { token } });
+      assert.equal(login.status, 200, login.text.slice(0, 200));
+      const cookie = [].concat(login.headers["set-cookie"]).map((c) => c.split(";")[0]).join("; ");
+      await settle(300);
+      proxy.take(); // WIRE_EXCEPTIONS: signing in is not a read
+      const found = await fn((method, path, options = {}) => call(method, path, { ...options, cookie }));
+      return { started, ...found };
+    } finally {
+      stop();
+      await running.catch(() => {});
+    }
+  };
+  /** Every page, the state document, each live page's stream, then every action's preview: what was not a read, by request. */
+  const walk = async (call, bodies) => {
+    const wrote = {};
+    const answered = {};
+    // A short wait after each answer, for what the request still sends once it has answered (a queue's close). A
+    // command that comes later still is judged with the next request: the rule is the same for all of them.
+    const judge = async (where, res, wait = 120) => {
+      await settle(wait);
+      const sent = proxy.take();
+      const bad = notReads(sent, named);
+      answered[where] = res.status;
+      if (bad.length > 0) wrote[where] = bad;
+    };
+    for (const [id, page] of Object.entries(PAGES)) await judge(`GET ${page.path}${WIRE_PAGE_QUERY[id] ?? ""}`, await call("GET", `${page.path}${WIRE_PAGE_QUERY[id] ?? ""}`));
+    await judge("GET /api/state", await call("GET", "/api/state"));
+    for (const [id, page] of Object.entries(PAGES)) if (page.live) await judge(`GET /api/events?page=${id}`, await call("GET", `/api/events?page=${id}${id === "run" ? "&id=local-wire-done" : id === "host" ? "&name=wirehost" : ""}`, { stream: true }), 60);
+    for (const action of ACTIONS) await judge(`preview ${action.name}`, await call("POST", `/api/act/${action.name}/preview`, { body: bodies[action.name] ?? {} }));
+    return { wrote, answered };
+  };
+  try {
+    proxy = await recordingProxy(LIVE);
+    // 1. A Valkey that holds nothing: the console starts, every page is opened and every action previewed, and it still holds nothing.
+    const empty = await withConsole((call) => walk(call, wirePreviewBodies({ repo, digest: "0".repeat(64) })));
+    assert.deepEqual(empty.started, [], "the console's start sends reads only");
+    assert.deepEqual(empty.wrote, {}, "on an empty Valkey: each request against what it sent that is not a read");
+    assert.deepEqual(await scanAll(), ["console:audit"], "and a console pointed at a Valkey that holds nothing leaves it holding nothing but the row of the sign-in");
+    assert.ok(Object.keys(empty.answered).length >= Object.keys(PAGES).length + ACTIONS.length, "every page and every action was walked");
+
+    // 2. A seeded fleet: a live host and what a pruning reader removes, a job that waits, one that failed, one held, and
+    // two run records (one to re-run, one parked).
+    const direct = (name) => { const q = makeQueue(parseConnection(LIVE), { name }); opened.push(q); return q; };
+    await r.sadd(HOST_SET, "wirehost", "gone-wire");
+    await r.hset(hostKey("wirehost"), { name: "wirehost", routes: "true", beatAt: String(Date.now()), jobs: "[]" });
+    await r.sadd(HELD_SET, "gone-held", "gh-wire-held");
+    await r.hset(heldKey("gh-wire-held"), { since: String(Date.now() - 60_000), target: "acme/web#7", label: "ci", checks: "1" });
+    await r.zadd("runs:index", Date.now(), "gone-run");
+    await direct("pi-jobs").add("local", { kind: "local", folder: repo, flow: "fix", task: "look" }, { jobId: "local-wire-w1" });
+    const failing = direct("pi-jobs@wirehost");
+    await failing.add("local", { kind: "local", folder: repo, flow: "fix", task: "look" }, { jobId: "local-wire-f1", attempts: 1 });
+    const worker = new Worker("pi-jobs@wirehost", async () => { throw new Error("boom"); }, { connection: parseConnection(LIVE) });
+    const end = Date.now() + 10_000;
+    while ((await failing.getJobCounts("failed")).failed !== 1 && Date.now() < end) await settle(50);
+    await worker.close();
+    const iso = (ms) => new Date(ms).toISOString();
+    const record = (rec) => writeFileSync(join(logs, `${sanitizeJobId(rec.jobId)}.json`), JSON.stringify(rec));
+    record({ jobId: "local-wire-done", kind: "local", target: "repo", flow: "fix", startedAt: iso(Date.now() - 120_000), endedAt: iso(Date.now() - 60_000), outcome: "completed", reason: null, host: "wirehost" });
+    record({ jobId: "gh-wire-parked", kind: "github", target: "acme/web#1", flow: "triage", startedAt: iso(Date.now() - 120_000), endedAt: iso(Date.now() - 60_000), outcome: "completed", reason: "awaiting-input", host: "wirehost" });
+    const planted = async () => ({ host: await r.sismember(HOST_SET, "gone-wire"), held: await r.sismember(HELD_SET, "gone-held"), run: (await r.zscore("runs:index", "gone-run")) !== null ? 1 : 0 });
+    // Every key but the audit log's, which the second sign-in adds its row to, and one with an expiry, which goes by
+    // itself (the lock the worker above took for its stalled check).
+    const census = async () => {
+      const kinds = {};
+      for (const key of await scanAll()) if (key !== "console:audit" && (await r.pttl(key)) < 0) kinds[key] = await r.type(key);
+      return kinds;
+    };
+    const before = await census();
+    const seeded = await withConsole(async (call) => {
+      // The trigger page's own digest, which its edit form sends back, so the edit's preview reaches its version gate.
+      const page = await call("GET", "/config/trigger?index=1");
+      const digest = /name="pageDigest" value="([a-f0-9]{64})"/.exec(page.text)?.[1] ?? "0".repeat(64);
+      await settle(250);
+      proxy.take();
+      return { digest, ...(await walk(call, wirePreviewBodies({ repo, digest }))) };
+    });
+    assert.deepEqual(seeded.started, [], "the console's start over a seeded fleet sends reads only");
+    assert.deepEqual(seeded.wrote, {}, "on a seeded fleet: each request against what it sent that is not a read");
+    assert.deepEqual(await planted(), { host: 1, held: 1, run: 1 }, "what a pruning reader removes is still there");
+    assert.deepEqual(await census(), before, "and no key was made or removed");
+    // The previews that have to reach the fleet did: each answered past its input checks.
+    for (const name of ["cancel-queued", "retry-failed", "remove-failed", "retry-all-failed", "remove-all-failed", "fleet-pause", "queue-pause", "cancel-all-held", "cancel-held"]) assert.equal(seeded.answered[`preview ${name}`], 200, `preview ${name} answered with a ticket (${seeded.answered[`preview ${name}`]})`);
+    assert.match(seeded.digest, /^[a-f0-9]{64}$/, "the trigger page's digest was read off the page, so its edit's preview reached its gate");
+    assert.equal(seeded.answered["preview trigger-environment-edit"], 409, "its gate read the live hosts and refused: the seeded host publishes no version");
+    assert.equal(WIRE_EXCEPTIONS.length, 2);
+  } finally {
+    for (const q of opened) await q.close().catch(() => {});
+    proxy?.close();
+    // Leave the database as found: everything the seeding made goes, and what was taken away comes back.
+    const left = await scanAll().catch(() => []);
+    if (left.length > 0) await r.del(...left).catch(() => {});
+    for (const [key, dump, ttl] of taken) if (dump) await r.restore(key, ttl > 0 ? ttl : 0, dump, "REPLACE").catch(() => {});
+    r.disconnect();
   }
 });
 
@@ -918,6 +1320,8 @@ test("every read tool that rests on the queues' reads tells a model what queueEr
   for (const [name, , unread] of READ_TOOLS) assert.equal(/queueErrors/.test(t[name].description), unread !== null, name);
   assert.match(t.dispatch_failed.description, /`queueErrors` gives the code of Valkey's error reply for each queue whose paused state or counts was answered with one: its failed jobs are in no total, so `more` is null and `complete` false/);
   assert.match(t.dispatch_waiting.description, /whether that queue is paused is not known, so a job in its wait list or its prioritized set is listed in the bucket `unknown`, neither a free slot nor a pause, and `complete` is false/);
+  // Issue #1036: a queue one of whose lists was answered with an error is named too, and its jobs are a floor.
+  assert.match(t.dispatch_waiting.description, /A queue one of whose lists of waiting jobs was answered with an error is named there too: the jobs in that list are in no row, so `jobs` is a floor for it\./);
 });
 
 // Issue #1036: every description that hands a model an error reply's code says what a code means by its class, in the

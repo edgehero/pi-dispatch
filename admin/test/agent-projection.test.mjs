@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadPageData, pagePanels, parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { fileTrouble } from "../src/console/panels/config.mjs";
-import { readProjects, readTriggers, readTriggersWithStalls } from "../src/read-model.mjs";
+import { createFleetReader, readProjects, readTriggers, readTriggersWithStalls } from "../src/read-model.mjs";
+import { answeredWith, discoveryRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeLiveHub, stateOf } from "../src/console/live.mjs";
-import { agentReadProjection, agentReasonToken } from "../src/agent-read.mjs";
+import { AGENT_UNREAD_WORD, agentReadProjection, agentReasonToken } from "../src/agent-read.mjs";
 const NOW = Date.UTC(2026, 9, 31);
 const PRIVATE_NAME = "privatepersona";
 function snapshot() {
@@ -69,6 +70,95 @@ test("a failed read reaches an agent as a yes or no, with no code, and what a to
   // It stands beside its neighbours, and the word it holds elsewhere does not move: a yes, a no and nothing stay what they are.
   assert.deepEqual(agentReadProjection({ invalid: "the reason", unreachable: "the reason", unreadable: "the reason" }), { invalid: true, unreachable: true, unreadable: true });
   assert.deepEqual(agentReadProjection({ unreadable: false, mcp: { unreadable: null } }), { unreadable: false, mcp: { unreadable: null } });
+});
+
+/**
+ * Every mark of `value` that says something was not read, by path: a key whose name says so (unread, unreachable,
+ * degraded, in part, incomplete, truncated) with a value that asserts it (true, words, a list that is not empty).
+ */
+function unreadMarks(value, path = "", out = new Map()) {
+  if (value === null || typeof value !== "object") return out;
+  if (Array.isArray(value)) {
+    value.forEach((item, i) => unreadMarks(item, `${path}[${i}]`, out));
+    return out;
+  }
+  for (const [key, v] of Object.entries(value)) {
+    const at = path === "" ? key : `${path}.${key}`;
+    const says = v === true || (typeof v === "string" && v !== "") || (Array.isArray(v) && v.length > 0);
+    if (/unread|unreach|degraded|inpart|incomplete|truncated/i.test(key) && says) out.set(at, v);
+    unreadMarks(v, at, out);
+  }
+  return out;
+}
+const markAt = (value, path) => path.split(/\.|\[|\]/).filter((part) => part !== "").reduce((at, key) => (at === null || at === undefined ? at : at[key]), value);
+
+// Issue #1036: the projection dropped the WORDS of two unread marks, and the fact went with them: an agent's copy had
+// no `queue.fleetDegraded` and no `parkedUnreachable`, so its pages drew the hosts and the parked runs as read.
+test("an agent's copy keeps every mark that says something was not read: the registry's and the parked runs' as one closed word, a waiting queue's with its code, and never a reader's words (#1036)", async () => {
+  assert.equal(AGENT_UNREAD_WORD, "unread");
+  const out = agentReadProjection({
+    queue: { fleetDegraded: "connect ECONNREFUSED 10.0.0.7:6379", registryReadInPart: true },
+    parkedUnreachable: "the run mirror at valkey.internal could not be read",
+    waiting: { pausedUnread: [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }, { queue: "pi-jobs", error: null }], listsUnread: [{ queue: "pi-jobs@hostb", error: "NOPERM this user has no permissions" }] },
+    insights: { costsUnreachable: "ECONNREFUSED 10.0.0.7", hosts: { readInPart: "1 of 2 host rows not read, of which Valkey answered with an error: hostw (NOPERM)" } },
+  });
+  assert.deepEqual(out, {
+    queue: { fleetDegraded: "unread", registryReadInPart: true },
+    parkedUnreachable: "unread",
+    waiting: { pausedUnread: [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }, { queue: "pi-jobs", error: null }], listsUnread: [{ queue: "pi-jobs@hostb", error: null }] },
+    insights: { costsUnreachable: true, hosts: { readInPart: true } },
+  });
+  assert.ok(!/10\.0\.0\.7|valkey\.internal|permissions|host rows/.test(JSON.stringify(out)), "no reader's words");
+  // A mark that asserts nothing stays one that asserts nothing.
+  assert.deepEqual(agentReadProjection({ queue: { fleetDegraded: null }, parkedUnreachable: null }), { queue: { fleetDegraded: null }, parkedUnreachable: null });
+  assert.deepEqual(agentReadProjection({ queue: { fleetDegraded: "" }, parkedUnreachable: "" }), { queue: {} });
+  // The word is the same whatever was said, and only under these two names.
+  assert.deepEqual(agentReadProjection({ fleetDegraded: "a", parkedUnreachable: "b", switchIncomplete: "the look for queues did not finish" }), { fleetDegraded: "unread", parkedUnreachable: "unread" });
+});
+
+test("the overview, Fleet, Parked and a host's page drawn for an agent over a registry and a parked scan that failed each say unread, as a viewer's do, and none is drawn Live (#1036)", async () => {
+  const dir = tempDir("pd-1036-agent-unread-");
+  mkdirSync(join(dir, "logs"));
+  writeFileSync(join(dir, "triggers.json"), JSON.stringify({ triggers: [] }));
+  const paths = { valkeyUrl: "redis://unused", logsDir: join(dir, "logs"), triggersPath: join(dir, "triggers.json") };
+  // The real reader over a client that answers the registry's index and the run mirror's read with an error.
+  const client = () => ({ ...discoveryRedis(() => ({ index: answeredWith("NOPERM") })), eval: answeredWith("NOPERM"), zrevrangebyscore: answeredWith("NOPERM"), pipeline: undefined });
+  const reader = createFleetReader(paths, { readOnly: true, parseConnectionFn: () => ({}), redisFn: client, makeQueueFn: quietQueue() });
+  const drawn = async (name, query, role) => {
+    const parsed = parsePageQuery(name, query);
+    const data = await loadPageData(name, parsed.query, { now: () => NOW, env: {}, paths, fleet: reader }, { role });
+    const page = String((await renderPage(name, { query: parsed.query, session: { name: role, role }, data, theme: null })).html);
+    return { data, pill: /<span id="live-status"[^>]*>/.exec(page)?.[0] ?? "", text: page.replace(/<script[^]*?<\/script>/g, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ") };
+  };
+  const SAYS = {
+    overview: ["The parked runs and the host registry could not be read, so what needs you is not known.", "The parked runs could not be read, so the questions are not counted.", "The hosts could not be read, so what they hold is not known."],
+    fleet: ["Registry not read", "The hosts could not be read, so what they hold is not known.", "not known: the hosts could not be read"],
+    parked: ["The parked runs could not be read (unread); this is not an empty inbox."],
+    host: ["Not known: the hosts could not be read, so nothing here says whether hosta is live."],
+  };
+  try {
+    const raw = await reader.snapshot({ waiting: true });
+    assert.deepEqual([typeof raw.queue.fleetDegraded, typeof raw.parkedUnreachable, raw.queue.fleetError], ["string", "string", "NOPERM"], "the reader's own marks: its words, and the reply's code");
+    // Every mark the snapshot carries that says unread is still one in an agent's copy, whatever it holds there.
+    const copy = agentReadProjection(raw);
+    const lost = [...unreadMarks(raw).keys()].filter((path) => { const v = markAt(copy, path); return !(v === true || (typeof v === "string" && v !== "") || (Array.isArray(v) && v.length > 0)); });
+    assert.deepEqual(lost, [], "no unread mark of the snapshot is lost to an agent");
+    assert.ok(unreadMarks(raw).size >= 4, "the snapshot carries marks to hold");
+    for (const [name, query] of [["overview", ""], ["fleet", ""], ["parked", ""], ["host", "name=hosta"]]) {
+      const agent = await drawn(name, query, "agent");
+      const viewer = await drawn(name, query, "viewer");
+      for (const sentence of SAYS[name]) assert.ok(agent.text.includes(sentence), `${name}, an agent's page says: ${sentence}`);
+      for (const sentence of SAYS[name].filter((x) => !x.includes("(unread)"))) assert.ok(viewer.text.includes(sentence), `${name}, a viewer's page says the same: ${sentence}`);
+      for (const never of ["No host is registered", "No live registry row for hosta", "No run is waiting on a person", "connect ECONNREFUSED", "said by Valkey"]) assert.ok(!agent.text.includes(never), `${name}: ${never}`);
+      // The pill: drawn over data that could not be read whole, so the page's script holds it at Not live.
+      for (const page of [agent, viewer]) assert.match(page.pill, /class="live live--off"[^>]* data-unread/, `${name}: ${page.pill}`);
+      assert.deepEqual([agent.data.snapshot.queue.fleetDegraded, agent.data.snapshot.parkedUnreachable, agent.data.snapshot.queue.fleetError], ["unread", "unread", "NOPERM"], name);
+      const gone = [...unreadMarks(viewer.data).keys()].filter((path) => { const v = markAt(agent.data, path); return !(v === true || (typeof v === "string" && v !== "") || (Array.isArray(v) && v.length > 0)); });
+      assert.deepEqual(gone, [], `${name}: no unread mark of the page's data is lost to an agent`);
+    }
+  } finally {
+    await reader.dispose();
+  }
 });
 
 test("fileTrouble says the code where its reader may see one, and only then", () => {

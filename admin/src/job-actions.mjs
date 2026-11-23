@@ -136,11 +136,11 @@ function consoleDeliveryId(random = randomBytes) {
  * at the bound, with `valkeyMayStillRun` on its error. A READ's error carries that mark as a write's does, so only the
  * step that writes may read it as "may or may not have been made".
  */
-async function openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs }) {
-  const { names, blind, blindPartial, hosts, incomplete } = await readFleetQueues({ url, redisFn, timeoutMs });
+async function openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs, readOnly = false }) {
+  const { names, blind, blindPartial, hosts, incomplete } = await readFleetQueues({ url, redisFn, timeoutMs, ...(readOnly ? { prune: false } : {}) });
   const opened = new Map();
   const queueOf = (name) => {
-    if (!opened.has(name)) opened.set(name, queueFn(consoleQueueConnection(url, parseConnectionFn), { name }));
+    if (!opened.has(name)) opened.set(name, queueFn(consoleQueueConnection(url, parseConnectionFn), { name, ...(readOnly ? { metaWrite: false } : {}) }));
     return opened.get(name);
   };
   return {
@@ -471,7 +471,7 @@ export async function planFailedBulk({ url, filter = {}, limit = BULK_MAX, redis
   // preview stayed open for as long.
   const release = releaseOf(() => fleet, () => null);
   const work = (async () => {
-    fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
+    fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs, readOnly: true });
     if (onlyQueue !== null && !fleet.names.includes(onlyQueue)) return { invalid: `${JSON.stringify(onlyQueue)} is not a queue this deployment drains (${fleet.names.join(", ")})` };
     const candidates = [];
     let leftover = 0;
@@ -730,7 +730,7 @@ export async function checkTriggerFixSource({ url, jobId, index, triggersPath, f
     const unchecked = Symbol("not checked");
     const lookup = (async () => {
       if (readRetainedJob) return readRetainedJob(jobId);
-      fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
+      fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs, readOnly: true });
       const data = (await fleet.find(jobId))?.job?.data ?? null;
       return data === null && (fleet.blind || fleet.incomplete) ? unchecked : data;
     })();
@@ -1170,7 +1170,7 @@ export async function dispatchRunAlready({ url, folder, flow, env = {}, queueFn 
     queue = null;
   };
   const work = (async () => {
-    queue = queueFn(consoleQueueConnection(url, parseConnectionFn), { name: localQueueName(env) });
+    queue = queueFn(consoleQueueConnection(url, parseConnectionFn), { name: localQueueName(env), metaWrite: false });
     return queuedAlready([queue], ALREADY_MATCH.local({ folder, flow }));
   })();
   try {
@@ -1203,7 +1203,7 @@ export async function planCancelQueued({ url, jobId, queue = null, projects = nu
   let redis = null;
   const release = releaseOf(() => fleet, () => redis);
   const work = (async () => {
-    fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
+    fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs, readOnly: true });
     const found = await fleet.find(jobId, queue);
     if (!found) return { refusal: `${notInFleet(jobId, fleet)}; nothing was changed`, status: 404 };
     // The console's bounded client (issue #987): no read of this preview waits past its bound for a Valkey that stopped
@@ -1632,7 +1632,7 @@ export async function planRerun({
     if (!read.record) return { refusal: recordReadRefusal(read, jobId, "re-run"), ...(read.missing !== true && typeof read.invalid !== "string" ? { unread: true } : {}) };
     const record = read.record;
     const touchSource = ["policy", "failed"].includes(record.outcome) ? { runId: jobId, cause: "rerun", ...(Number.isSafeInteger(Date.parse(record.endedAt)) ? { endedAt: Date.parse(record.endedAt) } : {}), scopeId: record.touchScopeId ?? touchScopeOf(record, record.host), ...(record.project ? { project: record.project } : {}) } : null;
-    fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
+    fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs, readOnly: true });
     const found = await fleet.find(jobId);
     // Not found among queues that could not all be asked is not "its data expired".
     if (!found && (fleet.blind || fleet.incomplete)) return { refusal: `the deployment's queues could not all be read, so ${jobId}'s job was not looked for in every queue; nothing was queued, try again`, unread: true };
@@ -1961,7 +1961,7 @@ export async function planParkedAnswer({
     const key = targetKeyOf(record.kind, record.target);
     const later = (Array.isArray(runs) ? runs : []).find((r) => r?.purpose !== "answer-draft" && key !== null && targetKeyOf(r?.kind, r?.target) === key && runAt(r) > at);
     if (later) return { refusal: `${jobId} was already answered: ${String(later.jobId ?? "a later run")} ran on ${String(record.target)} after it` };
-    fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
+    fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs, readOnly: true });
     const found = await fleet.find(jobId);
     const data = found?.job?.data ?? null;
     const approval = record.reason === "awaiting-approval";
@@ -2096,7 +2096,7 @@ export const steerUnconfirmed = (what, id, jobId) => ({ invalid: jobLast(`messag
  * not its being open (a run that just ended still holds its inbox, and the withdraw script answers for it).
  */
 async function findSteerJob({ url, jobId, redisFn, queueFn, parseConnectionFn, timeoutMs, fleetHolder }) {
-  const fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
+  const fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs, readOnly: true });
   fleetHolder.fleet = fleet;
   const found = await fleet.find(jobId);
   if (!found) return { refusal: notInFleet(jobId, fleet, "Nothing was sent") };

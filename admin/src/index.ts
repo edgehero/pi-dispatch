@@ -671,7 +671,8 @@ function registerTools(pi: ExtensionAPI): void {
       // a bare array holding some unstated fraction of a fleet's runs is exactly that laundering. `mirror`
       // says whether the list is the whole deployment ("ok"), this host alone ("off"), capped
       // ("truncated"), or unknown ("unreachable ...").
-      // `prune: false` (issue #1036): an expired id stays in the mirror's index for a pruning reader (the panel, the worker).
+      // `prune: false` (issue #1036): an id whose record is gone stays in the mirror's index, for the panel's reader, or
+      // for the worker's writer once the id is past the window or the count cap.
       const merged: any = await listRunsMerged({ logsDir: paths.logsDir, limit: params.limit ?? 10, url: paths.valkeyUrl, prune: false });
       return toolText(JSON.stringify(Array.isArray(merged?.runs) ? { ...merged, runs: merged.runs.map((r: any) => modelRunRecord(runShown(r), { list: true })) } : merged));
     },
@@ -1059,7 +1060,8 @@ function registerTools(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute() {
       const paths = resolvePaths(deploymentEnv());
-      // `prune: false` (issue #1036): a stale member of the held index is skipped and left for `/dispatch status` or the worker.
+      // `prune: false` (issue #1036): a stale member of the held index is skipped and left. Only the panel and
+      // `/dispatch status` prune that index, no service, so the read walks on past stale members (`HELD_LOOK_MAX`).
       const held = await readHeldJobs({ url: paths.valkeyUrl, prune: false });
       return toolText(JSON.stringify(waitingForAgent(held)));
     },
@@ -1340,7 +1342,7 @@ function registerTools(pi: ExtensionAPI): void {
   // Issue #963: what a read that failed looks like, so a model never takes it for an empty fleet.
   const unreadWords: Record<string, string> = {
     failed: " `jobs` is null when the failed jobs could not be read; `complete` is true only when every queue was read and no failed job is past the list. `queueErrors` gives the code of Valkey's error reply for each queue whose paused state or counts was answered with one: its failed jobs are in no total, so `more` is null and `complete` false. " + REPLY_CODE_MEANING,
-    waiting: " `jobs` is null when the waiting jobs could not be read; `complete` is true only when every queue was read and none was cut. `queueErrors` gives the code of Valkey's error reply for each queue whose paused state or counts was answered with one, a stopped host's queue among them: whether that queue is paused is not known, so a job in its wait list or its prioritized set is listed in the bucket `unknown`, neither a free slot nor a pause, and `complete` is false. " + REPLY_CODE_MEANING,
+    waiting: " `jobs` is null when the waiting jobs could not be read; `complete` is true only when every queue was read and none was cut. `queueErrors` gives the code of Valkey's error reply for each queue whose paused state or counts was answered with one, a stopped host's queue among them: whether that queue is paused is not known, so a job in its wait list or its prioritized set is listed in the bucket `unknown`, neither a free slot nor a pause, and `complete` is false. A queue one of whose lists of waiting jobs was answered with an error is named there too: the jobs in that list are in no row, so `jobs` is a floor for it. " + REPLY_CODE_MEANING,
     hosts: " `hosts` is null and `unavailable` true when the host registry could not be read; `readAt` is when the rows were read. `readInPart` true when some hosts' rows were not read: `unreadHosts` names them (`unreadHostsMore` counts those past the ones named), a kept row is marked `notRead`, its last row, with no beat, and a host this read never read has no row. `hostErrors` gives the code of Valkey's error reply for each host whose row was answered with one. " + REPLY_CODE_MEANING,
   };
   for (const [name, kind] of [["dispatch_failed", "failed"], ["dispatch_waiting", "waiting"], ["dispatch_setup", "setup"], ["dispatch_hosts", "hosts"]]) {

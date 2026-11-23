@@ -293,6 +293,63 @@ function flagAnswersWith(v, queue, error) {
   };
 }
 
+/** Make the fake answer every read of `key` with `error`, as a pipeline hands one command's failure. */
+function keyAnswersWith(v, key, error) {
+  const pipeline = v.redis.pipeline.bind(v.redis);
+  v.redis.pipeline = () => {
+    const p = pipeline();
+    const exec = p.exec;
+    p.exec = async () => {
+      const from = v.redis.log.length;
+      const out = await exec();
+      return out.map((pair, i) => (v.redis.log[from + i][1] === key ? [error, null] : pair));
+    };
+    return p;
+  };
+}
+
+// Issue #1036: a list Valkey answered with an error read as an EMPTY list, so the jobs in it were in no row and no
+// count, and nothing said so: "nothing is waiting" over a job that waits.
+test("readWaiting: a queue one of whose four lists was not read is named with the reply's code, its rows are a floor, and the jobs of its other lists are still rows (#1036)", async () => {
+  const wrongtype = () => Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" });
+  const LISTS = [["wait", "waiting"], ["paused", "paused"], ["prioritized", "prioritized"], ["delayed", "delayed"]];
+  for (const [list, lost] of LISTS) {
+    const v = fakeValkey();
+    for (const [, state] of LISTS) addJob(v, "pi-jobs@hostb", `gh-${state}`, { state });
+    addJob(v, "pi-jobs", "gh-shared", { state: "waiting" });
+    keyAnswersWith(v, `bull:pi-jobs@hostb:${list}`, wrongtype());
+    const got = await readWaiting(v.redis, { queues: [fakeQueue("pi-jobs"), fakeQueue("pi-jobs@hostb")], now: () => AT });
+    assert.deepEqual(got.listsUnread, [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }], list);
+    assert.deepEqual(got.byQueue.map((q) => [q.queue, q.inLine, q.truncated, q.listsUnread === true]), [["pi-jobs", 1, false, false], ["pi-jobs@hostb", 3, true, true]], `${list}: the queue's three other jobs are rows, and its rows are a floor`);
+    assert.equal(got.truncated, true, `${list}: so the read's rows are a floor`);
+    assert.deepEqual(got.rows.map((r) => r.jobId).sort(), ["gh-shared", ...LISTS.map(([, state]) => `gh-${state}`).filter((id) => id !== `gh-${lost}`)].sort(), `${list}: the job in the list that was not read is in no row`);
+    assert.equal(Object.hasOwn(got, "pausedUnread"), false, `${list}: the paused flag was read, and is not named`);
+    assert.ok(!JSON.stringify(got).includes("Operation against"), "the reply's code alone");
+  }
+  // Two lists of one queue: one entry, the first code. A list that got no answer has none.
+  const two = fakeValkey();
+  addJob(two, "pi-jobs", "gh-a", { state: "waiting" });
+  keyAnswersWith(two, "bull:pi-jobs:wait", new Error("Command timed out"));
+  keyAnswersWith(two, "bull:pi-jobs:paused", wrongtype());
+  const both = await readWaiting(two.redis, { queues: [fakeQueue("pi-jobs")], now: () => AT });
+  assert.deepEqual([both.listsUnread, both.rows, both.truncated], [[{ queue: "pi-jobs", error: "WRONGTYPE" }], [], true], "no row, and never a whole count of none");
+  const silent = fakeValkey();
+  addJob(silent, "pi-jobs", "gh-a", { state: "waiting" });
+  keyAnswersWith(silent, "bull:pi-jobs:wait", new Error("Command timed out"));
+  assert.deepEqual((await readWaiting(silent.redis, { queues: [fakeQueue("pi-jobs")], now: () => AT })).listsUnread, [{ queue: "pi-jobs", error: null }]);
+  // Read whole: no such key, on the read or on a queue.
+  const whole = fakeValkey();
+  addJob(whole, "pi-jobs", "gh-ok", { state: "waiting" });
+  const fine = await readWaiting(whole.redis, { queues: [fakeQueue("pi-jobs")], now: () => AT });
+  assert.deepEqual([Object.hasOwn(fine, "listsUnread"), Object.hasOwn(fine.byQueue[0], "listsUnread"), fine.truncated], [false, false, false]);
+  // One delayed job's row, the cancel planner's read: its due instant not read is a row not read, never a job with none.
+  const one = fakeValkey();
+  addJob(one, "pi-jobs", "gh-d1", { state: "delayed" });
+  assert.ok((await readWaitingRow(one.redis, { q: fakeQueue("pi-jobs"), jobId: "gh-d1", state: "delayed", now: () => AT })).row, "the control: read, it is a row");
+  keyAnswersWith(one, "bull:pi-jobs:delayed", wrongtype());
+  assert.deepEqual(await readWaitingRow(one.redis, { q: fakeQueue("pi-jobs"), jobId: "gh-d1", state: "delayed", now: () => AT }), { unreachable: true });
+});
+
 // Issue #1036: the waiting read is the only read that looks at the paused flag of a queue the registry does not name,
 // and a look Valkey answered with an error read as "not paused".
 test("readWaiting: a queue whose paused flag Valkey answered with an error is named with the code, and its jobs in the wait list and the prioritized set are in neither the slot nor the paused bucket (#1036)", async () => {

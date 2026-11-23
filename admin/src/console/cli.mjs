@@ -1016,7 +1016,7 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     // Here and nowhere a tool's context is built, so a person's page is the only way to it (DES-ADMIN-VIA-PI-EXTENSION).
     const triggerEnvironment = m.triggerEnvironmentPlans?.createTriggerEnvironmentActions({
       paths: side.paths, env: side.env, fs, now,
-      readHosts: () => m.readModel.readHosts({ url: side.paths.valkeyUrl, now }),
+      readHosts: () => m.readModel.readHosts({ url: side.paths.valkeyUrl, now, prune: false }),
       readHostLoads: () => pageDeps.hostLoads(),
       readSkew: async (index, proposedFs) => fleet.triggerSkew(index, await fleet.waiting(), { fs: proposedFs }),
       readRunRecords: async (index) => m.readModel.triggerDetailOf(await fleet.snapshot(), index)?.history,

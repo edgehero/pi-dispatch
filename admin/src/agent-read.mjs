@@ -33,6 +33,25 @@ const PRIVATE = new Set(["closeActors", "reviewAuthors", "text", "body", "task",
  * an error: the one fact that tells a row to repair from a row to wait for. Each passes as a code or is null.
  */
 const ERROR_MAPS = new Set(["queueErrors", "hostErrors"]);
+
+/**
+ * THE UNREAD MARKS THAT HOLD A READER'S OWN WORDS (issue #1036): `queue.fleetDegraded`, why the host registry was not
+ * read whole, and `parkedUnreachable`, why the parked runs were not. Each is a sentence that can quote a client (a
+ * host name, an address), so the string rule dropped it, and with it the FACT: an agent's copy had no mark at all, and
+ * its pages drew the hosts and the parked runs as read, under a pill that said Live. The fact is kept and the words
+ * are not: each arrives as the one closed word below, a string, since the pages that draw these marks test for one.
+ * What Valkey answered, where it answered with an error, is beside it as a code (`fleetError`, `unreadHosts`).
+ */
+const UNREAD_WORDS = new Set(["fleetDegraded", "parkedUnreachable"]);
+export const AGENT_UNREAD_WORD = "unread";
+
+/**
+ * The lists whose entries name something not read with the code of Valkey's error reply for it (`error`): a host's
+ * row (`unreadHosts`), and a queue's paused flag or one of its lists in the waiting read (`pausedUnread`,
+ * `listsUnread`). The code passes as one word or is null; without this it was a string under a key this table does
+ * not know, and the entry arrived naming the queue and not what it was answered.
+ */
+const CODED_LISTS = new Set(["unreadHosts", "pausedUnread", "listsUnread"]);
 const REPLY_CODE = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
 const replyCode = (value) => (typeof value === "string" && REPLY_CODE.test(value) ? value : null);
 
@@ -49,6 +68,7 @@ export function agentReadProjection(value, key = "", depth = 0) {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value === "string") {
     if (key === "fleetError") return replyCode(value);
+    if (UNREAD_WORDS.has(key)) return value === "" ? undefined : AGENT_UNREAD_WORD;
     // Issue #1035: beside `queuesMayBeShort` in a fleet pause's or resume's answer, the class of the error reply that
     // makes the list short for a cause waiting does not end. One of two closed words, anything else left out.
     if (key === "queuesShortLasting") return value === "key" || value === "permission" ? value : undefined;
@@ -81,12 +101,14 @@ export function agentReadProjection(value, key = "", depth = 0) {
     // fixed words and a count, so it holds no name; the field holds a tool's name that only its shape vouches for, so it goes.
     if (field === "outcomeNote" && isOutcomeNote(v)) { out.note = v; continue; }
     if (field === "loaded") { const note = outcomeNote(value); if (note !== null) out.note = note; continue; }
-    if (key === "unreadHosts" && field === "error") { out.error = replyCode(v); continue; }
+    if (CODED_LISTS.has(key) && field === "error") { out.error = replyCode(v); continue; }
     if (PRIVATE.has(field)) continue;
     if (field === "invalid" && Array.isArray(v)) { out.invalid = v.filter((name) => ["maxCostUsd", "dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd"].includes(name)); continue; }
     // A yes or no about a read, in place of what it said. `unreadable` holds an OS code or a sentence about a record, and with it dropped a file that
     // could not be read arrived as an empty object, which a page read as a file with nothing wrong and nothing in it.
-    if (["invalid", "unreachable", "unreadable", "refusal", "refused", "countersUnreachable", "recordsUnreachable"].includes(field) && typeof v === "string") { out[field] = true; continue; }
+    // `costsUnreachable` (the Insights payload's costs) and `readInPart` (a registry read in part, in the reader's
+    // words) joined the list with issue #1036: each was dropped whole, the fact with the words.
+    if (["invalid", "unreachable", "unreadable", "refusal", "refused", "countersUnreachable", "recordsUnreachable", "costsUnreachable", "readInPart"].includes(field) && typeof v === "string") { out[field] = true; continue; }
     const projected = agentReadProjection(v, field, depth + 1);
     if (projected !== undefined) out[field] = projected;
   }

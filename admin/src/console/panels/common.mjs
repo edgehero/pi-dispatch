@@ -432,25 +432,6 @@ function capMicrosOf(record) {
 // ---- the queue and its hosts (the overview's and the fleet's) --------------------------------------------------------
 
 /**
- * Paused, partly paused or running, as words and a class. A queue no worker drains (`online === false`) is never green
- * (issue #710): "running" there means only that nothing paused it, and jobs pile up behind it.
- *
- * `unread` (issue #1035) is how many queues were not read because Valkey answered their read with an error (the
- * snapshot's `queueErrors`, counted by `queueErrorsOf`). Over those the words claim nothing about a queue that was not
- * read: "partly paused" said "others are not" where every queue that WAS read is paused and the rest are not known
- * (`pausedPartial` is true there, issue #1064), and "running" was green over a queue nobody read.
- */
-function pausedState(q, online = true, unread = 0) {
-  if (q?.pausedState) return html`<span class="bad">paused (the kill switch is on)</span>`;
-  const notKnown = `whether ${unread === 1 ? "1 queue that was not read is" : `${unread} queues that were not read are`} paused is not known`;
-  if (q?.pausedPartial && unread > 0) return html`<span class="warn">partly paused: a queue that was read is paused, and ${notKnown}</span>`;
-  if (q?.pausedPartial) return html`<span class="warn">partly paused: some hosts' queues are paused and others are not</span>`;
-  if (unread > 0) return html`<span class="warn">no queue that was read is paused, and ${notKnown}</span>`;
-  if (online === false) return html`<span class="warn">not paused, but no worker is online</span>`;
-  return html`<span class="good">running</span>`;
-}
-
-/**
  * How old a host's last beat may be for the host to count as online (issue #710): a minute, four of the worker's 15 s
  * beats. The hosts tables mark an older beat amber by the same bound (`beatCell`). Not the registry row's 90 s TTL,
  * past which the row is gone anyway: a row that still lives with no beat for a minute is a worker that is wedged or
@@ -658,6 +639,6 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 export {
   plural, SEC, MIN, cell, msOf, count, runLink, targetLink, titled, actForm, field, area, indexField, editor, table, facts,
-  fromSnapshot, costText, capMicrosOf, pausedState, beatCell, blessedText, activeTable, outcomeText, bannerCut,
+  fromSnapshot, costText, capMicrosOf, beatCell, blessedText, activeTable, outcomeText, bannerCut,
   parkedAnswerForm
 };
