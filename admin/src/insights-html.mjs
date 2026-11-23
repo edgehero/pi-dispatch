@@ -1491,6 +1491,8 @@ export function normSizing(v) {
           .slice(0, SIZING_HOSTS_MAX)
           .map((h) => ({ name: h.name, budgetMemMiB: regBudget(h.budgetMemMiB), budgetCpuCenti: regBudget(h.budgetCpuCenti), usedMemMiB: regField(h.usedMemMiB), usedCpuCenti: regField(h.usedCpuCenti) }))
           .sort((a, b) => cmpStr(a.name, b.name)),
+        // Issue #1062: a registry read in part, in its own words.
+        ...(typeof hostsIn.readInPart === "string" ? { readInPart: clip(escapeInterpreted(hostsIn.readInPart), 120) } : {}),
       };
   const projects = [];
   const src = v.projects !== null && typeof v.projects === "object" && !Array.isArray(v.projects) ? v.projects : {};
@@ -1600,8 +1602,10 @@ function sizingFacts(m, c) {
 export function sizingSectionHtml(ns, tips, nowMs) {
   if (ns.unreachable) return `<div class="dim">job sizes not read: ${escapeHtml(ns.unreachable)}</div>`;
   const parts = [];
+  // Issue #1062: a registry read in part draws the rows that answered and says how many did not.
+  if (!ns.hosts.unreachable && ns.hosts.readInPart) parts.push(`<div class="dim small">host budgets read in part: ${escapeHtml(ns.hosts.readInPart)}; a raise offers no call</div>`);
   if (ns.hosts.unreachable) parts.push(`<div class="dim small">host budgets not read: ${escapeHtml(ns.hosts.unreachable)}</div>`);
-  else if (ns.hosts.rows.length === 0) parts.push('<div class="dim small">no live host publishes a budget</div>');
+  else if (ns.hosts.rows.length === 0) parts.push(ns.hosts.readInPart ? '<div class="dim small">no host row answered in time</div>' : '<div class="dim small">no live host publishes a budget</div>');
   else {
     // Each dimension in the panel's HOSTS view states and words (dashboard.ts `budgetText`): what the jobs were promised
     // of a budget ("promised memory 6g of 16g"), "no memory budget" for one switched off, "memory budget not known yet"

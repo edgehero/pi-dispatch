@@ -1238,6 +1238,9 @@ test("a client's or a registry's error reaches no refusal unbounded: the planner
   const blind = () => ({ on() {}, smembers: async () => { throw new Error(words); }, scan: async () => ["0", []], disconnect() {} });
   const empty = (_c, { name }) => ({ name, getJob: async () => undefined, close: async () => {} });
   assert.deepEqual(await planCancelQueued({ ...fakes, jobId: "gh-1", redisFn: blind, queueFn: empty }), { refusal: "no job gh-1 in 1 queue (the host registry could not be read; a host that is not registered may still hold it); nothing was changed", status: 404 });
+  // Issue #1062: a registry that answered with one row not read in time was read in part, and is said so.
+  const partial = () => ({ on() {}, smembers: async () => ["mini1", "mini2"], hgetall: (key) => (key === "host:h:mini2" ? new Promise(() => {}) : Promise.resolve({ name: "mini1", routes: "true" })), srem: async () => 0, scan: async () => ["0", []], disconnect() {} });
+  assert.deepEqual(await planCancelQueued({ ...fakes, timeoutMs: 400, jobId: "gh-1", redisFn: partial, queueFn: empty }), { refusal: "no job gh-1 in 2 queues (the host registry was read in part; a host whose row was not read may still hold it); nothing was changed", status: 404 });
 });
 
 test("a re-run or an answer over a record that could not be read says which read failed and that nothing was queued, never that the run has no record", async () => {

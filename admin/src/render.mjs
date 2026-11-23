@@ -314,8 +314,12 @@ export function renderSchedulers(schedulers) {
     out.push(`  unreachable (${cell(schedulers.unreachable)})`);
   } else {
     const list = Array.isArray(schedulers) ? schedulers : [];
-    if (list.length === 0) out.push("  (none configured)");
+    // Issue #1062: read over a host registry read in part, a host's schedulers may be missing, so none read is not
+    // none.
+    const part = typeof schedulers?.hostsReadInPart === "string" ? schedulers.hostsReadInPart : null;
+    if (list.length === 0) out.push(part ? "  (none read)" : "  (none configured)");
     else for (const s of list) out.push(`  ${schedulerLine(s)}`);
+    if (part) out.push(`  the host registry was read in part (${cell(part)}), so a host's schedulers may be missing`);
   }
   return out.join("\n");
 }

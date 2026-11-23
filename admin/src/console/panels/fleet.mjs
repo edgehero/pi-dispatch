@@ -27,7 +27,8 @@ import {
   beatAgeOf,
   progressText,
   workersOnline, plural,
-  hostsUnread, HOSTS_UNREAD, HOSTS_UNREAD_TEXT } from "./common.mjs";
+  hostsUnread, HOSTS_UNREAD, HOSTS_UNREAD_TEXT,
+  NO_BEAT_READ, REGISTRY_PART_TEXT, registryReadInPart, rowLastSeen } from "./common.mjs";
 import {
   waitingSentence,
   WAITING_CUT_TEXT,
@@ -48,6 +49,9 @@ export const ACTIVE_PARTIAL_TEXT = "Not every queue's running jobs could be read
 
 /** Hosts' sentence under a registry whose last read showed no host and which could not be read this time. */
 export const HOSTS_LAST_EMPTY_TEXT = "No host was registered when the registry was last read.";
+
+/** The hosts panel with no row over a registry read in part (issue #1062): the rows that were listed did not answer. */
+export const HOSTS_PART_EMPTY_TEXT = "No host's row answered in time when the registry was last read, so no host is shown.";
 
 /** Queues' note where the registry was never read: the hosts' own queues are named by it, so none of them is listed. */
 export const QUEUES_UNREAD_TEXT = "The hosts could not be read, so their own queues are not listed and what they hold is not counted.";
@@ -167,7 +171,7 @@ export const fleetBar = (v) => {
       : list(s.held.rows).length + Number(s.held.more ?? 0);
   return ui.card({
     ring: partial ? "attention" : null,
-    body: html`<div class="fl-bar"><div class="fl-bar__row">${ui.tile(partial || allPaused ? "attention" : "ok", { icon: partial || allPaused ? "pause" : "fleet" })}<div class="fl-bar__t"><h2>${title}</h2><p class="muted">${online.online ?? "unknown"} ${online.online === 1 ? "host beats" : "hosts beat"}, ${plural(running.length, "queue")} ${running.length === 1 ? "accepts" : "accept"} jobs. ${v.role === "operator" ? html`Valkey <span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "Valkey answers."}</p>${partial ? html`<p class="muted">Starts nothing new: ${paused.map((q) => q.queue).join(", ")}. Keeps starting jobs: ${running.map((q) => q.queue).join(", ")}.</p>` : null}</div><div class="fl-bar__stats">${statistic(count("waiting"), "waiting")}${
+    body: html`<div class="fl-bar"><div class="fl-bar__row">${ui.tile(partial || allPaused ? "attention" : "ok", { icon: partial || allPaused ? "pause" : "fleet" })}<div class="fl-bar__t"><h2>${title}</h2><p class="muted">${online.atLeast && online.online === 0 ? NO_BEAT_READ : `${online.atLeast ? `at least ${online.online}` : online.online ?? "unknown"} ${online.online === 1 ? "host beats" : "hosts beat"}`}, ${plural(running.length, "queue")} ${running.length === 1 ? "accepts" : "accept"} jobs. ${v.role === "operator" ? html`Valkey <span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "Valkey answers."}</p>${partial ? html`<p class="muted">Starts nothing new: ${paused.map((q) => q.queue).join(", ")}. Keeps starting jobs: ${running.map((q) => q.queue).join(", ")}.</p>` : null}</div><div class="fl-bar__stats">${statistic(count("waiting"), "waiting")}${
       partial
         ? statistic(
             paused.reduce(
@@ -181,7 +185,7 @@ export const fleetBar = (v) => {
             "attention",
           )
         : null
-    }${statistic(count("active"), "active")}${statistic(count("delayed"), "delayed")}${statistic(held, "held")}${statistic(count("failed"), "awaiting retry", "failed")}</div><div class="fl-bar__btns">${partial ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}${running.length || !queues.length ? act(v, "fleet-pause", "Pause the fleet", [], { small: false }) : null}${allPaused ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}</div></div>${s.queue?.fleetDegraded ? ui.banner({ status: "attention", title: "Registry not read", body: hostsUnread(s) ? HOSTS_UNREAD_TEXT : html`${REGISTRY_UNREAD_TEXT} Registry rows last read ${s.hostsReadAt ? timeHtml(s.hostsReadAt) : "at an unknown time"}.`, sm: true }) : null}${!paused.length && online.none ? ui.banner({ status: "attention", title: NO_WORKER_TEXT, sm: true }) : online.staleBeats ? html`<p class="muted">${STALE_BEATS_TEXT}</p>` : null}${mismatch?.disagreement ? ui.banner({ status: "attention", title: "Two Valkeys: this console and the service disagree",
+    }${statistic(count("active"), "active")}${statistic(count("delayed"), "delayed")}${statistic(held, "held")}${statistic(count("failed"), "awaiting retry", "failed")}</div><div class="fl-bar__btns">${partial ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}${running.length || !queues.length ? act(v, "fleet-pause", "Pause the fleet", [], { small: false }) : null}${allPaused ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}</div></div>${s.queue?.fleetDegraded ? ui.banner({ status: "attention", title: registryReadInPart(s) ? "Registry read in part" : "Registry not read", body: hostsUnread(s) ? HOSTS_UNREAD_TEXT : html`${registryReadInPart(s) ? REGISTRY_PART_TEXT : REGISTRY_UNREAD_TEXT} Registry rows last read ${s.hostsReadAt ? timeHtml(s.hostsReadAt) : "at an unknown time"}.`, sm: true }) : null}${!paused.length && online.none ? ui.banner({ status: "attention", title: NO_WORKER_TEXT, sm: true }) : online.staleBeats ? html`<p class="muted">${STALE_BEATS_TEXT}</p>` : null}${mismatch?.disagreement ? ui.banner({ status: "attention", title: "Two Valkeys: this console and the service disagree",
           block: true, body: html`<p>${mismatch.disagreement}</p><p>A pause reaches both; a resume neither until they agree.</p>`, sm: true }) : null}${mismatch?.refused ? html`<div class="pp-refusal tone-refused" role="region" aria-label="Resume refused"><p class="pp-refusal__h">${ui.icon("refused")}Refused: Resume the fleet</p><p>${mismatch.refused}</p>${v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p><b>Nothing was changed.</b> One queue can still be resumed on the Valkey this console read it from.</p></div>` : mismatch?.disagreement && v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p class="pp-src">${ui.icon("beat", { size: "sm" })}<span>Read ${ageText(Math.max(0, v.now - Number(s.at ?? s.readAt ?? v.now)))} ago from ${v.role === "operator" ? html`<span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "the deployment's Valkey"} and ${hostsUnread(s) ? html`no host's registry row: the hosts could not be read` : html`${list(s.hostBudgets).length} hosts' registry rows`}. Live: this panel redraws when the fleet changes.</span></p></div>`,
   });
 };
@@ -389,8 +393,9 @@ export const fleetDelayed = wrap("Delayed", (s, v) => {
   )} </ul> <p> Pause windows move to their end and reserve nothing. Retry backoff starts at 60 seconds and grows; scope and host slots ask after 5 seconds, endpoints after 7 seconds, host budget about every 9 seconds (keeping its place), and never-fits after 60 seconds for another host. </p> </details>`;
 });
 
+// A row a registry read in part did read is current (issue #1062, `rowLastSeen`); one it did not is as last seen.
 const completeHostJobs = (h, snapshot) =>
-  !snapshot.queue?.fleetDegraded && Array.isArray(h.jobs) && h.jobsMore === 0 && !h.jobsUnreadable &&
+  !rowLastSeen(snapshot, h) && Array.isArray(h.jobs) && h.jobsMore === 0 && !h.jobsUnreadable &&
   h.concurrency !== null && h.concurrency !== undefined && h.concurrency !== "" &&
   Number.isSafeInteger(Number(h.concurrency)) && Number(h.concurrency) >= 0 &&
   beatAgeOf(h) !== null && beatAgeOf(h) <= 60000;
@@ -418,7 +423,7 @@ export const fleetHosts = wrap(
     // Nothing read about the hosts is its own sentence: no "as it was last seen" over rows nobody ever saw, and no
     // "No host is registered." (issue #962). A registry read before and not now keeps its last rows and says so.
     const unread = hostsUnread(s);
-    return html`${unread ? html`<p class="note">${HOSTS_UNREAD_TEXT}</p>` : s.queue?.fleetDegraded ? html`<p class="note">${REGISTRY_UNREAD_TEXT}</p>` : null}<ul class="hosts">${hosts.map(
+    return html`${unread ? html`<p class="note">${HOSTS_UNREAD_TEXT}</p>` : s.queue?.fleetDegraded ? html`<p class="note">${registryReadInPart(s) ? REGISTRY_PART_TEXT : REGISTRY_UNREAD_TEXT}</p>` : null}<ul class="hosts">${hosts.map(
       (h) => {
         const jobs = list(h.jobs);
         const orphans = jobs.filter((j) => j.o).length;
@@ -437,7 +442,7 @@ export const fleetHosts = wrap(
             .join(", ") || "venues not published"
         }</span></span>${known ? ui.slots({ run: jobs.length - orphans, hold: orphans, free: Math.max(0, Number(h.concurrency ?? 0) - jobs.length) }) : html`<span class="faint">Free slots not known</span>`}<span class="hostrow__beat${age === null || age > 60000 ? " tone-attention" : ""}">${ui.icon("beat", { size: "sm" })}${ageText(age)}</span><span class="hostrow__p">${queue ? act(v, queue.paused ? "queue-resume" : "queue-pause", queue.paused ? "Resume" : "Pause", [["queue", queue.queue]]) : null}</span><span class="hostrow__x"><span class="${consumerFailed ? "tone-failed" : "faint"}">${consumerHealthText(h.consumerHealth)}</span>${resourceLine(h, "budgetMemMiB", "usedMemMiB", "Memory", 1024, "GiB")}${resourceLine(h, "budgetCpuCenti", "usedCpuCenti", "CPU", 100, "cores")}${!(Number(h.budgetMemMiB) > 0) && !(Number(h.budgetCpuCenti) > 0) ? html`<span class="faint">This host reports no memory or CPU figures</span>` : null}${h.budgetCpuCenti && h.budgetCpuCenti !== "off" && !Number.isFinite(Number(h.budgetCpuCenti)) ? html`<span class="faint">CPU budget unreadable.</span>` : null}<span>Running ${jobs.length ? jobs.map((j, i) => html`${i ? ", " : null}${runLink(j.id)}${j.o ? " (orphaned hold)" : ""}${j.at ? ` ${ageText(v.now - j.at)}` : ""}`) : h.jobsUnreadable || !Array.isArray(h.jobs) ? "job list unreadable" : "none listed"}${h.jobsMore ? `; ${h.jobsMore} more not listed` : ""}</span><span>Routes: ${h.routes === false || h.routes === "false" ? "Shared jobs only" : "Routed and shared jobs"}</span>${age !== null && age > 60000 ? html`<span class="tinted tone-attention">${ui.icon("attention", { size: "sm" })}Heartbeat late: ${ageText(age)} (expected within 1m)</span>` : null}</span></li>`;
       },
-    )}</ul>${hosts.length || unread ? null : html`<p>${s.queue?.fleetDegraded ? HOSTS_LAST_EMPTY_TEXT : "No host is registered."}</p>`}`;
+    )}</ul>${hosts.length || unread ? null : html`<p>${registryReadInPart(s) ? HOSTS_PART_EMPTY_TEXT : s.queue?.fleetDegraded ? HOSTS_LAST_EMPTY_TEXT : "No host is registered."}</p>`}`;
   },
   {
     sub: (s) => {
@@ -456,7 +461,9 @@ export const fleetHosts = wrap(
             h.concurrency !== "" &&
             Number.isSafeInteger(Number(h.concurrency)),
         );
-      return `${hosts.filter((h) => beatAgeOf(h) !== null && beatAgeOf(h) <= 60000).length} beating, ${complete ? `${busy} of ${hosts.reduce((n, h) => n + Number(h.concurrency), 0)} slots busy` : `${busy} listed jobs hold slots; total occupancy is not known`}`;
+      // Over a registry read in part the rows it did not reach have no beat of now (`beatAgeOf`): the count is a floor.
+      const beating = hosts.filter((h) => beatAgeOf(h) !== null && beatAgeOf(h) <= 60000).length;
+      return `${registryReadInPart(s) ? (beating > 0 ? `at least ${beating} beating` : NO_BEAT_READ) : `${beating} beating`}, ${complete ? `${busy} of ${hosts.reduce((n, h) => n + Number(h.concurrency), 0)} slots busy` : `${busy} listed jobs hold slots; total occupancy is not known`}`;
     },
   },
 );

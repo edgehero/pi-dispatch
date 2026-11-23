@@ -290,3 +290,10 @@ test("busyIdleText: idle is the complement of the printed busy, so the two alway
 		assert.equal(Math.round((parseFloat(busy) + parseFloat(idle)) * 10), 1000, `${busy} + ${idle}`);
 	}
 });
+
+test("a registry read in part says so in the coverage, the live jobs of the hosts it could not read left out (#1062)", async () => {
+	const h = harness(deployment([run("a", 3, 2)]));
+	h.opts.readLiveHostsFn = async () => ({ hosts: [], incomplete: "1 of 3 host rows not read" });
+	assert.equal(await runCapacity(["--json"], h.opts), 0);
+	assert.match(JSON.parse(h.out.join("")).coverage.reason, /host registry incomplete \(1 of 3 host rows not read\)/);
+});

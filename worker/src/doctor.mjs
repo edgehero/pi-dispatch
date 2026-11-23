@@ -3581,6 +3581,9 @@ export async function collectChecks(shellVars, seams) {
 		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
 		checks.push({ ok: true, label: `Fleet: could not read the host registry (${printable(fleet.unreachable)})` });
 	}
+	// Issue #1062: a registry read in part. The hosts whose rows were not read in time are in none of the fleet's checks,
+	// which is said, as a registry that could not be read at all is.
+	if (!fleet.unreachable && fleet.incomplete) checks.push({ ok: true, label: `Fleet: the host registry was read in part (${printable(fleet.incomplete)}); the fleet's checks leave those hosts out` });
 	// Issue #761: the pi-dispatch versions the live workers report, and this doctor's own against this host's running
 	// worker, after the peers block so the second is said on a single host too. Workers only: a receiver's status row is
 	// never a doctor input (INT-RECEIVER-STATUS-KEY).

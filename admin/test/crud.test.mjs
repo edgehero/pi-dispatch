@@ -936,6 +936,44 @@ test("no registered tool's result carries a bundle variable name or an operator-
   }
 });
 
+test("dispatch_status and dispatch_capacity say a host registry read in part as a yes the agent keeps (#1062, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 60_000 }, async () => {
+  // A real Valkey behind a proxy that holds each connection's HGETALL and what follows it: the registry's index answers
+  // and no row does, so the scheduler read is over a host registry read in part.
+  const { freezingProxy } = await import("../../worker/test/helpers/freezing-proxy.mjs");
+  const { makeRedisClient } = await import("@edgehero/pi-dispatch/connection");
+  const url = process.env.VALKEY_TEST_URL;
+  const name = `pd1062-${process.pid}-${Date.now()}`;
+  const direct = makeRedisClient(url);
+  direct.on("error", () => {});
+  await direct.hset(`host:h:${name}`, "name", name, "routes", "true", "beatAt", String(Date.now()));
+  await direct.pexpire(`host:h:${name}`, 60_000);
+  await direct.sadd("host:live", name);
+  const proxy = await freezingProxy(url, { holdFrom: "HGETALL" });
+  const saved = { VALKEY_URL: process.env.VALKEY_URL };
+  process.env.VALKEY_URL = proxy.url;
+  try {
+    const status = textOf(await toolByName("dispatch_status").execute("id", {}, undefined, undefined, toolCtx({ hasUI: false }).ctx));
+    assert.ok(Array.isArray(status.schedulers), JSON.stringify(status.schedulers));
+    assert.equal(status.schedulersReadInPart, true, JSON.stringify(status).slice(0, 600));
+    // The capacity report says it only in sentences the agent's read drops (`text`, `coverage.reason`); the yes stays.
+    const capacity = textOf(await toolByName("dispatch_capacity").execute("id", { window: "24h" }, undefined, undefined, toolCtx({ hasUI: false }).ctx));
+    assert.equal(capacity.registryReadInPart, true, JSON.stringify(capacity).slice(0, 600));
+    assert.equal(capacity.text, undefined, "the plain report does not reach the model");
+    // The control: read whole (straight at Valkey, no row held), nothing is said.
+    process.env.VALKEY_URL = url;
+    const whole = textOf(await toolByName("dispatch_status").execute("id", {}, undefined, undefined, toolCtx({ hasUI: false }).ctx));
+    assert.equal(Object.hasOwn(whole, "schedulersReadInPart"), false, JSON.stringify(whole).slice(0, 600));
+    const wholeCapacity = textOf(await toolByName("dispatch_capacity").execute("id", { window: "24h" }, undefined, undefined, toolCtx({ hasUI: false }).ctx));
+    assert.equal(Object.hasOwn(wholeCapacity, "registryReadInPart"), false, JSON.stringify(wholeCapacity).slice(0, 600));
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    proxy.close();
+    await direct.del(`host:h:${name}`);
+    await direct.srem("host:live", name);
+    direct.disconnect();
+  }
+});
+
 test("declining the confirm writes nothing at all", async () => {
   const { runSecretsCommand } = await jiti.import("../src/secrets-command.ts");
   let wrote = false;

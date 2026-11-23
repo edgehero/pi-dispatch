@@ -5,8 +5,8 @@ import { childrenOf, loadPageData, parsePageQuery, renderPage } from "../src/con
 import { HOSTS_UNREAD, HOSTS_UNREAD_TEXT } from "../src/console/panels/common.mjs";
 import { RUNS_EMPTY, RUNS_HOST_UNREADABLE, RUNS_MIRROR_DEGRADED, RUNS_MIRROR_DEGRADED_EMPTY, RUNS_MIRROR_OFF, RUNS_NONE_WITHOUT_HOST, runsFilters, runsFiltersModel, runsSummary, runsSummaryModel, runsTableModel } from "../src/console/panels/runs.mjs";
 import { TRANSCRIPT_UNREAD_TEXT, childSearchText, queuedText } from "../src/console/panels/run.mjs";
-import { PROJECT_HOLDS_UNREAD, PROJECT_RUNS_UNREAD } from "../src/console/panels/project.mjs";
-import { BREAKDOWN_SCOPE_TEXT, SPEND_PANELS, SPLIT_UNREAD_TEXT, heldLabel } from "../src/console/panels/spend.mjs";
+import { PROJECT_HOLDS_PART, PROJECT_HOLDS_UNREAD, PROJECT_RUNS_UNREAD, PROJECT_SIZING_PART } from "../src/console/panels/project.mjs";
+import { BREAKDOWN_SCOPE_TEXT, HELD_PART_TEXT, SPEND_PANELS, SPLIT_HOSTS_PART_TEXT, SPLIT_UNREAD_TEXT, heldLabel } from "../src/console/panels/spend.mjs";
 import { capacityHostsText } from "../src/console/panels/capacity-pulse.mjs";
 import { assembleInsightsView } from "../src/insights-assembly.mjs";
 import { LOADED_WORDS, projectLoadsOf } from "../src/loaded-words.mjs";
@@ -162,6 +162,21 @@ test("the project view: a history or a registry that was not read makes its coun
   const noHistory = await readProjectView(projectInput({ reads: { fleetRuns: () => ({ runs: [], incomplete: true }) } }));
   assert.deepEqual([noHistory.historyIncomplete, noHistory.spend.floor, noHistory.spend.heldMicros], [true, true, 0], "the fleet's pages were not read whole: the hosts were");
   // What an agent's tool is handed says incomplete and holds no number that reads as "null" or a zero nobody read.
+  // Issue #1062: a registry read in part leaves the holds unknown and says so (`heldReadInPart`).
+  const part = await readProjectView(projectInput({ snapshot: { hostBudgets: [{ name: "mini1", jobs: "[]", jobsMore: "0" }], waiting: { rows: [] }, queue: { fleetDegraded: "1 of 2 host rows not read", registryReadInPart: true } } }));
+  assert.deepEqual([part.spend.heldMicros, part.spend.heldUnread, part.spend.heldReadInPart], [null, true, true]);
+  assert.equal(Object.hasOwn(whole.spend, "heldReadInPart"), false);
+  // The Job size over it is judged on the budgets of the rows that answered, a kept row not among them, and said to be
+  // read in part, never that the measurements could not be read.
+  const budgetsSeen = [];
+  const rows = [{ name: "mini1", jobs: "[]", jobsMore: "0", budgetMemMiB: "8192", budgetCpuCenti: "400" }, { name: "mini2", jobs: "[]", jobsMore: "0", budgetMemMiB: "65536", budgetCpuCenti: "1600", notRead: true }];
+  const sizedPart = await readProjectView(projectInput({ snapshot: { hostBudgets: rows, waiting: { rows: [] }, queue: { fleetDegraded: "1 of 2 host rows not read", registryReadInPart: true } }, reads: { sizing: (a) => { budgetsSeen.push(a.hostBudgets); return { projects: {} }; } } }));
+  assert.deepEqual([sizedPart.sizingUnreadable, sizedPart.sizingReadInPart], [false, true]);
+  assert.deepEqual(budgetsSeen.at(-1), [{ memMiB: 8192, cpuCenti: 400 }], "mini1's budget alone");
+  const sizedWhole = await readProjectView(projectInput({ snapshot: { hostBudgets: rows.map(({ notRead, ...h }) => h), waiting: { rows: [] } }, reads: { sizing: (a) => { budgetsSeen.push(a.hostBudgets); return { projects: {} }; } } }));
+  assert.deepEqual([sizedWhole.sizingUnreadable, Object.hasOwn(sizedWhole, "sizingReadInPart"), budgetsSeen.at(-1).length], [false, false, 2]);
+  const sizedUnread = await readProjectView(projectInput({ snapshot: { hostBudgets: rows, waiting: { rows: [] }, queue: { fleetDegraded: "registry unreadable" } }, reads: { sizing: (a) => { budgetsSeen.push(a.hostBudgets); return { projects: {} }; } } }));
+  assert.deepEqual([sizedUnread.sizingUnreadable, Object.hasOwn(sizedUnread, "sizingReadInPart"), budgetsSeen.at(-1)], [true, false, null], "wholly unread: no budget, and not known");
   const agent = projectViewForAgent(noSnapshot);
   assert.deepEqual([agent.spend.incomplete, agent.spend.heldMicros, agent.spend.usedMicros], [true, null, null]);
   assert.ok(!JSON.stringify(agent).includes("NaN"));
@@ -189,6 +204,12 @@ test("/config/project: no \"No retained run\" and no bare count over a history t
   const holds = (heldUnread) => draw((p) => { p.spend = { ...p.spend, envelope: false, settledMicros: 0, usedMicros: null, heldMicros: null, heldKnownMicros: 0, heldIncomplete: true, heldUnread }; });
   assert.ok((await holds(true)).includes(PROJECT_HOLDS_UNREAD) && !(await holds(true)).includes("known from the hosts that reported it"));
   assert.ok((await holds(false)).includes("Held money is incomplete; $0.00 is known from the hosts that reported it.") && !(await holds(false)).includes(PROJECT_HOLDS_UNREAD));
+  // Issue #1062: over a registry read in part the holds are not known either, said as read in part.
+  const part = await draw((p) => { p.spend = { ...p.spend, envelope: false, settledMicros: 0, usedMicros: null, heldMicros: null, heldKnownMicros: 0, heldIncomplete: true, heldUnread: true, heldReadInPart: true }; });
+  assert.ok(part.includes(PROJECT_HOLDS_PART) && !part.includes(PROJECT_HOLDS_UNREAD), part);
+  const sized = await draw((p) => { p.sizingUnreadable = false; p.sizingReadInPart = true; });
+  assert.ok(sized.includes(PROJECT_SIZING_PART) && !sized.includes("could not be read completely"), sized);
+  assert.ok(!(await draw(() => {})).includes(PROJECT_SIZING_PART), "a whole read says nothing of it");
   const golden = wordsOf(await CONFIGURATION_DRAW["project-history-unread.operator"]());
   assert.ok(golden.includes(PROJECT_RUNS_UNREAD) && !golden.includes("No retained run recorded this project."));
   assert.equal(projectLoadsOf([], { historyIncomplete: true }).sub, "at least 0 runs in the last 7 days");
@@ -253,8 +274,24 @@ test("Capacity: no host count and no peak of none over a registry that was not r
   assert.match(records, /Weighted by slots, 3 hosts named by the run records \(the hosts themselves could not be read\)\./);
   assert.match(records, /Fleet peak \d+ jobs at once/);
   assert.equal(capacityHostsText({ hostCount: 1, venuesUnreadable: true }), ", 1 host named by the run records (the hosts themselves could not be read)");
+  // Issue #1062: a registry read in part is said so, never as one that did not answer.
+  const part = await draw((c) => { c.venuesReadInPart = true; });
+  assert.match(part, /Host venues read in part Some hosts' registry rows did not answer in time; their venues and current fleet slots remain unknown\./);
+  assert.doesNotMatch(part, /Host venues not read|The registry did not answer/);
   assert.equal(capacityHostsText({ hostCount: 3 }), ", 3 hosts");
   assert.equal(capacityHostsText({}), "");
+});
+
+test("Spend and the budget split over a host registry read in part say so where they speak of held money and hosts (#1062)", async () => {
+  const p = spendFixture();
+  const today = wordsOf(await drawSpend("insights", { payload: { ...p, hostsReadInPart: true, spend: { ...p.spend, today: { ...p.spend.today, heldMicros: null, heldJobs: null, hostsReadInPart: true } } } }));
+  assert.ok(today.includes(HELD_PART_TEXT), "the held money is not known, read in part");
+  assert.doesNotMatch(today, /could not be read/);
+  assert.ok(!wordsOf(await drawSpend("insights")).includes(HELD_PART_TEXT), "a whole read says nothing of it");
+  const split = wordsOf(await drawSpend("insights-budget-split", { payload: { ...p, hostsReadInPart: true } }));
+  assert.ok(split.includes(SPLIT_HOSTS_PART_TEXT) && split.includes("Not confirmed") && !split.includes("All hosts agree"), "no agreement claimed for hosts it did not read");
+  const whole = wordsOf(await drawSpend("insights-budget-split"));
+  assert.ok(whole.includes("All hosts agree") && !whole.includes(SPLIT_HOSTS_PART_TEXT));
 });
 
 test("/insights/breakdown says whose records it reads, whatever was read", async () => {

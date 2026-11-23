@@ -302,11 +302,20 @@ test("round 1: dispatch_runs' list carries an openshell run's host count only; a
 });
 
 test("final review: a registry read that failed says so, never 'no live host'; the snapshot passes no rows then", async () => {
-  const { readFileSync } = await import("node:fs");
+  // What the fleet reader's snapshot hands this view over a failed or a partial registry read is pinned by behaviour in
+  // read-model.test.mjs ("a registry read in part keeps only the rows that did not answer: ...").
   const view = secretProfilesView({ settings: { overlay: { secretProfiles: { prod: "/p" } } }, env: {}, hosts: null, hostsUnreadable: true, fs: {} });
   assert.equal(profileHostsText(view.profiles[0], view), "served by: the host registry could not be read");
   const read = secretProfilesView({ settings: { overlay: { secretProfiles: { prod: "/p" } } }, env: {}, hosts: [], hostsUnreadable: true, fs: {} });
   assert.equal(profileHostsText(read.profiles[0], read), "served by: no live host in the registry", "rows in hand win over the flag");
-  const src = readFileSync(new URL("../src/read-model.mjs", import.meta.url), "utf8");
-  assert.match(src, /hosts: fleetDegraded \? null : lastHosts\.map\(hostRowOf\), hostsUnreadable: Boolean\(fleetDegraded\)/);
+});
+
+test("a registry read in part says served by the hosts it read and that another may serve it too, and raises no unserved warning (#1062)", () => {
+  const view = secretProfilesView({ settings: { overlay: { secretProfiles: { prod: "/p" } } }, env: {}, hosts: [], hostsReadInPart: true, fs: {} });
+  assert.equal(view.hostsReadInPart, true);
+  assert.equal(profileHostsText(view.profiles[0], view), "served by: none of the hosts read (the host registry was read in part, so a host whose row did not answer may serve it too)");
+  assert.doesNotMatch(profileHostsText(view.profiles[0], view), /could not be read|no live host/);
+  const whole = secretProfilesView({ settings: { overlay: { secretProfiles: { prod: "/p" } } }, env: {}, hosts: [], fs: {} });
+  assert.equal(Object.hasOwn(whole, "hostsReadInPart"), false);
+  assert.equal(profileHostsText(whole.profiles[0], whole), "served by: no live host in the registry");
 });

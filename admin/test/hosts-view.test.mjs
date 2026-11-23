@@ -422,6 +422,16 @@ test("an unreadable registry says the rows are the last read", async () => {
   await comp.dispose();
 });
 
+test("a registry read in part says so, never that it could not be read (#1062)", async () => {
+  const comp = await openHosts({ fetchSnapshot: async () => ({ ...SNAP, queue: { counts: {}, fleetDegraded: "1 of 3 host rows not read", registryReadInPart: true } }), capacityInfo: async () => ({ report: reportOf() }) });
+  const text = textAt(comp, 120);
+  await comp.dispose();
+  // The panel wraps the line inside its box: read it as one sentence.
+  const flat = text.replace(/\s*│\s*\n\s*│\s*/g, " ");
+  assert.match(flat, /host registry read in part \(1 of 3 host rows not read\): the rows not read are the last read/);
+  assert.doesNotMatch(text, /host registry unreadable/);
+});
+
 const LONG_HOST = `a${"b".repeat(63)}`;
 const LONG_PROJECT = `p${"q".repeat(31)}`;
 const LONG_ID = `gh-${"9".repeat(125)}`;

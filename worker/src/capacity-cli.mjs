@@ -82,7 +82,8 @@ export async function runCapacity(args, { env = process.env, write = (chunk) => 
 			readCapacityRecords({ redis, logsDir, sinceMs: windowStartMs, nowMs, retentionDays, localHost, indexMax: runMirrorMaxRuns, noMirrorReason: refusedNote, timeoutMs: FLEET_READ_TIMEOUT_MS, ...(fs ? { fs } : {}) }),
 		]);
 		if (named && (fleet.unreachable || read.mirrorState.startsWith("unreachable"))) return fail(`could not read Valkey at ${urlShown(url)}: ${fleet.unreachable ? `host registry ${fleet.unreachable}` : `run mirror ${read.mirrorState}`}`);
-		const coverage = { ...read.coverage, reason: [read.coverage.reason, fleet.unreachable ? `host registry unreadable (${fleet.unreachable})` : null].filter(Boolean).join("; ") || null };
+		// Issue #1062: a registry read in part leaves out the live jobs of the hosts whose rows were not read, and says so.
+		const coverage = { ...read.coverage, reason: [read.coverage.reason, fleet.unreachable ? `host registry unreadable (${fleet.unreachable})` : fleet.incomplete ? `host registry incomplete (${fleet.incomplete})` : null].filter(Boolean).join("; ") || null };
 		const report = computeCapacity({ records: read.records, live: fleet.hosts ?? [], windowStartMs, nowMs, bucketMs: window.bucketMs, coverage });
 		const shown = host === undefined ? { report } : onlyHost(report, host);
 		if (shown.unknown) return fail(`no host named ${JSON.stringify(host)} in the last ${since}${shown.unknown.length > 0 ? ` (hosts: ${shown.unknown.join(", ")})` : ""}`);

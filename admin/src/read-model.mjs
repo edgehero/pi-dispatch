@@ -77,7 +77,7 @@ import { JOB_FIELD, META_FIELD, QUEUE_KEY, SCHEDULER_ID_MAX, SCHEDULER_ID_RE, SC
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
-import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, passwordDeclinedOf, refusedDatabaseOf, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_COMMAND_TIMEOUT_MS, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
+import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, passwordDeclinedOf, refusedDatabaseOf, replyErrorCode, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_COMMAND_TIMEOUT_MS, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
 import { pointerState } from "./deployment-pointer.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { readDoctorResults } from "@edgehero/pi-dispatch/doctor-results";
@@ -600,9 +600,9 @@ export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutM
     // read's degraded answer, like a down Valkey, never a throw out of a function that fails open.
     redis = redisFn(url);
     redis.on?.("error", () => {}); // a down Valkey is one clean line, never nine ioredis stack traces
-    const { names, blind, hosts, incomplete } = await fleetQueuesOn(redis, { timeoutMs });
+    const { names, blind, blindPartial, hosts, incomplete } = await fleetQueuesOn(redis, { timeoutMs });
     // `incomplete` only where the keyspace scan said so: a caller that claims "no queue holds it" needs to know.
-    return { names, blind, hosts, ...(incomplete ? { incomplete } : {}) };
+    return { names, blind, ...(blindPartial ? { blindPartial } : {}), hosts, ...(incomplete ? { incomplete } : {}) };
   } catch (err) {
     return { names: [QUEUE], blind: err?.message ?? String(err), hosts: [] };
   } finally {
@@ -620,17 +620,19 @@ export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutM
  * (through `readFleetQueues`) and the fleet reader's retained-job read (the run page's re-run and parked-answer checks),
  * so the page asks exactly the queues the click will: a host out of the registry (stopped more than ~90 s) still has
  * its queue, and a page that searched the registry alone said "the data is gone" for a job the planner then found.
- * `blind` is the registry's degradation, `incomplete` the keyspace scan's (`discoverHostQueuesReporting`); either
- * means a job no queue named here holds may still be held. `readLiveHostsFn`/`discoverFn` are seams; a `discoverFn`
+ * `blind` is the registry's degradation (unreadable, or read in part since issue #1062: its words then say how many
+ * rows were not read), `incomplete` the keyspace scan's (`discoverHostQueuesReporting`); either means a job no queue
+ * named here holds may still be held. `readLiveHostsFn`/`discoverFn` are seams; a `discoverFn`
  * answering a bare list (the kill switch's shape) reads as complete. Never throws for a read that fails: it degrades.
  */
 export async function fleetQueuesOn(redis, { timeoutMs = 2500, prune, readLiveHostsFn = readLiveHosts, discoverFn = discoverHostQueuesReporting } = {}) {
   // CONCURRENTLY, sharing one budget. Serialising them doubled the worst case, so a status read against
   // an unreachable Valkey took twice as long to say the same thing.
-  // The inner per-operation bound is HALVED, like `readHosts`: `readLiveHosts` walks `1 + N` operations
-  // sequentially, so an inner bound equal to the outer one lets a single hung operation consume the whole
-  // budget and the two timers fire together. Halved, one slow host costs half the budget rather than all
-  // of it, and the walk can still finish.
+  // The inner bound is HALVED, like `readHosts`. `readLiveHosts` walked `1 + N` operations one after another, each
+  // under the inner bound; since issue #1062 the inner bound is its whole read, with the rows side by side, so the
+  // halving now only keeps the outer timer a backstop that does not fire with it. A listing whose rows were not all
+  // read in time (`incomplete`) is the registry's degradation too: a host whose row was not read may have a queue this
+  // set lacks.
   const [fleet, existing] = await Promise.all([
     withTimeout(
       Promise.resolve()
@@ -645,8 +647,11 @@ export async function fleetQueuesOn(redis, { timeoutMs = 2500, prune, readLiveHo
   ]);
   const found = Array.isArray(existing) ? { names: existing, incomplete: null } : { names: Array.isArray(existing?.names) ? existing.names : [], incomplete: existing?.incomplete ?? (Array.isArray(existing?.names) ? null : "the queue scan answered nothing") };
   const hosts = Array.isArray(fleet?.hosts) ? fleet.hosts : [];
-  const blind = fleet?.unreachable ?? (Array.isArray(fleet?.hosts) ? null : "registry unreadable");
-  return { names: unionQueueNames(fleetQueueNames(hosts), found.names), blind, hosts, incomplete: found.incomplete };
+  const blind = fleet?.unreachable ?? (Array.isArray(fleet?.hosts) ? (fleet?.incomplete ?? null) : "registry unreadable");
+  // `blindPartial` (issue #1062): the registry answered and only some of its rows were not read, so a sentence says it
+  // was read in part rather than that it could not be read.
+  const partial = !fleet?.unreachable && Array.isArray(fleet?.hosts) && Boolean(fleet?.incomplete);
+  return { names: unionQueueNames(fleetQueueNames(hosts), found.names), blind, ...(partial ? { blindPartial: true } : {}), hosts, incomplete: found.incomplete };
 }
 
 /**
@@ -2358,7 +2363,9 @@ const HELD_HYDRATE_MAX = 200;
  * The capacity report for `dispatch_capacity` (issue #599, phase 2, INT-CAPACITY-REPORT): the CLI's read and the CLI's
  * function (`readCapacityRecords`, `computeCapacity`, `onlyHost`, `capacityText`), so the tool, `pi-dispatch capacity`
  * and doctor cannot disagree. READ-ONLY: the registry is read with `prune: false` and the mirror reader prunes nothing.
- * `{ report, text, unread }` (`unread` names what did not answer, of "registry" and "mirror"), or `{ error }` for a window it does not offer, a host the report does not have, or a retention or a
+ * `{ report, text, unread }` (`unread` names what did not answer, of "registry" and "mirror"; `registryReadInPart` true
+ * when the registry answered and some host rows did not, issue #1062), or `{ error }` for a window it does not offer,
+ * a host the report does not have, or a retention or a
  * mirror cap the worker would refuse. An unreachable Valkey is not an error: the report reads this host's files and says
  * why.
  *
@@ -2393,15 +2400,16 @@ export async function readCapacity({ url, env = process.env, window = "7d", host
       redis ? readLiveHosts(redis, { now, timeoutMs, prune: false }).catch((e) => ({ unreachable: e?.message ?? "registry unreadable" })) : { unreachable: null },
       readCapacityRecords({ redis, logsDir: facts.logsDir, sinceMs, nowMs, retentionDays: facts.retentionDays, localHost: facts.localHost, indexMax: facts.runMirrorMaxRuns, noMirrorReason, timeoutMs, ...(fs ? { fs } : {}) }),
     ]);
-    const coverage = { ...read.coverage, reason: [read.coverage.reason, fleet.unreachable ? `host registry unreadable (${fleet.unreachable})` : null].filter(Boolean).join("; ") || null };
+    // Issue #1062: a registry read in part leaves out the live jobs of the hosts whose rows were not read, and says so.
+    const coverage = { ...read.coverage, reason: [read.coverage.reason, fleet.unreachable ? `host registry unreadable (${fleet.unreachable})` : fleet.incomplete ? `host registry incomplete (${fleet.incomplete})` : null].filter(Boolean).join("; ") || null };
     const report = computeCapacity({ records: read.records, live: fleet.hosts ?? [], windowStartMs: sinceMs, nowMs, bucketMs, coverage });
     const shown = host === undefined || host === null ? { report } : onlyHost(report, host);
     if (shown.unknown) return { error: `no host named ${JSON.stringify(host)} in the last ${window}${shown.unknown.length > 0 ? ` (hosts: ${shown.unknown.join(", ")})` : ""}` };
     // What the report could not ask (issue #962), as names and not only as the sentences of `coverage.reason`: a caller
     // that would say "no such host in this window" must know whether the registry and the fleet's mirror answered. A
     // deployment with no mirror ("off") was read: it has none.
-    const unread = [...(!redis || fleet.unreachable || !Array.isArray(fleet.hosts) ? ["registry"] : []), ...(!redis || read.mirrorState.startsWith("unreachable") ? ["mirror"] : [])];
-    return { report: shown.report, text: capacityText(shown.report, { since: window }), unread };
+    const unread = [...(!redis || fleet.unreachable || fleet.incomplete || !Array.isArray(fleet.hosts) ? ["registry"] : []), ...(!redis || read.mirrorState.startsWith("unreachable") ? ["mirror"] : [])];
+    return { report: shown.report, text: capacityText(shown.report, { since: window }), unread, ...(!fleet.unreachable && fleet.incomplete ? { registryReadInPart: true } : {}) };
   } finally {
     try {
       redis?.disconnect?.();
@@ -2432,11 +2440,11 @@ export async function readHosts({ url, redisFn = makeRedisClient, timeoutMs = 25
     // `timeoutMs` goes INWARD as well as around. Without it the inner per-operation bound stayed at its
     // 2000ms default while the outer 2500ms had to cover a sequential `1 + N` round-trip walk, so past a
     // handful of hosts on a slow Valkey the outer timer always won -- and the caller degraded to the
-    // shared queue alone for no reason but fleet size. Halved inward so N operations fit inside one outer
-    // budget rather than one operation consuming it.
+    // shared queue alone for no reason but fleet size. Halved inward; since issue #1062 the inner bound is the whole
+    // read, rows side by side, and a listing that is not whole keeps its `incomplete` for the caller to say.
     const res = await withTimeout(readLiveHosts(redis, { now, timeoutMs: Math.max(250, Math.floor(timeoutMs / 2)) }), timeoutMs, { unreachable: "timed out reaching the registry" });
     if (res.unreachable) return { unreachable: res.unreachable };
-    return { hosts: res.hosts };
+    return { hosts: res.hosts, ...(res.incomplete ? { incomplete: res.incomplete, ...(Array.isArray(res.unreadHosts) ? { unreadHosts: res.unreadHosts } : {}) } : {}) };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
@@ -2752,9 +2760,10 @@ async function readWorkerCount(queue) {
 }
 
 /**
- * Read the resident job schedulers and compute per-entry `overdueMs`: BullMQ's no-overlap scheduler can
- * silently under-fire under load, so the admin surfaces `next` drift rather than let it look healthy
- * (design.md:249). Returns an array, or `{ unreachable }` on a connection error.
+ * Read the resident job schedulers and compute per-entry `overdueMs`: BullMQ's no-overlap scheduler can silently
+ * under-fire under load, so the admin surfaces `next` drift rather than let it look healthy (design.md:249). Returns an
+ * array, or `{ unreachable }` on a connection error. An array read over a host registry read in part carries
+ * `hostsReadInPart` (issue #1062).
  */
 export async function readSchedulers({
   url,
@@ -2791,7 +2800,12 @@ export async function readSchedulers({
     const first = await bounded(primary);
     if (first === UNANSWERED) return { unreachable: "timed out reading the job schedulers" };
     const others = await Promise.all(rest.map((q) => bounded(q).then((l) => (l === UNANSWERED ? [] : l), () => [])));
-    return mapSchedulers([first, ...others].flat(), now());
+    const list = mapSchedulers([first, ...others].flat(), now());
+    // Issue #1062: over a registry read in part, the queue of a host whose row did not answer was not read, so its
+    // schedulers may be missing from the list; the list says so (`hostsReadInPart`, the registry's words) for a reader
+    // that would otherwise read it as every scheduler there is.
+    if (typeof fleet?.incomplete === "string" && fleet.incomplete !== "") list.hostsReadInPart = fleet.incomplete;
+    return list;
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
@@ -4563,6 +4577,8 @@ function hostRowOf(h) {
     ttlAgeMs: Number.isSafeInteger(h?.ttlAgeMs) && h.ttlAgeMs >= 0 ? h.ttlAgeMs : null,
     skewMs: Number.isSafeInteger(h?.skewMs) ? h.skewMs : null,
     noExpiry: h?.noExpiry === true ? true : h?.noExpiry === false ? false : null,
+    // Issue #1062: a host whose row a registry read in part did not reach: the row is the last one read of it.
+    ...(h?.notRead === true ? { notRead: true } : {}),
     routes: h?.routes,
     // Issue #712: the profiles this host advertises (`s:<profile>`, `w:<profile>`), through the worker's own allowlist and
     // sorted, so two ticks of one row compare equal; and its venues (`parseHostBackends`: the blessed list, the default,
@@ -4587,6 +4603,10 @@ export function doctorSelfName(env) {
 
 /** How long the reader waits on the registry before drawing the fleet it last knew. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
+
+/** A switch preview's read of one queue that Valkey answered with an error (issue #1053), beside the reply's code. */
+const ERRORED_READ = Symbol("errored-read");
+
 // Longer than every read this file bounds for itself, so this decides only the reads that have no bound of their own.
 const FLEET_COMMAND_TIMEOUT_MS = 5_000;
 
@@ -4770,6 +4790,8 @@ export function createFleetReader(
   // prevent. We keep what we last saw and mark the snapshot degraded instead.
   let lastNames = [queue.name];
   let fleetDegraded = null;
+  // Whether `fleetDegraded` is a registry read in part (issue #1062), not one that could not be read.
+  let fleetPartial = false;
   // The registry rows last read (issue #596, phase 3): each live host's published budget and what its jobs hold, for
   // the PROJECTS view's size suggestions and its budget line. Kept like `lastNames` on an unreachable registry.
   let lastHosts = [];
@@ -4783,9 +4805,30 @@ export function createFleetReader(
     const fleet = await readLiveHostsFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS, prune }).catch((err) => ({
       unreachable: err?.message ?? String(err),
     }));
+    fleetPartial = false;
     if (fleet?.unreachable || !Array.isArray(fleet?.hosts)) {
       fleetDegraded = fleet?.unreachable ?? "registry unreadable";
       lastHosts = lastHosts.map((h) => ({ ...h, consumerHealth: { state: "unknown", rows: [] } }));
+    } else if (fleet.incomplete) {
+      // Read in part (issue #1062): the registry is still degraded, in its own words, since a host whose row was not
+      // read may have a queue the set lacks. The rows that were read are not thrown away: they replace their own last
+      // rows, a host whose row was not read keeps its last row, its health unknown, and the set is the queues of both.
+      // Keeping the last set alone made a console whose first read was partial switch the shared queue only,
+      // where the CLI's switch reached every host it read. `lastHostsAt` (`hostsReadAt`) is this read's instant, since
+      // the rows it read are of now, and each kept row is marked `notRead`, so a surface that dates a row
+      // (`dispatch_hosts`' beat) never dates a kept one by this read.
+      fleetDegraded = fleet.incomplete;
+      fleetPartial = true;
+      const health = await readConsumerStatus(redis, fleet.hosts, { now: nowFn });
+      const fresh = fleet.hosts.map((h, i) => ({ ...h, consumerHealth: { state: health[i].state, rows: health[i].rows } }));
+      // Only a host whose row did not answer is kept (`unreadHosts`): one whose row answered empty was pruned and is
+      // gone, as a whole read drops it, and so is one no longer in the index. A reader handed in without the list keeps
+      // every last row it did not read now.
+      const unreadNames = Array.isArray(fleet.unreadHosts) ? new Set(fleet.unreadHosts) : null;
+      const kept = lastHosts.filter((h) => !fresh.some((f) => f.name === h.name) && (unreadNames === null || unreadNames.has(h.name))).map((h) => ({ ...h, consumerHealth: { state: "unknown", rows: [] }, notRead: true }));
+      lastNames = unionQueueNames(fleetQueueNames(fresh), fleetQueueNames(kept));
+      lastHosts = [...fresh, ...kept].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      lastHostsAt = nowFn();
     } else {
       fleetDegraded = null;
       lastNames = fleetQueueNames(fleet.hosts);
@@ -5278,9 +5321,19 @@ export function createFleetReader(
       // Issue #737: the waiting jobs, started now beside the queue reads and awaited at the end (cached, so at most one
       // read per WAITING_TTL_MS). Null when this call did not ask for them.
       const waitingRead = waiting === true ? waitingOf(queues, Array.isArray(projectsView?.projects) ? projectsView.projects : null, Array.isArray(triggersView?.triggers) ? triggersView.triggers : null, opts?.freshWaiting === true) : null;
-      const [pausedStates, countsPer, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerLists, activeLists, stallCounts] = await Promise.all([
-        Promise.all(queues.map((q) => q.isPaused())),
-        Promise.all(queues.map((q) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed"))),
+      // Issue #1053: on a switch preview's read, a queue whose paused state or counts Valkey answers with an error (its
+      // meta key holding a string, say) is that one queue not read, named in `switchErrored` with the reply's code,
+      // never a snapshot that fails for the whole fleet: the one-queue preview refused every queue for it, said as a
+      // Valkey that could not be reached. Any other failure still fails the snapshot, as before. Only on that read: a
+      // page draws `queueCounts` as every queue it reads, so on the per-tick read such a queue still fails the snapshot
+      // loudly rather than going missing from a page that would not say so.
+      const errorReply = (read) => (preview === null ? read : Promise.resolve(read).catch((e) => {
+        if (replyErrorCode(e) === null) throw e;
+        return { [ERRORED_READ]: replyErrorCode(e) };
+      }));
+      const [pausedRead, countsRead, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerLists, activeLists, stallCounts] = await Promise.all([
+        Promise.all(queues.map((q) => errorReply(q.isPaused()))),
+        Promise.all(queues.map((q) => errorReply(q.getJobCounts("waiting", "active", "paused", "delayed", "failed")))),
         // Inside the promise: a throw while building a replacement, right here in this list, would orphan the reads above it.
         Promise.resolve().then(() => queueNamed(queue.name).getWorkers()).catch(() => []),
         redis.get(dayKey()),
@@ -5301,6 +5354,14 @@ export function createFleetReader(
         cronIds.length > 0 ? redis.mget(...cronIds.map((id) => stallKey(id))).catch(() => null) : Promise.resolve([]),
       ]);
       const workers = Array.isArray(workerList) && workerList.length > 0 ? workerList.length : "unknown";
+      // The queues a switch preview's read got an error reply for (issue #1053), each with the first reply's code, and
+      // every other queue as it was read: an errored queue is in neither `queueCounts` nor the sums, and
+      // `switchErrored` names it.
+      const erroredCode = (i) => pausedRead[i]?.[ERRORED_READ] ?? countsRead[i]?.[ERRORED_READ] ?? null;
+      const switchErrored = queues.flatMap((q, i) => (erroredCode(i) === null ? [] : [{ queue: q?.name ?? "-", error: erroredCode(i) }]));
+      const readAt = queues.flatMap((_, i) => (erroredCode(i) === null ? [i] : []));
+      const pausedStates = readAt.map((i) => pausedRead[i]);
+      const countsPer = readAt.map((i) => countsRead[i]);
       // Summed across the fleet, because a count of one queue is not a count of the deployment.
       const counts = {};
       for (const c of countsPer) for (const [k, v] of Object.entries(c ?? {})) counts[k] = (counts[k] ?? 0) + Number(v ?? 0);
@@ -5500,9 +5561,11 @@ export function createFleetReader(
         scopedLimits,
         scopedBudget,
         dollars,
-        queue: { pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded },
+        // `registryReadInPart` (issue #1062): `fleetDegraded` is a registry that answered with some rows not read in
+        // time, so a surface says it was read in part rather than that it could not be read.
+        queue: { pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded, ...(fleetPartial ? { registryReadInPart: true } : {}) },
         // Issue #641: each queue's own counts beside the summed ones, so a surface can say which host's queue is deep.
-        queueCounts: queues.map((q, i) => ({ queue: q?.name ?? "-", paused: Boolean(pausedStates[i]), counts: Object.fromEntries(Object.entries(countsPer[i] ?? {}).map(([k, v]) => [k, Number(v ?? 0)])) })),
+        queueCounts: readAt.map((qi, i) => ({ queue: queues[qi]?.name ?? "-", paused: Boolean(pausedStates[i]), counts: Object.fromEntries(Object.entries(countsPer[i] ?? {}).map(([k, v]) => [k, Number(v ?? 0)])) })),
         // Issue #596, phase 3: each live host's budget and use, as the registry publishes them (integers as text, `off`,
         // or "" while unknown). Read by the PROJECTS view; nothing here judges them. Issue #599, phase 3: with what the
         // HOSTS view's live lines read off the same rows (`hostRowOf`), so that view adds no read to this tick.
@@ -5545,7 +5608,7 @@ export function createFleetReader(
         secretBundles: secretBundlesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs, fs }),
         // Issue #712: the secret profiles view (`secretProfilesView`): each profile's source, roots status, triggers,
         // projects, last resolve and the live hosts that advertise it. Names and words only, never a resolver path.
-        secretProfiles: secretProfilesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs, hosts: fleetDegraded ? null : lastHosts.map(hostRowOf), hostsUnreadable: Boolean(fleetDegraded), fs }),
+        secretProfiles: secretProfilesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs, hosts: fleetDegraded && !fleetPartial ? null : lastHosts.filter((h) => h.notRead !== true).map(hostRowOf), hostsUnreadable: Boolean(fleetDegraded) && !fleetPartial, hostsReadInPart: fleetPartial, fs }),
         // Issue #712: the PI_SECRET_PROFILES names this deployment declares (`envSecretProfiles`; never a path here, the
         // names-only rule of the overlay list beside it), so no surface says "none declared" over env-declared profiles.
         secretProfilesEnv: (() => {
@@ -5589,7 +5652,9 @@ export function createFleetReader(
         ...(waitingJobs !== null ? { waiting: waitingJobs } : {}),
         // Issue #737: what a switch preview's `queueCounts` cover, only on a call that asked for the switch's queues.
         // `switchUnread` (issue #964): the queues the switch flips that it did not read, this host's own where no discovery named it.
-        ...(preview !== null ? { switchTotal: preview.total, switchTruncated: preview.truncated, switchIncomplete: preview.incomplete, switchUnread: preview.unread } : {}),
+        // `switchErrored` (issue #1053): the queues of that read Valkey answered with an error, `{ queue, error }` with
+        // the reply's code alone, never its words.
+        ...(preview !== null ? { switchTotal: preview.total, switchTruncated: preview.truncated, switchIncomplete: preview.incomplete, switchUnread: preview.unread, switchErrored } : {}),
       };
     },
     /**
@@ -5976,7 +6041,8 @@ export function createFleetReader(
           if (found === null) return { unreachable: "the deployment's queues could not be read within the bound" };
           const { names } = found;
           // The registry read's own error stays out of it: a client's words, which can name a host, and this is a page's.
-          if (!names.includes(queue)) return { invalid: `${JSON.stringify(queue)} is not a queue this deployment drains (${names.join(", ")})${fleetDegraded ? "; the host registry could not be read, so a host's queue may be missing from that list" : ""}. Nothing was changed` };
+          // Over a registry read in part (issue #1062) the queue may be a host's whose row did not answer: said so.
+          if (!names.includes(queue)) return { invalid: `${JSON.stringify(queue)} is not a queue this deployment drains (${names.join(", ")})${fleetDegraded ? (fleetPartial ? "; the host registry was read in part, so the queue of a host whose row did not answer may be missing from that list" : "; the host registry could not be read, so a host's queue may be missing from that list") : ""}. Nothing was changed` };
         }
         const q = queueNamed(queue);
         const step = await switchStep(q, paused, switchStepTimeoutMs);
@@ -7696,7 +7762,7 @@ const PROFILE_USES_MAX = 16;
  * `/dispatch secrets list` prints the paths itself from the two sources. Never a reference or a value, and nothing is
  * resolved: the realpath is the add's own check, on this host.
  */
-export function secretProfilesView({ triggers = null, settings = null, env = {}, projects = null, runs = [], hosts = null, hostsUnreadable = false, fs = nodeFs } = {}) {
+export function secretProfilesView({ triggers = null, settings = null, env = {}, projects = null, runs = [], hosts = null, hostsUnreadable = false, hostsReadInPart = false, fs = nodeFs } = {}) {
   const fromEnv = envSecretProfiles(env?.PI_SECRET_PROFILES);
   const raw = settings?.overlay?.secretProfiles;
   const overlay = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
@@ -7754,7 +7820,7 @@ export function secretProfilesView({ triggers = null, settings = null, env = {},
       hostsUnknown: hostRows.filter((h) => h?.capsSeen === false || !Array.isArray(h?.caps)).length,
     };
   });
-  return { profiles: rows, envSeen: fromEnv.seen, envMalformed: fromEnv.malformed, rootsSeen: typeof env?.PI_SECRET_RESOLVER_ROOTS === "string", hostsSeen: Array.isArray(hosts) ? hostRows.length : null, hostsUnreadable: !Array.isArray(hosts) && hostsUnreadable === true };
+  return { profiles: rows, envSeen: fromEnv.seen, envMalformed: fromEnv.malformed, rootsSeen: typeof env?.PI_SECRET_RESOLVER_ROOTS === "string", hostsSeen: Array.isArray(hosts) ? hostRows.length : null, hostsUnreadable: !Array.isArray(hosts) && hostsUnreadable === true, ...(Array.isArray(hosts) && hostsReadInPart === true ? { hostsReadInPart: true } : {}) };
 }
 
 /** A profile row's `source` in words, the same on every surface. */
@@ -7801,6 +7867,8 @@ export function profileLastText(last) {
 export function profileHostsText(row, view = null) {
   // A registry read that failed this tick is not "no host": the rows last read may be stale, so none are named.
   if (view?.hostsUnreadable === true) return "served by: the host registry could not be read";
+  // Read in part (issue #1062): the hosts read that advertise it, and that a host whose row did not answer may too.
+  if (view?.hostsReadInPart === true) return `served by: ${row.hosts.length > 0 ? row.hosts.join(", ") : "none of the hosts read"} (the host registry was read in part, so a host whose row did not answer may serve it too)`;
   if (view?.hostsSeen === null) return "served by: the registry is not read here (the console's and the panel's profiles show the live hosts)";
   if (row.hosts.length > 0) return `served by: ${row.hosts.join(", ")}${row.hostsUnknown > 0 ? ` (${row.hostsUnknown} host(s) publish no capabilities)` : ""}`;
   if (view?.hostsSeen === 0) return "served by: no live host in the registry";

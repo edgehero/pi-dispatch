@@ -142,7 +142,7 @@ export function switchListShort(res) {
  * row, the pi extension and the CLI (`worker/src/cli.mjs`, held equal by a test) carry the same sentence.
  */
 export function switchShortNote(paused) {
-  return `the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not ${paused ? "paused" : "resumed"}. ${paused ? "Pause" : "Resume"} the fleet again once Valkey answers`;
+  return `the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not ${paused ? "paused" : "resumed"}. ${paused ? "Pause" : "Resume"} the fleet again once Valkey answers`;
 }
 
 /**

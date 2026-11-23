@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { test } from "node:test";
 import { Command, Redis } from "ioredis";
 import { freezingProxy } from "./helpers/freezing-proxy.mjs";
-import { JudgedConnector, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, passwordDeclinedOf, useValkeyContext } from "../src/connection.mjs";
+import { JudgedConnector, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, passwordDeclinedOf, replyErrorCode, useValkeyContext } from "../src/connection.mjs";
 
 // Issue #464, gate round 1 (measured on Fedora 44): WHATWG URL keeps an IPv6 literal's brackets in `hostname`, and the
 // queue client then looked up the name "[::1]", which never resolves, so a `redis://[::1]:port` VALKEY_URL never
@@ -825,4 +825,16 @@ test("a BullMQ queue with the bound reads as before, and its remove on a Valkey 
 		await direct.close().catch(() => {});
 		proxy.close();
 	}
+});
+
+test("replyErrorCode: Valkey's error reply's code alone, a word for a reply without one, and null for an error that is no reply (#1053)", () => {
+	const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+	assert.equal(replyErrorCode(reply("WRONGTYPE Operation against a key holding the wrong kind of value")), "WRONGTYPE");
+	assert.equal(replyErrorCode(reply("ERR Error running script (call to f_0123): @user_script:12: WRONGTYPE Operation against a key")), "ERR");
+	assert.equal(replyErrorCode(reply("NOSCRIPT")), "NOSCRIPT");
+	assert.equal(replyErrorCode(reply("something a proxy said")), "error", "never the reply's own words");
+	assert.equal(replyErrorCode(reply("")), "error");
+	assert.equal(replyErrorCode(new Error("Connection is closed.")), null);
+	assert.equal(replyErrorCode(Object.assign(new Error("WRONGTYPE x"), { name: "Error" })), null, "the name decides, never the text");
+	assert.equal(replyErrorCode(null), null);
 });

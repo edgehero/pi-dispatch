@@ -108,6 +108,24 @@ test("dispatch_hosts unread after a good read: the rows as last seen, unavailabl
   } finally { await reader.dispose(); }
 });
 
+test("dispatch_hosts over a registry read in part: read, said in part, the rows it read dated by that read, a kept row marked and given no beat (#1062)", async () => {
+  const clock = { t: AT };
+  let answer = { hosts: [{ ...row(), name: "mini1", ttlAgeMs: PTTL }], incomplete: "1 of 2 host rows not read" };
+  const reader = readerOver(registryKeys({}), { readLiveHostsFn: async () => answer, clock });
+  try {
+    const first = await readKept("hosts", reader);
+    assert.deepEqual([first.unavailable, first.readInPart, first.readAt, first.hosts.map((h) => [h.name, h.notRead === true, h.beat])], [false, true, AT, [["mini1", false, AT - PTTL]]], "a first read in part is read, never hosts null");
+    answer = { hosts: [{ ...row(), name: "mini1", ttlAgeMs: PTTL }, { ...row(), name: "mini2", ttlAgeMs: PTTL }] };
+    clock.t = AT + MIN;
+    await readKept("hosts", reader);
+    answer = { hosts: [{ ...row(), name: "mini2", ttlAgeMs: PTTL }], incomplete: "1 of 2 host rows not read", unreadHosts: ["mini1"] };
+    clock.t = AT + 2 * MIN;
+    const again = await readKept("hosts", reader);
+    assert.deepEqual([again.unavailable, again.readInPart, again.readAt], [false, true, AT + 2 * MIN]);
+    assert.deepEqual(again.hosts.map((h) => [h.name, h.notRead === true, h.beat, h.beatAgeMs]), [["mini1", true, null, null], ["mini2", false, AT + 2 * MIN - PTTL, PTTL]], "the kept row is not dated by a read that did not reach it, nor aged");
+  } finally { await reader.dispose(); }
+});
+
 test("dispatch_hosts: a jobs value that is no list and sandboxes that do not parse are null (not known), never []", async () => {
   const got = await read("hosts", readerOver(registryKeys({ mini1: row({ jobs: "not json", sandboxes: "{\"id\":" }) })));
   const [h] = got.hosts;
@@ -196,6 +214,31 @@ test("dispatch_failed builds the registry's queues and at most as many others as
   assert.equal(built.length, WAITING_QUEUES_MAX, "one queue (one client) each for the shared queue, the registry's and 62 others, not 102");
   const fit = await read("failed", readerOver({ ...registryKeys({ mini1: row() }), ...metas("pi-jobs@mini1", ...stale.slice(0, WAITING_QUEUES_MAX - 2)) }));
   assert.equal(fit.complete, true, "exactly the bound: nothing was cut");
+});
+
+// Issue #1053: the failed read goes through the kill switch's set, whose read names a queue Valkey answered with an
+// error (`switchErrored`) instead of failing; that queue is in no count, so the failed total leaves its jobs out.
+test("dispatch_failed over a queue whose read Valkey answered with an error is not complete, and how many more is not known (#1053)", async () => {
+  const keys = { ...registryKeys({}), ...metas("pi-jobs@hostb") };
+  const failed = { "pi-jobs@hostb": Array.from({ length: 25 }, (_, i) => failedJob(`f${i}`, AT - i * MIN)) };
+  const wrongtype = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+  const make = quietQueue([], { failed });
+  const reader = createFleetReader(paths(), {
+    makeQueueFn: (c, opts) => {
+      const q = make(c, opts);
+      return q.name === "pi-jobs@hostb" ? { ...q, isPaused: wrongtype } : q;
+    },
+    parseConnectionFn: () => ({}),
+    redisFn: () => keyedRedis(keys),
+    readLiveHostsFn: (r, o) => readLiveHosts(r, { ...o, now: () => AT }),
+    nowFn: () => AT,
+    readOnly: true,
+  });
+  const got = await read("failed", reader);
+  assert.deepEqual([got.unavailable, got.more, got.complete, got.jobs.length], [false, null, false, 20], "its 25 failed jobs are in no total: neither none more nor complete");
+  // The same set read whole is complete, and its count is known again.
+  const whole = await read("failed", readerOver(keys, { failed }));
+  assert.deepEqual([whole.more, whole.complete], [5, false]);
 });
 
 test("dispatch_failed over a failed set that could not be read: jobs null and unavailable", async () => {

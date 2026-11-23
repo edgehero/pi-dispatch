@@ -693,8 +693,8 @@ test("/dispatch pause answered part-way with an error over an unreadable registr
 
 test("the pause and resume tools tell a model what queuesMayBeShort means in the words the surfaces say (#964)", () => {
   const t = tools();
-  assert.match(t.dispatch_pause.description, /queuesMayBeShort true in the answer means the host registry or the look for queues could not be read, so other queues may exist and were not paused: pause again once Valkey answers\./);
-  assert.match(t.dispatch_resume.description, /queuesMayBeShort true in the answer means the host registry or the look for queues could not be read, so other queues may exist and were not resumed\./);
+  assert.match(t.dispatch_pause.description, /queuesMayBeShort true in the answer means the host registry or the look for queues could not be read whole, so other queues may exist and were not paused: pause again once Valkey answers\./);
+  assert.match(t.dispatch_resume.description, /queuesMayBeShort true in the answer means the host registry or the look for queues could not be read whole, so other queues may exist and were not resumed\./);
 });
 
 test("the table has exactly one row per audited call site in index.ts, secrets-command.ts and dashboard.ts", () => {

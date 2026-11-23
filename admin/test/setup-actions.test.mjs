@@ -401,6 +401,11 @@ test("complete exposure uses real trigger validation and reserve estimates; part
   assert.equal((await readSetupExposure(ctx)).complete, false, "queue data keyed only by ID cannot safely price duplicate IDs across queues");
   snapshot = { ...whole, switchIncomplete: "unreadable" };
   assert.equal((await readSetupExposure(ctx)).complete, false);
+  // Issue #1053: a queue whose read Valkey answered with an error is in no row, so the read is not whole either.
+  snapshot = { ...whole, switchErrored: [] };
+  assert.equal((await readSetupExposure(ctx)).complete, true, "an empty list is a whole read");
+  snapshot = { ...whole, switchErrored: [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }] };
+  assert.equal((await readSetupExposure(ctx)).complete, false);
   snapshot = { ...snapshot, switchIncomplete: null };
   a.readJobsData = async () => new Map();
   assert.equal((await readSetupExposure(ctx)).complete, false);

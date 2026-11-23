@@ -3359,7 +3359,8 @@ function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: 
   };
   const now = Number.isSafeInteger(snapshot?.fetchedAt) ? snapshot.fetchedAt : null;
 
-  if (snapshot?.queue?.fleetDegraded) lines.push(...wrapped(`host registry unreadable (${cellOf(snapshot.queue.fleetDegraded)}): the rows last read`, "warning"));
+  // Issue #1062: a registry read in part is said so; the rows it read are this read's and the others the last read.
+  if (snapshot?.queue?.fleetDegraded) lines.push(...wrapped(snapshot.queue.registryReadInPart === true ? `host registry read in part (${cellOf(snapshot.queue.fleetDegraded)}): the rows not read are the last read` : `host registry unreadable (${cellOf(snapshot.queue.fleetDegraded)}): the rows last read`, "warning"));
   if (!info || info.loading) lines.push(...wrapped("reading the last 7 days of run records", "dim"));
   else if (info.refreshing) lines.push(...wrapped("reading the last 7 days again", "dim"));
   else if (info.unwired) lines.push(...wrapped("history not wired in this panel (no capacity reader)", "dim"));

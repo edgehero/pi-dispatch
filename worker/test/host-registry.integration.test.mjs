@@ -94,3 +94,43 @@ test("a writer whose clock is two minutes behind reads back skewed by about +120
 	for (const r of [slow, fast]) assert.ok(r.ttlAgeMs >= 0 && r.ttlAgeMs < 2000, `ttlAgeMs ${r.ttlAgeMs}`);
 	assert.equal(fast.staleMs, 0, "staleMs is unchanged: clamped for a clock ahead");
 });
+
+test("through a real Valkey whose connection holds every row's read, the registry read ends within its one bound and says it is not whole (#1062)", { skip, timeout: 20_000 }, async (t) => {
+	const w = await world(t);
+	const mine = ["held-a", "held-b", "held-c"].map((what) => w.host(what));
+	for (const { reg } of mine) await reg.start({ routes: "true" });
+	// The index goes out ahead of the rows on the proxy's connection, so it answers; from the first HGETALL on, that
+	// connection's commands are held, as behind a scan that stalled.
+	const { freezingProxy } = await import("./helpers/freezing-proxy.mjs");
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const proxy = await freezingProxy(url, { holdFrom: "HGETALL" });
+	const via = makeRedisClient(proxy.url, { disconnectTimeoutMs: 0 });
+	via.on("error", () => {});
+	t.after(() => {
+		via.disconnect();
+		proxy.close();
+	});
+	const started = performance.now();
+	const read = await w.readLiveHosts(via, { prune: false, timeoutMs: 600 });
+	const ms = performance.now() - started;
+	assert.ok(ms < 1100, `one bound for every row, not one per row (took ${Math.round(ms)} ms for at least three rows)`);
+	assert.ok(Array.isArray(read.hosts), JSON.stringify(read));
+	const [missed, of] = /^(\d+) of (\d+) host rows not read$/.exec(read.incomplete ?? "")?.slice(1).map(Number) ?? [];
+	assert.ok(missed >= 3 && of >= missed, `the rows not read are counted: ${read.incomplete}`);
+	for (const { name } of mine) assert.equal(await w.redis.sismember(w.HOST_SET, name), 1, `${name} stays indexed`);
+});
+
+test("through a real Valkey, a row that is not a hash is that row alone: the listing stays whole and its member stays (#1062)", { skip }, async (t) => {
+	const w = await world(t);
+	const { name, reg } = w.host("hashed");
+	await reg.start({});
+	const broken = uniqueHost("string");
+	w.names.add(broken);
+	await w.redis.set(w.hostKey(broken), "not a hash");
+	await w.redis.sadd(w.HOST_SET, broken);
+	const read = await w.readLiveHosts(w.redis, { prune: false });
+	assert.ok(read.hosts.some((h) => h.name === name), "the readable row is listed");
+	assert.ok(!read.hosts.some((h) => h.name === broken), "the string is no host's row");
+	assert.equal(Object.hasOwn(read, "incomplete"), false, `Valkey answered for it (${read.incomplete})`);
+	assert.equal(await w.redis.sismember(w.HOST_SET, broken), 1);
+});

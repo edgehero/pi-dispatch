@@ -326,6 +326,7 @@ const NOT_IN_THE_TABLE = Object.freeze({
   // A belt around the dry run, whose file system holds every write: a read that fails comes back as one of the table's rows.
   "the change could not be checked": "unreachable",
   "The live hosts could not be read": "version",
+  "Not every live host could be read": "version",
   "This change needs": "version",
 });
 

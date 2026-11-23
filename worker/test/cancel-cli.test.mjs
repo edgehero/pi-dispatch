@@ -803,3 +803,10 @@ test("on a real probe, a cancel request whose connection drops under it is a los
 		srv.close();
 	}
 });
+
+test("not-found names registry rows that were not read in time apart from an unreadable registry: such a host may still hold the job (#1062)", { skip: needsDeps }, async () => {
+	const partial = world({ jobKnown: false, queueNames: ["pi-jobs", "pi-jobs@a"] });
+	partial.seams.readLiveHostsFn = async () => ({ hosts: [{ name: "a", routes: "true" }], incomplete: "1 of 2 host rows not read" });
+	assert.equal(await runCancel("j1", "redis://x", partial.seams), 1);
+	assert.equal(partial.err.join(""), "error: no job j1 in 2 queue(s) [registry incomplete: 1 of 2 host rows not read; a host whose row was not read may still hold it]\n");
+});

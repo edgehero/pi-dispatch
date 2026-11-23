@@ -131,7 +131,7 @@ test("pause and resume flip this host's own queue and say when the set of queues
 	const resumed = await run(["resume"], "PI_WORKER_NAME=hosta\n");
 	assert.deepEqual([resumed.code, resumed.flipped], [0, ["15:pi-jobs"]]);
 	assert.equal(resumed.out, `resumed [registry unreadable: registry boom] [queue scan incomplete]\n  but ${killSwitchShortNote(false)}\n`);
-	assert.equal(killSwitchShortNote(true), "the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not paused. Pause the fleet again once Valkey answers");
+	assert.equal(killSwitchShortNote(true), "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers");
 	// The name is the deployment .env's alone, which the worker service runs. None declared there: the shared queue alone,
 	// never one a hostname would name, and a name only this shell sets is said and left out. A name this shell sets
 	// otherwise, or one the worker refuses, is said too, and the switch goes on.
@@ -584,8 +584,10 @@ const never = () => new Promise(() => {});
 /**
  * `status` (or `argv`, `status --target <item>`) under a short deadline, with stderr collected. `queues` maps a queue
  * name to its paused state: null, no answer; "running, uncounted", it says it runs and never gives its counts;
- * "counted, state unknown", the reverse. `probe` stands in for the probe when given, and `probeError` is an error the
- * probe reports as it connects.
+ * "counted, state unknown", the reverse; "wrongtype", Valkey answers its paused state with a WRONGTYPE error and
+ * counts it; "wrongtype, uncounted", both reads answered with that error; "connection failed", both reads fail with
+ * no answer (issue #1053). `probe` stands in for the probe when given, and `probeError` is an error the probe reports
+ * as it connects. `status` is null where nothing was printed.
  */
 async function silentStatus({ argv = ["status"], queues = { "pi-jobs": null }, deadlineMs = 300, probeAnswers = false, probe = null, probeError = null } = {}) {
 	let output = "";
@@ -611,9 +613,15 @@ async function silentStatus({ argv = ["status"], queues = { "pi-jobs": null }, d
 				})),
 				makeQueue: (connection, { name }) => {
 					const kind = queues[name];
+					dropAfter.push(connection.disconnectTimeout);
+					const wrongtype = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+					const lost = () => Promise.reject(new Error("Connection is closed."));
+					if (kind === "wrongtype" || kind === "wrongtype, uncounted" || kind === "connection failed") {
+						const counts = kind === "wrongtype" ? () => Promise.resolve({ waiting: 2, active: 1, paused: 0, delayed: 0, failed: 0 }) : kind === "connection failed" ? lost : wrongtype;
+						return { name, client: { async zrange() { return []; } }, isPaused: kind === "connection failed" ? lost : wrongtype, getJobCounts: counts, async close() { closed.push(name); } };
+					}
 					const paused = kind === "running, uncounted" ? false : kind === "counted, state unknown" ? null : kind;
 					const counted = kind === "counted, state unknown" || (paused !== null && kind !== "running, uncounted");
-					dropAfter.push(connection.disconnectTimeout);
 					return {
 						name, client: paused === null ? never() : { async zrange() { return []; } },
 						isPaused: () => (paused === null ? never() : Promise.resolve(paused)),
@@ -626,7 +634,7 @@ async function silentStatus({ argv = ["status"], queues = { "pi-jobs": null }, d
 	} finally {
 		process.stderr.write = origErr;
 	}
-	return { code, status: JSON.parse(output), err: errs.join(""), ms: performance.now() - started, asked, closed, dropAfter };
+	return { code, status: output === "" ? null : JSON.parse(output), err: errs.join(""), ms: performance.now() - started, asked, closed, dropAfter };
 }
 
 test("status against a Valkey that takes the connection and answers nothing prints what it could not read and ends at its deadline (issue #1003)", { timeout: 15_000 }, async () => {
@@ -1215,7 +1223,7 @@ test("status over a list of queues that may be short says so at the top with the
 	assert.deepEqual([unscanned.status.pausedState, unscanned.status.paused, unscanned.status.partial], [true, 3, undefined]);
 	assert.equal(unscanned.status.waitingDetails.discoveryIncomplete, true);
 	assert.equal(unscanned.err, warned);
-	assert.equal(statusShortNote(false), "the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and the sums above leave them out. Run pi-dispatch status again once Valkey answers");
+	assert.equal(statusShortNote(false), "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and the sums above leave them out. Run pi-dispatch status again once Valkey answers");
 	// The registry could not be read, and a host queue the scan found did not answer: both, and exit 1 for the queue.
 	const both = await silentStatus({ queues: { "pi-jobs": false, "pi-jobs@mini2": null }, probe: { on() {}, disconnect() {}, async smembers() { throw new Error("registry refused"); }, async scan() { return ["0", ["bull:pi-jobs@mini2:meta"]]; } } });
 	assert.equal(both.code, 1);
@@ -1330,4 +1338,182 @@ test("a resume through a real Valkey whose queue scan does not finish resumes th
 		await dropKeys(direct, `bull:${own}:*`);
 		direct.disconnect();
 	}
+});
+
+// Issue #1053: one queue's read that Valkey answered with an error (its meta key holding a string) failed the whole
+// `status`, said as a Valkey that could not be reached, while every other queue answered.
+test("status names a queue whose read Valkey answered with an error, by the reply's code alone, reads and sums every other, exits 1, and says Valkey answered (#1053)", { timeout: 15_000 }, async () => {
+	const res = await silentStatus({ queues: { "pi-jobs": false, "pi-jobs@hosta": true, "pi-jobs@hostb": "wrongtype" }, probeAnswers: true });
+	assert.equal(res.code, 1, "a queue it found and did not read, the rule for one that did not answer");
+	assert.deepEqual([res.status.partial, res.status.unavailableQueues, res.status.queueErrors], [true, ["pi-jobs@hostb"], { "pi-jobs@hostb": "WRONGTYPE" }]);
+	assert.deepEqual([res.status.waiting, res.status.paused, res.status.pausedState, res.status.pausedPartial], [6, 3, false, true], "every queue's counts that answered are summed, hostb's included");
+	assert.equal(res.err, "error: Valkey at redis://127.0.0.1:6379 answered a read with an error\n  the line above leaves out the paused state of pi-jobs@hostb (Valkey answered WRONGTYPE)\n");
+	// Both of its reads answered with the error: its counts are left out too, and no other queue's.
+	const both = await silentStatus({ queues: { "pi-jobs": true, "pi-jobs@hostb": "wrongtype, uncounted" }, probeAnswers: true });
+	assert.deepEqual([both.code, both.status.unavailableQueues, both.status.queueErrors, both.status.waiting, both.status.pausedState], [1, ["pi-jobs@hostb"], { "pi-jobs@hostb": "WRONGTYPE" }, 2, null]);
+	assert.match(both.err, /\n {2}the line above leaves out the paused state and counts of pi-jobs@hostb \(Valkey answered WRONGTYPE\)\n$/);
+	// Beside a queue that did not answer in time, the first line says both.
+	const mixed = await silentStatus({ queues: { "pi-jobs": false, "pi-jobs@hosta": null, "pi-jobs@hostb": "wrongtype" }, probeAnswers: true });
+	assert.deepEqual([mixed.code, mixed.status.unavailableQueues, mixed.status.queueErrors], [1, ["pi-jobs@hosta", "pi-jobs@hostb"], { "pi-jobs@hostb": "WRONGTYPE" }]);
+	assert.match(mixed.err, /^error: Valkey at redis:\/\/127\.0\.0\.1:6379 did not answer every read within 0\.3 seconds and answered a read with an error\n/);
+	for (const r of [res, both, mixed]) assert.doesNotMatch(r.err, /could not reach|is it running|Operation against/, "Valkey answered, and with its code alone");
+});
+
+test("status beside a queue whose connection failed reads the rest, and says the connection's error; only when nothing answered is it a Valkey it could not reach (#1053)", { timeout: 15_000 }, async () => {
+	const failed = await silentStatus({ queues: { "pi-jobs": false, "pi-jobs@hostb": "connection failed" }, probeAnswers: true });
+	assert.deepEqual([failed.code, failed.status.unavailableQueues, Object.hasOwn(failed.status, "queueErrors"), failed.status.waiting], [1, ["pi-jobs@hostb"], false, 2]);
+	assert.doesNotMatch(failed.err, /could not reach/);
+	assert.match(failed.err, /\n {2}Connection is closed\.\n {2}the line above leaves out the paused state and counts of pi-jobs@hostb\n$/);
+	// Every queue's reads failed with no answer: the connection's error, as before, with no line.
+	const none = await silentStatus({ queues: { "pi-jobs": "connection failed", "pi-jobs@hostb": "connection failed" }, probeAnswers: true });
+	assert.deepEqual([none.code, none.status], [1, null]);
+	assert.match(none.err, /^error: could not reach Valkey at redis:\/\/127\.0\.0\.1:6379: .*\n {2}Connection is closed\.\n$/);
+});
+
+test("status through a real Valkey where one queue's meta key holds a string names that queue as answered with WRONGTYPE and reads the rest (#1053, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
+	const { makeQueue } = await import("../src/queue.mjs");
+	const { makeRedisClient, parseConnection } = await import("../src/connection.mjs");
+	const url = process.env.VALKEY_TEST_URL;
+	// The broken queue under a host queue name of this test's own, since the scan finds it by its meta key; every other
+	// queue the status builds is prefixed, so no other test's queue is read.
+	const host = `pd1053-${process.pid}-${Date.now()}`;
+	const broken = `pi-jobs@${host}`;
+	const prefix = `${host}-`;
+	const direct = makeRedisClient(url);
+	direct.on("error", () => {});
+	let out = "";
+	const errs = [];
+	const origErr = process.stderr.write.bind(process.stderr);
+	try {
+		const seed = makeQueue(parseConnection(url), { name: broken });
+		await seed.add("seed", { kind: "local" }, { jobId: "seed-1053" });
+		await seed.close();
+		await direct.del(`bull:${broken}:meta`);
+		await direct.set(`bull:${broken}:meta`, "not a hash");
+		process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+		const code = await main(["status", "--valkey-url", url], { VALKEY_URL: url }, {
+			valkeyRefusal: async () => null, write: (text) => { out += text; },
+			controlClients: { makeQueue: (connection, { name }) => makeQueue(connection, { name: name === broken ? name : `${prefix}${name}` }) },
+		});
+		process.stderr.write = origErr;
+		const err = errs.join("");
+		assert.equal(code, 1, err);
+		const line = JSON.parse(out);
+		assert.equal(line.queueErrors?.[broken], "WRONGTYPE", out);
+		assert.ok(line.unavailableQueues.includes(broken));
+		assert.ok(!line.unavailableQueues.includes("pi-jobs"), "the shared queue was read");
+		assert.equal(typeof line.waiting, "number");
+		assert.doesNotMatch(err, /could not reach|Operation against/, err);
+		assert.match(err, new RegExp(`answered a read with an error\\n.*${broken} \\(Valkey answered WRONGTYPE\\)`), err);
+	} finally {
+		process.stderr.write = origErr;
+		await dropKeys(direct, `bull:${prefix}*`);
+		await dropKeys(direct, `bull:${broken}:*`);
+		direct.disconnect();
+	}
+});
+
+// Issue #1062: three registry hosts whose rows wait behind a scan that stalled on the probe's connection cost a bound
+// each, so the resume's deadline was gone before its write, and the shared queue, which answered, was "not sent".
+test("a resume behind a stalled scan with three registry hosts ends within its deadline, resumes the shared queue, and names the registry rows it did not read (#1062)", { timeout: 15_000 }, async () => {
+	const dir = tempDir("pd-1062-registry-");
+	const res = await resumeInOrder(dir, "", { hosts: ["hosta", "hostb", "hostc"], scan: never });
+	assert.ok(res.ms < 2_800, `the registry's rows cost one bound, not three (took ${Math.round(res.ms)} ms of a three-second deadline)`);
+	assert.deepEqual([res.code, res.resumed, res.err], [0, ["pi-jobs"], ""]);
+	assert.equal(res.out, `resumed [registry incomplete: 3 of 3 host rows not read] [queue scan incomplete]\n  but ${killSwitchShortNote(false)}\n`);
+});
+
+test("status and status --target say registry rows not read in time as fleetIncomplete, with the list may be short, within the deadline (#1062)", { timeout: 15_000 }, async () => {
+	const probe = { on() {}, disconnect() {}, async smembers() { return ["hosta", "hostb"]; }, hgetall: never, async scan() { return ["0", []]; } };
+	const status = await silentStatus({ queues: { "pi-jobs": false }, probe, deadlineMs: 3_000 });
+	assert.ok(status.ms < 2_800, `took ${Math.round(status.ms)} ms`);
+	assert.deepEqual([status.code, status.status.fleetIncomplete, status.status.queuesMayBeShort, status.status.waitingDetails.discoveryIncomplete, status.status.fleet], [0, "2 of 2 host rows not read", true, true, undefined]);
+	assert.equal(status.err, `warning: ${statusShortNote(false)}\n`);
+	const target = await silentStatus({ argv: ["status", "--target", "owner/repo#12"], queues: { "pi-jobs": false }, probe, deadlineMs: 3_000 });
+	assert.deepEqual([target.code, target.status.fleetIncomplete, target.status.queuesMayBeShort, target.status.complete], [0, "2 of 2 host rows not read", true, false]);
+});
+
+test("a resume through a real Valkey whose scan stalls, with three registry hosts, ends within its deadline and resumes what it found (#1062, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
+	const { makeQueue } = await import("../src/queue.mjs");
+	const { makeRedisClient, parseConnection } = await import("../src/connection.mjs");
+	const { HOST_SET, hostKey } = await import("../src/host-registry.mjs");
+	const url = process.env.VALKEY_TEST_URL;
+	const tag = `pd1062-${process.pid}-${Date.now()}`;
+	const prefix = `${tag}-`;
+	const hosts = ["a", "b", "c"].map((x) => `${tag}-${x}`);
+	const cwd = tempDir("pd-1062-held-");
+	const direct = makeRedisClient(url);
+	direct.on("error", () => {});
+	try {
+		// Three live, routing rows of this test's own; every queue the resume builds is prefixed, the shared one paused.
+		for (const name of hosts) {
+			await direct.hset(hostKey(name), "name", name, "routes", "true", "beatAt", String(Date.now()));
+			await direct.pexpire(hostKey(name), 60_000);
+			await direct.sadd(HOST_SET, name);
+		}
+		const shared = makeQueue(parseConnection(url), { name: `${prefix}pi-jobs` });
+		await shared.pause();
+		await shared.close();
+		const resumed = await throughHeldScan(["resume"], { prefix, cwd });
+		assert.ok(resumed.ms < 4_500, `within the five-second deadline (took ${Math.round(resumed.ms)} ms)`);
+		assert.equal(resumed.code, 0, resumed.err);
+		assert.match(resumed.out, /^resumed \[registry incomplete: \d+ of \d+ host rows not read\] \[queue scan incomplete\]\n {2}but the list of queues may be short/);
+		assert.equal(await direct.hexists(`bull:${prefix}pi-jobs:meta`, "paused"), 0, "the shared queue was resumed");
+	} finally {
+		for (const name of hosts) {
+			await direct.del(hostKey(name));
+			await direct.srem(HOST_SET, name);
+		}
+		await dropKeys(direct, `bull:${prefix}*`);
+		direct.disconnect();
+	}
+});
+
+test("status where every queue's reads are answered with an error and the registry and the scan are unread says Valkey answered, never that it could not be reached (#1053)", { timeout: 15_000 }, async () => {
+	// An error reply is Valkey answering: "is it running?" only when nothing at all answered.
+	// The scan ends at its two-second bound inside a three-second deadline, so the queue is built and read after it.
+	const probe = { on() {}, disconnect() {}, async smembers() { throw new Error("registry refused"); }, scan: never };
+	const res = await silentStatus({ queues: { "pi-jobs": "wrongtype, uncounted" }, probe, deadlineMs: 3_000 });
+	assert.equal(res.code, 1);
+	assert.deepEqual([res.status.unavailableQueues, res.status.queueErrors, res.status.fleet], [["pi-jobs"], { "pi-jobs": "WRONGTYPE" }, "registry refused"]);
+	assert.match(res.err, /\nerror: Valkey at redis:\/\/127\.0\.0\.1:6379 answered a read with an error\n {2}the line above leaves out the paused state and counts of pi-jobs \(Valkey answered WRONGTYPE\)\n$/);
+	assert.doesNotMatch(res.err, /could not reach|did not answer within|is it running/);
+});
+
+/** A probe whose registry lists hosta and hostb, hostb's row never answering, and whose scan ends at once, empty. */
+const hostbUnread = () => ({
+	on() {}, disconnect() {},
+	async smembers() { return ["hosta", "hostb"]; },
+	hgetall: (key) => (key === "host:h:hostb" ? never() : Promise.resolve({ name: "hosta", routes: "true", beatAt: "1800000000000" })),
+	async scan() { return ["0", []]; },
+});
+
+test("a resume over a registry read in part whose scan finished says its list may be short, by the registry alone (#1062)", { timeout: 15_000 }, async () => {
+	const res = await resumeInOrder(tempDir("pd-1062-part-"), "", {}, { makeClient: hostbUnread });
+	assert.deepEqual([res.code, res.resumed, res.err], [0, ["pi-jobs", "pi-jobs@hosta"], ""]);
+	assert.equal(res.out, `resumed [2 queues] [registry incomplete: 1 of 2 host rows not read]\n  but ${killSwitchShortNote(false)}\n`);
+});
+
+test("a resume that fails over a registry read in part names the registry on its first line and says the list may be short (#1062)", { timeout: 15_000 }, async () => {
+	const dir = tempDir("pd-1062-failed-");
+	writeFileSync(join(dir, ".env"), "");
+	const errs = [];
+	const origErr = process.stderr.write;
+	process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+	let code;
+	try {
+		code = await main(["resume"], { VALKEY_URL: "redis://127.0.0.1:1/15" }, {
+			cwd: dir, statusDeadlineMs: 3_000, write: () => {}, valkeyRefusal: async () => null,
+			controlClients: {
+				makeRedisClient: hostbUnread,
+				makeQueue: (_c, { name }) => ({ name, client: Promise.resolve({}), resume: () => Promise.reject(replyError("NOPERM this user has no permissions to run the 'evalsha' command")), async close() {} }),
+			},
+		});
+	} finally {
+		process.stderr.write = origErr;
+	}
+	const lines = errs.join("").split("\n");
+	assert.equal(code, 1);
+	assert.equal(lines[0], "error: could not resume the whole deployment at redis://127.0.0.1:1/15 [registry incomplete: 1 of 2 host rows not read]");
+	assert.ok(lines.includes(`  ${killSwitchShortNote(false)}`), errs.join(""));
 });

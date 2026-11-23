@@ -11641,8 +11641,8 @@ budget is below the projects' minimums together, and holds THIS host's `usedMemM
 a container carries none), and warns when THIS host's `budgetSeed` is `unlisted`, naming the venues. NO JOB DECISION READS THEM. An
 earlier draft of phase 2 refused a forge job `job-size-exceeds-fleet` after two reads 30 s apart showed no live host
 whose budget fits it, and the gate round refuted it: a clean stop DELETES its row, a crash lets it expire, and
-`readLiveHosts` drops a row whose read times out, so a host that is merely restarting was read as absent and a job it
-would have run was refused for good. A job on the shared queue of a host with `PI_WORKER_NAME` whose size never fits this host
+`readLiveHosts` dropped a row whose read timed out (since issue #1062 it marks the listing `incomplete`), so a host that is
+merely restarting was read as absent and a job it would have run was refused for good. A job on the shared queue of a host with `PI_WORKER_NAME` whose size never fits this host
 now waits for a host it fits on (a host without one refuses it: nobody else drains its queue), and doctor names a project that fits no live host. So the falsification test below holds UNAMENDED again.
 
 **The TTL is refreshed on EVERY beat**, which reverses this project's stated set-once rule (`budget.mjs`:
@@ -11700,6 +11700,42 @@ falsification test holds unamended (a skipped member was never a host).
 **`{ unreachable }` and `[]` are different answers** and no consumer may collapse them. "There are no
 other hosts" and "I could not find out" differ, and a panel that renders the second as the first tells an
 operator their fleet is gone when Valkey merely blinked.
+
+**One bound over the whole read, and a listing that is not whole says so** (issue #1062, ADDED 2026-11-23).
+`readLiveHosts`' `timeoutMs` bounds the whole read, not each command: once the index answers, every member's row (its
+HGETALL beside its PTTL) is read side by side under what is left of that one bound, and a stale member's SREM under what
+is left after its row answered; every row's bound still running when the read ends is cleared, so a row whose HGETALL
+failed at once does not leave its PTTL's bound holding the process. The rows were read one after another, each under a full bound, so a client whose
+connection held them (three hosts behind a scan that stalled on the kill switch's probe) spent one bound per host: a
+`resume` took 6.17 s in all, past its five-second deadline, sent nothing, and named the connection as the cause. A row that did not
+answer in time, or whose read failed with no answer from Valkey, makes the answer `{ hosts, incomplete, unreadHosts }`,
+`incomplete` saying how many ("2 of 3 host rows not read") and `unreadHosts` naming those members: a third answer, neither `{ unreachable }` nor a whole list, which a
+consumer may not read as either. A row Valkey answered with an error (a key that is not a hash) is no host's
+self-description and degrades that row alone, as before; neither kind of row is pruned, since only a row Valkey answers
+as empty is stale. `livePeers` keeps `incomplete`. Each consumer: the kill switch, `status` and `status --target` name it
+(`[registry incomplete: ...]` on a switch's line and the first line of its report, `fleetIncomplete` on a status line)
+and say the list of queues may be short; `cancel` and `steer` say a host whose row was not read may still hold the job;
+`capacity` (and the console's capacity read) says it in its coverage, and `dispatch_capacity` adds
+`registryReadInPart: true`, a yes the agent can act on, where the coverage says it only in sentences; doctor says the registry was read in part and its
+fleet checks leave those hosts out; the host-lost sweep reads it as unknown (`liveHostNamesOf`, null), which extends a
+recovery's deadline and never fails a run whose host was not read; the console's fleet reads take it as a registry read
+in part (`fleetDegraded` with `registryReadInPart`, the switch set's `blind` with `blindPartial`), joining the rows it
+read and their queues to the last set and keeping the last rows of only the hosts in `unreadHosts` (each marked
+`notRead`, its consumer health and its beat's age unknown, drawn as last seen and not counted as beating, so a count of
+beating hosts is "at least", or "no host's beat was read" where it is 0), while a host whose row answered empty is dropped as a whole read drops it, with
+`hostsReadAt` that read's instant, so its switch reaches every host it read as the CLI's does; its pages (Fleet,
+Overview, a host's and a run's, a project's held money and Job size, the latter judged on the budgets of the rows
+read, the secrets page's hosts, and a one-queue switch's refusal of a
+queue it does not know), `dispatch_hosts` (`readInPart`, a `notRead` row with no beat or age) and the TUI say so ("read
+in part", never "could not be read"); the console's capacity read names the registry in `unread`, its scheduler read
+(`readSchedulers`) carries `hostsReadInPart`, which `/dispatch triggers` says and `dispatch_status` gives as
+`schedulersReadInPart: true`, a yes the agent can act on, and the insights sizing, capacity, spend and
+budget split views say it (`hostsReadInPart`, `venuesReadInPart`, the sizing view's `readInPart`; Spend's held money,
+today's on its chart too, then not known, and the budget split never says all hosts agree); and the trigger edit's
+version gate refuses on it as on a registry it cannot read. UNCHANGED, checked: the cron gate (not knowing whether a peer
+disagrees withholds nothing, as for `{ unreachable }`), the receiver's router (the shared queue is always a correct
+answer), the updates page and the host loads view (a host not listed is asserted neither way), and every reader that
+promises no writes keeps `prune: false`.
 
 **The two shared bounds keep their keys under the prefixes they belong to**, not under `host:`:
 `wait:check:<i>` sits with the rest of the wait feature so one `KEYS wait:*` still shows all of it, and
@@ -14417,11 +14453,27 @@ its `unavailableQueues` with `complete: false`, and its exit code stays 0. No ke
 **A list that may be short (#1043).** When the host registry or the queue scan did not finish, `status` adds a top-level
 `queuesMayBeShort: true` beside `waitingDetails.discoveryIncomplete`, since a queue it did not find is in none of the
 summed fields, and writes under the line, on stderr, `warning: the list of queues may be short: the host registry or the
-look for queues could not be read, so other queues may exist and the sums above leave them out. Run pi-dispatch status
+look for queues could not be read whole, so other queues may exist and the sums above leave them out. Run pi-dispatch status
 again once Valkey answers` (the fleet's sentence for a switch over such a list, #964, adapted to a read). The exit code
 does not change for it: 0 when every queue found answered, 1 with `partial` when one did not. `--target` adds the same
 field beside `complete: false` and `discoveryIncomplete`, and the same line ending "the line above leaves out what they
 hold". No key, field or TTL changes.
+
+**A queue Valkey answers with an error, and registry rows not read (#1053, #1062).** A queue whose paused state or counts
+Valkey answers with an error reply (its `bull:<queue>:meta` holding a string gives `WRONGTYPE`) is a queue not read
+whole: the read that got the error is left out (its paused state, or its counts) and its other read still counts, as for
+a read that did not answer, so its counts that answered are in the sums; it is in `unavailableQueues` with `partial:
+true`, a top-level `queueErrors` maps its name to the reply's code alone (`{"pi-jobs@hostb":"WRONGTYPE"}`, the first word
+of the reply, `replyErrorCode`; never the rest of the reply, nor a URL), every other queue is read and summed as usual,
+and the `error:` line says Valkey answered a read with an error, the line under it naming the queue with that code ("the
+paused state of pi-jobs@hostb (Valkey answered WRONGTYPE)"); exit code 1, the rule for a queue found and not read. A read that fails with no answer (a connection that failed) beside one that answered is one
+more queue not read, its error under the first line; "could not reach Valkey" is said only when no queue read answered at
+all, as before. Such a reply used to fail the whole `status`, no line printed, said as a Valkey that could not be
+reached. When the registry listed hosts whose rows were not all read in time, `status` and `status --target` add a
+top-level `fleetIncomplete` with the registry's words ("3 of 3 host rows not read"), beside `queuesMayBeShort`, the
+warning line, and `waitingDetails.discoveryIncomplete`, as for a registry that could not be read at all (`fleet`). The
+exit code does not change for it. `--target` UNCHANGED, checked, for an error reply: it reads no meta key, and a queue
+whose read fails is already in its `unavailableQueues`. No key, field or TTL changes.
 
 - **Canary exclusion (#717)**: ordinary worker pickup checks `dispatch:canary:exclusive` before paid gates and defers with reason `canary`. The experiment takes its compare-owned renewable lease before proving shared/host queue active lists empty. Lost ownership aborts the experiment. All consuming workers must run this implementation before experiments begin, and legacy consumers must not be started during an experiment: older code does not honor the lease. This closes the standalone command concurrency bypass; queue pause still refuses canaries.
 
@@ -15507,6 +15559,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-23 (#1053, #1062) | **`INT-DEFER-REASON-KEY` AMENDED**, a NEW paragraph after #1043's: a read of a queue's paused state or counts that Valkey answers with an error reply is left out while that queue's other read still counts, the queue in `unavailableQueues` with `partial: true` and named in a NEW top-level `queueErrors` by the reply's code alone, every other queue read and summed, exit code 1, the `error:` line saying Valkey answered with an error; "could not reach Valkey" only when no queue read answered (measured on a scratch deployment with `bull:pi-jobs@hostb:meta` a string: before, no line and "could not reach Valkey ... WRONGTYPE ...", exit 1 in 0.14 s; after, the line with `queueErrors`, pi-jobs@hostb's paused state left out and every count that answered summed, exit 1 in 0.14 s); and a NEW top-level `fleetIncomplete` on `status` and `status --target` for registry rows not read in time; #1043's paragraph's quoted warning CORRECTED to "could not be read whole", the words it now prints. `--target` UNCHANGED, checked, for an error reply. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**, a NEW paragraph after "`{ unreachable }` and `[]` are different answers": `readLiveHosts`' `timeoutMs` bounds the whole read, the rows side by side under what is left of it and their bounds cleared when it ends, and a row not read in time makes the answer `{ hosts, incomplete, unreadHosts }`, handled by every consumer as listed there (the console joining the rows it read to its last set, keeping the last rows of `unreadHosts` alone, drawn as last seen, and saying the registry was read in part; `dispatch_status` and `dispatch_capacity` each adding a yes, `schedulersReadInPart` and `registryReadInPart`), never pruned (measured, three registry hosts behind a held scan: `resume` 6.17 s, exit 1, "pi-jobs: not sent (no connection within 5 seconds)" before; 2.17 s, exit 0, "resumed [registry incomplete: 3 of 3 host rows not read] [queue scan incomplete]" after); the phase 2 budget paragraph CORRECTED, its "drops a row whose read times out" now in the past. The content rule, the keys, the TTL and the expiry fields UNCHANGED, checked. **Code evidence**: worker/src/cli.mjs -> answeredWithin, settleQueueReads, statusShortfall, killSwitch, deploymentQueueNames, targetStatus, switchReport; worker/src/connection.mjs -> replyErrorCode; worker/src/host-registry.mjs -> readLiveHosts, liveHostNamesOf, livePeers; admin/src/read-model.mjs -> createFleetReader (snapshot), readSchedulers, readCapacity; admin/src/index.ts -> dispatch_status, dispatch_capacity |
 | 2026-11-22 (#1043) | **`INT-DEFER-REASON-KEY` AMENDED**, a NEW paragraph after #1003's: when the host registry or the queue scan did not finish, `status` adds a top-level `queuesMayBeShort: true` and a `warning:` line under it on stderr saying other queues may exist and the sums leave them out, where only `waitingDetails.discoveryIncomplete` said so and the sums read as the whole fleet's (measured with the scan held three seconds: `paused` 0 and `pausedState` false over two paused host queues, exit code 0). The exit code does not change for it. `--target` adds the same field and line. The CLI reader's and #932's paragraphs UNCHANGED, checked. **Code evidence**: worker/src/cli.mjs -> `killSwitch`, `targetStatus`, `statusShortNote` |
 | 2026-11-23 (#1049) | **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED and CORRECTED**, the CPU reserve's helper: the worker's one `rm -f` of its killed doctor child's helper name now runs wherever its `local` venue is in use (the child reads the docker reserve there and runs a helper where its own read of the daemon says cgroupfs), unless the worker's own read of that venue already says a method other than the helper (the child reads the same daemon, and an rm there could only time out on a slow daemon and say a helper was not removed that never existed); it ran only where the worker's own reserve already held a helper venue, which it learns only once its own facts read has answered, so on a slow daemon a child killed before that kept its helper. The residual names the canary sweep's caveats in "a daemon this host owns", the case of another host reaching a daemon this host owns ADDED beside the PID namespace. The start numbers' sub-bullet CORRECTED: the spawn was `ms` before `container_first_output`'s `time` within a millisecond, not to the millisecond, since `ms` and `time` are two reads of the clock one after the other. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the residual in "a daemon this host owns": the same holds across machines, a daemon this host owns that another host also reaches carrying that host's doctors' pid-named canary networks and probes and CPU-reserve helpers (no gh probe, which runs only on a daemon its own host owns), which this host's doctor reads against its own process table and can remove while their doctor is alive over there, with the same bounds and not guarded (a name carries no host). UNCHANGED, checked: the helper's argv and names, doctor's sweep and its owner rules, `doctor_helper_not_removed`'s fields, the leftover pass, `INT-DOCTOR-RESULTS-KEY`, `INT-LIVE-PROBE-CONTRACT` (its own caveat stands). **Code evidence**: worker/src/start.mjs -> startWorker (the doctor spawner's afterKill, localBlessed, the reserve's states); worker/src/cpu-reserve.mjs -> removeKilledDoctorHelper, makeCpuReserve (states); worker/src/doctor.mjs -> doctorCpuReserve (localUsed), sweepStaleDoctorHelpers, sweepStaleProbeContainers. |
 | 2026-11-22 (#1008, console) | **`INT-AUTH-CONNECTIONS-FILE-CONTRACT` AMENDED**, the host-status key paragraph: the console reads the key outside a snapshot (`readSubscriptionStatusOf`, the registry and the status keys alone) for the trigger page's cap judgement and the paid previews' reserve estimates, and a bound row with no paid extra usage names its provider notional (`notionalBoundProviders`); the key's shape, lifetime and bounds UNCHANGED, checked. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: the console reads `notionalProviders`, `tokens.costNotional`, `tokens.allowanceMicros` and `tokens.costChargedMicros` as written. **Code evidence**: admin/src/read-model.mjs -> readSubscriptionStatusOf; admin/src/subscription-auth-view.mjs -> notionalBoundProviders; admin/src/trigger-environment-plans.mjs -> notionalProviders; admin/src/console/actions.mjs -> reserveInputsLive |

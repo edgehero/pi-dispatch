@@ -27,6 +27,8 @@ import {
   doctorFromSetup,
   HOSTS_UNREAD_TEXT,
   hostsUnread,
+  REGISTRY_PART_TEXT,
+  registryReadInPart,
   runLink as recordLink,
   timeHtml,
 } from "./common.mjs";
@@ -74,7 +76,9 @@ const gone = html`<p class="note"> This host has no live registry row. Its last 
 // "no record" or "no result" of it. Only a read that showed no row does.
 const unreadOf = (v) => hostsUnread(v.data?.snapshot);
 const notKnown = html`<p class="note">${HOSTS_UNREAD_TEXT}</p>`;
-const goneOf = (v) => (unreadOf(v) ? notKnown : gone);
+// Issue #1062: over a registry read in part, a host with no row may be one whose row did not answer, not one gone.
+const partNotKnown = html`<p class="note">${REGISTRY_PART_TEXT} Whether this host is live is not known.</p>`;
+const goneOf = (v) => (unreadOf(v) ? notKnown : registryReadInPart(v.data?.snapshot) ? partNotKnown : gone);
 // A history that failed (null), or an empty one whose fleet mirror was not read: the reader does not throw in an
 // outage, it answers no runs and a mirror that is neither "ok" nor "off". Neither is a host no record names.
 const historyUnread = (history) =>
@@ -119,10 +123,14 @@ export function orphanCommand(job) {
 
 export const hostState = (v) => {
   const h = hostOf(v);
-  const unread = Boolean(v.data?.snapshot?.queue?.fleetDegraded);
+  // A registry read in part leaves this host's row as unread only where it did not reach it (`notRead`, issue #1062).
+  const part = registryReadInPart(v.data?.snapshot);
+  const unread = Boolean(v.data?.snapshot?.queue?.fleetDegraded) && !(part && h && h.notRead !== true);
   const skew = h ? hostSkewText(h) : null;
   const age = h ? beatAgeOf(h) : null;
-  const late = age === null || age > 60000;
+  // A row the registry read in part did not reach has no beat of now (`beatAgeOf` null for it): not read, never late.
+  const notRead = h?.notRead === true;
+  const late = !notRead && (age === null || age > 60000);
   if (
     h &&
     !late &&
@@ -136,6 +144,12 @@ export const hostState = (v) => {
   const doctor = doctorHostsOf(v.data?.snapshot).find(
     (row) => row.name === label(v),
   );
+  // Issue #1062: over a registry read in part, a host with no row may be one whose row did not answer in time.
+  if (!h && registryReadInPart(v.data?.snapshot) && !unreadOf(v))
+    return ui.card({
+      tint: "attention",
+      body: html`<div class="hd-state"><span class="tile tone-attention">${ui.icon("beat")}</span><div class="hd-state__t"><h2>Host not known</h2><p>${REGISTRY_PART_TEXT} Nothing here says whether ${label(v)} is live, late or gone.</p></div></div>`,
+    });
   if (!h && unreadOf(v))
     return ui.card({
       tint: "attention",
@@ -143,7 +157,7 @@ export const hostState = (v) => {
     });
   return ui.card({
     tint: "attention",
-    body: html`<div class="hd-state"><span class="tile tone-attention">${ui.icon("beat")}</span><div class="hd-state__t"><h2>${!h ? "Host has gone" : late ? `Stale: no beat for ${age === null ? "an unknown time" : ageText(age)}` : ["failed", "stalled"].includes(h.consumerHealth?.state) ? "Queue consumer needs attention" : "Host needs attention"}</h2><p>${consumerHealthText(h?.consumerHealth)}</p>${unread ? html`<p>${REGISTRY_UNREAD_TEXT}</p>` : null}${h ? html`${late ? html`<p>Heartbeat late: ${age === null ? "age not known" : ageText(age)} (expected within 1m). The worker beats every 15s; routing stops after three missed beats. Jobs already in its own queue wait for it.${doctor && doctorStale(doctor) ? ` Doctor on ${h.name} is also ${ageText(doctor.ageMs)} old.` : ""}</p>` : null}${h.noExpiry ? html`<p>${HOST_NO_EXPIRY_TEXT}</p>` : null}${skew === null ? null : html`<p>${skew}</p>`}${h.jobsUnreadable ? html`<p>${JOBS_UNREAD_TEXT}</p>` : null}<p>${h.routes === false || h.routes === "false" ? "This host has no routing queue; it still takes shared jobs." : "This host takes its own routed jobs and shared jobs."}</p>` : gone}</div>${h && late && canAct(v) && h.routes !== false && h.routes !== "false" ? html`<div class="hd-state__a">${ui.actForm({ action: "queue-pause", hidden: [["queue", hostQueueName(h.name)]], label: `Pause ${hostQueueName(h.name)}`, kind: ["danger", "sm"] })}</div>` : null}</div>`,
+    body: html`<div class="hd-state"><span class="tile tone-attention">${ui.icon("beat")}</span><div class="hd-state__t"><h2>${!h ? "Host has gone" : notRead ? "Row not read this time" : late ? `Stale: no beat for ${age === null ? "an unknown time" : ageText(age)}` : ["failed", "stalled"].includes(h.consumerHealth?.state) ? "Queue consumer needs attention" : "Host needs attention"}</h2><p>${consumerHealthText(h?.consumerHealth)}</p>${unread ? html`<p>${part ? REGISTRY_PART_TEXT : REGISTRY_UNREAD_TEXT}</p>` : null}${h ? html`${late ? html`<p>Heartbeat late: ${age === null ? "age not known" : ageText(age)} (expected within 1m). The worker beats every 15s; routing stops after three missed beats. Jobs already in its own queue wait for it.${doctor && doctorStale(doctor) ? ` Doctor on ${h.name} is also ${ageText(doctor.ageMs)} old.` : ""}</p>` : null}${h.noExpiry ? html`<p>${HOST_NO_EXPIRY_TEXT}</p>` : null}${skew === null ? null : html`<p>${skew}</p>`}${h.jobsUnreadable ? html`<p>${JOBS_UNREAD_TEXT}</p>` : null}<p>${h.routes === false || h.routes === "false" ? "This host has no routing queue; it still takes shared jobs." : "This host takes its own routed jobs and shared jobs."}</p>` : gone}</div>${h && late && canAct(v) && h.routes !== false && h.routes !== "false" ? html`<div class="hd-state__a">${ui.actForm({ action: "queue-pause", hidden: [["queue", hostQueueName(h.name)]], label: `Pause ${hostQueueName(h.name)}`, kind: ["danger", "sm"] })}</div>` : null}</div>`,
   });
 };
 
@@ -626,7 +640,7 @@ export const hostRow = card("Registry row", (h, v) =>
           ],
         ],
         { cols: 1 },
-      )} <p> Last beat ${ageText(beatAgeOf(h))} ago. Every 15s. The row expires after 90s without one. </p> ${
+      )} <p> ${h.notRead === true ? "Last beat not read this time: the host registry was read in part." : `Last beat ${ageText(beatAgeOf(h))} ago.`} Every 15s. The row expires after 90s without one. </p> ${
         h.noExpiry
           ? html`<p class="warn"> This row has no expiry and may outlive its host. </p>`
           : null

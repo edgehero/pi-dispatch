@@ -21,7 +21,7 @@ import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dis
 import { requestSandboxEnd } from "@edgehero/pi-dispatch/sandbox-sessions";
 import { PACKAGE_MOVED_SENTENCE, PACKAGE_NOT_TAKEN_SENTENCE, UPDATES_UNREAD_SENTENCE } from "../src/console/actions.mjs";
 import { switchPartialWords, actionNamed, agentFailure, AGENT_QUEUES_SHORT, AGENT_REFUSED, AGENT_UNCONFIRMED, PAUSE_SNAPSHOT_TIMEOUT_MS, START_USED } from "../src/console/actions.mjs";
-import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, SWITCH_UNREAD_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
+import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueErroredRefusal, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_ERRORED_LINE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, SWITCH_UNREAD_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { CONFIRM_SLOT_ID, doneBannerHtml, PARTIAL_NOTE } from "../src/console/confirm-view.mjs";
@@ -2470,6 +2470,51 @@ test("a fleet or queue switch previews over the queues the switch flips: a stopp
   assert.deepEqual((await c.both("fleet-resume", {})).confirm.json().change.inverse, { action: "fleet-pause", body: {} });
 });
 
+// Issue #1053: a switch preview's read where Valkey answered one queue's read with an error (its meta key holding a
+// string) refused every one-queue preview as "the fleet could not be read (is Valkey reachable?)".
+test("a switch read that Valkey answered with an error for one queue names it: that queue's preview refuses by name, another's goes on, the fleet's list it as not counted (#1053)", async () => {
+  const { paths } = deployment();
+  let errored = [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }];
+  const acted = [];
+  const fleet = {
+    snapshot: async () => ({ queueCounts: [{ queue: "pi-jobs", paused: false, counts: { waiting: 1 } }, { queue: "pi-jobs@hosta", paused: true, counts: { paused: 2 } }], switchErrored: errored }),
+    pause: async () => (acted.push("pause"), { results: [{ shown: "redis://h/0", res: { ok: true, queues: ["pi-jobs", "pi-jobs@hosta", "pi-jobs@hostb"] } }] }),
+    resume: async () => (acted.push("resume"), { results: [{ shown: "redis://h/0", res: { ok: true, queues: ["pi-jobs", "pi-jobs@hosta", "pi-jobs@hostb"] } }] }),
+    pauseQueue: async ({ queue, paused }) => (acted.push(`${paused ? "pause" : "resume"} ${queue}`), { ok: true }),
+  };
+  const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
+  // Its own queue: refused, by name and code, never as the whole fleet unread.
+  for (const action of ["queue-pause", "queue-resume"]) {
+    const own = await c.act(action, { queue: "pi-jobs@hostb" });
+    assert.equal(own.status, 400, own.text);
+    assert.equal(own.json().error, queueErroredRefusal("pi-jobs@hostb", "WRONGTYPE"));
+  }
+  assert.equal(queueErroredRefusal("pi-jobs@hostb", "WRONGTYPE"), "pi-jobs@hostb could not be read: Valkey answered its read with an error (WRONGTYPE), so whether it is paused is not known here; nothing was changed");
+  // Another queue's preview goes on, and its switch is made.
+  const other = await c.both("queue-pause", { queue: "pi-jobs" });
+  assert.equal(other.confirm.status, 200, other.confirm.text);
+  assert.ok(!JSON.stringify(other.preview).includes("hostb"), "another queue's error is no part of this one's preview");
+  // The fleet's pause lists it, and says it is not in the counts.
+  const line = SWITCH_ERRORED_LINE(errored);
+  assert.equal(line, "Not read, so not in these counts: pi-jobs@hostb (Valkey answered WRONGTYPE); the switch is still sent to it");
+  const pause = await c.both("fleet-pause", {});
+  assert.ok(pause.preview.summary.includes("Queues: pi-jobs, pi-jobs@hosta, pi-jobs@hostb"), JSON.stringify(pause.preview.summary));
+  assert.ok(pause.preview.summary.includes(line), JSON.stringify(pause.preview.summary));
+  assert.equal(pause.confirm.status, 200, pause.confirm.text);
+  // The fleet's resume: the queue may be paused and hold jobs, so the count is a floor and the Undo is not exact.
+  const resume = await c.both("fleet-resume", {});
+  assert.ok(resume.preview.summary.includes(line), JSON.stringify(resume.preview.summary));
+  assert.ok(resume.preview.summary.some((one) => one.startsWith("At least 2 jobs wait to start in the paused queues (pi-jobs@hosta)")), JSON.stringify(resume.preview.summary));
+  assert.equal(resume.preview.count, undefined, "a floor is no count");
+  assert.deepEqual([resume.confirm.json().change.inverse, resume.confirm.json().change.undo], [null, UNDO_SENTENCES.resumeShort]);
+  assert.deepEqual(acted, ["pause pi-jobs", "pause", "resume"]);
+  // A code that is not one is left out, never shown; two errored queues are named together.
+  errored = [{ queue: "pi-jobs@hostb", error: "WRONGTYPE" }, { queue: "pi-jobs@hostc", error: "NOSCRIPT" }, { queue: "pi-jobs@hostd", error: "WRONGTYPE Operation against a key" }];
+  const two = await c.act("fleet-pause", {});
+  assert.ok(two.json().summary.includes("Not read, so not in these counts: pi-jobs@hostb (Valkey answered WRONGTYPE), pi-jobs@hostc (Valkey answered NOSCRIPT); the switch is still sent to them"), two.text);
+  assert.ok(!two.text.includes("Operation against"));
+});
+
 // Issue #737: the switch's queues as one preview read them can be short: a keyspace scan that did not finish
 // (`switchIncomplete`), or a fleet of more queues than a preview reads (`switchTruncated`).
 test("a short switch read never claims an exact Undo: paused before is not known, the waiting count is a floor, and a queue it did not read is not called foreign", async () => {
@@ -3303,11 +3348,11 @@ test("a fleet pause or resume that switched every queue it knew over a set that 
     };
     const paused = await rowsOf(() => c.both("fleet-pause", {}));
     assert.equal(paused.res.confirm.status, 200, paused.res.confirm.text);
-    assert.equal(paused.res.confirm.json().change.summary, "Paused the fleet, but the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not paused. Pause the fleet again once Valkey answers");
+    assert.equal(paused.res.confirm.json().change.summary, "Paused the fleet, but the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers");
     assert.deepEqual(paused.rows, [["write", "ok", null], ["write", "ok", switchShortNote(true)]]);
     assert.equal(await shared.isPaused(), true);
     const resumed = await rowsOf(() => c.both("fleet-resume", {}));
-    assert.equal(resumed.res.confirm.json().change.summary, "Resumed the fleet, but the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not resumed. Resume the fleet again once Valkey answers");
+    assert.equal(resumed.res.confirm.json().change.summary, "Resumed the fleet, but the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not resumed. Resume the fleet again once Valkey answers");
     assert.deepEqual(resumed.rows, [["write", "ok", null], ["write", "ok", switchShortNote(false)]]);
     // An agent session's row carries the closed word, and its answer the machine fact.
     const agent = await c.cookieFor(AGENT_TOKEN);

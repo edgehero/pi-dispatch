@@ -65,7 +65,7 @@ import { endpointsOverlap, loadPrivateEndpoints, privateEndpointsPath, privateFo
 import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
 import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
-import { makeHostRegistry, readLiveHosts } from "./host-registry.mjs";
+import { liveHostNamesOf, makeHostRegistry, readLiveHosts } from "./host-registry.mjs";
 import { endpointStatusFields, ENDPOINT_STATUS_VERSION } from "./endpoint-status.mjs";
 import { liveJobsFields, liveJobsOf } from "./live-jobs.mjs";
 import { makeSandboxTelemetry, parseBudgetFrom, parseCpuReserve } from "./host-telemetry.mjs";
@@ -3135,12 +3135,9 @@ export async function startWorker(
 		log,
 		// The registry's live rows (host-registry.mjs heartbeats, HOST_TTL_MS): a recovery whose host is still beating is
 		// delayed (a pause window, a full host), not lost. Names in the run checkpointer's spelling, as the pointer has them;
-		// null when the registry could not be read, which extends rather than fails.
-		liveHosts: async () => {
-			const read = await readLiveHosts(redis, { now, prune: false });
-			if (read?.unreachable || !Array.isArray(read?.hosts)) return null;
-			return new Set(read.hosts.map((h) => normalizeHost(h.name)));
-		},
+		// null when the registry could not be read, or was read in part (issue #1062, `liveHostNamesOf`): a row not read in
+		// time may be the recovery's host, still beating, and null extends rather than fails.
+		liveHosts: async () => liveHostNamesOf(await readLiveHosts(redis, { now, prune: false }), normalizeHost),
 		onLost: async (job) => {
 			const at = new Date(now()).toISOString();
 			// Issue #646: the run's final outcome, so its inbox is closed and counted here too (index.mjs's rule for every

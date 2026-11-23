@@ -605,9 +605,9 @@ export async function workerHint(queue, { timeoutMs = 2000 } = {}) {
  * `pi-dispatch status --target <item>` (issue #932, target-status.mjs): one JSON line, `{ item, jobs, windows, complete,
  * unavailableQueues }`, over every queue the kill switch would act on (`deploymentQueueNames`), the same discovery and
  * the same loud degraded read (`fleet`, `discoveryIncomplete`, and `queuesMayBeShort` with its sentence under the line
- * since issue #1043). Under plain `status`'s deadline (issue #1003, `statusDeadline`): a queue that has not answered by
- * then is in `unavailableQueues` and `complete` is false, the exit code 0 as before, since `complete` already says the
- * line may be short.
+ * since issue #1043; `fleetIncomplete` for registry rows not read in time since issue #1062). Under plain `status`'s
+ * deadline (issue #1003, `statusDeadline`): a queue that has not answered by then is in `unavailableQueues` and
+ * `complete` is false, the exit code 0 as before, since `complete` already says the line may be short.
  */
 async function targetStatus(item, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients, deadlineMs = STATUS_DEADLINE_MS }) {
 	const deadline = statusDeadline(deadlineMs);
@@ -616,17 +616,17 @@ async function targetStatus(item, url, { env, write, label, urlShown, valkeyRefu
 	const { readTargetStatus, TARGET_STATUS_TIMEOUT_MS } = await import("./target-status.mjs");
 	const refused = await valkeyRefusal(url, env, { deadlineAt: deadline.at });
 	if (refused) return fail(refused);
-	const { names, blind, incomplete } = await deploymentQueueNames(url, controlClients, deadline.within);
+	const { names, blind, registryShort, incomplete } = await deploymentQueueNames(url, controlClients, deadline.within);
 	const queues = [];
 	// Past the deadline no queue is built, as in `killSwitch`, which says why.
 	const spent = deadline.spent();
 	try {
 		for (const name of names) queues.push(spent ? unansweredQueue(name) : (controlClients.makeQueue ?? makeQueue)({ ...parseConnection(url, { failFast: true }), disconnectTimeout: 0 }, { name }));
 		const read = await readTargetStatus(queues, item, { now: () => Number(now()), timeoutMs: deadline.within(TARGET_STATUS_TIMEOUT_MS) });
-		const degraded = blind !== null || incomplete;
+		const degraded = blind !== null || registryShort !== null || incomplete;
 		// `queuesMayBeShort` and the sentence as plain `status` has them (issue #1043): `complete` is false for a cut read
 		// too, so it alone does not say that a queue may be missing from the list.
-		write(`${JSON.stringify({ ...(label ? { valkey: urlShown(url) } : {}), ...read, ...(degraded ? { complete: false, discoveryIncomplete: true, queuesMayBeShort: true } : {}), ...(blind ? { fleet: blind } : {}) })}\n`);
+		write(`${JSON.stringify({ ...(label ? { valkey: urlShown(url) } : {}), ...read, ...(degraded ? { complete: false, discoveryIncomplete: true, queuesMayBeShort: true } : {}), ...(blind ? { fleet: blind } : {}), ...(registryShort ? { fleetIncomplete: registryShort } : {}) })}\n`);
 		if (degraded) process.stderr.write(`warning: ${label}${statusShortNote(true)}\n`);
 	} catch (error) {
 		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${urlShown(url)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${error.message}`);
@@ -655,7 +655,8 @@ async function deploymentQueueNames(url, controlClients, within = (ms) => ms) {
 		discoverHostQueuesReporting(probe, { timeoutMs: within(FLEET_READ_TIMEOUT_MS) }),
 	]);
 	probe.disconnect?.();
-	return { names: unionQueueNames(fleetQueueNames(fleet?.hosts), existing.names), blind: fleet?.unreachable ?? null, incomplete: Boolean(existing?.incomplete), existing };
+	// `registryShort`: the registry's rows not read in time (issue #1062), which `killSwitch` names the same way.
+	return { names: unionQueueNames(fleetQueueNames(fleet?.hosts), existing.names), blind: fleet?.unreachable ?? null, registryShort: fleet?.unreachable ? null : fleet?.incomplete ?? null, incomplete: Boolean(existing?.incomplete), existing };
 }
 
 /**
@@ -663,7 +664,7 @@ async function deploymentQueueNames(url, controlClients, within = (ms) => ms) {
  * `switchShortNote` (admin/src/words.mjs), held equal to it by a test, since the CLI does not import the admin.
  */
 export function killSwitchShortNote(paused) {
-	return `the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not ${paused ? "paused" : "resumed"}. ${paused ? "Pause" : "Resume"} the fleet again once Valkey answers`;
+	return `the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not ${paused ? "paused" : "resumed"}. ${paused ? "Pause" : "Resume"} the fleet again once Valkey answers`;
 }
 
 /**
@@ -672,7 +673,7 @@ export function killSwitchShortNote(paused) {
  * jobs and windows), and what to do.
  */
 export function statusShortNote(target) {
-	return `the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and ${target ? "the line above leaves out what they hold" : "the sums above leave them out"}. Run pi-dispatch status again once Valkey answers`;
+	return `the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and ${target ? "the line above leaves out what they hold" : "the sums above leave them out"}. Run pi-dispatch status again once Valkey answers`;
 }
 
 /**
@@ -781,6 +782,9 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	const consumersRead = status ? readConsumerStatus(probe, fleet?.hosts ?? [], { now: () => Number(now()), timeoutMs: within(CONSUMER_READ_TIMEOUT_MS) }) : null;
 	if (!status) probe.disconnect?.();
 	const blind = fleet?.unreachable ?? null;
+	// The registry's rows that were not read in time (issue #1062, `readLiveHosts`' `incomplete`): their hosts' queues may
+	// be missing from the set, as a registry that could not be read at all leaves them out, so it is named the same way.
+	const registryShort = blind === null ? fleet?.incomplete ?? null : null;
 	// With this host's own queue on a pause (issue #964, `ownQueueOf`), which a registry or a scan that did not answer cannot
 	// name. On a resume only where it exists, by discovery or by its own meta key (`ownFound`, issue #1007): a queue that
 	// does not exist has nothing to resume, and a queue built to resume it would write its meta key.
@@ -793,10 +797,10 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	// found them. Report the count we ACTED on, and name the degraded read separately, the scan's too (issue #964), on the
 	// line of a whole switch and on the first line of `switchReport`'s (issue #1007).
 	const ownNote = own?.problem ? ` [this host's queue not added: ${own.problem}]` : "";
-	const span = `${names.length > 1 ? ` [${names.length} queues]` : ""}${blind ? ` [registry unreadable: ${blind}]` : ""}${existing?.incomplete ? " [queue scan incomplete]" : ""}${ownNote}`;
+	const span = `${names.length > 1 ? ` [${names.length} queues]` : ""}${blind ? ` [registry unreadable: ${blind}]` : ""}${registryShort ? ` [registry incomplete: ${registryShort}]` : ""}${existing?.incomplete ? " [queue scan incomplete]" : ""}${ownNote}`;
 	// What a set that may be short means, and what to do (issue #964), under the line of a switch that confirmed every
 	// queue it found; the exit code stays 0, as the console answers that switch. `switchReport` says it otherwise.
-	const short = blind || existing?.incomplete ? `\n${label}  but ${killSwitchShortNote(cmd === "pause")}` : "";
+	const short = blind || registryShort || existing?.incomplete ? `\n${label}  but ${killSwitchShortNote(cmd === "pause")}` : "";
 	const queues = [];
 	// Once the deadline is spent (a Valkey that answered nothing to the PING) no queue is built: a queue closed in
 	// the tick it was built is closed while its socket is still opening, and ioredis then prints the ready check that
@@ -818,7 +822,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 			// switch that confirmed every queue it found, is not: it is said (`short`, issue #964), as the console says it over
 			// its answer that the fleet was paused.
 			if (steps.some((step) => step.state !== "confirmed") || ownUnread.length > 0) {
-				return fail(switchReport({ cmd, shown: urlShown(url), names: [...names, ...ownUnread.map(({ name }) => name)], steps: [...steps, ...ownUnread.map(({ why, answered }) => ({ state: "not-sent", why, ...(answered ? { answered: true } : {}) }))], blind, incomplete: Boolean(existing?.incomplete), ownNote }));
+				return fail(switchReport({ cmd, shown: urlShown(url), names: [...names, ...ownUnread.map(({ name }) => name)], steps: [...steps, ...ownUnread.map(({ why, answered }) => ({ state: "not-sent", why, ...(answered ? { answered: true } : {}) }))], blind, registryShort, incomplete: Boolean(existing?.incomplete), ownNote }));
 			}
 			write(`${label}${cmd === "pause" ? `paused: worker will stop taking new jobs (jobs still enqueue)${span}` : `resumed${span}`}${short}\n`);
 		} else {
@@ -830,12 +834,16 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 			// answered by then is null here, never a zero or a running queue: "wait until status shows no active job" must not
 			// be satisfied by a count nobody read.
 			const { readStatusWaiting, STATUS_WAITING_TIMEOUT_MS } = await import("./status-waiting.mjs");
-			const [states, per, waiting, consumers] = await Promise.all([
+			const [rawStates, rawPer, waiting, consumers] = await Promise.all([
 				answeredWithin(queues.map((q) => q.isPaused()), within(deadlineMs)),
 				answeredWithin(queues.map((q) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed")), within(deadlineMs)),
 				readStatusWaiting(queues, { now: () => Number(now()), timeoutMs: within(STATUS_WAITING_TIMEOUT_MS) }),
 				consumersRead,
 			]);
+			// A queue Valkey answered with an error (issue #1053: its meta key holds a string, say) is one queue not read, named
+			// with that error's code in `queueErrors`, and every other queue is read and summed as usual.
+			const { states, per, codes, answered, failure } = settleQueueReads(names, rawStates, rawPer);
+			if (failure !== null && connectionError === null) connectionError = failure;
 			const unread = names.filter((_, i) => states[i] === null || per[i] === null);
 			const counts = per.reduce((acc, c) => {
 				for (const [k, v] of Object.entries(c ?? {})) acc[k] = (acc[k] ?? 0) + (Number(v) || 0);
@@ -849,20 +857,22 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 			const known = states.filter((s) => s !== null);
 			const pausedState = known.includes(false) ? false : known.length === states.length ? true : null;
 			const pausedPartial = known.includes(true) && known.includes(false);
-			if (blind || existing?.incomplete) { waiting.partial = true; waiting.discoveryIncomplete = true; }
+			if (blind || registryShort || existing?.incomplete) { waiting.partial = true; waiting.discoveryIncomplete = true; }
 			// A list that may be short (issue #1043): the registry or the scan did not finish, so a queue it did not find is in
 			// none of the sums, and only `waitingDetails` said so. `queuesMayBeShort` says it at the top, the agent tools' flag
 			// for a switch over such a list (issue #964), and the sentence goes under the line. A queue it found and did not
 			// read is `partial`, exit 1; a list that may be short is not a failure by itself, as #964 has it for a switch.
-			const listMayBeShort = blind !== null || Boolean(existing?.incomplete);
-			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i] === true) } : {}), ...counts, ...(unread.length > 0 ? { partial: true, unavailableQueues: unread } : {}), ...(listMayBeShort ? { queuesMayBeShort: true } : {}), ...(blind ? { fleet: blind } : {}), waitingDetails: waiting, consumers, pollers };
+			const listMayBeShort = blind !== null || registryShort !== null || Boolean(existing?.incomplete);
+			const errored = Object.keys(codes).length > 0 ? { queueErrors: codes } : {};
+			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i] === true) } : {}), ...counts, ...(unread.length > 0 ? { partial: true, unavailableQueues: unread, ...errored } : {}), ...(listMayBeShort ? { queuesMayBeShort: true } : {}), ...(blind ? { fleet: blind } : {}), ...(registryShort ? { fleetIncomplete: registryShort } : {}), waitingDetails: waiting, consumers, pollers };
 			write(`${JSON.stringify(out)}\n`);
 			if (listMayBeShort) process.stderr.write(`warning: ${label}${statusShortNote(false)}\n`);
-			// The line is printed with what was read, and the exit code says status could not read what it exists to say,
-			// as it does for a Valkey that refuses the connection. "Is it running?" only when nothing at all answered.
+			// The line is printed with what was read, and the exit code says status could not read what it exists to say, as
+			// it does for a Valkey that refuses the connection: a queue answered with an error is a queue it found and did
+			// not read, the same exit 1 (issue #1053). "Is it running?" only when nothing at all answered.
 			if (unread.length > 0) {
-				const answeredNothing = states.every((x) => x === null) && per.every((x) => x === null) && blind !== null && Boolean(existing?.incomplete);
-				return fail(statusShortfall({ shown: urlShown(url), seconds: deadlineMs / 1000, hint: (await import("./valkey-auth.mjs")).valkeyDownHint(url), connectionError, answeredNothing, names, states, per }));
+				const answeredNothing = !answered && blind !== null && Boolean(existing?.incomplete);
+				return fail(statusShortfall({ shown: urlShown(url), seconds: deadlineMs / 1000, hint: (await import("./valkey-auth.mjs")).valkeyDownHint(url), connectionError, answeredNothing, names, states, per, codes }));
 			}
 		}
 	} catch (error) {
@@ -893,19 +903,24 @@ function statusDeadline(deadlineMs) {
  * `status`'s closing sentence when its line leaves something out (issue #1003): whether the Valkey answered anything
  * (the "is it running?" `hint` only when nothing did), the connection's own error where the probe saw one, and per
  * queue exactly what is missing: its paused state, its counts, or both. `states` and `per` hold null for a read that
- * did not answer.
+ * did not answer. `codes` (issue #1053) names each queue Valkey answered with an error, by that error's code beside the
+ * queue's name, and the first line then says Valkey answered with an error rather than only that it ran out of time.
  */
-function statusShortfall({ shown, seconds, hint, connectionError = null, answeredNothing, names, states, per }) {
+function statusShortfall({ shown, seconds, hint, connectionError = null, answeredNothing, names, states, per, codes = {} }) {
+	const named = (list) => list.map((name) => (codes[name] ? `${name} (Valkey answered ${codes[name]})` : name)).join(", ");
 	const both = names.filter((_, i) => states[i] === null && per[i] === null);
 	const pausedOnly = names.filter((_, i) => states[i] === null && per[i] !== null);
 	const countsOnly = names.filter((_, i) => states[i] !== null && per[i] === null);
 	const lacks = [
-		both.length > 0 ? `the paused state and counts of ${both.join(", ")}` : null,
-		pausedOnly.length > 0 ? `the paused state of ${pausedOnly.join(", ")}` : null,
-		countsOnly.length > 0 ? `the counts of ${countsOnly.join(", ")}` : null,
+		both.length > 0 ? `the paused state and counts of ${named(both)}` : null,
+		pausedOnly.length > 0 ? `the paused state of ${named(pausedOnly)}` : null,
+		countsOnly.length > 0 ? `the counts of ${named(countsOnly)}` : null,
 	].filter(Boolean).join("; ");
+	// A queue left out that Valkey did not answer with an error is one whose read ran out of time or failed.
+	const erroredOnly = names.every((name, i) => (states[i] !== null && per[i] !== null) || codes[name] !== undefined);
+	const errorWords = Object.keys(codes).length > 0 ? "answered a read with an error" : null;
 	const head = !answeredNothing
-		? `Valkey at ${shown} did not answer every read within ${seconds} seconds`
+		? `Valkey at ${shown} ${erroredOnly ? errorWords : [`did not answer every read within ${seconds} seconds`, errorWords].filter(Boolean).join(" and ")}`
 		: connectionError !== null ? `could not reach Valkey at ${shown}: ${hint}` : `Valkey at ${shown} did not answer within ${seconds} seconds: ${hint}`;
 	return `${head}${connectionError !== null ? `\n  ${connectionError}` : ""}\n  the line above leaves out ${lacks}`;
 }
@@ -978,7 +993,7 @@ async function switchQueues(queues, cmd, left, seconds) {
  * `killSwitchShortNote`) under the reads named on the first line as a whole switch's line names them; and what to do
  * next. `ownNote` is this host's queue that could not be added, as the whole switch's line says it.
  */
-function switchReport({ cmd, shown, names, steps, blind = null, incomplete = false, ownNote = "" }) {
+function switchReport({ cmd, shown, names, steps, blind = null, registryShort = null, incomplete = false, ownNote = "" }) {
 	const done = `${cmd}d`;
 	const lines = names.map((name, i) => {
 		const { state, why, reads } = steps[i];
@@ -990,7 +1005,7 @@ function switchReport({ cmd, shown, names, steps, blind = null, incomplete = fal
 	});
 	// A write that Valkey answered with an error may have applied, so it counts as sent here, as one never answered does.
 	if (!steps.some((step) => ["confirmed", "unconfirmed", "errored"].includes(step.state))) lines.push("nothing changed");
-	if (blind || incomplete) lines.push(killSwitchShortNote(cmd === "pause"));
+	if (blind || registryShort || incomplete) lines.push(killSwitchShortNote(cmd === "pause"));
 	// "Once Valkey answers" only where something waits on it: a write not answered, a read back that did not answer, or a
 	// connection that did not come up. A refusal or an error is Valkey's answer, a read back it answered with an error
 	// included, and so is an error reply to the look for this host's queue (`answered`, issue #1042): the next step is
@@ -999,7 +1014,7 @@ function switchReport({ cmd, shown, names, steps, blind = null, incomplete = fal
 	const waiting = pending || steps.some((step) => step.state === "not-sent" && !step.skipped && !step.answered);
 	const failedOn = steps.some((step) => step.state === "refused" || step.state === "errored" || (step.state === "not-sent" && step.answered === true));
 	lines.push(`run pi-dispatch status ${waiting ? "once Valkey answers " : ""}to see each queue, then pi-dispatch ${cmd} again${!waiting && failedOn ? " once what Valkey refused or failed on is put right" : ""}${cmd === "resume" && pending ? "; a resume not confirmed may start jobs when it lands" : ""}`);
-	const unread = `${blind ? ` [registry unreadable: ${blind}]` : ""}${incomplete ? " [queue scan incomplete]" : ""}`;
+	const unread = `${blind ? ` [registry unreadable: ${blind}]` : ""}${registryShort ? ` [registry incomplete: ${registryShort}]` : ""}${incomplete ? " [queue scan incomplete]" : ""}`;
 	return `could not ${cmd} the whole deployment at ${shown}${unread}${ownNote}\n  ${lines.join("\n  ")}`;
 }
 
@@ -1049,19 +1064,57 @@ function unansweredQueue(name) {
 	return { name, client: never, isPaused: () => never, getJobCounts: () => never, close: async () => {} };
 }
 
+/** A read Valkey answered with an error (issue #1053), as `answeredWithin` gives it: the reply's code alone. */
+class ErrorReply {
+	constructor(code) {
+		this.code = code;
+	}
+}
+
+/** A read that failed with no answer from Valkey (a connection that failed), as `answeredWithin` gives it. */
+class ReadFailed {
+	constructor(error) {
+		this.error = error;
+	}
+}
+
 /**
  * Each of `reads` as it settled, or null for one that had not answered `ms` after the call (issue #1003): what a read of
- * a Valkey that never answers reads as. One that fails still rejects, as before, so a Valkey that refuses the
- * connection is still said as the connection's error rather than as a line of unread parts.
+ * a Valkey that never answers reads as. Never rejects (issue #1053): a read Valkey answered with an error is an
+ * `ErrorReply` with its code (`replyErrorCode`), and any other failure a `ReadFailed`. Rejecting the whole read for one
+ * of them made one queue whose meta key holds a string fail `status` for every queue, said as a Valkey that could not
+ * be reached while it answered; the caller decides what a failure means beside what did answer (`settleQueueReads`).
  */
 async function answeredWithin(reads, ms) {
+	const { replyErrorCode } = await import("./connection.mjs");
 	let timer;
 	const late = new Promise((resolve) => { timer = setTimeout(resolve, ms, null); });
 	try {
-		return await Promise.all(reads.map((read) => Promise.race([read, late])));
+		return await Promise.all(reads.map((read) => Promise.race([Promise.resolve(read).catch((error) => (replyErrorCode(error) !== null ? new ErrorReply(replyErrorCode(error)) : new ReadFailed(error))), late])));
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+/**
+ * `status`'s per-queue reads as its line uses them (issue #1053): `states` and `per` with null for each read that did
+ * not answer in time, was answered with an error or failed; `codes`, each queue Valkey answered with an error and that
+ * error's code; `answered`, whether any read got an answer from Valkey, an error reply included. A failure that is no
+ * reply (a connection that failed) is thrown when nothing answered, so a Valkey that refuses every connection is said
+ * as that connection's error, as before; beside a read that answered it is one more queue not read, and `failure` is
+ * its message for the closing sentence.
+ */
+function settleQueueReads(names, rawStates, rawPer) {
+	const all = [...rawStates, ...rawPer];
+	const answered = all.some((x) => x !== null && !(x instanceof ReadFailed));
+	const failed = all.find((x) => x instanceof ReadFailed);
+	if (failed && !answered) throw failed.error;
+	const codes = {};
+	const value = (x, i) => {
+		if (x instanceof ErrorReply) codes[names[i]] ??= x.code;
+		return x instanceof ErrorReply || x instanceof ReadFailed ? null : x;
+	};
+	return { states: rawStates.map(value), per: rawPer.map(value), codes, answered, failure: failed ? failed.error?.message ?? String(failed.error) : null };
 }
 
 /**

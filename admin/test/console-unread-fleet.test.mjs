@@ -3,8 +3,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { NOW } from "../../launch/fixture-deployment.mjs";
 import { pagePanels, loadPageData, renderPage } from "../src/console/pages.mjs";
-import { HOSTS_UNREAD, HOSTS_UNREAD_TEXT } from "../src/console/panels/common.mjs";
-import { ACTIVE_PARTIAL_TEXT, ACTIVE_UNREAD_TEXT, DOCTOR_HOSTS_UNREAD_TEXT, HOSTS_LAST_EMPTY_TEXT, QUEUES_UNREAD_TEXT, STALLS_UNREAD } from "../src/console/panels/fleet.mjs";
+import { HOSTS_UNREAD, HOSTS_UNREAD_TEXT, NO_BEAT_READ, REGISTRY_PART_TEXT, beatFresh, hostsUnread } from "../src/console/panels/common.mjs";
+import { ACTIVE_PARTIAL_TEXT, ACTIVE_UNREAD_TEXT, DOCTOR_HOSTS_UNREAD_TEXT, HOSTS_LAST_EMPTY_TEXT, HOSTS_PART_EMPTY_TEXT, QUEUES_UNREAD_TEXT, STALLS_UNREAD } from "../src/console/panels/fleet.mjs";
+import { beatAgeOf, firstRunState } from "../src/doctor-view.mjs";
+import { stateOf } from "../src/console/live.mjs";
+import { runHost } from "../src/console/panels/run.mjs";
+import { LAST_SEEN_WORDS } from "../src/console/panels/overview.mjs";
 import { HOST_ACTIVE_UNREAD_TEXT } from "../src/console/panels/host.mjs";
 import { dataUnread } from "../src/console/panels/common.mjs";
 import { toolActionRequest } from "../src/tool-actions.mjs";
@@ -119,6 +123,105 @@ test("the overview over a registry that was never read says the hosts are not kn
   }
   const seen = await panelsOf("overview", overviewSnapshot({ ...OVERVIEW_CALM, queue: { ...overviewSnapshot().queue, fleetDegraded: "registry" }, hostsReadAt: NOW - 60_000 }));
   for (const id of ["p-active", "p-hosts"]) assert.ok(seen[id].includes(REGISTRY_UNREAD_TEXT) && !seen[id].includes(HOSTS_UNREAD_TEXT), seen[id]);
+});
+
+// Issue #1062: a registry that answered with some hosts' rows not read in time was read in part. Its rows that answered
+// are drawn and dated by that read (`hostsReadAt`); no surface says the registry or the hosts could not be read.
+const partQueue = (over = {}) => ({ ...snap().queue, fleetDegraded: "1 of 4 host rows not read", registryReadInPart: true, ...over });
+const COULD_NOT = [REGISTRY_UNREAD_TEXT, HOSTS_UNREAD_TEXT, HOSTS_UNREAD, "The host registry could not be read", "Registry not read"];
+
+test("/fleet and the overview over a registry read in part say so, draw the rows that were read, and never say it could not be read (#1062)", async () => {
+  const fleet = await panelsOf("fleet", snap({ queue: partQueue(), hostsReadAt: NOW - 1_000 }));
+  assert.ok(fleet["p-hosts"].includes(REGISTRY_PART_TEXT) && fleet["p-hosts"].includes("build3"), fleet["p-hosts"]);
+  assert.ok(fleet["p-fleetbar"].includes("Registry read in part") && fleet["p-fleetbar"].includes(REGISTRY_PART_TEXT), fleet["p-fleetbar"]);
+  for (const never of COULD_NOT) assert.ok(!all(fleet).includes(never), never);
+  // No row answered: said as such, never "No host was registered" nor "No host is registered".
+  const empty = await panelsOf("fleet", snap({ hostBudgets: [], queue: partQueue(), hostsReadAt: NOW - 1_000 }));
+  assert.ok(empty["p-hosts"].includes(HOSTS_PART_EMPTY_TEXT), empty["p-hosts"]);
+  for (const never of [HOSTS_LAST_EMPTY_TEXT, "No host is registered", ...COULD_NOT]) assert.ok(!empty["p-hosts"].includes(never), never);
+  const overview = await panelsOf("overview", overviewSnapshot({ ...OVERVIEW_CALM, queue: { ...overviewSnapshot().queue, fleetDegraded: "1 of 4 host rows not read", registryReadInPart: true }, hostsReadAt: NOW - 1_000 }));
+  for (const id of ["p-active", "p-hosts"]) assert.ok(overview[id].includes(REGISTRY_PART_TEXT), overview[id]);
+  assert.match(all(overview), /The host registry was read in part(, so| and the queue sees no worker connected, so) failing doctors are not counted/);
+  for (const never of COULD_NOT) assert.ok(!all(overview).includes(never), never);
+});
+
+test("hostsUnread is false over a registry read in part, even with no hostsReadAt: its rows were read (#1062)", () => {
+  assert.equal(hostsUnread({ queue: { fleetDegraded: "1 of 2 host rows not read", registryReadInPart: true }, hostsReadAt: null }), false);
+  assert.equal(hostsUnread({ queue: { fleetDegraded: "ECONNREFUSED" }, hostsReadAt: null }), true, "one never read stays unread");
+});
+
+test("the host page and the first run's worker step over a registry read in part: a row it read is as read now, one it did not is said so (#1062)", async () => {
+  const host = async (name, snapshot) => (await pagePanels("host", { query: { name }, session: OP, data: { page: "host", now: NOW, env: {}, snapshot }, readOnly: false })).map((p) => wordsOf(p.html)).join(" ");
+  const read = await host("build3", snap({ queue: partQueue(), hostsReadAt: NOW - 1_000 }));
+  for (const never of [REGISTRY_PART_TEXT, ...COULD_NOT]) assert.ok(!read.includes(never), never);
+  const notRead = await host("build3", snap({ queue: partQueue(), hostsReadAt: NOW - 1_000, hostBudgets: snap().hostBudgets.map((h) => (h.name === "build3" ? { ...h, notRead: true } : h)) }));
+  assert.ok(notRead.includes(REGISTRY_PART_TEXT), notRead);
+  const absent = await host("hostz", snap({ queue: partQueue(), hostsReadAt: NOW - 1_000 }));
+  assert.ok(absent.includes(REGISTRY_PART_TEXT) && !absent.includes("This host has no live registry row"), absent);
+  for (const never of COULD_NOT) assert.ok(!absent.includes(never), never);
+  // A row read now that beats says a worker runs; with only kept rows, whether one does is not known, read in part.
+  const beat = (h) => ({ ...h, ttlAgeMs: 5_000 });
+  const worker = (hostBudgets) => firstRunState(snap({ queue: partQueue(), hostsReadAt: NOW - 1_000, hostBudgets }), { session: { role: "operator" } }).steps.find((s) => s.id === "worker");
+  assert.equal(worker(snap().hostBudgets.map(beat)).state, "ready");
+  const kept = worker(snap().hostBudgets.map((h) => ({ ...beat(h), notRead: true })));
+  assert.deepEqual([kept.state, kept.sentence], ["check", ["The host registry was read in part, so whether a worker runs is not known."]]);
+});
+
+test("over a registry read in part a row it did not read is not counted, dated or drawn as current, and a row it read is (#1062)", async () => {
+  const notRead = (rows, name) => rows.map((h) => (h.name === name ? { ...h, notRead: true } : h));
+  // /fleet: the bar's beats and the hosts card's count are floors over the rows read; wholly unread stays "unknown".
+  const rows = notRead(snap().hostBudgets, "build3");
+  const fleet = await panelsOf("fleet", snap({ queue: partQueue(), hostsReadAt: NOW - 1_000, hostBudgets: rows }));
+  const beating = rows.filter((h) => { const age = beatAgeOf(h); return age !== null && age <= 60_000; }).length;
+  assert.ok(beating < snap().hostBudgets.filter((h) => { const age = beatAgeOf(h); return age !== null && age <= 60_000; }).length, "the kept row is not counted (vacuous otherwise)");
+  assert.match(fleet["p-fleetbar"], new RegExp(`at least ${beating} ${beating === 1 ? "host beats" : "hosts beat"}`), fleet["p-fleetbar"]);
+  assert.ok(fleet["p-hosts"].includes(`at least ${beating} beating`), fleet["p-hosts"]);
+  // A row it read draws its slots, its jobs known; only the row it did not read has them not known.
+  assert.equal(fleet["p-hosts"].split("Free slots not known").length - 1, 1, fleet["p-hosts"]);
+  const unread = await panelsOf("fleet", snap({ queue: degraded, hostsReadAt: NOW - 3_600_000 }));
+  assert.equal(unread["p-hosts"].split("Free slots not known").length - 1, snap().hostBudgets.length, "wholly unread: no row's slots are known");
+  // A floor of 0 is said as no beat read, never "at least 0".
+  const noBeat = await panelsOf("fleet", snap({ queue: partQueue(), hostsReadAt: NOW - 1_000, hostBudgets: rows.map((h) => ({ ...h, ttlAgeMs: undefined, beatAt: undefined, staleMs: 600_000 })) }));
+  assert.match(noBeat["p-fleetbar"], new RegExp(`${NO_BEAT_READ}, \\d+ queues? accepts? jobs`), noBeat["p-fleetbar"]);
+  assert.match(noBeat["p-hosts"], new RegExp(`Hosts ${NO_BEAT_READ}, `), noBeat["p-hosts"]);
+  assert.doesNotMatch(noBeat["p-fleetbar"] + noBeat["p-hosts"], /at least 0/);
+  assert.match(unread["p-fleetbar"], /unknown hosts beat/);
+  // The overview: the row read is current (its beat's age and its slots), the row not read is "as last seen".
+  const lastSeenCount = (text) => text.split(LAST_SEEN_WORDS).length - 1;
+  const base = overviewSnapshot({ ...OVERVIEW_CALM });
+  const partRows = notRead(base.hostBudgets, "build3");
+  const part = await panelsOf("overview", overviewSnapshot({ ...OVERVIEW_CALM, queue: { ...base.queue, fleetDegraded: "1 of 2 host rows not read", registryReadInPart: true }, hostsReadAt: NOW - 1_000, hostBudgets: partRows }));
+  assert.equal(lastSeenCount(part["p-hosts"]), 1, part["p-hosts"]);
+  assert.match(part["p-hosts"], new RegExp(`at least ${partRows.filter((h) => beatFresh(h)).length} beating`));
+  assert.match(part["p-hosts"], /build3 \S+ as last seen/, "the row not read is as last seen");
+  assert.match(part["p-hosts"], /mini1 \S+ \d+s /, "the row read is drawn with its beat's age");
+  // The Running card: the row read draws its free slots, the row not read is as last seen.
+  assert.match(part["p-active"], /build3 as last seen mini1 \d+ free/, part["p-active"]);
+  // No row read beats and the queue sees no worker: whether one is online is not known, never judged on "at least 0".
+  const silent = partRows.map((h) => ({ ...h, ttlAgeMs: undefined, beatAt: undefined, staleMs: 600_000 }));
+  const quiet = await panelsOf("overview", overviewSnapshot({ ...OVERVIEW_CALM, queue: { ...base.queue, workers: 0, fleetDegraded: "1 of 2 host rows not read", registryReadInPart: true }, hostsReadAt: NOW - 1_000, hostBudgets: silent }));
+  assert.ok(quiet["p-hosts"].includes(`Hosts ${NO_BEAT_READ}`) && !quiet["p-hosts"].includes("at least 0"), quiet["p-hosts"]);
+  assert.ok(quiet["p-needs"].includes("The host registry was read in part and the queue sees no worker connected, so failing doctors are not counted and whether a worker is online is not known."), quiet["p-needs"]);
+  const whole = await panelsOf("overview", overviewSnapshot({ ...OVERVIEW_CALM, queue: { ...base.queue, fleetDegraded: "registry" }, hostsReadAt: NOW - 60_000 }));
+  assert.ok(lastSeenCount(whole["p-hosts"]) > base.hostBudgets.length, "wholly unread: every row and the head are as last seen");
+  assert.doesNotMatch(whole["p-hosts"], /mini1 \S+ \d+s /, "and no row is drawn with a beat of now");
+  // dispatch_hosts' and the state API's age, the host page and the run page's heartbeat: none from a row not read.
+  const state = stateOf(snap({ queue: partQueue(), hostsReadAt: NOW - 1_000, hostBudgets: rows }), "operator", { now: NOW });
+  assert.equal(state.hosts.find((h) => h.name === "build3").lastBeatAgeMs, null);
+  assert.notEqual(state.hosts.find((h) => h.name !== "build3").lastBeatAgeMs, null);
+  const host = (await pagePanels("host", { query: { name: "build3" }, session: OP, data: { page: "host", now: NOW, env: {}, snapshot: snap({ queue: partQueue(), hostsReadAt: NOW - 1_000, hostBudgets: rows }) }, readOnly: false })).map((p) => wordsOf(p.html)).join(" ");
+  assert.ok(host.includes("Row not read this time") && host.includes("Last beat not read this time: the host registry was read in part.") && !/Stale|Heartbeat late/.test(host), host);
+  const record = { jobId: "gh-1062", kind: "github", target: "acme/api#1", outcome: "policy", reason: "backend-floor", host: "build3", backend: "podman", budgetReserved: false, tokens: null, exitCode: null, startedAt: new Date(NOW - 60_000).toISOString(), endedAt: new Date(NOW - 30_000).toISOString() };
+  const run = wordsOf(runHost({ data: { run: { record }, snapshot: snap({ queue: partQueue(), hostsReadAt: NOW - 1_000, hostBudgets: rows }) }, role: "operator", env: {}, query: { id: "gh-1062" }, now: NOW, readOnly: false }));
+  assert.ok(run.includes("Heartbeat not read this time: the host registry was read in part") && !run.includes("could not be read"), run);
+});
+
+test("the host page's headline over a registry read in part says the host is not known, never that it has no row (#1062)", async () => {
+  const page = async (snapshot) => wordsOf((await renderPage("host", { query: { name: "hostz" }, session: OP, data: { page: "host", now: NOW, env: {}, snapshot }, readOnly: false, theme: null, maxStreams: 4 })).html);
+  const part = await page(snap({ queue: partQueue(), hostsReadAt: NOW - 1_000 }));
+  assert.ok(part.includes("Not known: the host registry was read in part, so nothing here says whether hostz is live."), part.slice(0, 800));
+  assert.ok(!part.includes("No live registry row for hostz"));
+  assert.ok((await page(snap())).includes("No live registry row for hostz."), "a whole read says so");
 });
 
 // ---- /models ----------------------------------------------------------------------------------------------------------
