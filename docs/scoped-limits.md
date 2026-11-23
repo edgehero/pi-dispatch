@@ -352,7 +352,21 @@ slot taken before it is given back, so a storm against a spent global cap cannot
 week or month. A refund for a container that never started (docker fault), or for a job refused as
 misconfigured, gives back every slot the job took.
 
-Deferral re-checks on a fixed short interval. There is no per-scope queue: a newer job can take a freed
+A deferred job is asked again after 5 seconds, and less often the longer its scope stays busy: every 10 seconds
+once jobs have waited for that scope for 50, every 20 once they have waited 100. Every job waiting for the same
+scope is asked at the same pace, and the pace starts over at 5 seconds when a job takes the scope. So a short wait
+is over as soon as before, a job behind one long run wakes about a quarter as often, and a freed scope is taken
+within one delay, 20 seconds at most.
+
+The worker's log says `scope_busy_deferred` once, when a job starts to wait for a busy scope, and
+`scope_busy_ended` once, when it takes it, with how many times it was deferred (`deferrals`) and `waitedMs`: the
+sum of the delays those deferrals gave it. That is the time its scope cost it, not the time between the two
+lines: a pause window that held the job meanwhile is not in it. A job that waits one re-check says both lines.
+Three cases say the first line and never the second: a job that one host deferred and another host ran (each
+worker knows only its own pickups, so the host that ran it never saw it wait), a job cancelled or removed while
+it waited, and a job handed back to the worker while its first attempt was still running there.
+
+There is no per-scope queue: a newer job can take a freed
 scope ahead of an older deferred one, and the only promise is that a deferred job is never dropped and
 never billed while it waits. Edits apply live — the worker watches the file and keeps the last good
 version on a bad edit (`scoped_limits_reload_invalid` in the log).
@@ -406,7 +420,7 @@ Three doors, same as quiet hours:
 | File | `{ "version": 1, "limits": [ { scope, day?, week?, month?, concurrent? } ] }`; version 2 adds `dayUsd?`, `weekUsd?`, `monthUsd?`, `model:` rows and `project:<id>` rows; version 3 adds `memory?`, `cpus?`, `hostShare?` and `minJobs?` on a project row |
 | Job size | `PI_JOB_MEMORY` and `PI_JOB_CPUS` (default `4g` and `2`), unless the job's project row sets its own |
 | Refusal reason | `scope-cap` (pre-spend, never retried); `project-cap` for a project row; `dollar-cap` for a dollar window; `allocation-cap` when an allocation envelope's split bound the window |
-| Deferral | delayed set, fixed re-check, never dropped |
+| Deferral | delayed set, asked again every 5 to 20 seconds, never dropped |
 | Panel key | `m` |
 | Tools | `dispatch_limits`, `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete` |
 | Projects | `PI_PROJECTS_FILE` groups repos and folders into a project, recorded per run and capped by a `project:<id>` row. It is wired like this key. See [projects.md](projects.md) |

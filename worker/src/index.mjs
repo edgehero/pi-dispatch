@@ -78,12 +78,30 @@ export const STALLED_FAILED_REASON = "job stalled more than allowable limit";
 /** How many (job, stall count, attempt, source) keys the processor remembers having logged a refused record for. */
 export const REJECTED_SEEN_MAX = 1000;
 // The scope-busy re-check (issue #242): a held scope has no natural "until" (the holder may run to
-// JOB_TIMEOUT_MS), so a deferred job re-tests on a fixed cadence. 5s keeps the worst case trivial
-// (<=360 wakes across a 30-minute hold, each ~1ms of synchronous predicate briefly occupying a slot)
-// while a same-folder CHAINED job -- enqueued by its parent before the parent's finally releases the
-// folder -- pays exactly one re-check, not fifteen seconds of dead air. No jitter: one worker per
-// docker daemon bounds any herd by its own concurrency, and a contended wake just re-defers.
+// JOB_TIMEOUT_MS), so a deferred job re-tests on a short cadence. It starts at 5s, so a same-folder
+// CHAINED job -- enqueued by its parent before the parent's finally releases the folder -- pays
+// exactly one re-check, not fifteen seconds of dead air (where other jobs already wait for that folder
+// it gets the folder's delay, as they do). No jitter: one worker per docker daemon bounds any herd by
+// its own concurrency, and a contended wake just re-defers.
 export const SCOPE_BUSY_RECHECK_MS = 5_000;
+// Where that re-check settles while a scope stays busy (issue #1023). Fixed at 5s it was 360 wakes across a 30-minute
+// hold for every job waiting, each one a defer record's write, a move in Valkey and a log line: the issue's host
+// counted 17,455 of them in 90 minutes, from local runs behind one held folder. The delay now follows how long the
+// SCOPE has been busy with someone waiting for it (`waitBackoffMs` under this ceiling, in `deferScope`): 5s for the
+// first 50s, 10s for the next 50s, then 20s, which is about 100 wakes across that hold for a job that waited all of
+// it, and a short wait is asked as often as before. Every job waiting for one scope gets the same delay, as at the
+// fixed 5s: a cadence per job let a job that had just arrived (5s) take a freed scope ahead of one that had waited
+// an hour (20s) most of the time. And the cadence starts over when a job takes the scope, so the jobs behind a new
+// holder ask at 5s again.
+// The ceiling is 20s, not `waitBackoffMs`'s own fifteen minutes, for two reasons. A freed scope should not sit unused
+// for minutes. And every delay must stay under the wait gate's 30s floor, which is what tells a wait deferral from a
+// scope deferral by its wake instant where no defer record says why (INT-WAIT-PROFILES-CONTRACT). 5s, 10s and 20s
+// are also none of the other gates' FIXED re-checks (7s, 9s, 11s, 15s, 60s), and a test holds those apart; a delay
+// that is computed can still land on one of them (the wait gate's throttled re-ask is the larger of 11s and a quarter
+// of its backoff, plus jitter: 20s to 22s at an 80s interval), so the instant is evidence and the record is the answer.
+export const SCOPE_BUSY_RECHECK_MAX_MS = 20_000;
+/** How many jobs' waits for a busy scope the processor remembers at once (`scopeWaits`). */
+export const SCOPE_WAITS_MAX = 1000;
 
 // The newer-release re-check (issue #761, DES-STORE-VERSION-WHEN-NEEDED): a job this worker cannot read, or one whose
 // settings, triggers or pause windows file a newer pi-dispatch wrote, waits for this host's upgrade. Nothing here can
@@ -115,11 +133,12 @@ const WAIT_CHECK_KEY = "wait-check";
 const THROTTLE_ALARM = 5;
 
 // The floor under a throttled or aborted re-ask. Its own constant rather than a borrow of
-// SUPERSEDE_RECHECK_MS, which documents an unrelated concern. Deliberately NOT 5s: that is
-// SCOPE_BUSY_RECHECK_MS, and INT-WAIT-PROFILES-CONTRACT has wait deferrals distinguishable from scope
-// deferrals by wake instant. The defer record (`defer-write.mjs`, issue #737) now says why a job sits in the
-// delayed set; the instants remain the evidence for a reader older than it and for a record that could not be
-// written. A test pins the two apart.
+// SUPERSEDE_RECHECK_MS, which documents an unrelated concern. Deliberately none of the scope re-check's
+// delays (5s, 10s and 20s, SCOPE_BUSY_RECHECK_MS up to SCOPE_BUSY_RECHECK_MAX_MS): INT-WAIT-PROFILES-CONTRACT
+// has wait deferrals distinguishable from scope deferrals by wake instant. That holds for this floor, which a
+// test pins apart; the re-ask above it is a quarter of the backoff plus jitter and can itself come to 20s (20s to
+// 22s at an 80s interval). The defer record (`defer-write.mjs`, issue #737) says why a job sits in the delayed
+// set; the instants remain the evidence for a reader older than it and for a record that could not be written.
 const THROTTLE_FLOOR_MS = 11_000;
 
 /**
@@ -333,9 +352,48 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
-	// is about 360 of them. The verdict cannot change between them (same record, same attempt), so one line says it.
+	// is about 100 of them. The verdict cannot change between them (same record, same attempt), so one line says it.
 	// Bounded, oldest out first, so a long-lived worker holds at most REJECTED_SEEN_MAX keys.
 	const rejectedSeen = new Set();
+	// WAITING FOR A BUSY SCOPE (issue #1023), two maps that `deferScope` keeps.
+	// `scopeBusy`: what is waited for (a slot's key or a fleet lease's, `busyKey`) to `{ key, since, waiters }`. `since`
+	// is the first deferral on that scope while it had no entry, and the re-check backs off from it, the same for every
+	// job waiting there. The entry goes when a job takes the scope (the jobs behind the new holder start again at the
+	// short re-check) and when the last job this processor remembers waiting for it is gone, so it never outlives its
+	// waiters: a fleet lease is taken on other hosts too, where this processor sees no take, and a stale `since` there
+	// would start a later wait at the ceiling.
+	// `scopeWaits`: job id to `{ timestamp, deferrals, waitedMs, busy }`, from the first deferral a scope gate gave the
+	// job until it holds every scope slot it needs. It is what makes a wait ONE episode in the log, `scope_busy_deferred`
+	// at its first deferral and `scope_busy_ended` when the job takes its scope, where every wake used to say a line.
+	// `waitedMs` adds up the delays the scope gates gave this job, so a pause window that held it meanwhile is not in
+	// it. `timestamp` is the job's own (BullMQ's creation time): a job added again under an id whose earlier job was
+	// removed while it waited is another job, and starts its own episode. `busy` is the `scopeBusy` entry it last
+	// waited on, counted there once.
+	// Process memory, as the slot count itself is and for its reason (DES-SCOPED-LIMITS-AND-FOLDER-MUTEX, "Why the count
+	// is process memory": one worker per daemon, so one process sees every pickup of a host's jobs), and because nothing
+	// decides on it: it shapes a delay and two log lines. A restart forgets it; the scopes then start over at the short
+	// re-check and a waiting job says its first line again.
+	// Bounded: `scopeWaits` holds at most SCOPE_WAITS_MAX jobs, the one deferred longest ago dropped first (a job can end
+	// where this processor never sees it: cancelled or removed while delayed, or run by another host), and `scopeBusy`
+	// holds no entry without a remembered waiter, so it can hold no more entries than that.
+	const scopeWaits = new Map();
+	const scopeBusy = new Map();
+	const busyKey = (where, key) => `${where}\u0000${key}`;
+	// One job fewer waits on `busy`; the entry goes with its last one. By identity: an entry a take already removed may
+	// have a successor under the same key, which is not this one.
+	const leaveBusy = (busy) => {
+		if (!busy) return;
+		busy.waiters -= 1;
+		if (busy.waiters <= 0 && scopeBusy.get(busy.key) === busy) scopeBusy.delete(busy.key);
+	};
+	/** Forget what is remembered of job `id`'s wait, and return it (null where nothing was). */
+	const endScopeWait = (id) => {
+		const wait = scopeWaits.get(id) ?? null;
+		if (wait === null) return null;
+		scopeWaits.delete(id);
+		leaveBusy(wait.busy);
+		return wait;
+	};
 	// Watch producer refusals finish before pickup and cannot carry a steering session.
 	const recordWatchOutcome = recordRun;
 	// A free boundary refusal happens before pickup creates a keeper or takes a host slot. Its existing inbox and
@@ -1095,8 +1153,34 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// Every hold goes back before we defer, the host slot too: `makeInFlight().release` is not idempotent, so a
 			// slot held across a deferral would be a slot this machine never gets back.
 			await releaseAllHolds();
-			deps?.log?.(fields.event, { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs: SCOPE_BUSY_RECHECK_MS, ...fields.extra });
-			await deferTo(job, token, nowMs + SCOPE_BUSY_RECHECK_MS, why, { project, ...(why === "chained" ? { holder: job.data.parentJobId } : {}) });
+			// Issue #1023, the job's episode first: only its FIRST deferral is logged. What is remembered under this id for a
+			// job of another `timestamp` is an earlier job's, and is dropped before anything is counted.
+			let wait = scopeWaits.get(job.id);
+			const first = !wait || wait.timestamp !== job.timestamp;
+			if (first) {
+				leaveBusy(wait?.busy);
+				wait = { timestamp: job.timestamp, deferrals: 0, waitedMs: 0, busy: null };
+			}
+			// Then the delay: by how long the scope this gate names (`fields.on`) has been busy with someone waiting, 5s,
+			// then 10s, then 20s (SCOPE_BUSY_RECHECK_MAX_MS says why per scope and why it stops there).
+			let busy = scopeBusy.get(fields.on);
+			if (!busy) scopeBusy.set(fields.on, (busy = { key: fields.on, since: nowMs, waiters: 0 }));
+			const delayMs = Math.min(waitBackoffMs(SCOPE_BUSY_RECHECK_MS, nowMs - busy.since), SCOPE_BUSY_RECHECK_MAX_MS);
+			if (wait.busy !== busy) {
+				leaveBusy(wait.busy);
+				busy.waiters += 1;
+				wait.busy = busy;
+			}
+			wait.deferrals += 1;
+			wait.waitedMs += delayMs;
+			// Set again on every deferral so that it is the newest in the map: the bound drops the one deferred longest ago.
+			scopeWaits.delete(job.id);
+			scopeWaits.set(job.id, wait);
+			if (scopeWaits.size > SCOPE_WAITS_MAX) endScopeWait(scopeWaits.keys().next().value);
+			if (first) deps?.log?.(fields.event, { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs, ...fields.extra });
+			// The defer record is still written on EVERY deferral, never once per wait: its `until` is the instant the job
+			// moves to, and the console's reader holds a record to its job's due time (INT-DEFER-REASON-KEY).
+			await deferTo(job, token, nowMs + delayMs, why, { project, ...(why === "chained" ? { holder: job.data.parentJobId } : {}) });
 		};
 		// The repo or folder slot's reason. A chained child (its parent enqueued it before the parent's finally gave the
 		// folder back) waits on that parent's run; any other job on the scope's own limit, by its kind.
@@ -1113,7 +1197,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				}
 				throw new InfraRetry("the local workspace identity could not be read", { reason: "container-never-started" });
 			}
-			if (!inFlight.tryAcquire(localWorkspace.key, 1)) await deferScope("scope-folder", { event: "scope_busy_deferred" });
+			if (!inFlight.tryAcquire(localWorkspace.key, 1)) await deferScope("scope-folder", { event: "scope_busy_deferred", on: busyKey("slot", localWorkspace.key) });
 			scopeHolds.push({ key: localWorkspace.key, fleet: null });
 		}
 		if (scope) {
@@ -1122,7 +1206,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// Optional-chained: makeProcessor gives `deps` no default and bare wirings pass deps: {}.
 				// The scope itself stays out of the log line (no-pii-in-logs -- a local scope is a full
 				// host path); the delayed count and the job id are what an operator needs to see it.
-				await deferScope(scopeWhy, { event: "scope_busy_deferred" });
+				await deferScope(scopeWhy, { event: "scope_busy_deferred", on: busyKey("slot", scope) });
 			}
 			const repoHold = { key: scope, fleet: null };
 			scopeHolds.push(repoHold);
@@ -1143,7 +1227,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// matching row, so a deployment with no scoped-limits file issues no command at all.
 			if (scopeLease && job.data?.kind !== "local" && Number.isFinite(ceiling)) {
 				repoHold.fleet = await scopeLease.acquire(job.id, { slots: ceiling, keyArgs: [hash16(scope)] });
-				if (!repoHold.fleet) await deferScope(scopeWhy, { event: "scope_busy_deferred", extra: { where: "fleet" } });
+				if (!repoHold.fleet) await deferScope(scopeWhy, { event: "scope_busy_deferred", extra: { where: "fleet" }, on: busyKey("fleet", scope) });
 			}
 		}
 
@@ -1157,13 +1241,31 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		const projectRow = projectRowFor(limits, project);
 		if (projectRow && Number.isSafeInteger(projectRow.concurrent)) {
 			if (!inFlight.tryAcquire(projectRow.scope, projectRow.concurrent)) {
-				await deferScope("scope-project", { event: "scope_busy_deferred", extra: { ledger: "project" } });
+				await deferScope("scope-project", { event: "scope_busy_deferred", extra: { ledger: "project" }, on: busyKey("slot", projectRow.scope) });
 			}
 			const projectHold = { key: projectRow.scope, fleet: null };
 			scopeHolds.push(projectHold);
 			if (scopeLease) {
 				projectHold.fleet = await scopeLease.acquire(job.id, { slots: projectRow.concurrent, keyArgs: [hash16(projectRow.scope)] });
-				if (!projectHold.fleet) await deferScope("scope-project", { event: "scope_busy_deferred", extra: { ledger: "project", where: "fleet" } });
+				if (!projectHold.fleet) await deferScope("scope-project", { event: "scope_busy_deferred", extra: { ledger: "project", where: "fleet" }, on: busyKey("fleet", projectRow.scope) });
+			}
+		}
+		// Every scope slot this job needs is its own now (issue #1023). Each scope it took has a new holder, so the cadence
+		// of the jobs still waiting there starts over: their next deferral is the first of a new 5s phase.
+		for (const hold of scopeHolds) {
+			scopeBusy.delete(busyKey("slot", hold.key));
+			if (hold.fleet) scopeBusy.delete(busyKey("fleet", hold.key));
+		}
+		// And a wait that brought this job here is over: one line for the whole episode, with what the lines per wake used
+		// to add up to. The entry goes first, so a later wait of the same job (another gate below can defer it and give
+		// these slots back) is an episode of its own; one left under this id by an earlier job says nothing. The job holds
+		// its slots here and no `try` around this gives them back, so a logger that throws must not get past this line.
+		const scopeWait = endScopeWait(job.id);
+		if (scopeWait && scopeWait.timestamp === job.timestamp) {
+			try {
+				deps?.log?.("scope_busy_ended", { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", waitedMs: scopeWait.waitedMs, deferrals: scopeWait.deferrals });
+			} catch {
+				// The line is lost; the job runs.
 			}
 		}
 
@@ -2533,22 +2635,36 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		}
 	};
 	return async function processor(job, token, signal) {
-		// One boundary covers pre-pickup refusals, ordinary results and a cancel that replaced a retry. Waiting for
-		// processJob also waits for pickup's finally and its held resources, so a mere cancel request never frees the
-		// window while the attempt is still settling. Throws (retries and deferrals included) leave it alone. The real
-		// BullMQ job owns the stored key; its compare-and-delete cannot clear a newer run's window (#899).
-		// A terminal cancel is not proof that a failed container stop succeeded: that existing exception retains its
-		// orphaned resource holds. The semantic window bounds repeated intent, not isolation or resource admission.
-		const result = await processJob(job, token, signal);
-		if (shouldReleaseSemanticWindow(result)) await releaseSemanticWindow(job, deps?.log, { cause: "policy" });
-		// Settlement failure must not retry a command that already finished. Reconciliation observes its terminal
-		// queue state and completes the same compare-by-generation transition after the connection recovers.
-		if (job.data?.localEvent && deps?.localEventRuntime && !["local-event-wrong-worker", "local-event-invalid", "local-event-unavailable"].includes(result?.reason)) {
-			try {
-				await deps.localEventRuntime.store.finish(job.data.localEvent, { owner: String(token ?? job.id), discard: job.data.localEvent.once === true });
-			} catch { deps?.log?.("local_event_settle_failed", { jobId: job.id }); }
+		// Issue #1023: a job that leaves here any other way than by a deferral waits for no scope any more (it ran, it was
+		// refused, or it failed into a retry or for good), so what `scopeWaits` holds for it goes, and with it the job's
+		// place among those waiting for its scope. ONE place around every exit, as the host budget's waiter bookkeeping is
+		// in `processJob`. A job that took its scope has no entry by now; this is for one that ended before the scope
+		// gates on a later pickup, or whose move to the delayed set was refused. A deferral keeps the entry: that job is
+		// still waiting.
+		let deferred = false;
+		try {
+			// One boundary covers pre-pickup refusals, ordinary results and a cancel that replaced a retry. Waiting for
+			// processJob also waits for pickup's finally and its held resources, so a mere cancel request never frees the
+			// window while the attempt is still settling. Throws (retries and deferrals included) leave it alone. The real
+			// BullMQ job owns the stored key; its compare-and-delete cannot clear a newer run's window (#899).
+			// A terminal cancel is not proof that a failed container stop succeeded: that existing exception retains its
+			// orphaned resource holds. The semantic window bounds repeated intent, not isolation or resource admission.
+			const result = await processJob(job, token, signal);
+			if (shouldReleaseSemanticWindow(result)) await releaseSemanticWindow(job, deps?.log, { cause: "policy" });
+			// Settlement failure must not retry a command that already finished. Reconciliation observes its terminal
+			// queue state and completes the same compare-by-generation transition after the connection recovers.
+			if (job.data?.localEvent && deps?.localEventRuntime && !["local-event-wrong-worker", "local-event-invalid", "local-event-unavailable"].includes(result?.reason)) {
+				try {
+					await deps.localEventRuntime.store.finish(job.data.localEvent, { owner: String(token ?? job.id), discard: job.data.localEvent.once === true });
+				} catch { deps?.log?.("local_event_settle_failed", { jobId: job.id }); }
+			}
+			return result;
+		} catch (error) {
+			deferred = error instanceof DelayedError;
+			throw error;
+		} finally {
+			if (!deferred) endScopeWait(job.id);
 		}
-		return result;
 	};
 }
 

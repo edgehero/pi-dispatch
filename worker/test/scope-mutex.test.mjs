@@ -98,7 +98,7 @@ test("the folder mutex: a second same-folder local job defers while the first ho
 
 	await assert.rejects(() => h.processor(b.job, "tok-b", new AbortController().signal), (e) => e.name === "DelayedError");
 	assert.equal(b.moves.length, 1, "moveToDelayed exactly once");
-	assert.equal(b.moves[0].ts, NOW + mod.SCOPE_BUSY_RECHECK_MS, "deferred to the fixed re-check instant");
+	assert.equal(b.moves[0].ts, NOW + mod.SCOPE_BUSY_RECHECK_MS, "deferred to the first re-check instant");
 	assert.equal(b.moves[0].tok, "tok-b", "with the worker's token");
 	assert.equal(h.seen.started, 1, "the second container NEVER started while the first held the folder");
 	assert.equal(h.redis.incrCalls, 1, "only the first job reserved budget -- the defer path spends nothing");
@@ -1227,6 +1227,407 @@ test("the host slot's and an endpoint's deferral name the project the pickup res
 	const e1 = localJob("e-shop", "/srv/shop-a");
 	await assert.rejects(() => ep.processor(e1.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
 	assert.deepEqual(reasonOf(ep.redis, e1.job), { why: "endpoint", bucket: "slot", until: NOW + mod.ENDPOINT_BUSY_RECHECK_MS, project: "shop", holder: null, endpoint: "lan-ollama" });
+});
+
+// --- waiting for a busy scope: a backoff per scope, and one episode per job in the log (issue #1023) -------------------
+
+/**
+ * A harness on a clock the test moves. A scope's slot can be held and given back from outside, straight on the in-flight
+ * map the processor reads, so a test decides when a waiting job finds its scope free without running the holder; a take
+ * THROUGH the processor (which is what starts a scope's cadence over) is a real pickup, held open like every other.
+ */
+function onAClock(options = {}) {
+	const clock = { at: NOW };
+	const h = harness({ ...options, extra: { ...options.extra, now: () => clock.at } });
+	const lines = (event, id = null) => h.seen.logs.filter((l) => l.event === event && (id === null || l.fields.jobId === id)).map((l) => l.fields);
+	/** One pickup of `spy` at `at` that a gate defers: how far out the job was moved. */
+	const deferredAt = async (spy, at) => {
+		clock.at = at;
+		await assert.rejects(() => h.processor(spy.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
+		return spy.moves.at(-1).ts - at;
+	};
+	/**
+	 * One pickup of `spy` at `at` that gets through every gate: `{ run }`, its run held open until `h.releaseNext()`
+	 * (an object, since an async function that returned the run itself would wait for it to end).
+	 */
+	const startedAt = async (spy, at) => {
+		clock.at = at;
+		const before = h.seen.started;
+		const run = h.processor(spy.job, "tok", new AbortController().signal);
+		// Not `untilStarted`: a pickup that did not get through never starts a container, and that wait would never return.
+		let ended = null;
+		run.then((result) => (ended = { result }), (error) => (ended = { error }));
+		for (let i = 0; i < 1000 && h.seen.started === before && ended === null; i++) await new Promise((r) => setImmediate(r));
+		assert.equal(h.seen.started, before + 1, `the job reached its container (${ended === null ? "nothing yet" : (ended.error?.name ?? "it returned")})`);
+		return { run };
+	};
+	return { ...h, clock, lines, deferredAt, startedAt };
+}
+const S = 1000;
+
+test("a busy scope is asked for again after 5s, then 10s, then 20s as it stays busy, and never later (#1023)", { skip }, async () => {
+	const h = onAClock();
+	assert.ok(h.inFlight.tryAcquire("/srv/site", 1), "the folder is held elsewhere for the whole test");
+	const b = localJob("w-1", "/srv/site");
+	// By how long the scope has been busy with a job waiting for it: 5s for the first 50s, 10s for the next 50s, then 20s.
+	const byBusy = [];
+	for (const busy of [0, 50 * S - 1, 50 * S, 100 * S - 1, 100 * S, 150 * S]) byBusy.push(await h.deferredAt(b, NOW + busy));
+	assert.deepEqual(byBusy, [5 * S, 5 * S, 10 * S, 10 * S, 20 * S, 20 * S]);
+	assert.equal(await h.deferredAt(b, NOW + 3600 * S), mod.SCOPE_BUSY_RECHECK_MAX_MS, "an hour in it is still 20s, where the wait gate's own backoff says fifteen minutes");
+	assert.equal(h.seen.started, 0, "and no deferral started a container");
+
+	// Wake by wake on a scope of its own, each pickup at the instant the last deferral named: ten at 5s, five at 10s,
+	// then 20s, which is 100 wakes across a 30-minute hold where the fixed 5s made 360.
+	const walk = onAClock();
+	assert.ok(walk.inFlight.tryAcquire("/srv/site", 1));
+	const d = localJob("w-2", "/srv/site");
+	const walked = [];
+	for (let at = NOW; at < NOW + 1800 * S; at += walked.at(-1)) walked.push(await walk.deferredAt(d, at));
+	assert.deepEqual(walked.slice(0, 18), [...Array(10).fill(5 * S), ...Array(5).fill(10 * S), ...Array(3).fill(20 * S)]);
+	assert.equal(walked.length, 100);
+});
+
+test("every job waiting for one scope gets the same delay, however long each has waited itself (#1023)", { skip }, async () => {
+	// A delay per job let a job that had just arrived (5s) take a freed scope ahead of one that had waited an hour (20s).
+	const h = onAClock();
+	assert.ok(h.inFlight.tryAcquire("/srv/site", 1));
+	const old = localJob("w-old", "/srv/site");
+	const fresh = localJob("w-fresh", "/srv/site");
+	for (const busy of [0, 50 * S, 100 * S]) await h.deferredAt(old, NOW + busy);
+	assert.equal(await h.deferredAt(fresh, NOW + 110 * S), 20 * S, "the job that has just arrived gets the scope's delay, not a first 5s of its own");
+	assert.equal(await h.deferredAt(old, NOW + 120 * S), 20 * S);
+	assert.deepEqual(h.lines("scope_busy_deferred", "w-fresh"), [{ jobId: "w-fresh", kind: "local", delayMs: 20 * S }], "and its first line says that delay");
+	// Another scope is another cadence: a job waiting for a folder that has only now become busy starts at 5s.
+	assert.ok(h.inFlight.tryAcquire("/srv/other", 1));
+	assert.equal(await h.deferredAt(localJob("w-other", "/srv/other"), NOW + 120 * S), 5 * S);
+});
+
+test("a job that takes a scope starts its cadence over: the jobs behind the new holder ask at 5s again (#1023)", { skip }, async () => {
+	const h = onAClock();
+	assert.ok(h.inFlight.tryAcquire("/srv/site", 1));
+	const first = localJob("w-1", "/srv/site");
+	const second = localJob("w-2", "/srv/site");
+	for (const busy of [0, 50 * S, 100 * S, 180 * S]) await h.deferredAt(first, NOW + busy);
+	assert.equal(await h.deferredAt(second, NOW + 190 * S), 20 * S, "both wait at the scope's 20s");
+	// The holder ends and the first job takes the folder, through the processor: a new holder.
+	h.inFlight.release("/srv/site");
+	try {
+		const { run } = await h.startedAt(first, NOW + 200 * S);
+		assert.deepEqual(h.lines("scope_busy_ended"), [{ jobId: "w-1", kind: "local", waitedMs: 55 * S, deferrals: 4 }]);
+		assert.equal(await h.deferredAt(second, NOW + 210 * S), 5 * S, "behind the new holder the cadence starts over");
+		assert.equal(await h.deferredAt(second, NOW + 259 * S), 5 * S);
+		assert.equal(await h.deferredAt(second, NOW + 260 * S), 10 * S, "and backs off from that deferral, not from the first holder's time");
+		assert.equal(h.lines("scope_busy_deferred", "w-2").length, 1, "still the second job's one wait");
+		h.releaseNext();
+		assert.equal((await run).outcome, "completed");
+		const { run: last } = await h.startedAt(second, NOW + 270 * S);
+		assert.deepEqual(h.lines("scope_busy_ended").at(-1), { jobId: "w-2", kind: "local", waitedMs: 40 * S, deferrals: 4 }, "20s, 5s, 5s and 10s");
+		h.releaseNext();
+		await last;
+	} finally {
+		// Whatever the assertions said: a run left held open keeps the processor's timers, and the file with them.
+		h.releaseNext();
+	}
+});
+
+test("a wait for a busy scope is one episode in the log: a line at its first deferral, one when the job takes its scope, and a later wait of the same job says both again (#1023)", { skip }, async () => {
+	// The model server's one slot is taken elsewhere, so the job is deferred again right after it has its folder: it
+	// gives the folder back, and can come to wait for it a second time.
+	const endpointSlots = makeInFlight();
+	const h = onAClock({ getSettings: LOCAL_MODEL, extra: endpointWiring({ endpointSlots, lease: false }).extra });
+	assert.ok(endpointSlots.tryAcquire(OLLAMA.id, OLLAMA.slots));
+	assert.ok(h.inFlight.tryAcquire("/srv/site", 1));
+	const b = localJob("w-1", "/srv/site");
+
+	for (const busy of [0, 5 * S, 60 * S]) await h.deferredAt(b, NOW + busy);
+	assert.deepEqual(h.lines("scope_busy_deferred"), [{ jobId: "w-1", kind: "local", delayMs: 5 * S }], "three deferrals, one line, with the fields it always had");
+	assert.deepEqual(h.lines("scope_busy_ended"), [], "nothing ends while the job still waits");
+
+	h.inFlight.release("/srv/site");
+	assert.equal(await h.deferredAt(b, NOW + 70 * S), mod.ENDPOINT_BUSY_RECHECK_MS, "it took its folder, and the next gate deferred it");
+	assert.deepEqual(h.lines("scope_busy_ended"), [{ jobId: "w-1", kind: "local", waitedMs: 20 * S, deferrals: 3 }], "5s, 5s and 10s: the delays its scope gave it");
+	assert.equal(h.inFlight.count("/srv/site"), 0, "the folder went back with that deferral");
+	await h.deferredAt(b, NOW + 77 * S);
+	assert.equal(h.lines("scope_busy_ended").length, 1, "a pickup that did not wait for its scope ends no episode");
+	assert.equal(h.lines("scope_busy_deferred").length, 1);
+
+	// The folder is taken again before the job is back: a second wait, said as the first was.
+	assert.ok(h.inFlight.tryAcquire("/srv/site", 1));
+	assert.equal(await h.deferredAt(b, NOW + 84 * S), 5 * S, "its own take started the folder's cadence over");
+	await h.deferredAt(b, NOW + 89 * S);
+	assert.deepEqual(h.lines("scope_busy_deferred"), [{ jobId: "w-1", kind: "local", delayMs: 5 * S }, { jobId: "w-1", kind: "local", delayMs: 5 * S }]);
+	h.inFlight.release("/srv/site");
+	await h.deferredAt(b, NOW + 94 * S);
+	assert.deepEqual(h.lines("scope_busy_ended").at(-1), { jobId: "w-1", kind: "local", waitedMs: 10 * S, deferrals: 2 });
+	assert.equal(h.lines("scope_busy_ended").length, 2);
+});
+
+test("waitedMs is the delays the scope gates gave the job, not the time between the two lines (#1023)", { skip }, async () => {
+	// Deferred once by its folder, then held eight hours by a pause window while the folder was long free: the scope
+	// cost this job five seconds. The window neither ends the episode nor adds to it.
+	let pause = null;
+	const h = onAClock({ pauseUntil: () => pause });
+	assert.ok(h.inFlight.tryAcquire("/srv/site", 1));
+	const b = localJob("w-1", "/srv/site");
+	assert.equal(await h.deferredAt(b, NOW), 5 * S);
+	h.inFlight.release("/srv/site");
+	pause = NOW + 8 * 3600 * S;
+	assert.equal(await h.deferredAt(b, NOW + 5 * S), 8 * 3600 * S - 5 * S, "deferred to the window's end, by the pause gate");
+	assert.deepEqual(h.lines("scope_busy_ended"), [], "another gate's deferral ends no episode");
+	pause = null;
+	try {
+		const { run } = await h.startedAt(b, NOW + 8 * 3600 * S);
+		assert.deepEqual(h.lines("scope_busy_ended"), [{ jobId: "w-1", kind: "local", waitedMs: 5 * S, deferrals: 1 }]);
+		assert.equal(h.lines("scope_busy_deferred").length, 1);
+		h.releaseNext();
+		await run;
+	} finally {
+		h.releaseNext();
+	}
+});
+
+test("a job added again under the id of one that was removed while it waited starts its own episode (#1023)", { skip }, async () => {
+	// A cancel or a removal of a delayed job never reaches the processor, and a forge delivery's id can come back. The
+	// job's own timestamp tells the two apart.
+	const h = onAClock();
+	const again = (timestamp) => {
+		const spy = localJob("gh:acme/web#7", "/srv/site");
+		spy.job.timestamp = timestamp;
+		return spy;
+	};
+	assert.ok(h.inFlight.tryAcquire("/srv/site", 1));
+	const removed = again(NOW - 60 * S);
+	for (const busy of [0, 50 * S, 100 * S]) await h.deferredAt(removed, NOW + busy);
+	// Six hours on a new job has that id, and the folder is as busy as it was.
+	const later = NOW + 6 * 3600 * S;
+	const added = again(later);
+	assert.equal(await h.deferredAt(added, later), 5 * S, "nobody was left waiting for the folder, so its cadence starts over too");
+	assert.equal(h.lines("scope_busy_deferred", "gh:acme/web#7").length, 2, "the new job says its own first line");
+	h.inFlight.release("/srv/site");
+	// And one that finds its folder free says nothing of the wait an earlier job under its id left behind.
+	const quiet = onAClock();
+	assert.ok(quiet.inFlight.tryAcquire("/srv/site", 1));
+	await quiet.deferredAt(again(NOW - 60 * S), NOW);
+	quiet.inFlight.release("/srv/site");
+	try {
+		const { run } = await h.startedAt(added, later + 5 * S);
+		assert.deepEqual(h.lines("scope_busy_ended"), [{ jobId: "gh:acme/web#7", kind: "local", waitedMs: 5 * S, deferrals: 1 }], "its own wait, none of the removed job's");
+		h.releaseNext();
+		await run;
+		const { run: free } = await quiet.startedAt(again(later), later);
+		assert.deepEqual(quiet.lines("scope_busy_ended"), [], "no wait of this job ended");
+		quiet.releaseNext();
+		await free;
+	} finally {
+		h.releaseNext();
+		quiet.releaseNext();
+	}
+});
+
+test("every scope gate shares the one backoff and the one episode: the folder's identity, the scope, its fleet lease, the project row and its fleet lease (#1023)", { skip }, async () => {
+	const project = { limits: limitsOf2([{ scope: "project:shop", concurrent: 1 }]) };
+	const gates = [
+		{ name: "the folder's identity", options: { extraDeps: { localWorkspaceIdentity: () => ({ key: "ws:1:2" }) } }, hold: "ws:1:2", job: () => localJob("g-1", "/srv/site"), fields: {} },
+		{ name: "the scope", options: {}, hold: "/srv/site", job: () => localJob("g-1", "/srv/site"), fields: {} },
+		{ name: "the scope's fleet lease", options: { limits: limitsOf([{ scope: "acme/web", concurrent: 1 }]), extra: { scopeLease: nobody } }, hold: null, job: () => ghJob("g-1", "acme/web"), fields: { where: "fleet" }, kind: "forge" },
+		{ name: "the project row", options: { ...project, extra: { projects: () => SHOP } }, hold: "project:shop", job: () => localJob("g-1", "/srv/shop-a"), fields: { ledger: "project" } },
+		{ name: "the project's fleet lease", options: { ...project, extra: { projects: () => SHOP, scopeLease: nobody } }, hold: null, job: () => localJob("g-1", "/srv/shop-a"), fields: { ledger: "project", where: "fleet" } },
+	];
+	for (const gate of gates) {
+		const h = onAClock(gate.options);
+		if (gate.hold) assert.ok(h.inFlight.tryAcquire(gate.hold, 1), gate.name);
+		const spy = gate.job();
+		const delays = [];
+		for (const busy of [0, 50 * S, 100 * S]) delays.push(await h.deferredAt(spy, NOW + busy));
+		assert.deepEqual(delays, [5 * S, 10 * S, 20 * S], gate.name);
+		assert.deepEqual(h.lines("scope_busy_deferred"), [{ jobId: "g-1", kind: gate.kind ?? "local", delayMs: 5 * S, ...gate.fields }], `${gate.name}: one line, with the gate's own fields`);
+		assert.equal(h.seen.started, 0, gate.name);
+	}
+});
+
+test("a scope's slot and its fleet lease are two things to wait for, each with its own cadence, and a take of the lease starts the lease's over (#1023)", { skip }, async () => {
+	// A job that gets one of the repository's two slots here and is refused the fleet's lease waits for the lease, not
+	// for the slot it took and gave back.
+	let free = 0;
+	const lease = { acquire: async () => (free > 0 ? (free--, { release: async () => {} }) : null) };
+	const h = onAClock({ limits: limitsOf([{ scope: "acme/web", concurrent: 2 }]), extra: { scopeLease: lease } });
+	try {
+		const a = ghJob("g-1", "acme/web");
+		for (const busy of [0, 50 * S, 100 * S]) await h.deferredAt(a, NOW + busy);
+		assert.equal(h.inFlight.count("acme/web"), 0, "the slot went back with each deferral");
+		// Both slots are now held here, and a job is deferred on them for the first time: the slot's own 5s, while the
+		// lease has been waited for long enough to be at 20s.
+		assert.ok(h.inFlight.tryAcquire("acme/web", 2) && h.inFlight.tryAcquire("acme/web", 2));
+		assert.equal(await h.deferredAt(ghJob("g-2", "acme/web"), NOW + 110 * S), 5 * S);
+		assert.deepEqual(h.lines("scope_busy_deferred", "g-2"), [{ jobId: "g-2", kind: "forge", delayMs: 5 * S }]);
+		h.inFlight.release("acme/web");
+		h.inFlight.release("acme/web");
+		assert.equal(await h.deferredAt(a, NOW + 120 * S), 20 * S, "the lease's cadence went on");
+		const c = ghJob("g-3", "acme/web");
+		assert.equal(await h.deferredAt(c, NOW + 125 * S), 20 * S, "and every job waiting for the lease shares it");
+		assert.deepEqual(h.lines("scope_busy_deferred", "g-3"), [{ jobId: "g-3", kind: "forge", delayMs: 20 * S, where: "fleet" }]);
+		// One lease comes free and the first job takes a slot and the lease: one end line for its one wait, and the job
+		// still waiting for a lease is behind a new holder.
+		free = 1;
+		const { run } = await h.startedAt(a, NOW + 140 * S);
+		assert.deepEqual(h.lines("scope_busy_ended"), [{ jobId: "g-1", kind: "forge", waitedMs: 55 * S, deferrals: 4 }]);
+		assert.equal(await h.deferredAt(c, NOW + 145 * S), 5 * S, "the lease's cadence starts over at its take");
+		h.releaseNext();
+		assert.equal((await run).outcome, "completed");
+	} finally {
+		h.releaseNext();
+	}
+});
+
+test("a job that goes on to wait for another scope no longer counts as waiting for the first (#1023)", { skip }, async () => {
+	// Its folder comes free while its project's row is full: from then on it waits for the project. Nobody is left
+	// waiting for the folder, so the folder's cadence is forgotten, and the next job deferred there starts it over.
+	const h = onAClock({ limits: limitsOf2([{ scope: "project:shop", concurrent: 1 }]), extra: { projects: () => SHOP } });
+	assert.ok(h.inFlight.tryAcquire("/srv/shop-a", 1));
+	const moved = localJob("m-1", "/srv/shop-a");
+	for (const busy of [0, 50 * S, 100 * S]) await h.deferredAt(moved, NOW + busy);
+	h.inFlight.release("/srv/shop-a");
+	assert.ok(h.inFlight.tryAcquire("project:shop", 1));
+	assert.equal(await h.deferredAt(moved, NOW + 120 * S), 5 * S, "the project's own cadence, begun by this deferral");
+	assert.equal(h.lines("scope_busy_deferred", "m-1").length, 1, "one wait all the same");
+	assert.ok(h.inFlight.tryAcquire("/srv/shop-a", 1), "the folder is taken again");
+	assert.equal(await h.deferredAt(localJob("m-2", "/srv/shop-a"), NOW + 130 * S), 5 * S, "and its cadence starts over: the job that waited for it has moved on");
+});
+
+test("the defer record is written on every deferral of a wait, with the instant that deferral moved the job to (#1023)", { skip }, async () => {
+	// The console's reader holds a record to its job's due time, so a record written once per wait would stop matching at
+	// the second deferral. The backoff is what makes the writes fewer.
+	const h = onAClock({ redis: withDeferRecords(fakeRedis()) });
+	assert.ok(h.inFlight.tryAcquire("/srv/site", 1));
+	const b = localJob("w-1", "/srv/site");
+	let writes = 0;
+	for (const [busy, delay] of [[0, 5 * S], [5 * S, 5 * S], [50 * S, 10 * S], [100 * S, 20 * S], [120 * S, 20 * S]]) {
+		assert.equal(await h.deferredAt(b, NOW + busy), delay);
+		assert.equal(h.redis.deferSent.length, ++writes, "one write for this deferral");
+		assert.deepEqual(reasonOf(h.redis, b.job), { why: "scope-folder", bucket: "slot", until: NOW + busy + delay, project: null, holder: null, endpoint: null });
+		assert.equal(b.moves.at(-1).ts, NOW + busy + delay, "the record's until is the instant the job moved to");
+	}
+	assert.equal(h.lines("scope_busy_deferred").length, 1, "five records, one line");
+});
+
+test("the processor remembers at most SCOPE_WAITS_MAX waiting jobs, the one deferred longest ago dropped first, and no scope without one of them (#1023)", { skip }, async () => {
+	// A folder each, so that what is kept of a scope can be told from what is kept of a job.
+	const h = onAClock();
+	const folder = (i) => `/srv/f-${i}`;
+	const waiting = Array.from({ length: mod.SCOPE_WAITS_MAX }, (_, i) => localJob(`w-${i}`, folder(i)));
+	for (const [i, spy] of waiting.entries()) {
+		assert.ok(h.inFlight.tryAcquire(folder(i), 1));
+		await h.deferredAt(spy, NOW);
+	}
+	// A minute on, the first job is deferred again: still the same wait, and now the newest entry.
+	assert.equal(await h.deferredAt(waiting[0], NOW + 60 * S), 10 * S);
+	assert.equal(h.lines("scope_busy_deferred", "w-0").length, 1);
+	// One job more than the bound: the entry deferred longest ago goes, which is the second job's, not the first's.
+	assert.ok(h.inFlight.tryAcquire("/srv/f-new", 1));
+	await h.deferredAt(localJob("w-new", "/srv/f-new"), NOW + 60 * S);
+	assert.equal(await h.deferredAt(waiting[0], NOW + 110 * S), 20 * S, "the job deferred a moment ago is still remembered, and its folder's cadence with it");
+	assert.equal(h.lines("scope_busy_deferred", "w-0").length, 1);
+	// The third job is still remembered, so its folder is: a newcomer there gets the folder's 20s. (Each newcomer is one
+	// job more than the bound again, and drops the then-oldest: here the third job itself, after the delay was read.)
+	assert.equal(await h.deferredAt(localJob("w-late-2", folder(2)), NOW + 110 * S), 20 * S, "a scope someone is remembered waiting for stays");
+	// The second job's folder had no other job waiting, so it was forgotten with the job: a newcomer there starts the
+	// folder's cadence over.
+	assert.equal(await h.deferredAt(localJob("w-late-1", folder(1)), NOW + 110 * S), 5 * S, "a scope goes with its last remembered waiter");
+	// And the dropped job itself, when it comes back, is a new wait: its first line again, at its folder's delay.
+	assert.equal(await h.deferredAt(waiting[1], NOW + 111 * S), 5 * S);
+	assert.equal(h.lines("scope_busy_deferred", "w-1").length, 2);
+	assert.equal(h.seen.started, 0);
+});
+
+test("a waiting job that fails or ends before it reaches its scope again is forgotten, and its scope with it; one another gate defers is not (#1023)", { skip }, async () => {
+	let pause = null;
+	const settled = { outcome: "completed" };
+	const h = onAClock({ pauseUntil: () => (typeof pause === "function" ? pause() : pause), extra: { settledRecord: async () => settled } });
+	for (const folder of ["/srv/paused", "/srv/failed", "/srv/ended"]) assert.ok(h.inFlight.tryAcquire(folder, 1));
+
+	// A pause window defers the waiting job: it still waits for its folder, so the wait goes on where it stood.
+	const paused = localJob("w-paused", "/srv/paused");
+	await h.deferredAt(paused, NOW);
+	pause = NOW + 3600 * S;
+	assert.equal(await h.deferredAt(paused, NOW + 60 * S), 3540 * S, "deferred to the window's end, by the pause gate");
+	pause = null;
+	assert.equal(await h.deferredAt(paused, NOW + 3600 * S), 20 * S, "the same wait, on a folder an hour busy");
+	assert.equal(h.lines("scope_busy_deferred", "w-paused").length, 1);
+
+	// A pickup that throws before the scope gates (here the pause windows' read) is a failed attempt, not a deferral.
+	const failed = localJob("w-failed", "/srv/failed");
+	await h.deferredAt(failed, NOW);
+	pause = () => {
+		throw new Error("unreadable");
+	};
+	h.clock.at = NOW + 120 * S;
+	await assert.rejects(() => h.processor(failed.job, "tok", new AbortController().signal), /unreadable/);
+	pause = null;
+	assert.equal(await h.deferredAt(failed, NOW + 125 * S), 5 * S, "its retry waits anew, and nobody else waited for the folder, so that starts over too");
+	assert.equal(h.lines("scope_busy_deferred", "w-failed").length, 2);
+
+	// A pickup that returns before the scope gates (a stalled job whose record says the attempt finished) ends the job.
+	const ended = localJob("w-ended", "/srv/ended");
+	await h.deferredAt(ended, NOW);
+	ended.job.stalledCounter = 1;
+	h.clock.at = NOW + 120 * S;
+	assert.equal((await h.processor(ended.job, "tok", new AbortController().signal)).outcome, "completed");
+	ended.job.stalledCounter = 0;
+	assert.equal(await h.deferredAt(ended, NOW + 125 * S), 5 * S, "a job of that id that waits again is a new wait");
+	assert.equal(h.lines("scope_busy_deferred", "w-ended").length, 2);
+	assert.deepEqual(h.lines("scope_busy_ended"), [], "and none of them took its scope, so no wait is said to have ended");
+});
+
+test("a logger that throws on the end-of-wait line leaves the job its slots and its run (#1023)", { skip }, async () => {
+	// The line is said while the job holds its scope slots and before the processor's own try: a throw there would
+	// keep the folder taken for good.
+	const logs = [];
+	const h = onAClock({
+		extraDeps: {
+			log: (event, fields) => {
+				logs.push({ event, fields });
+				if (event === "scope_busy_ended") throw new Error("EPIPE");
+			},
+		},
+	});
+	assert.ok(h.inFlight.tryAcquire("/srv/site", 1));
+	const b = localJob("w-1", "/srv/site");
+	await h.deferredAt(b, NOW);
+	h.inFlight.release("/srv/site");
+	h.clock.at = NOW + 5 * S;
+	const run = h.processor(b.job, "tok", new AbortController().signal);
+	// Not `untilStarted`: a pickup the throw ended never starts a container, and that wait would never return.
+	let threw = null;
+	run.catch((error) => (threw = error));
+	for (let i = 0; i < 1000 && h.seen.started < 1 && threw === null; i++) await new Promise((r) => setImmediate(r));
+	try {
+		assert.equal(threw, null, "the logger's throw did not end the pickup");
+		assert.equal(h.seen.started, 1, "the job reached its container");
+		assert.equal(logs.filter((l) => l.event === "scope_busy_ended").length, 1, "the line was tried once");
+	} finally {
+		// Whatever the assertions said: a run left held open keeps the processor's timers, and the file with them.
+		h.releaseNext();
+	}
+	assert.equal((await run).outcome, "completed");
+	assert.equal(h.inFlight.count("/srv/site"), 0, "and the folder is free again");
+});
+
+test("the scope re-check's delays stay under the wait gate's floor and apart from every other gate's fixed re-check (#1023)", { skip }, async () => {
+	// INT-WAIT-PROFILES-CONTRACT: where no defer record says why a job sits in the delayed set, its wake instant is the
+	// evidence. The fixed re-checks are held apart here. A delay a gate computes is not: the wait gate's throttled re-ask
+	// is the larger of 11s and a quarter of its backoff, plus jitter, and can come to 20s (at an 80s interval), which is
+	// why the floor, and not this list, is the contract's rule.
+	const { BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS } = await import("../src/host-budget.mjs");
+	const { WAIT_INTERVAL_FLOOR_MS, waitBackoffMs } = await import("../src/wait-for.mjs");
+	// Every delay the scope gate can give, from the rule itself, over a day of a scope staying busy.
+	const delays = new Set();
+	for (let busy = 0; busy <= 86_400 * S; busy += 5 * S) delays.add(Math.min(waitBackoffMs(mod.SCOPE_BUSY_RECHECK_MS, busy), mod.SCOPE_BUSY_RECHECK_MAX_MS));
+	assert.deepEqual([...delays], [5 * S, 10 * S, 20 * S]);
+	const fixed = [mod.SUPERSEDE_RECHECK_MS, 11_000, mod.ENDPOINT_BUSY_RECHECK_MS, BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS];
+	for (const delay of delays) {
+		assert.ok(delay < WAIT_INTERVAL_FLOOR_MS, `${delay} is under the wait floor`);
+		assert.ok(!fixed.includes(delay), `${delay} is no other gate's fixed re-check (${fixed.join(", ")})`);
+	}
 });
 
 test("published endpoint use is the shared processors' map for per-machine and unnamed workers, including deferral and release", { skip }, async () => {
