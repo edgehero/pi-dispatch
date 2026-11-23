@@ -8,9 +8,13 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFi
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeRedisClient } from "@edgehero/pi-dispatch/connection";
-import { DISPATCH_RUN_ALLOWANCE_LOST, QUEUE_CLOSE_TIMEOUT_MS, applyPriorities, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planEnvelopeWrite, planParkedAnswer, planRerun, readEnvelope, revertAllocation, writeEnvelope } from "../src/read-model.mjs";
+import { DISPATCH_RUN_ALLOWANCE_LOST, QUEUE_CLOSE_TIMEOUT_MS, applyPriorities, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planEnvelopeWrite, planParkedAnswer, planRerun, readAllocations, readEnvelope, revertAllocation, writeEnvelope, writeTracking } from "../src/read-model.mjs";
 import { ALREADY_CUT, ALREADY_MATCH, ALREADY_PER_STATE, ALREADY_UNCHECKED, APPROVAL_NOT_PENDING, APPROVAL_UNREAD, CONNECT_ENDED, LOOK_FIRST, CONFIRM_READ_TIMEOUT_MS, PAID_PLAN_TIMEOUT_MS, alreadyQueuedLine, connectedQueue, dispatchRunAlready, enqueueUnconfirmed, enqueueUnread, queuedAlready } from "../src/job-actions.mjs";
 import { approvalTargetKey } from "@edgehero/pi-dispatch/approval-state";
+import { ALLOC_EXPECTED_KEY, ALLOC_LOCK_KEY, ALLOC_LOG_KEY, ALLOC_PLAN_KEY, CAS_SCRIPT, SEED_SCRIPT, STATE_CHANGE_OUTCOMES, makeAllocationState } from "@edgehero/pi-dispatch/allocation";
+import { envelopeDigest, parseEnvelope } from "@edgehero/pi-dispatch/envelope";
+import { fakeAllocRedis } from "./helpers/fake-alloc-redis.mjs";
+import { HISTORY_SETTLE_MS, expectedOther, expectedOtherText, historyBehind, historyBehindText } from "../src/render.mjs";
 import { enqueueTriggerFire, FIRE_UNCONFIRMED, planTriggerFire } from "../src/trigger-fire.mjs";
 import { CONSOLE_AUDIT_FIELD_MAX } from "@edgehero/pi-dispatch/console-audit";
 import { GROUP_STATUS_UNANSWERED, GROUP_UNCONFIRMED } from "../src/zero-touch-data.mjs";
@@ -577,7 +581,7 @@ function allocationFiles(tag) {
 /** A write client as `writeClient` builds it: not connected yet, `connect` and each command as `over` says. */
 const writeFake = (made, over) => (_url, options) => (made.push(options), { status: "wait", on() {}, connect: async () => {}, disconnect() { made.dropped = (made.dropped ?? 0) + 1; }, ...over });
 
-test("an envelope write whose digest was sent and not answered says may or may not and writes no file; one that was not sent keeps its sentence, and one that never connected throws the not-sent mark (#961, #965)", async () => {
+test("an envelope write whose digest was sent and not answered says what to do first and writes no file; one that never left, or never connected, throws the not-sent mark, and Valkey's own refusal is said as one (#961, #965, #987)", async () => {
   const files = allocationFiles("pd-961-envelope-");
   const before = readFileSync(files.envelope, "utf8");
   const common = { envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000, change: { totalUsd: "90" }, url: "redis://127.0.0.1:1", connectTimeoutMs: BOUND };
@@ -586,13 +590,23 @@ test("an envelope write whose digest was sent and not answered says may or may n
   const made = [];
   const lost = await writeEnvelope({ ...common, redisFn: writeFake(made, { set: () => Promise.reject(lostAnswer()) }) });
   assert.deepEqual(lost, { invalid: envelopeDigestUnconfirmed("alloc:envelope:expected", plan.digest), partial: true });
-  assert.match(lost.invalid, /^the record of the new envelope's digest in alloc:envelope:expected may or may not have been made: Valkey took it and did not answer within the bound\. The envelope file was not written\./);
+  // The instruction first, and the whole sentence inside what an audit row keeps of a reason: it was cut before
+  // "set it back by hand". Built with the real key and the real digest of this envelope.
+  assert.match(plan.digest, /^[0-9a-f]{16}$/);
+  assert.equal(lost.invalid, `If ${ALLOC_EXPECTED_KEY} holds ${plan.digest}, set it back by hand to the digest doctor prints (docs/allocation.md): Valkey did not confirm that write, and the envelope file was not written`);
+  assert.ok([...lost.invalid].length <= CONSOLE_AUDIT_FIELD_MAX, `${[...lost.invalid].length} code points`);
+  assert.doesNotMatch(lost.invalid, /envelope-mismatch|refuse/, "the hosts keep running with only the key moved, so no refusal is promised");
   assert.deepEqual(made[0], { failFast: true, lazyConnect: true, commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }, "the write's client has the command bound");
   assert.equal(readFileSync(files.envelope, "utf8"), before);
-  // Not sent: the sentence it had, and no mark.
-  const unsent = await writeEnvelope({ ...common, redisFn: writeFake([], { set: () => Promise.reject(new Error("Stream isn't writeable")) }) });
-  assert.equal(unsent.partial, undefined);
-  assert.match(unsent.invalid, /^could not record the new envelope's digest/);
+  // Never written (the bounded client marks what reached a socket, so no mark and no reply is a command that did not
+  // leave): the key cannot hold the new digest, which the answer it had said it might. Thrown with the not-sent mark.
+  const unsent = await writeEnvelope({ ...common, redisFn: writeFake([], { set: () => Promise.reject(Object.assign(new Error("Stream isn't writeable"), { code: "ENOTWRITABLE" })) }) }).then(() => "wrote", (error) => error);
+  assert.deepEqual([unsent?.message, unsent?.valkeyNotSent, unsent?.valkeyMayStillRun, unsent?.code], ["Stream isn't writeable", true, undefined, "ENOTWRITABLE"]);
+  assert.equal(readFileSync(files.envelope, "utf8"), before);
+  // Valkey's own reply: it took the SET and refused it, so nothing was changed, and Valkey was reached.
+  const refused = await writeEnvelope({ ...common, redisFn: writeFake([], { set: () => Promise.reject(refusal()) }) });
+  assert.deepEqual(refused, { invalid: "Valkey refused the record of the new envelope's digest in alloc:envelope:expected (READONLY You can't write against a read only replica.), so the file was not written; nothing was changed" });
+  assert.equal(readFileSync(files.envelope, "utf8"), before);
   // A client that never connects: nothing was sent, said within the bound, and the client is dropped. Its error is thrown
   // on with `valkeyNotSent` (issue #965), as a priorities plan's is, so the confirm says Valkey could not be reached.
   const never = [];
@@ -608,7 +622,7 @@ test("an envelope write whose digest was sent and not answered says may or may n
   assert.equal(readFileSync(files.envelope, "utf8"), before);
 });
 
-test("a priorities plan or a revert whose client never connects throws no mark within the bound, and one whose command was lost throws its mark on (#961)", async () => {
+test("a priorities plan or a revert whose client never connects throws no mark within the bound; one stopped at a read says nothing was sent, and one whose write was lost throws its mark on (#961, #987)", async () => {
   const files = allocationFiles("pd-961-alloc-");
   const r = readEnvelope({ envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000 });
   const common = { url: "redis://127.0.0.1:1", envelope: r.envelope, digest: r.digest, projects: r.projects, host: "h1", logsDir: files.logs, now: new Date(NOW), connectTimeoutMs: BOUND };
@@ -629,12 +643,260 @@ test("a priorities plan or a revert whose client never connects throws no mark w
     const refused = await write(writeFake([], { connect: () => Promise.reject(lostAnswer()) })).then(() => "wrote", (error) => error);
     assert.equal(refused.valkeyMayStillRun, undefined, name);
     assert.equal(refused.valkeyNotSent, true, name);
-    // A command that was sent and lost: the client's own error reaches the confirm, which says may or may not.
+    // Stopped at its first read (every command of this client is lost, and the first one is the plan's GET): a read's
+    // error carries the mark as a write's does, and nothing was changed by a read. It said may or may not.
     const lose = losingClient();
-    const lost = await write((_url) => Object.assign(Object.create(lose), { status: "wait", on() {}, connect: async () => {}, disconnect() {} })).then(() => "wrote", (error) => error);
-    assert.equal(lost?.valkeyMayStillRun, true, `${name}: ${String(lost?.message ?? lost)}`);
-    assert.equal(lost.valkeyNotSent, undefined, `${name}: a lost command was sent`);
+    const atRead = await write((_url) => Object.assign(Object.create(lose), { status: "wait", on() {}, connect: async () => {}, disconnect() {} })).then(() => "wrote", (error) => error);
+    assert.deepEqual([atRead?.valkeyNotSent, atRead?.valkeyMayStillRun, atRead?.message, atRead?.code], [true, undefined, "Command timed out", "ETIMEDOUT"], `${name}: ${String(atRead?.message ?? atRead)}`);
+    // A write that was sent and lost (the reads answer, the seed does not): the client's own error reaches the confirm,
+    // which says may or may not.
+    const atWrite = await write(writeFake([], { get: async () => null, eval: () => Promise.reject(lostAnswer()) })).then(() => "wrote", (error) => error);
+    assert.equal(atWrite?.valkeyMayStillRun, true, `${name}: ${String(atWrite?.message ?? atWrite)}`);
+    assert.equal(atWrite.valkeyNotSent, undefined, `${name}: a lost write was sent`);
   }
+});
+
+// ---- issue #987: a budget write says what it sent, and a lost one stays visible ----------------------------------------
+
+/** The allocation fake with every command that reaches it named in `sent`, and `lose(name, nth)` losing that one's answer. */
+function recordingAlloc() {
+  const fake = fakeAllocRedis();
+  const sent = [];
+  const losing = [];
+  const client = new Proxy(fake, {
+    get(target, name) {
+      const value = target[name];
+      if (typeof value !== "function" || ["on", "disconnect"].includes(name)) return value;
+      return (...args) => {
+        sent.push(name);
+        const seen = sent.filter((n) => n === name).length;
+        if (losing.some(([n, nth]) => n === name && nth === seen)) return Promise.reject(lostAnswer());
+        return value.apply(target, args);
+      };
+    },
+  });
+  return { fake, sent, client, lose: (name, nth = 1) => losing.push([name, nth]) };
+}
+
+const ALLOC_PROJECTS = [{ id: "shop", name: null, members: ["github:acme/web"] }, { id: "platform", name: null, members: ["github:acme/infra"] }];
+const allocEnvelope = (over = {}) => parseEnvelope(JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", platform: "10", _other: "0" }, defaultWeights: { shop: 1, platform: 1, _other: 0 }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 }, ...over }), "/e/envelope.json", { projects: ALLOC_PROJECTS, limits: [], maxCostMicros: 2_000_000 });
+const memoryAudit = () => ({ rows: [], append(row) { this.rows.push(row); } });
+const planText = (weights, basis = null, top = {}) => JSON.stringify({ version: 1, basis, projects: Object.entries(weights).map(([id, weight]) => ({ id, weight })), ...top });
+
+test("the tracking write client: a read leaves wrote false, every other command sets it before it leaves, and the state's commands are the seven its comment names (#987)", async () => {
+  // Each read alone, then each write alone, on a client of its own: the flag is up when the command reaches the client.
+  for (const name of ["get", "exists", "lrange"]) {
+    const t = writeTracking({ [name]: async () => t.wrote });
+    assert.equal(await t.redis[name]("k"), false, `${name} is a read`);
+    assert.equal(t.wrote, false);
+  }
+  for (const name of ["set", "eval", "lpush", "ltrim", "del", "hset", "GET2"]) {
+    const t = writeTracking({ [name]: async () => t.wrote });
+    assert.equal(await t.redis[name]("k"), true, `${name} counts as a write before it is sent: a command this list does not know is one`);
+  }
+  // The real allocation state through it, over every path the console runs: what it sends is those seven and no other.
+  const envelope = allocEnvelope();
+  const digest = envelopeDigest(envelope);
+  const r = recordingAlloc();
+  const t = writeTracking(r.client);
+  const state = makeAllocationState({ redis: t.redis, host: "h1", audit: memoryAudit(), token: () => "t" });
+  await state.reconcile({ envelope, digest, now: NOW });
+  const applied = await state.applyPlan({ envelope, digest, projects: ALLOC_PROJECTS, text: planText({ shop: 3, platform: 1, _other: 0 }), writer: { kind: "operator-session" }, now: NOW });
+  assert.equal(applied.outcome, "applied");
+  assert.equal((await state.revert({ envelope, digest, target: { planId: null, weights: { shop: 1, platform: 1, _other: 0 } }, now: NOW + 60_000 })).outcome, "reverted");
+  await state.fleetGoverned();
+  await state.lastAttempt({ triggerId: "none" });
+  r.fake.store.delete(ALLOC_EXPECTED_KEY);
+  await state.reconcile({ envelope, digest, now: NOW + 120_000 });
+  assert.deepEqual([...new Set(r.sent)].sort(), ["eval", "exists", "get", "lpush", "lrange", "ltrim", "set"]);
+  assert.equal(t.wrote, true);
+});
+
+test("a priorities plan stopped at a read says nothing was sent, and after a lost answer nothing more is asked of Valkey: one bound, and an applied plan stays applied (#987)", async () => {
+  const files = allocationFiles("pd-987-tracking-");
+  const read = readEnvelope({ envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000 });
+  const common = { url: "redis://127.0.0.1:1", envelope: read.envelope, digest: read.digest, projects: read.projects, host: "h1", logsDir: files.logs, now: new Date(NOW), connectTimeoutMs: BOUND };
+  const plan = { projects: [{ id: "shop", weight: 3 }, { id: "platform", weight: 1 }] };
+  const over = (r) => () => Object.assign(r.client, { status: "ready" });
+  const seeded = async () => {
+    const r = recordingAlloc();
+    await makeAllocationState({ redis: r.fake, host: "h1", audit: memoryAudit() }).reconcile({ envelope: read.envelope, digest: read.digest, now: NOW - 60_000 });
+    return r;
+  };
+  const thrown = (promise) => promise.then((value) => ({ value }), (error) => ({ error }));
+  // The plan's first GET: only a read was sent, so nothing was changed, and Valkey is what did not answer.
+  const atRead = await seeded();
+  atRead.lose("get", 1);
+  const none = await thrown(applyPriorities({ ...common, plan, keepOther: true, redisFn: over(atRead) }));
+  assert.deepEqual([none.error?.valkeyNotSent, none.error?.valkeyMayStillRun, none.error?.code], [true, undefined, "ETIMEDOUT"]);
+  assert.deepEqual(atRead.sent, ["get"], "and nothing was asked after it");
+  assert.deepEqual([atRead.fake.store.has(ALLOC_LOCK_KEY), atRead.fake.ops.length], [false, 1], "no lock, no write: only the seed made before");
+  // Valkey's own reply to that read is an answer: thrown on as it is, never as Valkey unreachable.
+  const replied = await seeded();
+  replied.fake.get = () => Promise.reject(refusal());
+  const answered = await thrown(applyPriorities({ ...common, plan, keepOther: true, redisFn: over(replied) }));
+  assert.deepEqual([answered.error?.name, answered.error?.valkeyNotSent], ["ReplyError", undefined]);
+  // An error that is not the client's (the audit file refuses a refusal's row) is no word about Valkey either.
+  const denied = await seeded();
+  const off = allocEnvelope({ delegation: { enabled: true, writers: ["portfolio-job"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } });
+  denied.fake.store.set(ALLOC_PLAN_KEY, JSON.stringify({ ...JSON.parse(denied.fake.store.get(ALLOC_PLAN_KEY)), envelopeDigest: envelopeDigest(off) }));
+  denied.fake.store.set(ALLOC_EXPECTED_KEY, envelopeDigest(off));
+  const fs = { mkdirSync() {}, appendFileSync() { throw Object.assign(new Error("denied"), { code: "EACCES" }); } };
+  const file = await thrown(applyPriorities({ ...common, envelope: off, digest: envelopeDigest(off), plan, keepOther: true, redisFn: over(denied), fs }));
+  assert.deepEqual([file.error?.code, file.error?.valkeyNotSent, denied.sent.every((name) => name === "get")], ["EACCES", undefined, true], String(file.error?.message ?? JSON.stringify(file.value)));
+  // The lock's SET, sent and lost: a write, so the mark stays, and nothing follows it.
+  const atLock = await seeded();
+  atLock.lose("set", 1);
+  const locked = await thrown(applyPriorities({ ...common, plan, keepOther: true, redisFn: over(atLock) }));
+  assert.deepEqual([locked.error?.valkeyMayStillRun, locked.error?.valkeyNotSent, atLock.sent.at(-1)], [true, undefined, "set"]);
+  // The compare-and-set, sent and lost: the lock's release in the state's `finally` is refused without reaching the
+  // client, where it waited out a second bound on the Valkey that had just not answered.
+  for (const [name, write] of [["a plan", (redisFn) => applyPriorities({ ...common, plan, keepOther: true, redisFn })], ["a revert", (redisFn) => revertAllocation({ ...common, target: { planId: null, weights: { shop: 1, platform: 1, _other: 0 } }, redisFn })]]) {
+    const atCas = await seeded();
+    atCas.lose("eval", 1);
+    const lost = await thrown(write(over(atCas)));
+    assert.deepEqual([lost.error?.valkeyMayStillRun, lost.error?.valkeyNotSent], [true, undefined], name);
+    assert.deepEqual(atCas.sent.slice(-2), ["set", "eval"], `${name}: the lock, the lost compare-and-set, and no release after it`);
+  }
+  // An applied plan whose lock release was lost: the plan is applied, its answer says so, and the split read back for
+  // the amounts is left out, since nothing more is asked of a Valkey that just did not answer.
+  const atRelease = await seeded();
+  atRelease.lose("eval", 2);
+  const done = await thrown(applyPriorities({ ...common, plan, keepOther: true, redisFn: over(atRelease) }));
+  assert.deepEqual([done.value?.outcome, done.value?.after, done.error], ["applied", null, undefined]);
+  assert.equal(JSON.parse(atRelease.fake.store.get(ALLOC_PLAN_KEY)).planId, done.value.planId);
+  assert.equal(atRelease.sent.at(-1), "eval", "the read back never reached the client");
+});
+
+test("the envelope's stray digest: with only the key moved every host keeps running, and a file that has that digest re-bases the fleet with no confirm (#987)", async () => {
+  // What the sentence must not promise, and what the notice does say, by the worker's own reconcile.
+  const envelope = allocEnvelope();
+  const digest = envelopeDigest(envelope);
+  const next = allocEnvelope({ totalUsd: "90" });
+  const fake = fakeAllocRedis();
+  const state = makeAllocationState({ redis: fake, host: "h1", audit: memoryAudit() });
+  await state.reconcile({ envelope, digest, now: NOW });
+  // An envelope write's record landed and its file was never written.
+  fake.store.set(ALLOC_EXPECTED_KEY, envelopeDigest(next));
+  const still = await state.reconcile({ envelope, digest, now: NOW + 1000 });
+  assert.deepEqual([still.mismatch, still.state.envelopeDigest], [false, digest], "a host whose file is the split's does not read the key");
+  assert.deepEqual(expectedOther({ expected: envelopeDigest(next), fileDigest: digest, splitDigest: digest }), { expected: envelopeDigest(next).slice(0, 8), file: digest.slice(0, 8) });
+  // A host that has a file with that digest: the fleet is re-based onto it, by a compare-and-set nobody confirmed.
+  const moved = await makeAllocationState({ redis: fake, host: "h2", audit: memoryAudit() }).reconcile({ envelope: next, digest: envelopeDigest(next), now: NOW + 2000 });
+  assert.deepEqual([moved.mismatch, moved.state.envelopeDigest, moved.state.writer], [false, envelopeDigest(next), "envelope-change"]);
+  // The notice is said of that and of nothing else.
+  assert.equal(expectedOtherText({ expected: "0123abcd", file: "89abcdef" }), "alloc:envelope:expected names envelope 0123abcd, not this host's (89abcdef): an envelope write that did not finish, or one made on another host. A file with that digest re-bases the fleet. If no write is under way, set the key back by hand (docs/allocation.md).");
+  for (const [said, facts] of [
+    ["the key holds this host's digest", { expected: digest, fileDigest: digest, splitDigest: digest }],
+    ["no key", { expected: null, fileDigest: digest, splitDigest: digest }],
+    ["no split yet: the next host to look seeds one and sets the key to its own digest", { expected: envelopeDigest(next), fileDigest: digest, splitDigest: undefined }],
+    ["a split made for another envelope than this host's: the mismatch line is the true one", { expected: envelopeDigest(next), fileDigest: digest, splitDigest: envelopeDigest(next) }],
+    ["no envelope digest", { expected: envelopeDigest(next), fileDigest: null, splitDigest: null }],
+  ]) assert.equal(expectedOther(facts), null, said);
+  assert.deepEqual(expectedOther({ expected: "not a digest", fileDigest: digest, splitDigest: digest }), { expected: "?", file: digest.slice(0, 8) });
+});
+
+test("the applied split has its row in the history after each of the five changes, and a row that never got there is said once the split is 15 seconds old (#987)", async () => {
+  const envelope = allocEnvelope();
+  const digest = envelopeDigest(envelope);
+  const fake = fakeAllocRedis();
+  const state = makeAllocationState({ redis: fake, host: "h1", audit: memoryAudit(), token: () => "t" });
+  const DAY = 86_400_000;
+  // The split and its history as the page reads them, a minute after the change.
+  const read = async (at) => {
+    const alloc = await readAllocations({ url: "redis://127.0.0.1:1", redisFn: () => fake, limit: 20 });
+    return { alloc, behind: historyBehind(alloc.state, alloc.log, { limit: 20, nowMs: at + 60_000 }) };
+  };
+  const seen = [];
+  const after = async (at, outcome, writer) => {
+    const { alloc, behind } = await read(at);
+    assert.equal(behind, null, `${outcome}: the split's row is there`);
+    assert.deepEqual([alloc.log[0].outcome, alloc.log[0].at, alloc.log[0].writer], [outcome, alloc.state.appliedAt, alloc.state.writer], outcome);
+    assert.equal(alloc.state.writer, writer, outcome);
+    seen.push(outcome);
+  };
+  // The seed (neutral), a plan (applied), its expiry (expired), an operator's revert (reverted), a changed envelope
+  // (rebased), and delegation turned off (neutral again): every writer keeps its row's `at` equal to the state's.
+  await state.reconcile({ envelope, digest, now: NOW });
+  await after(NOW, "neutral", "default");
+  const p = await state.applyPlan({ envelope, digest, projects: ALLOC_PROJECTS, text: planText({ shop: 3, platform: 1, _other: 0 }, null, { validUntil: new Date(NOW + 2 * DAY).toISOString() }), writer: { kind: "operator-session" }, now: NOW + 1000 });
+  assert.equal(p.outcome, "applied", JSON.stringify(p));
+  await after(NOW + 1000, "applied", "operator-session");
+  const target = JSON.parse(fake.lists.get(ALLOC_LOG_KEY)[0]);
+  await state.reconcile({ envelope, digest, now: NOW + 3 * DAY });
+  await after(NOW + 3 * DAY, "expired", "expiry");
+  assert.equal((await state.revert({ envelope, digest, target, now: NOW + 4 * DAY })).outcome, "reverted");
+  await after(NOW + 4 * DAY, "reverted", "operator-revert");
+  const smaller = allocEnvelope({ totalUsd: "90" });
+  fake.store.set(ALLOC_EXPECTED_KEY, envelopeDigest(smaller));
+  await state.reconcile({ envelope: smaller, digest: envelopeDigest(smaller), now: NOW + 5 * DAY });
+  await after(NOW + 5 * DAY, "rebased", "envelope-change");
+  const off = allocEnvelope({ totalUsd: "90", delegation: { enabled: false } });
+  fake.store.set(ALLOC_EXPECTED_KEY, envelopeDigest(off));
+  await state.reconcile({ envelope: off, digest: envelopeDigest(off), now: NOW + 6 * DAY });
+  await after(NOW + 6 * DAY, "rebased", "envelope-change");
+  assert.deepEqual([...new Set(seen)].sort(), [...STATE_CHANGE_OUTCOMES].sort(), "each of the worker's five change outcomes was written here");
+
+  // A change whose row never reached the history: the compare-and-set landed and the push after it did not.
+  const { alloc } = await read(NOW + 6 * DAY);
+  const st = alloc.state;
+  const at = Date.parse(st.appliedAt);
+  const older = alloc.log.slice(1);
+  assert.deepEqual(historyBehind(st, older, { limit: 20, nowMs: at + HISTORY_SETTLE_MS }), { writer: "envelope-change", at: "01-21 08:00" });
+  assert.equal(historyBehindText({ writer: "envelope-change", at: "01-21 08:00" }), "the applied split (written by envelope-change at 01-21 08:00) has no row in this history: a write whose answer was lost landed, or its row could not be pushed. The allocations file of the host that wrote it may hold the row.");
+  // Not said of a split younger than that (the push follows the write by milliseconds), nor without a clock.
+  assert.equal(historyBehind(st, older, { limit: 20, nowMs: at + HISTORY_SETTLE_MS - 1 }), null);
+  assert.equal(historyBehind(st, older, { limit: 20 }), null);
+  assert.equal(HISTORY_SETTLE_MS, 15_000);
+  // Its row anywhere among those read is its row: two hosts that change the split in one moment can push in the other order.
+  assert.equal(historyBehind(st, [older[0], alloc.log[0], ...older.slice(1)], { limit: 20, nowMs: at + 60_000 }), null);
+  // No change row at all among those read says nothing unless the whole history was read.
+  const refusals = Array.from({ length: 20 }, (_, i) => ({ at: new Date(at + i).toISOString(), writer: "operator-session", outcome: "refused", reason: "plan-too-soon" }));
+  assert.equal(historyBehind(st, refusals, { limit: 20, nowMs: at + 60_000 }), null, "the split's row may lie further back than was read");
+  assert.deepEqual(historyBehind(st, refusals.slice(0, 19), { limit: 20, nowMs: at + 60_000 }), { writer: "envelope-change", at: "01-21 08:00" }, "the whole history was read, and it holds no change");
+  assert.deepEqual(historyBehind(st, [], { limit: 20, nowMs: at + 60_000 }), { writer: "envelope-change", at: "01-21 08:00" });
+  // A row with the right instant by another writer, or the right writer at another instant, is not the split's.
+  assert.notEqual(historyBehind(st, [{ ...alloc.log[0], writer: "expiry" }], { limit: 20, nowMs: at + 60_000 }), null);
+  assert.notEqual(historyBehind(st, [{ ...alloc.log[0], at: new Date(at + 1).toISOString() }], { limit: 20, nowMs: at + 60_000 }), null);
+  // No split, or one with no instant, has nothing to be behind.
+  assert.equal(historyBehind(null, older, { limit: 20, nowMs: at + 60_000 }), null);
+  assert.equal(historyBehind({ ...st, appliedAt: "soon" }, older, { limit: 20, nowMs: at + 60_000 }), null);
+});
+
+test("two plans racing on one basis: the loser's rows are no change of the split, and the winner's split has its row in the history whichever was pushed last (#987)", async () => {
+  const envelope = allocEnvelope();
+  const digest = envelopeDigest(envelope);
+  const fake = fakeAllocRedis();
+  // One audit for both hosts, in the order the rows were written: what a host's allocations file holds.
+  const file = memoryAudit();
+  const winning = makeAllocationState({ redis: fake, host: "h1", audit: file, token: () => "a" });
+  // The losing host reads the split before the winner's write and takes the lock after the winner released it: its
+  // lock waits at a gate, and says when it got there.
+  let open;
+  let arrived;
+  const gate = new Promise((resolve) => (open = resolve));
+  const atLock = new Promise((resolve) => (arrived = resolve));
+  const held = new Proxy(fake, { get: (target, name) => (name === "set" ? async (...args) => (arrived(), await gate, target.set(...args)) : typeof target[name] === "function" ? target[name].bind(target) : target[name]) });
+  const losing = makeAllocationState({ redis: held, host: "h2", audit: file, token: () => "b" });
+  await winning.reconcile({ envelope, digest, now: NOW });
+  // The same writer at the same instant: nothing but the plan tells the two attempts' rows apart.
+  const attempt = (state, weights) => state.applyPlan({ envelope, digest, projects: ALLOC_PROJECTS, text: planText(weights), writer: { kind: "operator-session" }, now: NOW + 1000 });
+  const second = attempt(losing, { shop: 1, platform: 3, _other: 0 });
+  await atLock;
+  const won = await attempt(winning, { shop: 3, platform: 1, _other: 0 });
+  open();
+  const lost = await second;
+  assert.deepEqual([won.outcome, lost.outcome, lost.reason], ["applied", "apply-failed", "plan-stale"]);
+  // The file holds the documented shape of a write that did not happen: the loser's `applied` row, written before its
+  // compare-and-set, newer than the winner's and followed by its `apply-failed`.
+  assert.deepEqual(file.rows.map((row) => [row.outcome, row.planId]), [["neutral", null], ["applied", won.planId], ["applied", lost.planId], ["apply-failed", lost.planId]]);
+  // The history the notice reads is `alloc:log`, which never held the loser's `applied` row.
+  const alloc = await readAllocations({ url: "redis://127.0.0.1:1", redisFn: () => fake, limit: 20 });
+  assert.deepEqual(alloc.log.map((row) => [row.outcome, row.planId]), [["apply-failed", lost.planId], ["applied", won.planId], ["neutral", null]]);
+  assert.equal(alloc.state.planId, won.planId);
+  assert.equal(historyBehind(alloc.state, alloc.log, { limit: 20, nowMs: NOW + 61_000 }), null, "the winner's split has its row, under the loser's newer one");
+  // The loser's row is not taken for the split's: with the winner's own row gone, the split is behind its history.
+  assert.deepEqual(historyBehind(alloc.state, alloc.log.filter((row) => row.outcome !== "applied"), { limit: 20, nowMs: NOW + 61_000 }), { writer: "operator-session", at: "01-15 08:00" });
 });
 
 // ---- the zero touch service and the agent's start ---------------------------------------------------------------------

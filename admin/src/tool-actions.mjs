@@ -104,7 +104,8 @@ export function switchPartialRefusal(paused, short, sent, errored = false) {
 export async function executeToolAction(name, params, rawCtx, { paths, env, grantsEnv, granted = false, now = Date.now, fleet: injectedFleet, actionLookup = actionNamed, policy = authorizeTransition, audit: injectedAudit, actor: injectedActor, fs: files = fs, readModel = rm, writePlans = plans, deploymentDir = null, sizingNoteFn = null, ownQueueNamesFn = () => [] } = {}) {
   if (["priorities-set", "allocation-revert", "envelope-set"].includes(TOOL_ACTIONS[name]) && now === Date.now) now = () => allocNow().getTime();
   const allocationModel = { ...readModel };
-  for (const method of ["applyPriorities", "revertAllocation", "writeEnvelope"]) allocationModel[method] = (args) => readModel[method]({ ...args, ...allocRedis() });
+  // `readAllocations` with them (issue #987): the envelope preview reads the expected digest, on the client its write uses.
+  for (const method of ["applyPriorities", "revertAllocation", "writeEnvelope", "readAllocations"]) allocationModel[method] = (args) => readModel[method]({ ...args, ...allocRedis() });
   const toolCtx = gateDialogs(rawCtx);
   const interactive = toolCtx?.hasUI === true && typeof toolCtx?.ui?.confirm === "function";
   const actor = injectedActor ?? agentActor();

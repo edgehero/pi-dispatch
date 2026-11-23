@@ -242,6 +242,34 @@ The other admin writers check the envelope too. A project delete that removes a 
 row below a project's floor, and a `maxCostUsd` change that removes the per-job cap are refused before the confirm,
 naming the conflict. An envelope that already does not load does not block them.
 
+### A write whose answer was lost
+
+Valkey can take a write and stop answering before it says so (a frozen host, a dropped link). The console then
+cannot know whether the write happened, says so once, and the write may still land when Valkey answers again. What
+it leaves is shown on the Budget split page, under Other states, until it is put right.
+
+**An envelope change.** The confirm says: "If alloc:envelope:expected holds <digest>, set it back by hand to the
+digest doctor prints (docs/allocation.md): Valkey did not confirm that write, and the envelope file was not
+written". If the record landed, the key names an envelope no file has. Nothing refuses jobs for that: a host
+compares its own file with the applied split and reads the key only when the two differ. But a file with that digest,
+on any host, would re-base the fleet with no confirm. The page says "alloc:envelope:expected names envelope
+<digest>, not this host's (<digest>)", and the next preview of an envelope change says what the key holds. Either
+confirm the change again (the preview says "already holds this envelope's digest", and confirming writes the file),
+or put the key back to the digest the fleet runs on, which `pi-dispatch doctor` prints as the applied split's:
+
+```sh
+valkey-cli GET alloc:envelope:expected
+valkey-cli SET alloc:envelope:expected <the digest doctor prints>
+```
+
+**A priorities plan or a revert.** One that stopped before it wrote anything says that Valkey could not be reached
+and nothing was changed. One that stopped at its write says the change may or may not have been made. If it landed,
+the split is the plan's or the revert's and the history has no row of it, because the row is pushed after the
+write is answered. The page then says "The applied split (written by <writer> at <time>) has no row in this history".
+The row is in the allocations file of the host that wrote it (`PI_LOGS_DIR/allocations/`), unless the write was the
+first neutral split of a fleet, which writes its row afterwards. Nothing needs repair: the split shown is the split
+in force, and the next plan or revert writes its own row. To undo it, revert to the row you want.
+
 ## The panel
 
 Press `b` in the panel list (`p` and `r` are pause and resume there). The view shows the envelope, each project's
@@ -269,7 +297,7 @@ runs the edited file, and it cannot see a hand edit put back. Check the host's l
 
 ### The other surfaces
 
-- **Budget split** (`/insights/budget-split`) shows the envelope's totals, per-project weights, allocations, spend including holds, floors, the current plan and newest 20 history rows. Refusal counts use the envelope window. Rows start at 1; a host column appears when history names several hosts. Live host digests show which envelopes differ or are unknown. Operators see escaped plan reasons and structured priorities/envelope forms, plus Revert with a preview and five-minute confirmation ticket; viewers see the numbers and history. The allocation forms live here rather than Configuration's Projects panel. Spend retains a linked split summary. [Spend views](insights.md) explains the confirmation and undo semantics.
+- **Budget split** (`/insights/budget-split`) shows the envelope's totals, per-project weights, allocations, spend including holds, floors, the current plan and newest 20 history rows. Refusal counts use the envelope window. Rows start at 1; a host column appears when history names several hosts. Live host digests show which envelopes differ or are unknown. Operators see escaped plan reasons and structured priorities/envelope forms, plus Revert with a preview and five-minute confirmation ticket; viewers see the numbers and history. The allocation forms live here rather than Configuration's Projects panel. Spend retains a linked split summary. [Spend views](insights.md) explains the confirmation and undo semantics. Its Other states card also says when `alloc:envelope:expected` names an envelope that is not this host's, and when the applied split has no row in the history ([A write whose answer was lost](#a-write-whose-answer-was-lost)); the panel's `b` view and `/dispatch priorities` do not show these two.
 - **A run's detail** shows a `plan` line for a run that left one (the outcome, its reason, `clamped`, the plan
   id) and a `dollars` line (what the run settled, and on what basis).
 - **A portfolio trigger** carries `[portfolio]` in the panel's trigger list and in `/dispatch triggers`. Its

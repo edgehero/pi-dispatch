@@ -474,6 +474,67 @@ test("the outside-edit notice is one rule and one sentence on the panel's text t
   }
 });
 
+test("the split slice carries what a budget write whose answer was lost leaves, by render.mjs's two rules, and the page says each in that module's words (#987)", async () => {
+  const { fakeAllocRedis } = await import("./helpers/fake-alloc-redis.mjs");
+  const { expectedOther, expectedOtherText, historyBehind, historyBehindText } = await import("../src/render.mjs");
+  const { escapeHtml } = await import("../src/graph-html.mjs");
+  const { readEnvelope } = await import("../src/read-model.mjs");
+  const dir = tempDir("admin-insights-lost-write-");
+  const files = { envelope: join(dir, "envelope.json"), projects: join(dir, "projects.json"), settings: join(dir, "settings.json") };
+  writeFileSync(files.projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
+  writeFileSync(files.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", _other: "0" }, defaultWeights: { shop: 1, _other: 0 }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }));
+  writeFileSync(files.settings, JSON.stringify({ maxCostUsd: "2" }));
+  const digest = readEnvelope({ envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000 }).digest;
+  const paths = { envelopeFile: files.envelope, projectsFile: files.projects, settingsFile: files.settings, valkeyUrl: "redis://127.0.0.1:6390" };
+  const M = 1_000_000;
+  const APPLIED = Date.parse("2026-10-05T06:00:00.000Z");
+  // A revert whose compare-and-set landed after its answer was lost: the split is the revert's, the history's newest
+  // change is the plan before it. And an envelope write's record that landed with no file written.
+  const state = { version: 1, envelopeDigest: digest, planId: null, writer: "operator-revert", appliedAt: new Date(APPLIED).toISOString(), weights: { shop: 1, _other: 0 }, allocations: { shop: 100 * M, _other: 0 }, unallocated: 0, repos: {}, clamped: false };
+  const earlier = { at: "2026-10-04T06:00:00.000Z", host: "h1", writer: "operator-session", outcome: "applied", reason: null, planId: "3f9a0c1d2e4b5a67", weights: { shop: 1 } };
+  const own = { at: state.appliedAt, host: "h1", writer: "operator-revert", outcome: "reverted", reason: null, planId: null, weights: { shop: 1, _other: 0 } };
+  const stray = "0123456789abcdef";
+  const view = async ({ log, expected, nowMs, options = {} }) => {
+    const redis = fakeAllocRedis();
+    redis.store.set("t987:plan", JSON.stringify(state));
+    if (expected) redis.store.set("t987:envelope:expected", expected);
+    redis.lists.set("t987:log", log.map((r) => JSON.stringify(r)));
+    ia._setAllocationSeamsForTests({ redisFn: () => redis, prefix: "t987", now: () => new Date(nowMs) });
+    try {
+      return await ia.assembleAllocationView(paths, null, options);
+    } finally {
+      ia._setAllocationSeamsForTests({});
+    }
+  };
+  const lost = await view({ log: [earlier], expected: stray, nowMs: APPLIED + 60_000 });
+  assert.deepEqual(lost.expectedOther, { expected: "01234567", file: digest.slice(0, 8) });
+  assert.deepEqual(lost.expectedOther, expectedOther({ expected: stray, fileDigest: digest, splitDigest: digest }), "the assembler applies render.mjs's rule");
+  assert.deepEqual(lost.historyBehind, { writer: "operator-revert", at: "10-05 06:00" });
+  assert.deepEqual(lost.historyBehind, historyBehind(state, [earlier], { limit: 20, nowMs: APPLIED + 60_000 }));
+  // The page says each in render.mjs's own words, which the page module restates because it may not load that module.
+  assert.equal(html.splitExpectedOtherText(lost.expectedOther), expectedOtherText(lost.expectedOther));
+  assert.equal(html.splitHistoryBehindText(lost.historyBehind), historyBehindText(lost.historyBehind));
+  const page = pageOf({ allocation: lost, window: "30d" }, 0);
+  assert.ok(page.includes(`<span class="state">${escapeHtml(expectedOtherText(lost.expectedOther))}</span>`), "the stray key on the page");
+  assert.ok(page.includes(`<span class="state">${escapeHtml(historyBehindText(lost.historyBehind))}</span>`), "the missing row on the page");
+  // The console's views carry the same facts, for a viewer and an operator alike: neither is a secret.
+  for (const role of ["viewer", "operator"]) {
+    const consoleView = await view({ log: [earlier], expected: stray, nowMs: APPLIED + 60_000, options: { consoleView: true, role, nowMs: APPLIED + 60_000 } });
+    assert.deepEqual([consoleView.expectedOther, consoleView.historyBehind], [lost.expectedOther, lost.historyBehind], role);
+  }
+  // A split whose row is there and whose key names this host's envelope says neither, and the page holds neither sentence.
+  const whole = await view({ log: [own, earlier], expected: digest, nowMs: APPLIED + 60_000 });
+  assert.deepEqual([whole.expectedOther, whole.historyBehind], [null, null]);
+  const calm = pageOf({ allocation: whole, window: "30d" }, 0);
+  assert.ok(!calm.includes("alloc:envelope:expected names envelope") && !calm.includes("has no row in this history"));
+  // A split written a moment ago is not said to lack its row: the push follows the write by milliseconds.
+  assert.equal((await view({ log: [earlier], expected: digest, nowMs: APPLIED + 5_000 })).historyBehind, null);
+  // The normalizer bounds what it is handed: a digest that is not one is no notice, a writer that is no word is "?".
+  assert.equal(html.normAllocation({ ...lost, expectedOther: { expected: "<b>", file: "01234567" } }).expectedOther, null);
+  assert.deepEqual(html.normAllocation({ ...lost, historyBehind: { writer: "<b>", at: "junk" } }).historyBehind, { writer: "?", at: "?" });
+  assert.deepEqual([html.normAllocation({ ...lost, expectedOther: undefined, historyBehind: undefined }).expectedOther, html.normAllocation({ ...lost, historyBehind: null }).historyBehind], [null, null], "an older payload has neither");
+});
+
 // ---- the capacity section's assembler (issue #599, phase 4) ----
 
 const { computeCapacity } = await import("@edgehero/pi-dispatch/capacity");

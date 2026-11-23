@@ -1081,7 +1081,12 @@ Fire now whose latch was lost says the minute may be taken. The trigger page che
 seconds, and says so when it could not. Adopt refuses when a host's applied state or a canary's facts could not be read,
 and says a canary's result is not known when the recent runs could not be, instead of asking for a canary that may have
 run. An envelope, a priorities plan or an allocation revert whose write was sent and not answered says it may or may not
-have been made.
+have been made. One that Valkey stopped answering before it wrote anything says that Valkey could not be reached and
+nothing was changed (2026-11-23, #987), and a revert stopped at its write answers after one 5 second wait, where it took
+two. An envelope's answer says first what to do: set `alloc:envelope:expected` back by hand if it holds the new digest
+([Allocation](allocation.md#a-write-whose-answer-was-lost)). What such a write leaves stays on the Budget split page,
+under Other states, until it is put right: the expected key naming an envelope that is not this host's, or an applied
+split with no row in the history. The next preview of an envelope change says in one line what the key holds.
 
 A Valkey password changed in the deployment's `.env` needs no restart: the console's clients read it again each time they
 connect, so after a rotation they read Valkey again at their next try, and so does a password a bad line kept from being

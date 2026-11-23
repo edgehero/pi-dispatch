@@ -41,7 +41,7 @@ import { buildGraphModel } from "./graph-model.mjs";
 import { readGraphTriggers } from "./graph-triggers.mjs";
 import { INSIGHTS_SPLIT_REFUSALS } from "./insights-html.mjs";
 import { costsSinceMs, foldCosts, foldTriggerCosts, hasLedger, recordInProject, recordInRepo, matchesGlob, meteredRunMicros, recordNotionalMicros, recordNotionalProviders, repoKeyOf, projectKeyOf, refusedBeforeSpend } from "./costs.mjs";
-import { sizeBits, outsideEdit, splitTotalMicros } from "./render.mjs";
+import { sizeBits, outsideEdit, expectedOther, historyBehind, splitTotalMicros } from "./render.mjs";
 import { escapeInterpreted } from "./panel.mjs";
 import { deploymentWindowsAt, meteredMicros, reservedInOf, valkeyEndpointTag } from "@edgehero/pi-dispatch/dollar-budget";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
@@ -301,6 +301,9 @@ export function splitCounts(records) {
   return { refusals, plans, ...(newerSkipped > 0 ? { newerSkipped } : {}) };
 }
 
+/** How many rows of `alloc:log` the split slice reads and shows: what `historyBehind` is told was asked for. */
+const SPLIT_HISTORY_ROWS = 20;
+
 /**
  * The budget split slice of the insights payload (issue #507): the envelope, the applied split and its spend, and the
  * newest `alloc:log` outcomes, through the same `readAllocations` the panel's `b` view and `/dispatch priorities` use,
@@ -309,8 +312,11 @@ export function splitCounts(records) {
  * reaches a file meant to be shared. A problem text has the envelope path cut to its basename for the same reason,
  * unless an operator asked for `?paths=full`, the page's one opt-in for host paths. The cut is made on the parser's RAW
  * text, before `envelopeProblem` escapes it: a path holding a character the escape rewrites would no longer match.
- * `outsideEdit` is the panel's notice, by its rule, over the same 20 rows. Exported for its tests, as `splitCounts` is: the
- * rest of the insights assembly dials the real queue. `envFn` is the deployment's environment (`processEnv`).
+ * `outsideEdit` is the panel's notice, by its rule, over the same 20 rows. `expectedOther` and `historyBehind` (issue
+ * #987) are what a budget write whose answer was lost leaves to be seen, each by its rule in render.mjs: the expected
+ * key naming an envelope that is not this host's, and an applied split with no row among those 20 (the history read
+ * with the clock the spend is read at). Exported for its tests, as `splitCounts` is: the rest of the insights assembly
+ * dials the real queue. `envFn` is the deployment's environment (`processEnv`).
  */
 export async function assembleAllocationView(paths, counts, { fullPaths = false, envFn = processEnv, consoleView = false, role = "viewer", nowMs } = {}) {
   if (!paths.envelopeFile) return { unset: true };
@@ -322,7 +328,8 @@ export async function assembleAllocationView(paths, counts, { fullPaths = false,
   }
   const e = read.envelope;
   const head = { window: e.window, totalMicros: e.totalMicros, floors: { ...e.floors }, delegation: e.delegation?.enabled === true, ...(consoleView ? { envelope: e, digest: read.digest, file: fullPaths && role === "operator" ? paths.envelopeFile : basename(paths.envelopeFile) } : {}) };
-  const alloc = await readAllocations({ url: paths.valkeyUrl, envelope: e, projects: read.projects, now: nowMs === undefined ? allocNow() : new Date(nowMs), withReasons: consoleView && role === "operator", ...allocRedis() });
+  const at = nowMs === undefined ? allocNow() : new Date(nowMs);
+  const alloc = await readAllocations({ url: paths.valkeyUrl, envelope: e, projects: read.projects, now: at, withReasons: consoleView && role === "operator", limit: SPLIT_HISTORY_ROWS, ...allocRedis() });
   if (alloc?.unreachable) return { ...head, unreachable: String(alloc.unreachable) };
   const st = alloc.state ?? null;
   return {
@@ -335,11 +342,13 @@ export async function assembleAllocationView(paths, counts, { fullPaths = false,
     state: st && { ...(consoleView ? { weights: { ...(st.weights ?? {}) }, jobId: st.jobId ?? null, triggerId: st.triggerId ?? null, ...(role === "operator" ? { reasons: { ...(st.reasons ?? {}) } } : {}) } : {}), planId: st.planId ?? null, writer: st.writer ?? null, appliedAt: st.appliedAt ?? null, validUntil: st.validUntil ?? null, clamped: st.clamped === true, allocations: { ...(st.allocations ?? {}) }, unallocated: st.unallocated ?? null },
     mismatch: st !== null && st.envelopeDigest !== read.digest,
     outsideEdit: outsideEdit(alloc.log, st?.envelopeDigest),
+    expectedOther: expectedOther({ expected: alloc.expected, fileDigest: read.digest, splitDigest: st?.envelopeDigest }),
+    historyBehind: historyBehind(st, alloc.log, { limit: SPLIT_HISTORY_ROWS, nowMs: at.getTime() }),
     spend: {
       deployment: alloc.spend?.deployment?.micros ?? null,
       projects: Object.fromEntries(Object.entries(alloc.spend?.projects ?? {}).map(([id, v]) => [id, v?.micros ?? null])),
     },
-    log: (Array.isArray(alloc.log) ? alloc.log : []).slice(0, 20).map((h) => ({ at: h.at, writer: h.writer, outcome: h.outcome, reason: h.reason ?? null, planId: h.planId ?? null, ...(consoleView ? { host: h.host ?? null, weights: h.weights ?? null, jobId: h.jobId ?? null, triggerId: h.triggerId ?? null } : {}) })),
+    log: (Array.isArray(alloc.log) ? alloc.log : []).slice(0, SPLIT_HISTORY_ROWS).map((h) => ({ at: h.at, writer: h.writer, outcome: h.outcome, reason: h.reason ?? null, planId: h.planId ?? null, ...(consoleView ? { host: h.host ?? null, weights: h.weights ?? null, jobId: h.jobId ?? null, triggerId: h.triggerId ?? null } : {}) })),
     counts,
   };
 }

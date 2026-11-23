@@ -27,6 +27,10 @@ import { KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 // The one vocabulary the console and the panel read (issue #710): the runs table's OUTCOME column says the same words.
 import { outcomeWord, recordReason } from "./words.mjs";
 import { newerSkippedSentence } from "./newer-release.mjs";
+// The applied split's own vocabulary (issue #987), imported for the reason `KNOWN_KEYS` is: the key's name and the
+// outcomes that change the split are the worker's, and a copy here would be the second one. No statement of that
+// module runs at import.
+import { ALLOC_EXPECTED_KEY, STATE_CHANGE_OUTCOMES } from "@edgehero/pi-dispatch/allocation";
 
 // The three spend windows and the overlay cap key each reads. Order is day -> week -> month.
 const BUDGET_WINDOWS = [
@@ -684,6 +688,77 @@ export const SPLIT_ONLY_MARK = "not in this host's file";
 /** The outside-edit notice in words, the same on every surface. */
 export function outsideEditText(e) {
   return `a host reported envelope ${e.digest} at ${e.at}, not the one the split was made for (${e.split}); a host still on it refuses governed jobs as envelope-mismatch`;
+}
+
+/** A digest as its first 8 hex digits, "?" for a value that is not one. */
+const digest8 = (d) => (typeof d === "string" && /^[0-9a-f]{8}/.test(d) ? d.slice(0, 8) : "?");
+
+/**
+ * The stray-key notice (issue #987): `alloc:envelope:expected` names an envelope that is not this host's, while this
+ * host's file IS the envelope the applied split was made for. That is what an envelope write leaves whose record of
+ * the digest was sent, not answered, and landed when Valkey woke (the file was never written), and what a write on
+ * another host leaves here until the fleet re-bases. The fleet keeps running on the applied split: a host reads the key
+ * only once its own file differs from the split. But a file with THAT digest, on any host, re-bases the fleet onto
+ * itself with no confirm, so a key nobody is about to honour is put back. Returned as its facts, `{ expected, file }`
+ * (8-hex digests), or null; `expectedOtherText` words it.
+ *
+ * Said of nothing else. With no split applied the next host to look seeds one and sets the key to its own digest, so
+ * the key decides nothing. With a split made for another envelope than this host's (`splitDigest` is not `fileDigest`)
+ * the mismatch line is the true one: this host's file is the odd one out, and the key may well agree with the split.
+ */
+export function expectedOther({ expected, fileDigest, splitDigest } = {}) {
+  if (typeof expected !== "string" || expected === "" || typeof fileDigest !== "string" || fileDigest === "") return null;
+  if (splitDigest !== fileDigest || expected === fileDigest) return null;
+  return { expected: digest8(expected), file: digest8(fileDigest) };
+}
+
+/** The stray-key notice in words, the same on every surface. */
+export function expectedOtherText(e) {
+  return `${ALLOC_EXPECTED_KEY} names envelope ${e.expected}, not this host's (${e.file}): an envelope write that did not finish, or one made on another host. A file with that digest re-bases the fleet. If no write is under way, set the key back by hand (docs/allocation.md).`;
+}
+
+/**
+ * How old the applied split is before a missing row is said of it. A compare-and-set and the push of its row are two
+ * commands, milliseconds apart, and a page that reads between them would report a row that is on its way.
+ */
+export const HISTORY_SETTLE_MS = 15_000;
+
+/**
+ * The missing-row notice (issue #987): the applied split has no row in the history read. Every change of the split
+ * writes a row whose `at` is the new state's `appliedAt` and whose `writer` is the state's (`STATE_CHANGE_OUTCOMES`, the
+ * worker's list of those rows), pushed to `alloc:log` right after the write. So a split with no such row among those
+ * read is one whose row never got there: a write whose answer was lost and that landed when Valkey woke (the writer
+ * had stopped by then, before its push), or a push that failed. Until now such a split was said once, in the failed
+ * confirm, and then showed as an applied plan with a history that ended one change earlier.
+ *
+ * `log` is the newest rows of `alloc:log`, newest first, `limit` how many were asked for. That list, and never the
+ * allocations file, on purpose. The file gets an `applied` or a `reverted` row BEFORE the compare-and-set (a change
+ * that happened always has its row), so a write that then lost its compare-and-set leaves one there as well, followed
+ * by its `apply-failed`, and two plans racing on one basis leave two `applied` rows. `alloc:log` gets a change's row
+ * only after the write was answered, and of a loser its `apply-failed` alone: a change row in it is a change that
+ * happened, whoever pushed last. And it is the fleet's history, where a file is one host's.
+ *
+ * A row that matches anywhere among those read is the split's row: two hosts that change the split within a moment
+ * can push in the other order, and the newest change row is then not the applied split's. With NO change row at all
+ * among them, the split's row may lie further back than was read, so that says nothing unless the whole history was
+ * read (fewer rows than `limit`).
+ * Nothing is said of a split younger than `HISTORY_SETTLE_MS` at `nowMs`, nor without a clock. Returned as its facts,
+ * `{ writer, at }` (the writer's word and an `MM-DD HH:MM` instant), or null; `historyBehindText` words it.
+ */
+export function historyBehind(state, log, { limit = 20, nowMs } = {}) {
+  if (!state || typeof state !== "object" || typeof state.appliedAt !== "string" || typeof state.writer !== "string") return null;
+  const applied = Date.parse(state.appliedAt);
+  if (!Number.isFinite(applied) || !Number.isFinite(nowMs) || nowMs - applied < HISTORY_SETTLE_MS) return null;
+  const rows = Array.isArray(log) ? log : [];
+  const changes = rows.filter((r) => STATE_CHANGE_OUTCOMES.includes(r?.outcome));
+  if (changes.some((r) => r.at === state.appliedAt && r.writer === state.writer)) return null;
+  if (changes.length === 0 && rows.length >= limit) return null;
+  return { writer: cell(state.writer), at: allocAt(state.appliedAt) };
+}
+
+/** The missing-row notice in words, the same on every surface. */
+export function historyBehindText(h) {
+  return `the applied split (written by ${h.writer} at ${h.at}) has no row in this history: a write whose answer was lost landed, or its row could not be pushed. The allocations file of the host that wrote it may hold the row.`;
 }
 
 /**

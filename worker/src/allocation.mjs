@@ -65,6 +65,14 @@ export const ENVELOPE_MISMATCH_REASON = "envelope-mismatch";
 export const STATE_WRITERS = Object.freeze(["default", "expiry", "envelope-change", "operator-revert", "operator-session", "portfolio-job"]);
 /** What an audit row says happened. */
 export const AUDIT_OUTCOMES = Object.freeze(["applied", "duplicate", "refused", "apply-failed", "neutral", "expired", "rebased", "reverted", "envelope-changed-externally"]);
+/**
+ * The outcomes whose row goes with a CHANGE of the applied split (issue #987): a plan applied, an operator's revert, the
+ * neutral split written (the seed, or delegation turned off), a plan that expired and a re-base onto a changed
+ * envelope. Each such row carries the new state's `appliedAt` as its `at` and the state's `writer`, which is what lets
+ * a reader of `alloc:log` tell whether the applied split has its row there. Every other outcome leaves the split as it
+ * was. A test holds this list to the rows the compare-and-set and the seed really write.
+ */
+export const STATE_CHANGE_OUTCOMES = Object.freeze(["applied", "reverted", "neutral", "expired", "rebased"]);
 
 /**
  * The compare-and-set. KEYS[1] `alloc:plan`; ARGV[1] the plan id the writer read (`""` for none), ARGV[2] the envelope

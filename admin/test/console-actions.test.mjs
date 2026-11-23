@@ -19,7 +19,7 @@ import { enqueueForgeJob, forgeDeliveryJobId, makeQueue } from "@edgehero/pi-dis
 import { buildRecord, makeRecordWriter, sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
 import { requestSandboxEnd } from "@edgehero/pi-dispatch/sandbox-sessions";
-import { PACKAGE_MOVED_SENTENCE, PACKAGE_NOT_TAKEN_SENTENCE, UPDATES_UNREAD_SENTENCE } from "../src/console/actions.mjs";
+import { ENVELOPE_EXPECTED_LINES, PACKAGE_MOVED_SENTENCE, PACKAGE_NOT_TAKEN_SENTENCE, UPDATES_UNREAD_SENTENCE } from "../src/console/actions.mjs";
 import { switchPartialWords, actionNamed, agentFailure, AGENT_QUEUES_SHORT, AGENT_REFUSED, AGENT_UNCONFIRMED, PAUSE_SNAPSHOT_TIMEOUT_MS, START_USED } from "../src/console/actions.mjs";
 import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueErroredRefusal, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_ERRORED_LINE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, SWITCH_UNREAD_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
@@ -4851,6 +4851,58 @@ test("Budget split envelope preview contains the exact file diff and multi-host 
 });
 
 
+test("the envelope preview says in one line what alloc:envelope:expected holds when that is not the envelope the fleet runs on, or that it could not be read, and never refuses for it (#987)", async () => {
+  const { dir, paths } = deployment();
+  paths.envelopeFile = join(dir, "envelope.json");
+  writeFileSync(paths.envelopeFile, `${JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { web: "10", _other: "0" }, defaultWeights: { web: 1, _other: 0 }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }, null, 2)}\n`);
+  // The real planner over the files; the read of the split is the case's answer, a throw included.
+  let answer = { state: null, expected: null, log: [] };
+  const asked = [];
+  const rm = { ...RM, readAllocations: async (args) => { asked.push(args); if (answer instanceof Error) throw answer; return answer; }, writeEnvelope: async () => ({ ok: true }) };
+  const c = await start({ paths, a: { rm } });
+  const input = { envelope: { totalUsd: "120" } };
+  const lines = async () => {
+    const p = await c.act("envelope-set", input);
+    assert.equal(p.status, 200, p.text);
+    assert.equal(typeof p.json().ticket, "string", "a preview, whatever the key holds");
+    return p.json().summary.filter((line) => line.includes("alloc:envelope:expected"));
+  };
+  // No key: nothing to say. One bounded read of one row, with no envelope, so no spend is read for it.
+  assert.deepEqual(await lines(), []);
+  assert.deepEqual(asked[0], { url: paths.valkeyUrl, limit: 1, timeoutMs: 2500 });
+  // This change's digests, as its confirm's audit row records them.
+  const out = await c.both("envelope-set", input);
+  assert.equal(out.confirm.status, 200, out.confirm.text);
+  const { beforeDigest, afterDigest } = c.audit.rows.find((r) => r.kind === "envelope-set" && r.outcome === "ok");
+  assert.match(`${beforeDigest} ${afterDigest}`, /^[0-9a-f]{16} [0-9a-f]{16}$/);
+  // An earlier write of this change recorded its digest and wrote no file.
+  answer = { state: null, expected: afterDigest, log: [] };
+  assert.deepEqual(await lines(), ["alloc:envelope:expected already holds this envelope's digest: an earlier write of this change recorded it and did not write this host's file. Confirming writes the file."]);
+  // A digest nobody here knows: a write that did not finish, or another host's.
+  answer = { state: { envelopeDigest: beforeDigest }, expected: "0123456789abcdef", log: [] };
+  assert.deepEqual(await lines(), ["alloc:envelope:expected holds another digest (01234567) than this host's file: a write that did not finish, or one made on another host. Confirming replaces it."]);
+  answer = { state: null, expected: "not a digest", log: [] };
+  assert.deepEqual(await lines(), [ENVELOPE_EXPECTED_LINES.other("?")]);
+  // The envelope the fleet runs on, by this host's file or by the applied split: what every envelope change replaces.
+  answer = { state: { envelopeDigest: beforeDigest }, expected: beforeDigest, log: [] };
+  assert.deepEqual(await lines(), []);
+  answer = { state: { envelopeDigest: "fedcba9876543210" }, expected: "fedcba9876543210", log: [] };
+  assert.deepEqual(await lines(), []);
+  // Not read: said, with the preview still there. A Valkey that cannot be read is the confirm's to refuse.
+  for (const unread of [{ unreachable: "timed out reaching the queue" }, new Error("boom"), null]) {
+    answer = unread;
+    assert.deepEqual(await lines(), ["Whether alloc:envelope:expected holds another digest could not be read from Valkey."]);
+  }
+  assert.deepEqual([ENVELOPE_EXPECTED_LINES.same, ENVELOPE_EXPECTED_LINES.unread].map((line) => typeof line), ["string", "string"]);
+  // The real reader on an address that refuses the connect: the preview is there at the read's one bound, and says so.
+  const refused = await start({ paths });
+  const t0 = Date.now();
+  const p = await refused.act("envelope-set", input);
+  assert.equal(p.status, 200, p.text);
+  assert.ok(p.json().summary.includes(ENVELOPE_EXPECTED_LINES.unread), JSON.stringify(p.json().summary));
+  assert.ok(Date.now() - t0 < 4500, `${Date.now() - t0} ms`);
+});
+
 test("an envelope write whose Valkey connect got no answer says the deployment's Valkey could not be reached, as a priorities plan does, and writes nothing (#965)", async () => {
   const { dir, paths } = deployment();
   paths.envelopeFile = join(dir, "envelope.json");
@@ -5055,6 +5107,25 @@ test("a budget write that was sent and not answered says may or may not have bee
   const entry = { payload: { files: {}, change: {} }, expect: null };
   assert.deepEqual(await actionNamed("envelope-set").apply(entry, ctx({ invalid: sentence, partial: true })), { invalid: sentence, partial: true });
   assert.deepEqual(await actionNamed("envelope-set").apply(entry, ctx({ invalid: "the file was not written" })), { invalid: "the file was not written" });
+});
+
+test("a priorities plan or a revert that Valkey stops answering while it has only read says Valkey could not be reached and nothing was changed, in the bar and in the audit row (#987)", async () => {
+  const { dir, paths } = deployment();
+  paths.envelopeFile = join(dir, "envelope.json");
+  writeFileSync(paths.envelopeFile, `${JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { web: "10", _other: "0" }, defaultWeights: { web: 1, _other: 0 }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }, null, 2)}\n`);
+  const log = [{ at: "2026-10-15T00:00:00Z", outcome: "applied", planId: "p1", weights: { web: 2, _other: 0 } }];
+  // The real funnels and the worker's real allocation state, over a client that connects and whose first command, the
+  // plan's GET, is sent and never answered. A read's error carries the mark of a command that may still run, as a
+  // write's does: it said the change may or may not have been made.
+  const atRead = () => ({ status: "wait", on() {}, connect: async () => {}, disconnect() {}, get: () => Promise.reject(lostWrite()), set: async () => assert.fail("no lock is taken"), eval: async () => assert.fail("no script is sent"), lpush: async () => assert.fail("no row is pushed") });
+  for (const [name, input, funnel] of [["priorities-set", { projects: [{ id: "web", weight: 3 }] }, "applyPriorities"], ["allocation-revert", { index: 0 }, "revertAllocation"]]) {
+    const rm = { ...RM, readAllocations: async () => ({ state: null, expected: null, log }), [funnel]: (args) => RM[funnel]({ ...args, redisFn: atRead }) };
+    const c = await start({ paths, a: { rm } });
+    const out = await c.both(name, input);
+    assert.deepEqual([out.confirm.status, out.confirm.json().error], [503, VALKEY_UNREACHABLE], `${name}: ${out.confirm.text}`);
+    assert.match(out.confirm.json().html, /data-again>Try again</, name);
+    assert.deepEqual(lastTwo(c), [["write", "ok", null], ["write", "failed", "the write threw (ETIMEDOUT); Valkey could not be reached, so nothing was changed"]], name);
+  }
 });
 
 test("the pause preview waits six seconds for its snapshot, the resume ten (#961)", async () => {

@@ -104,6 +104,10 @@ const states = {
   "spend-split-unreachable.viewer": () => drawSpend("insights-budget-split", { role: "viewer", payload: allocationUnread() }),
   "spend-split-newer.viewer": () => drawSpend("insights-budget-split", { role: "viewer", payload: allocationState({ stateProblem: "newer" }) }),
   "spend-split-outside-edit.operator": () => drawSpend("insights-budget-split", { payload: allocationState({ outsideEdit: { at: "10-08 15:00", digest: "01234567", split: "89abcdef" } }) }),
+  // Issue #987: what a budget write whose answer was lost leaves on the page for as long as it stays so. The expected key
+  // naming an envelope that is not this host's, and an applied split with no row in the history.
+  "spend-split-expected-other.operator": () => drawSpend("insights-budget-split", { payload: allocationState({ expectedOther: { expected: "01234567", file: "89abcdef" } }) }),
+  "spend-split-history-behind.operator": () => drawSpend("insights-budget-split", { payload: allocationState({ historyBehind: { writer: "operator-revert", at: "10-08 15:00" } }) }),
   "spend-capacity.viewer": () => drawSpend("insights-capacity", { role: "viewer", query: "range=24h" }),
   "spend-capacity-no-time.viewer": () => drawSpend("insights-capacity", { role: "viewer", query: "range=mtd", payload: { ...spendFixture(), capacity: { noTime: true, fromMs: NOW } } }),
   "spend-capacity-unreadable.viewer": () => drawSpend("insights-capacity", { role: "viewer", payload: { ...spendFixture(), capacity: { unreachable: "unavailable" } } }),

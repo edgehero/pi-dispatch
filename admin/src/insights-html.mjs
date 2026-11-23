@@ -531,6 +531,29 @@ function normOutsideEdit(v) {
   return digest !== null && split !== null ? { digest, at, split } : null;
 }
 
+/** The stray-key facts the assembler sends (issue #987): two 8-hex digests (or "?"), else none. */
+function normExpectedOther(v) {
+  if (v === null || v === undefined || typeof v !== "object") return null;
+  const hex = (d) => (typeof d === "string" && /^(?:[0-9a-f]{8}|\?)$/.test(d) ? d : null);
+  const expected = hex(v.expected);
+  const file = hex(v.file);
+  return expected !== null && file !== null ? { expected, file } : null;
+}
+
+/** The missing-row facts the assembler sends (issue #987): the split's writer, a word, and an `MM-DD HH:MM` instant. */
+function normHistoryBehind(v) {
+  if (v === null || v === undefined || typeof v !== "object") return null;
+  return { writer: splitWord(v.writer) ?? "?", at: typeof v.at === "string" && /^\d{2}-\d{2} \d{2}:\d{2}$/.test(v.at) ? v.at : "?" };
+}
+
+/**
+ * The two notices of a budget write whose answer was lost (issue #987), in words: render.mjs `expectedOtherText`'s and
+ * `historyBehindText`'s, restated because this module may load neither, and held equal by a test. Exported for the
+ * console's split panel, which says them as a state.
+ */
+export const splitExpectedOtherText = (e) => `alloc:envelope:expected names envelope ${e.expected}, not this host's (${e.file}): an envelope write that did not finish, or one made on another host. A file with that digest re-bases the fleet. If no write is under way, set the key back by hand (docs/allocation.md).`;
+export const splitHistoryBehindText = (h) => `the applied split (written by ${h.writer} at ${h.at}) has no row in this history: a write whose answer was lost landed, or its row could not be pushed. The allocations file of the host that wrote it may hold the row.`;
+
 /**
  * A plan id: null when there is none (an empty string included, which the panel and `/dispatch priorities` read as no
  * plan too), the 16-hex hash, or "?" for a value that is neither (never read as "no plan").
@@ -616,6 +639,8 @@ export function normAllocation(v) {
     },
     mismatch: v.mismatch === true,
     outsideEdit: normOutsideEdit(v.outsideEdit),
+    expectedOther: normExpectedOther(v.expectedOther),
+    historyBehind: normHistoryBehind(v.historyBehind),
     deploymentSpent: microsOr(spend.deployment),
     rows,
     log,
@@ -1205,6 +1230,10 @@ export function splitSectionHtml(na, tips, names, windowLabel) {
     const e = na.outsideEdit;
     rows.push(`<div class="row"><span class="state">${escapeHtml(`a host reported envelope ${e.digest} at ${e.at}, not the one the split was made for (${e.split}); a host still on it refuses governed jobs as envelope-mismatch`)}</span></div>`);
   }
+  // What a budget write whose answer was lost leaves (issue #987): the expected key naming an envelope that is not this
+  // host's, and an applied split with no row in the history below. Fixed words around facts the normalizer bounded.
+  if (na.expectedOther !== null) rows.push(`<div class="row"><span class="state">${escapeHtml(splitExpectedOtherText(na.expectedOther))}</span></div>`);
+  if (na.historyBehind !== null) rows.push(`<div class="row"><span class="state">${escapeHtml(splitHistoryBehindText(na.historyBehind))}</span></div>`);
   if (na.stateProblem === "newer") rows.push('<div class="row"><span class="state">the applied split was written by a newer pi-dispatch: upgrade this console</span></div>');
   else if (na.stateProblem === "unreadable") rows.push('<div class="row"><span class="state">the applied split does not decode; the next pickup replaces it with the neutral split</span></div>');
   if (st) {

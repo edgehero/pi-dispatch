@@ -10,8 +10,10 @@ import {
 	ALLOC_LOG_KEY,
 	ALLOC_LOG_MAX,
 	ALLOC_PLAN_KEY,
+	AUDIT_OUTCOMES,
 	CAS_SCRIPT,
 	SEED_SCRIPT,
+	STATE_CHANGE_OUTCOMES,
 	governedDollars,
 	makeAllocationAudit,
 	makeAllocationLogReaper,
@@ -221,6 +223,63 @@ test("audit order: the applied row is written while alloc:plan still holds the o
 	assert.equal(lost.redis.store.get(ALLOC_PLAN_KEY), before);
 	assert.equal(logRows(lost.redis)[0].outcome, "apply-failed", "alloc:log gets the failure, never the row whose change did not happen");
 	assert.ok(!logRows(lost.redis).some((x) => x.outcome === "applied"));
+});
+
+test("STATE_CHANGE_OUTCOMES is the outcomes of the rows a change of the split pushes: one such row per change, with the state's instant and writer, and none where the split stayed (#987)", async () => {
+	// Every path that can write `alloc:plan` (the seed, a plan, its expiry, a revert, a re-base, delegation turned off)
+	// and every path that leaves it (a duplicate, a refusal, a lost compare-and-set, a host with another envelope), each
+	// judged by what it did to the stored state and which rows it pushed to `alloc:log` meanwhile.
+	let loseCas = false;
+	const { redis, alloc, envelope, digest } = setup({ redis: fakeRedis({ onEval: (script) => (loseCas && script === CAS_SCRIPT ? 0 : undefined) }) });
+	const changed = new Set();
+	const left = new Set();
+	const step = async (what, act) => {
+		const before = redis.store.get(ALLOC_PLAN_KEY) ?? null;
+		const had = logRows(redis).length;
+		await act();
+		const after = redis.store.get(ALLOC_PLAN_KEY) ?? null;
+		const pushed = logRows(redis).slice(0, logRows(redis).length - had);
+		const changes = pushed.filter((row) => STATE_CHANGE_OUTCOMES.includes(row.outcome));
+		if (after === before) {
+			assert.deepEqual(changes, [], `${what}: the split stayed, so no row says it changed`);
+			for (const row of pushed) left.add(row.outcome);
+			return;
+		}
+		const state = JSON.parse(after);
+		assert.equal(changes.length, 1, `${what}: one row for one change (${pushed.map((row) => row.outcome).join(", ")})`);
+		assert.deepEqual([changes[0].at, changes[0].writer], [state.appliedAt, state.writer], `${what}: the row carries the new state's instant and writer`);
+		changed.add(changes[0].outcome);
+	};
+	const DAY = 24 * HOUR;
+	const applied = (weights, basis, at, top = {}) => alloc.applyPlan({ envelope, digest, projects: PROJECTS, text: plan(weights, basis, { top }), writer: SESSION, now: at });
+	await step("the seed", () => alloc.reconcile({ envelope, digest, now: NOW }));
+	let first;
+	await step("a plan", async () => { first = await applied({ shop: 3, platform: 1, _other: 0 }, null, NOW, { validUntil: new Date(NOW + 2 * DAY).toISOString() }); });
+	assert.equal(first.outcome, "applied");
+	const target = logRows(redis)[0];
+	await step("the same plan again", () => applied({ shop: 3, platform: 1, _other: 0 }, null, NOW, { validUntil: new Date(NOW + 2 * DAY).toISOString() }));
+	await step("a plan too soon", () => applied({ shop: 1, platform: 3, _other: 0 }, first.planId, NOW + HOUR));
+	loseCas = true;
+	await step("a plan whose compare-and-set lost", () => applied({ shop: 1, platform: 3, _other: 0 }, first.planId, NOW + 1.5 * DAY));
+	loseCas = false;
+	await step("the plan's expiry", () => alloc.reconcile({ envelope, digest, now: NOW + 3 * DAY }));
+	await step("a revert", () => alloc.revert({ envelope, digest, target, now: NOW + 4 * DAY }));
+	// A host with another envelope the key does not name: one changed-externally row, the split as it was.
+	const other = envelopeOf({ totalUsd: "30" });
+	await step("a hand-edited envelope", () => makeAllocationState({ redis, host: "mini2", audit: memAudit(redis) }).reconcile({ envelope: other, digest: envelopeDigest(other), now: NOW + 4 * DAY }));
+	redis.store.set(ALLOC_EXPECTED_KEY, envelopeDigest(other));
+	await step("a re-base", () => alloc.reconcile({ envelope: other, digest: envelopeDigest(other), now: NOW + 5 * DAY }));
+	// Delegation off under the digest the split already has: the neutral split, by the envelope-change writer.
+	const off = envelopeOf({ totalUsd: "30", delegation: { enabled: false } });
+	redis.store.set(ALLOC_PLAN_KEY, JSON.stringify({ ...stored(redis), envelopeDigest: envelopeDigest(off) }));
+	redis.store.set(ALLOC_EXPECTED_KEY, envelopeDigest(off));
+	assert.notEqual(stored(redis).planId, null, "a plan is applied when delegation goes off");
+	await step("delegation turned off", () => alloc.reconcile({ envelope: off, digest: envelopeDigest(off), now: NOW + 6 * DAY }));
+	assert.deepEqual([stored(redis).planId, stored(redis).writer, logRows(redis)[0].reason], [null, "envelope-change", "delegation-off"]);
+
+	assert.deepEqual([...changed].sort(), [...STATE_CHANGE_OUTCOMES].sort(), "every member goes with a change, and no other outcome does");
+	assert.deepEqual([...left].sort(), AUDIT_OUTCOMES.filter((o) => !STATE_CHANGE_OUTCOMES.includes(o)).sort(), "and the rest of the audit outcomes leave the split as it was");
+	assert.ok(Object.isFrozen(STATE_CHANGE_OUTCOMES) && STATE_CHANGE_OUTCOMES.every((o) => AUDIT_OUTCOMES.includes(o)));
 });
 
 test("the CAS compares the envelope digest: a state another host re-based refuses a write made against the old digest (#504)", async () => {

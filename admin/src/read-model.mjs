@@ -1950,7 +1950,8 @@ export function planEnvelopeWrite({ envelopeFile, projectsPath = null, scopedLim
  *
  * A Valkey that cannot be reached refuses before the file is touched: an envelope the fleet would refuse is worse than
  * no change. Returns `{ ok, digest, previousDigest, unchanged? }` or `{ invalid }`, and throws `writeClient`'s
- * `valkeyNotSent` error for a connect that got no answer (issue #965), before the key or the file is written.
+ * `valkeyNotSent` error for a connect that got no answer (issue #965), before the key or the file is written, and one
+ * of its own for the digest's SET when that command never left (issue #987).
  */
 export async function writeEnvelope({ envelopeFile, projectsPath = null, scopedLimitsPath = null, maxCostMicros = null, change = {}, expect = null, url, redisFn = makeRedisClient, prefix = null, fs = nodeFs, afterExpected = null, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS }) {
   const plan = planEnvelopeWrite({ envelopeFile, projectsPath, scopedLimitsPath, maxCostMicros, change, fs });
@@ -1978,8 +1979,14 @@ export async function writeEnvelope({ envelopeFile, projectsPath = null, scopedL
       // Sent and not answered (issue #961): the key may hold the new digest, now or when Valkey wakes, so this is
       // never "nothing was changed".
       if (err?.valkeyMayStillRun === true) return { invalid: envelopeDigestUnconfirmed(key, plan.digest), partial: true };
-      // A SET that failed on the client side may still have been applied by the server (a timeout after the write).
-      return { invalid: `could not record the new envelope's digest in ${key} (${boundedText(err?.message ?? String(err))}), so the file was not written; ${key} may already hold the new digest ${plan.digest}, in which case set it back to the envelope digest the hosts run (doctor prints it) by hand (docs/allocation.md)` };
+      // Valkey's own answer (a read-only replica, a key of another type): it took the command and refused it, so the
+      // key is as it was, and the file was not touched.
+      if (refusedByValkey(err)) return { invalid: `Valkey refused the record of the new envelope's digest in ${key} (${boundedText(err?.message ?? String(err))}), so the file was not written; nothing was changed` };
+      // Never written (issue #987): the bounded client marks every command that reached a socket and was then lost, so
+      // one that rejects with no mark and no reply did not leave. The key cannot hold the new digest, which is what this
+      // answer said it might: thrown on as a connect that got no answer is, and the confirm says Valkey could not be
+      // reached and nothing was changed.
+      throw Object.assign(new Error(boundedText(err?.message ?? String(err))), { valkeyNotSent: true, ...(typeof err?.code === "string" ? { code: err.code } : {}) });
     }
     await afterExpected?.(); // a test seam: the window between the key and the file, where a second writer can land
     let replaced;
@@ -2061,11 +2068,80 @@ async function writeClient(url, redisFn, connectTimeoutMs = CONFIRM_READ_TIMEOUT
   return redis;
 }
 
+/** The commands of the applied split's state that change nothing: every other one, a new one included, is a write. */
+const ALLOCATION_READS = Object.freeze(["get", "exists", "lrange"]);
+
+/**
+ * A write client that knows what it sent (issue #987), for the worker's allocation state (`makeAllocationState`) run
+ * from the console: `{ redis, wrote, unsent(err) }`. `redis` forwards every command to the client it was given.
+ *
+ * `wrote` turns true BEFORE any command that is not a read leaves. The state sends, by name: `get` (the plan, the
+ * expected digest), `exists` (`fleetGoverned`) and `lrange` (`lastAttempt`), which read; and `eval` (the seed, the
+ * compare-and-set, the lock's release), `set` (the lock, and the expected digest with NX), `lpush` and `ltrim` (a row
+ * of `alloc:log`), which write. A plan or a revert reads first (`reconcile`), and a read that was sent and not answered
+ * carries the client's `valkeyMayStillRun` as a write's does, so a plan stopped at its first GET read as a change that
+ * may or may not have been made. `unsent(err)` is what such a caller throws on: for an error a command of this client
+ * rejected with, that is not Valkey's own reply, while `wrote` is still false, a new error marked `valkeyNotSent` (no
+ * mark of a command that may still run), which the confirm answers as Valkey unreachable and nothing changed. Any
+ * other error is handed back as it is: once a write left, the client's own mark decides, as before.
+ *
+ * After a command was lost (it rejected with `valkeyMayStillRun`) nothing more is asked of Valkey: every later
+ * command rejects at once with that same error and never reaches the socket. The state releases its lock in a
+ * `finally`, awaited, and on a Valkey that just did not answer that second command waited out a second bound (10 s
+ * for a revert stopped at its compare-and-set). Refused here, the release fails inside its own catch, and the lock
+ * ends by its expiry (`ALLOC_LOCK_MS`). The error is the lost command's own, so whatever throws it on still says the
+ * change may or may not have been made, which a write that was sent and not answered is.
+ */
+export function writeTracking(redis) {
+  let wrote = false;
+  let lost = null;
+  const rejected = new WeakSet();
+  const noted = (err) => {
+    if (err !== null && typeof err === "object") {
+      rejected.add(err);
+      if (lost === null && err.valkeyMayStillRun === true) lost = err;
+    }
+    return err;
+  };
+  const client = new Proxy(redis, {
+    get(target, name) {
+      const value = Reflect.get(target, name);
+      if (typeof name !== "string" || typeof value !== "function") return value;
+      return (...args) => {
+        if (lost !== null) return Promise.reject(lost);
+        if (!ALLOCATION_READS.includes(name.toLowerCase())) wrote = true;
+        try {
+          return Promise.resolve(value.apply(target, args)).catch((err) => {
+            throw noted(err);
+          });
+        } catch (err) {
+          return Promise.reject(noted(err));
+        }
+      };
+    },
+  });
+  return {
+    redis: client,
+    get wrote() {
+      return wrote;
+    },
+    unsent(err) {
+      if (wrote || err === null || typeof err !== "object" || !rejected.has(err) || refusedByValkey(err)) return err;
+      return Object.assign(new Error(boundedText(err.message ?? String(err))), { valkeyNotSent: true, ...(typeof err.code === "string" ? { code: err.code } : {}) });
+    },
+  };
+}
+
 /**
  * What an envelope write says when the digest's SET was sent and not answered (issue #961): the file was not written,
- * and the key may hold the new digest now or when Valkey wakes.
+ * and the key may hold the new digest now or when Valkey wakes. The instruction comes FIRST (issue #987): an audit row
+ * keeps 200 characters of a reason (`CONSOLE_AUDIT_FIELD_MAX`), and the sentence this replaces was cut before "set it
+ * back by hand", the one part an operator needs. It also said the hosts then refuse governed jobs as envelope-mismatch,
+ * which the worker does not do: a host compares its file with the applied split and reads this key only when the two
+ * differ (`reconcile`), so with the key alone moved every host keeps running. What the stray digest does is let a file
+ * that has it re-base the fleet with no confirm, which is why it is put back.
  */
-export const envelopeDigestUnconfirmed = (key, digest) => `the record of the new envelope's digest in ${key} may or may not have been made: Valkey took it and did not answer within the bound. The envelope file was not written. If ${key} holds ${digest} once Valkey answers, set it back to the envelope digest the hosts run (doctor prints it) by hand (docs/allocation.md), or the hosts refuse governed jobs as envelope-mismatch`;
+export const envelopeDigestUnconfirmed = (key, digest) => `If ${key} holds ${digest}, set it back by hand to the digest doctor prints (docs/allocation.md): Valkey did not confirm that write, and the envelope file was not written`;
 
 /** The fields of an applied state a reader may see. An ALLOWLIST, so a field added later is not shown by accident. */
 const STATE_FIELDS = Object.freeze(["planId", "basis", "writer", "jobId", "triggerId", "appliedAt", "lastPlanAt", "validUntil", "envelopeDigest", "weights", "repoWeights", "allocations", "unallocated", "repos", "clamped"]);
@@ -2173,12 +2249,15 @@ function amountsShown(state) {
  *
  * Returns `{ outcome, reason, planId?, field?, rule?, clamped?, basis, kept?, before, after }`: the ladder's enum and the
  * micro-dollars before and after, never a reason text. Throws on infrastructure (Valkey, the audit file), as the
- * worker does: such a plan has not applied.
+ * worker does: such a plan has not applied. What it throws says what was sent (issue #987, `writeTracking`): a Valkey
+ * that stopped answering while only reads had left is `valkeyNotSent`, nothing changed; once a write left, the
+ * client's own error, marked where its answer was lost. `after` is null when the split could not be read back.
  */
 export async function applyPriorities({ url, envelope, digest = envelopeDigest(envelope), projects = [], plan, keepOther = false, host, logsDir, now = new Date(), writer = { kind: "operator-session" }, redisFn = makeRedisClient, prefix = null, fs = nodeFs, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS }) {
   const redis = await writeClient(url, redisFn, connectTimeoutMs);
+  const tracked = writeTracking(redis);
   try {
-    const state = makeAllocationState({ redis, host, audit: makeAllocationAudit({ logsDir, fs }), prefix });
+    const state = makeAllocationState({ redis: tracked.redis, host, audit: makeAllocationAudit({ logsDir, fs }), prefix });
     const seen = await state.reconcile({ envelope, digest, now });
     const basis = seen?.state?.planId ?? null;
     // `keepOther`: a plan that leaves `_other` out keeps its CURRENT weight (the applied state's, else the envelope's
@@ -2188,9 +2267,19 @@ export async function applyPriorities({ url, envelope, digest = envelopeDigest(e
     const kept = keepOther && !given.some((p) => p?.id === OTHER) ? [{ id: OTHER, weight: seen?.state?.weights?.[OTHER] ?? envelope?.defaultWeights?.[OTHER] ?? 0 }] : [];
     const text = JSON.stringify({ version: PLAN_VERSION, basis, ...plan, projects: [...given, ...kept] });
     const result = await state.applyPlan({ envelope, digest, projects, text, writer, now });
-    const after = parseState(await redis.get(allocKeys(prefix).plan));
-    const afterState = after && after.corrupt === undefined && !after.newer ? after : null;
+    // The split read back, for the answer's amounts alone. The plan has been judged by now, and where it applied its
+    // compare-and-set was answered, so a read that fails here, or is refused because the lock's release was just lost,
+    // leaves the amounts out: thrown on, it said an applied plan may or may not have been made.
+    let afterState = null;
+    try {
+      const after = parseState(await tracked.redis.get(allocKeys(prefix).plan));
+      afterState = after && after.corrupt === undefined && !after.newer ? after : null;
+    } catch {
+      // the amounts after are not known
+    }
     return { ...result, basis, ...(kept.length > 0 ? { kept: [OTHER] } : {}), before: amountsShown(seen?.state ?? null), after: amountsShown(afterState) };
+  } catch (err) {
+    throw tracked.unsent(err);
   } finally {
     try {
       redis.disconnect();
@@ -2203,13 +2292,17 @@ export async function applyPriorities({ url, envelope, digest = envelopeDigest(e
 /**
  * The operator's revert to an `alloc:log` row (issue #504 part C, the panel's `r`): the worker's `revert`, writer
  * `operator-revert`, which skips the interval and the step rules but is still a compare-and-set and still refused while
- * delegation is off, the envelope differs or another apply holds the lock. Returns its `{ outcome, reason, planId? }`.
+ * delegation is off, the envelope differs or another apply holds the lock. Returns its `{ outcome, reason, planId? }`,
+ * and throws as `applyPriorities` does: `valkeyNotSent` while only reads had left (issue #987), else the client's error.
  */
 export async function revertAllocation({ url, envelope, digest = envelopeDigest(envelope), target, host, logsDir, now = new Date(), redisFn = makeRedisClient, prefix = null, fs = nodeFs, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS }) {
   const redis = await writeClient(url, redisFn, connectTimeoutMs);
+  const tracked = writeTracking(redis);
   try {
-    const state = makeAllocationState({ redis, host, audit: makeAllocationAudit({ logsDir, fs }), prefix });
+    const state = makeAllocationState({ redis: tracked.redis, host, audit: makeAllocationAudit({ logsDir, fs }), prefix });
     return await state.revert({ envelope, digest, target, now });
+  } catch (err) {
+    throw tracked.unsent(err);
   } finally {
     try {
       redis.disconnect();
