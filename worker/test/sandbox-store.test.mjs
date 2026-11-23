@@ -1210,6 +1210,25 @@ function paced(entries, { askMs = () => 0, removeMs = () => 0, open = () => fals
 	const events = [];
 	const logs = [];
 	let t = 0;
+	// A PASS THAT SPINS FAILS, IT DOES NOT HANG THE FILE. Every pass here sleeps between its asks of a runtime (a rest,
+	// or a slice of a wait), so SPIN_MAX asks, or looks at the job count, with no sleep among them is a loop that goes
+	// on without spending anything: a wait that says it waited where it slept for nothing, say. Such a loop runs on
+	// microtasks alone, which no timer can interrupt, so it is counted here. Once it trips, every seam throws: the
+	// runtime ask (which the pass reads as an unanswered runtime, and so leaves its loop), and then the line it says
+	// next, which no pass survives.
+	const spin = { since: 0, tripped: false };
+	const spun = () => {
+		spin.tripped = true;
+		throw new Error(`the pass spun: more than ${SPIN_MAX} asks or looks with no sleep between them`);
+	};
+	const counted = (fn) => (...args) => {
+		if (spin.tripped || ++spin.since > SPIN_MAX) spun();
+		return fn(...args);
+	};
+	const guarded = (fn) => (...args) => {
+		if (spin.tripped) spun();
+		return fn(...args);
+	};
 	const origin = (p) => new Map(fs.calls.renamed.map(([from, to]) => [to, from])).get(p) ?? p;
 	const rename = fs.renameSync;
 	fs.renameSync = (from, to) => {
@@ -1222,25 +1241,27 @@ function paced(entries, { askMs = () => 0, removeMs = () => 0, open = () => fals
 		fs,
 		now: () => AT,
 		clock: () => t,
-		sleep: async (ms) => {
+		sleep: guarded(async (ms) => {
+			spin.since = 0;
 			events.push(`sleep:${ms}`);
 			t += ms;
-		},
-		isOpen: async ({ name }) => {
+		}),
+		isOpen: counted(async ({ name }) => {
 			events.push(`isOpen:${name}`);
 			t += askMs(name);
 			return open(name);
-		},
-		remove: async (path, opts) => {
+		}),
+		remove: guarded(async (path, opts) => {
 			const name = origin(path).slice("/sbx/".length);
 			events.push(`remove:${name}`);
 			t += removeMs(name);
 			fs.rmSync(path, opts);
-		},
-		log: (event, fields) => logs.push([event, fields]),
+		}),
+		log: guarded((event, fields) => logs.push([event, fields])),
 	};
-	return { fs, events, logs, options, advance: (ms) => (t += ms) };
+	return { fs, events, logs, options, advance: (ms) => (t += ms), counted };
 }
+const SPIN_MAX = 1000;
 
 /** Each rest a pass took, in order: the sum of each run of consecutive sleep slices. */
 function restsOf(events) {
@@ -1665,7 +1686,8 @@ test("the default rest holds the event loop, so a boot pass with nothing else ru
 function besideJobs(entries, { starting = () => 0, running = () => 0, ...over } = {}) {
 	const p = paced(entries, over);
 	const at = () => p.options.clock();
-	const activity = { starting: () => starting(at()), running: () => running(at()) };
+	// The looks at the count are counted with the asks (`paced`): a wait that looks again and again and never sleeps.
+	const activity = { starting: p.counted(() => starting(at())), running: p.counted(() => running(at())) };
 	// A pass that waits without end fails here, at once, where it would otherwise hold the whole file.
 	const sleep = async (ms) => {
 		if (at() > 3_600_000) throw new Error("the pass has slept for more than an hour of its own clock");
@@ -1930,6 +1952,67 @@ test("a leftover tombstone's delete is not waited for after its read: the look c
 	assert.ok(`/sbx/.reap-4242-1-1/${SANDBOX_MANIFEST}` in stopping.fs.files);
 });
 
+test("a leftover tombstone is read after its wait, never before: a pin written into it while the pass waited decides (issue #1023)", async () => {
+	// Two leftovers again. The first holds a live pin and is put back, and a container starts in the turn it yields, for
+	// 1 s. The pass waits before the second. While it waits, a pin lands in the second one's manifest (a read taken
+	// before the wait would not have it, and the tombstone would be deleted on an answer a second old).
+	let began = null;
+	const p = besideJobs({}, { starting: (t) => (began !== null && t < began + 1000 ? 1 : 0) });
+	const second = `/sbx/.reap-4242-1-1/${SANDBOX_MANIFEST}`;
+	p.fs.files["/sbx/.reap-4242-1-0"] = "<dir>";
+	p.fs.files[`/sbx/.reap-4242-1-0/${SANDBOX_MANIFEST}`] = JSON.stringify({ jobId: "kept", createdAt: hoursAgo(50), keepUntil: new Date(AT + DAY).toISOString() });
+	p.fs.files["/sbx/.reap-4242-1-1"] = "<dir>";
+	p.fs.files[second] = JSON.stringify({ jobId: "t1", createdAt: hoursAgo(50) });
+	const log = p.options.log;
+	const sleep = p.options.sleep;
+	let slices = 0;
+	const out = await realMakeSandboxReaper({
+		...p.options,
+		pid: 4242,
+		log: (event, fields) => {
+			if (fields?.reason === "tombstone-pinned") began ??= p.options.clock();
+			log(event, fields);
+		},
+		sleep: async (ms) => {
+			if (++slices === 2) p.fs.files[second] = JSON.stringify({ jobId: "t1", createdAt: hoursAgo(50), keepUntil: new Date(AT + DAY).toISOString() });
+			return sleep(ms);
+		},
+	})();
+	assert.deepEqual(p.events.slice(0, 6), ["rename:.reap-4242-1-0", ...Array(4).fill("sleep:250"), "rename:.reap-4242-1-1"], "the wait, and then the second is put back under its run's name, not deleted");
+	assert.deepEqual(p.events.filter((e) => e.startsWith("remove:")), [], "nothing is deleted");
+	assert.equal(JSON.parse(p.fs.files[`/sbx/t1/${SANDBOX_MANIFEST}`]).keepUntil, new Date(AT + DAY).toISOString(), "the pinned run is back, pin and all");
+	assert.deepEqual(p.logs.filter(([, f]) => f.entry === ".reap-4242-1-1"), [["sandbox_reaper_skipped", { entry: ".reap-4242-1-1", reason: "tombstone-pinned", restored: true }]]);
+	assert.deepEqual([out.reaped, out.waitedForStartsMs], [0, 1000]);
+});
+
+test("a pass that looks or asks again and again without ever sleeping fails its test instead of hanging the file (issue #1023)", async () => {
+	// The guard every test beside jobs runs under (`paced`), shown on a reaper stand-in that does what such a defect
+	// does: it asks the runtime, looks at the count, and does both again with no sleep in between.
+	const p = besideJobs({ a: { createdAt: hoursAgo(50) } }, { starting: () => 1 });
+	const spinning = async () => {
+		for (;;) {
+			try {
+				await p.options.isOpen({ name: "a" });
+			} catch {
+				// as the reaper does with a runtime that does not answer: the run is held, and the pass says so
+				p.options.log("sandbox_reaper_skipped", { entry: "a", reason: "runtime-unanswered" });
+				return;
+			}
+			p.options.activity.starting();
+		}
+	};
+	await assert.rejects(spinning(), /the pass spun: more than 1000 asks or looks with no sleep between them/);
+	assert.ok(p.events.length <= 1000, "and it was stopped within the bound");
+	// A sleep between them is a pass at work, however long: nothing trips.
+	const working = besideJobs({ a: { createdAt: hoursAgo(50) } }, { starting: () => 1 });
+	for (let i = 0; i < 5000; i++) {
+		await working.options.isOpen({ name: "a" });
+		working.options.activity.starting();
+		await working.options.sleep(1);
+	}
+	assert.doesNotThrow(() => working.options.log("sandbox_reaper_pass", {}));
+});
+
 test("beside a job the cap counts the session networks the sweep asked the daemon about, with the runs and tombstones removed (issue #1023)", async () => {
 	// A sweeper over `n` networks that keeps its own place from pass to pass, as the real one does.
 	const networks = (p, n) => {
@@ -2044,13 +2127,15 @@ test("the reaper reads the worker's own count: a start holds a pass, a run makes
 	// first output), reported while the pass waits.
 	const p = paced(expiredRuns(20));
 	const activity = makeContainerActivity({ now: () => p.options.clock() });
+	// The real count, read through the harness's spin guard: a wait that looked at it for ever would hang the file.
+	const readThrough = (harness, count) => ({ starting: harness.counted(() => count.starting()), running: harness.counted(() => count.running()) });
 	const run = activity.enter();
 	let slices = 0;
 	const sleep = async (ms) => {
 		await p.options.sleep(ms);
 		if (++slices === 4) run.started();
 	};
-	const reap = realMakeSandboxReaper({ ...p.options, sleep, activity });
+	const reap = realMakeSandboxReaper({ ...p.options, sleep, activity: readThrough(p, activity) });
 	const beside = await reap();
 	assert.deepEqual([beside.waitedForStartsMs, beside.reaped, beside.more], [1000, 5, true], "held for the start, then small beside the run");
 	run.ended();
@@ -2062,7 +2147,7 @@ test("the reaper reads the worker's own count: a start holds a pass, a run makes
 	const lost = paced(expiredRuns(12));
 	const count = makeContainerActivity({ now: () => lost.options.clock() });
 	count.enter();
-	const sweep = realMakeSandboxReaper({ ...lost.options, activity: count });
+	const sweep = realMakeSandboxReaper({ ...lost.options, activity: readThrough(lost, count) });
 	const first = await sweep();
 	assert.deepEqual([first.waitedForStartsMs, first.reaped, first.more], [20_000, 5, true]);
 	lost.advance(120_000);

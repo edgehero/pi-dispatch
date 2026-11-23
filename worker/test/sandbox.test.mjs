@@ -209,6 +209,12 @@ test("resolveSandbox names the cause: retention off, swept, imageless, workspace
 	const now = () => Date.parse("2026-08-01T01:00:00Z");
 	assert.match(resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 0, fs: missing, now }).message, /PI_SANDBOX_RETENTION_HOURS/);
 	assert.match(resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: missing, now }).message, /swept at the end of its retention window/);
+	// The whole sentence, by literal (issue #1023): a run with no directory was swept, or was never kept because its
+	// trigger keeps no sandbox, or is older than retention. Nothing on disk says which, so the command names all three.
+	assert.deepEqual(resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: missing, now }), {
+		refused: "absent",
+		message: "no retained workspace for j1: it was swept at the end of its retention window, or its trigger keeps no sandbox (run.retainSandbox: false), or the run predates retention (`pi-dispatch sandbox --list` shows what is left)",
+	});
 	assert.equal(resolveSandbox({ jobId: "", sandboxDir: "/s", retentionHours: 24, fs: missing, now }).refused, "no-job-id");
 	assert.equal(resolveSandbox({ jobId: "j1", sandboxDir: "/s", retentionHours: 24, fs: fsWith({ ...manifest, image: null }), now }).refused, "no-image");
 
