@@ -47,8 +47,9 @@ export const HOST_BUDGET_KEYS = Object.freeze({
 /**
  * How often a job the budget deferred asks again. Its own value, like every re-check cadence, so the wake instants of the
  * different deferrals stay apart (the reason itself is recorded, `defer-reasons.mjs`): distinct from the scope re-check
- * (5 s), the endpoint re-check (7 s), the wait throttle floor (11 s) and the supersede re-ask (15 s). A test keeps them
- * apart. Short, because a hold keeps the room meanwhile: the wait is the latency of a freed slot, not a queue position.
+ * (5 s, 10 s and 20 s as a scope stays busy, issue #1023), the endpoint re-check (7 s), the wait throttle floor (11 s)
+ * and the supersede re-ask (15 s). A test keeps them apart. Short, because a hold keeps the room meanwhile: the wait is
+ * the latency of a freed slot, not a queue position.
  */
 export const BUDGET_RECHECK_MS = 9_000;
 

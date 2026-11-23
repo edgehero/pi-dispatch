@@ -198,7 +198,7 @@ is re-examined on its next wake; it holds no scope slot and no concurrency slot 
   for hourly checks to save money must not silently get quarter-hourly ones. Each delay is jittered by up
   to +10%, so a hundred jobs held on one outage do not wake in lockstep. The jitter only ever adds: taking
   time off would let a delay fall under the 30s floor, and that floor is what tells a wait deferral apart
-  from a scope deferral, which re-checks every 5s. The delay is also clamped to whatever is left of
+  from a scope deferral, which re-checks every 5 to 20s. The delay is also clamped to whatever is left of
   `PI_WAIT_MAX_MS`, so an hourly interval under a 15-minute maximum stops at 15 minutes rather than
   overshooting to 60.
 - **Checks are leased.** `PI_WAIT_CHECK_SLOTS` (1) bounds how many run at once, and the gate holds it below

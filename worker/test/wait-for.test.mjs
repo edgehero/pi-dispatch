@@ -174,6 +174,10 @@ test("the interval floor stays above the scope re-check, which is what tells the
 	const idx = await import("../src/index.mjs");
 	assert.equal(typeof idx.SCOPE_BUSY_RECHECK_MS, "number", "index.mjs must still export the scope re-check this floor is defined against");
 	assert.ok(WAIT_INTERVAL_FLOOR_MS > idx.SCOPE_BUSY_RECHECK_MS, `wait floor ${WAIT_INTERVAL_FLOOR_MS} must exceed the scope re-check ${idx.SCOPE_BUSY_RECHECK_MS}`);
+	// Issue #1023: the scope re-check backs off as a job's wait lengthens, so the floor has to clear where it settles.
+	assert.equal(typeof idx.SCOPE_BUSY_RECHECK_MAX_MS, "number", "index.mjs must still export the ceiling the scope re-check backs off to");
+	assert.ok(idx.SCOPE_BUSY_RECHECK_MAX_MS >= idx.SCOPE_BUSY_RECHECK_MS);
+	assert.ok(WAIT_INTERVAL_FLOOR_MS > idx.SCOPE_BUSY_RECHECK_MAX_MS, `wait floor ${WAIT_INTERVAL_FLOOR_MS} must exceed the scope re-check's ceiling ${idx.SCOPE_BUSY_RECHECK_MAX_MS}`);
 });
 
 test("the wait-for subpath is exported, so a later phase importing it cannot fail at publish time", async () => {

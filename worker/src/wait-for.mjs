@@ -64,8 +64,9 @@ export const WAIT_CONDITION_MAX = 4;
  * politeness here; what it protects is this worker's own concurrency slots.
  *
  * The floor is also load-bearing in a second place, and lowering it would break that silently: it is what
- * lets a held job be told apart from a scope deferral, whose re-check is `SCOPE_BUSY_RECHECK_MS` (5s). Any
- * value at or below that would make the two indistinguishable by wake instant.
+ * lets a held job be told apart from a scope deferral, whose re-check is 5s, 10s or 20s as the scope stays busy
+ * (`SCOPE_BUSY_RECHECK_MS` up to `SCOPE_BUSY_RECHECK_MAX_MS`, issue #1023). Any value at or below that ceiling
+ * would make the two indistinguishable by wake instant.
  *
  * `WAIT_INTERVAL_MAX_MS` is the ceiling the backoff climbs to, and it is a ceiling on the BACKOFF, never on
  * the operator: the rule the backoff must implement is `min(max(base·2^k, base), max(WAIT_INTERVAL_MAX_MS,
