@@ -1234,6 +1234,19 @@ test("the REAL loadPageData: a snapshot, a runs page or a run that cannot be rea
   assert.deepEqual(namesIn(res.take()), ["stale"]);
 });
 
+/** The hub's tick driven on the hand clock `time` until it has run: how long its loads waited in all. */
+const tickedOn = (hub, time) => async () => {
+  let back = false;
+  const start = time.clock();
+  hub.tick().then(() => { back = true; });
+  await time.settled();
+  while (!back) {
+    assert.ok(time.clock() - start < 60_000, "the tick came back: a load is waited for until its deadline, not for Valkey");
+    await time.advance(250);
+  }
+  return time.clock() - start;
+};
+
 test("the REAL loadPageData cut by its deadline is a failed load to the hub: never a good render, never kept for the page's pageMinMs, and read again at the next tick", async () => {
   // Issue #988: a Valkey that takes every read and answers none. The load is back at its deadline with the page's own
   // read marked failed, as a read that threw is, so the hub keeps a holder's panels and says stale, draws a stream that
@@ -1241,7 +1254,8 @@ test("the REAL loadPageData cut by its deadline is a failed load to the hub: nev
   // once per `pageMinMs`: a load the deadline cut is never kept. The deadline's clock is moved by hand.
   const time = handTime();
   const silent = () => new Promise(() => {});
-  const good = { snapshot: async () => ({}), runsPage: async () => ({ runs: [], next: null, mirror: "off", examined: 0 }), runById: async () => ({ missing: true }), parkedCount: async () => 0 };
+  // The runs page reads the day's window too, and a window that was not read is itself said unread (issue #988).
+  const good = { snapshot: async () => ({}), runsPage: async () => ({ runs: [], next: null, mirror: "off", examined: 0 }), runsWindow: async () => ({ partial: false }), runById: async () => ({ missing: true }), parkedCount: async () => 0 };
   let fleet = good;
   let loads = 0;
   const now = clock();
@@ -1251,18 +1265,7 @@ test("the REAL loadPageData cut by its deadline is a failed load to the hub: nev
     load: (pageName, query, who) => ((loads += 1), realPages.loadPageData(pageName, query, { fleet, now: T0, env: {}, deadline: { clock: time.clock, timers: time.timers } }, who)),
     pagePanels: async (_page, { data }) => [{ id: "p-main", html: data.readFailed === true ? "could not be read" : "read" }],
   });
-  /** The hub's ticks driven on the hand clock until none runs: how long their loads waited in all. */
-  const ticked = async () => {
-    let back = false;
-    const start = time.clock();
-    h.hub.tick().then(() => { back = true; });
-    await time.settled();
-    while (!back) {
-      assert.ok(time.clock() - start < 60_000, "the tick came back: a load is waited for until its deadline, not for Valkey");
-      await time.advance(250);
-    }
-    return time.clock() - start;
-  };
+  const ticked = tickedOn(h.hub, time);
   try {
     for (const [page, read, cutAt] of [["overview", "snapshot", PAGE_DEADLINE_MS], ["runs", "runsPage", PAGE_DEADLINE_MS + PAGE_VIEW_GRACE_MS]]) {
       fleet = good;
@@ -1299,6 +1302,52 @@ test("the REAL loadPageData cut by its deadline is a failed load to the hub: nev
       leave();
       leaveOpened();
     }
+  } finally {
+    h.hub.close();
+  }
+});
+
+test("a load whose deadline cut a read beside the page's own is unread to the hub, never fresh (issue #988), on a page with no marks of its own", async () => {
+  // The Parked page's own read, the snapshot, answers; the answer rules never do. The load is back at its deadline
+  // with the rules said unread. The pill's rule knows a load its deadline cut on any page (`deadlineSpent`), so the
+  // stream is told `unread`, where it was told `fresh` over a panel that said a read could not be made.
+  const time = handTime();
+  const answered = async () => ({ state: "ok", rows: [] });
+  let rules = answered;
+  const fleet = { snapshot: async () => ({ parked: [] }), parkedAnswerCheck: async () => ({ ok: true }) };
+  const now = clock();
+  const seen = [];
+  const h = hubOn({
+    now,
+    load: async (pageName, query, who) => {
+      const data = await realPages.loadPageData(pageName, query, { fleet, now: T0, env: {}, answerer: { read: (asked) => rules(asked) }, deadline: { clock: time.clock, timers: time.timers } }, who);
+      seen.push([data.readFailed === true, data.deadlineSpent === true]);
+      return data;
+    },
+    pagePanels: async (_page, { data }) => [{ id: "p-main", html: data.answerer?.state === "unavailable" ? "the answer rules could not be read" : "read" }],
+  });
+  const ticked = tickedOn(h.hub, time);
+  try {
+    const res = fakeRes();
+    h.hub.subscribe({ res, sessionId: "s1", session: OP, page: "parked", query: {} });
+    assert.equal(await ticked(), 0);
+    assert.deepEqual(namesIn(res.take()), ["fresh", "panel"]);
+    rules = () => new Promise(() => {});
+    now.advance(1000);
+    assert.equal(await ticked(), PAGE_DEADLINE_MS + PAGE_VIEW_GRACE_MS, "the rules are waited for until the deadline and its grace");
+    assert.deepEqual(seen.at(-1), [false, true], "the page's own read answered: the load is good, and cut");
+    assert.deepEqual(namesIn(res.text()), ["unread", "panel"]);
+    assert.deepEqual(panelsIn(res.take()).map((p) => p.html), ["the answer rules could not be read"]);
+    // The same again a tick later: said once while it lasts.
+    now.advance(1000);
+    await ticked();
+    assert.deepEqual(namesIn(res.take()), []);
+    rules = answered;
+    now.advance(1000);
+    assert.equal(await ticked(), 0);
+    assert.deepEqual(seen.at(-1), [false, false]);
+    assert.deepEqual(namesIn(res.text()), ["fresh", "panel"]);
+    assert.deepEqual(panelsIn(res.take()).map((p) => p.html), ["read"]);
   } finally {
     h.hub.close();
   }
