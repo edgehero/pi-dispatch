@@ -318,15 +318,20 @@ export async function cleanup(prepared) {
  * near-equivalent of it. `retainJobDir` owns the other branch entirely, including removing `jobDir` on
  * every failure path, which is why there is no `rm` here to pair with it.
  *
- * NEVER THROWS -- the processor already swallows this in a `finally`, and a retention fault must not be
- * the thing that turns a paid, completed run into a failure.
+ * THE RETAINING BRANCH NEVER THROWS (`retainJobDir`): a retention fault must not be the thing that turns a
+ * paid, completed run into a failure. The two branches that remove instead, the window at 0 and a run that
+ * keeps none (below), are `cleanup`, and reject when its `rm` fails; the processor swallows that in its `finally`.
  *
  * `retains(job)` (issue #1023) is the worker's read of the job's own trigger when the run ends
  * (`makeCheckRetainSandbox`, triggers-file.mjs): `false` only for a local command run whose trigger says
  * `run.retainSandbox: false` right now. The run's directory then goes the way it goes with the window at 0, by that
  * same `rm`, on EVERY outcome of the run (it completed, it failed, it timed out, it was stopped): the flag says nothing
  * is kept, and an operator who wants to look at a failing command turns it off. One line says so,
- * `sandbox_not_kept { jobId }`, after the directory is gone. Anything else keeps the run: no reader (every caller but
+ * `sandbox_not_kept { jobId }`, after the directory is gone, never before: when the removal fails the line is not
+ * written and the directory stays in the jobs directory. Nothing removes it while this worker runs. Its next BOOT
+ * does, with the other job directories left behind (`sweepOrphanJobDirs`), once the directory is older than that
+ * sweep's bound and only if it can be removed then (`job_dir_sweep_failed` with the code otherwise, and it stays).
+ * Anything else keeps the run: no reader (every caller but
  * the worker), a reader that throws, an answer that is not exactly `false`, and no job handed in. The run's record,
  * its log lines, its live transcript and its artifacts are not in this directory's keeping and stay as they were.
  */

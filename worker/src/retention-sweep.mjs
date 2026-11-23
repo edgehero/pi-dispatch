@@ -185,7 +185,10 @@ export function makeRetentionSweep({ reapers, intervalMs, log = () => {}, now = 
  * is given 5 s a runtime, and an ask that gets no answer holds the run and asks no more). Measured on the reaper:
  * 46 s for one pass with 2 s asks and a 3 s start during each ask (7
  * asks again); and in the worst case, a container that is starting each time the runtime has answered and up within
- * one slice, 80 asks again for one removal, 192 s at 2 s asks and 759 s at 9 s asks. The follow-up is armed when the
+ * one slice, 80 asks again for one removal: 192 s at 2 s asks, which is 81 asks (the first and the 80), the 20 s of
+ * waiting and a rest of 10 s. What the worker's own ask can reach by that count: 435 s for a run whose runtime its
+ * manifest names, since its ask is one `ps`, given 5 s; and 840 s for a run the watch cannot place on a host with
+ * both runtimes, whose ask is one `ps` of each. The follow-up is armed when the
  * pass ends, so the passes are a minute and a pass apart. Each pass removes at most fifty runs:
  * a thousand runs take at least twenty passes, about twenty minutes at this delay on a runtime that answers at once
  * (computed from 20 measured passes of about 6 s), and longer on one that does not, which is the point.

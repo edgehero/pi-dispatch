@@ -1217,10 +1217,13 @@ function validateQuotaReserve(run, onType, at, path) {
  * NOT CARRIED, AND NOT NORMALIZED, `run.quotaReserve`'s way: the worker that ran the job reads the flag from its own
  * triggers file when the run ends (triggers-file.mjs `makeCheckRetainSandbox`), so an edit takes effect for every run
  * that ends after it and no receiver, poller or job builder needs the field. No version row
- * (`TRIGGER_RUN_FIELD_VERSIONS`): every older loader DROPS an unknown `run` key on a cron trigger and on a local event
- * (measured at 5.4.2), so an older worker or receiver loads the file and the older worker keeps the sandbox, which is
- * the default. A watch rule is the one place an older loader refuses an unknown `run` key (`normalizeWatch` takes a
- * closed set), and the field is refused there by this loader too, with every other kind that is not a local command.
+ * (`TRIGGER_RUN_FIELD_VERSIONS`), so the field never raises the file's `version`: every older loader DROPS an unknown
+ * `run` key on a cron trigger and on a local event (measured at 5.4.2, and held on this loader by a test), so an older
+ * worker or receiver reads a file with the field exactly when it reads that file without it, and the older worker keeps
+ * the sandbox, which is the default. A file whose `version` is above what a release reads is refused by it whole,
+ * whatever it holds (5.4.2 reads up to 10). A watch rule is the one place an older loader refuses an unknown `run` key
+ * (`normalizeWatch` takes a closed set), and the field is refused there by this loader too, with every other kind that
+ * is not a local command.
  */
 function validateRetainSandbox(run, onType, at, path) {
 	if (run.retainSandbox === undefined) return;

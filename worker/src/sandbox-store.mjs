@@ -530,7 +530,10 @@ export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = (
  * what the budget leaves out: up to `SANDBOX_START_WAIT_MAX_MS` of waiting, and one more ask of a runtime after each
  * wait before a removal, at most 80 a pass, each as long as the runtime takes to answer (an ask that gets no answer
  * holds the run and asks no more). So a pass is bounded, and in the worst case long: 192 s measured for one removal
- * at 2 s asks, 759 s at 9 s asks.
+ * at 2 s asks, which is 81 asks (the first and 80 again), the 20 s of waiting and a rest of 10 s. The reaper does not
+ * bound an ask; the worker's ask is bounded where it is made (`makeSandboxRuntimeWatch`, sandbox.mjs). It is one `ps`,
+ * given 5 s, for a run whose runtime its manifest names, so 435 s at most by that count; and one `ps` of each runtime
+ * present for a run it cannot place, so 840 s at most on a host with both.
  * It still visits one entry before anything can stop it, so the lap moves on every pass however busy the host is. The
  * pass says how long it waited (`waitedForStartsMs`, in the result and the line), how many times it asked a runtime
  * again after a wait (`askedAgain`, in both, when it did) and that it ran beside a job
@@ -812,7 +815,8 @@ export function makeSandboxReaper({
 				// long as the runtime takes to answer (one that does not answer holds the run, and that ends the asking).
 				// Measured: 46 s for a pass with 2 s asks and a
 				// 3 s start during each (7 asks again); in the worst case, 80 asks again for one removal, 192 s at 2 s asks
-				// and 759 s at 9 s asks.
+				// (81 asks, 20 s of waiting, a rest of 10 s). With the worker's ask, one `ps` given 5 s for a run it can
+				// place, that count comes to 435 s at most; with two runtimes asked for a run it cannot place, 840 s.
 				let hold = null;
 				let asked = began;
 				for (let again = false; ; again = true) {

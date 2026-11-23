@@ -372,7 +372,10 @@ at another daemon is invisible to it, and only the rules above protect it.
   beside jobs can take longer than its 20 seconds: by up to 20 seconds of waiting, and by one runtime answer for each
   of those asks. One pass took 46 seconds with a runtime that answered in 2 seconds and a container that started
   during each answer. The worst case is a container that starts every time the runtime has answered: one removal
-  then took 192 seconds at 2 seconds an answer, and 759 at 9. While
+  then took 192 seconds at 2 seconds an answer, which is 81 answers, the 20 seconds of waiting and a rest of 10. The
+  worker gives a runtime 5 seconds to answer, so for a run whose runtime it knows that removal takes at most 435
+  seconds. A run it cannot tell the runtime of is asked of Docker and of Podman where both are present, 10 seconds
+  an ask at most, which comes to 840. While
   a job container is starting or running, a pass makes at most 5 removals (a session network it asked the runtime
   about counts as one) and rests at least 1 second after each. A container that has not shown itself up 120 seconds
   after its run began counts as running from then on, so a start that never reports cannot hold the sweep.

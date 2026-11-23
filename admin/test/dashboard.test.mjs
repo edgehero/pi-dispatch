@@ -1855,6 +1855,22 @@ test("RUN_DETAIL shows a run's retention state, and offers `b` only when there i
   assert.equal(/b\s+sandbox/.test(sweptOut), false, "a key that would refuse is not advertised");
 });
 
+test("RUN_DETAIL says of a run with no kept directory that it was swept, or never kept (#1023)", async () => {
+  // A run whose trigger keeps no sandbox has no manifest, exactly as a swept run has none. The verdict's words say
+  // both, and they are what the pane prints: the real verdict, over a retention root that holds nothing for the run.
+  const { sandboxRetentionOf } = await import("../src/sandbox-verdict.mjs");
+  const { tempDir } = await import("./helpers/temp-dir.mjs");
+  const verdict = sandboxRetentionOf({ sandboxDir: tempDir("no-sandbox-kept-"), sandboxRetentionHours: 24 }, "repeat:sync:1700000000000");
+  assert.deepEqual(verdict, { retained: false, why: "swept", reason: "swept, or never kept" });
+  for (const [name, info] of [["the verdict's words", verdict], ["a verdict with no words of its own", { retained: false }]]) {
+    const pane = await openRunDetail({ sandboxInfo: () => info, launchSandbox: async () => {} });
+    const out = stripAnsi(pane.render(80).join("\n"));
+    await pane.dispose();
+    assert.match(out, /sandbox\s+swept, or never kept\s+│/, name);
+    assert.equal(/b\s+sandbox/.test(out), false, `${name}: nothing to open, so no key`);
+  }
+});
+
 test("`b` suspends pi's TUI around the launch, and resumes it even when the launch fails", async () => {
   // The whole contract of the handoff: docker owns the terminal only BETWEEN stop and start, and start is
   // in a `finally` so a failed launch cannot leave the panel suspended with no way back.

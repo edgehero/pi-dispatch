@@ -1211,8 +1211,11 @@ function paced(entries, { askMs = () => 0, removeMs = () => 0, open = () => fals
 	const logs = [];
 	let t = 0;
 	// A PASS THAT SPINS FAILS, IT DOES NOT HANG THE FILE. Every pass here sleeps between its asks of a runtime (a rest,
-	// or a slice of a wait), so SPIN_MAX asks, or looks at the job count, with no sleep among them is a loop that goes
-	// on without spending anything: a wait that says it waited where it slept for nothing, say. Such a loop runs on
+	// or a slice of a wait). Its looks at the job count are not all slept between: a leftover tombstone the pass puts
+	// back costs 3 to 4 looks and no sleep, and the tests here leave two of those at most. So SPIN_MAX asks and looks
+	// with no sleep among them is a loop that goes on without spending anything: a wait that says it waited where it
+	// slept for nothing, say. (A test with some 330 leftovers to put back in one pass would reach the count honestly,
+	// and would need a larger one.) Such a loop runs on
 	// microtasks alone, which no timer can interrupt, so it is counted here. Once it trips, every seam throws: the
 	// runtime ask (which the pass reads as an unanswered runtime, and so leaves its loop), and then the line it says
 	// next, which no pass survives.
