@@ -24,6 +24,13 @@ const hash = (text) => createHash("sha256").update(text).digest("hex");
  */
 export const ZERO_TOUCH_READ_TIMEOUT_MS = 10_000;
 
+/**
+ * The bound one command of the report's stores has by itself (the question groups', the touch index's and the run
+ * records' own defaults), named here (issue #988) for a page's deadline: the page's read hands each of them this or
+ * what the deadline has left, whichever is sooner. The fix store takes no bound and keeps its own, the same two seconds.
+ */
+export const ZERO_TOUCH_STORE_MS = 2_000;
+
 /** What a configuration fix says when its accounting could not be begun or staged: the file was not touched. */
 const ACCOUNTING_UNPREPARED = "Fix accounting could not be prepared. Nothing was changed; try again when Valkey is available.";
 
@@ -58,10 +65,16 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
     const fixes = makeZeroTouchFixStore({ redis, now, retentionDays });
     const touches = makeTouchStore({ redis, now, retentionDays });
     const outbox = makeTouchOutbox({ dir: join(paths.logsDir, "touch-outbox"), store: touches, fs, log });
+    // The stores that take a bound, made again with `ms` for each of their commands (issue #988): a page's read makes
+    // them step by step, each with what is left of its deadline.
+    const boundedBy = (ms) => ({
+      groups: makeQuestionGroupStore({ redis, now, retentionDays, timeoutMs: ms }),
+      outbox: makeTouchOutbox({ dir: join(paths.logsDir, "touch-outbox"), store: makeTouchStore({ redis, now, retentionDays, timeoutMs: ms }), fs, log }),
+    });
     const release = () => {
       try { redis.disconnect(); } catch { /* already closed */ }
     };
-    const work = Promise.resolve().then(() => fn({ redis, groups, fixes, touches, outbox }));
+    const work = Promise.resolve().then(() => fn({ redis, groups, fixes, touches, outbox, boundedBy }));
     if (timeoutMs === null) {
       try { return await work; }
       finally { release(); }
@@ -102,17 +115,27 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
     return { refusal: "This Zero touch action is not available." };
   }
   return {
-    async read({ days = 30, windowDays = days, project = null, scope = null, scopeId = scope, includeRecords = false } = {}) {
-      return using(async ({ redis, groups, fixes, outbox }) => {
+    // `within` (issue #988) is a page's deadline: a read's own bound, or what the deadline has left when that is
+    // sooner. The report's steps follow one another (the repairs, the two snapshots, the fold of the window), each with
+    // a bound of two seconds, so on a Valkey that stopped answering they end together with a six second deadline, and
+    // a page that cut the read there drew "could not be read" where this read was about to say what it could not
+    // read: a window that is partial, this host's runs, the mirror not reached. With `within` each step that takes a
+    // bound is made with what is left, so the report ends by the deadline in its own words whatever came before it.
+    async read({ days = 30, windowDays = days, project = null, scope = null, scopeId = scope, includeRecords = false, within: deadline = null } = {}) {
+      return using(async ({ redis, groups: ownGroups, fixes, outbox: ownOutbox, boundedBy }) => {
+        const left = typeof deadline === "function" ? () => deadline(ZERO_TOUCH_STORE_MS) : null;
+        const step = () => (left ? boundedBy(left()) : { groups: ownGroups, outbox: ownOutbox });
+        const { outbox } = step();
         await outbox.repair();
         try { await fixes.repair({ readTrigger: (index) => JSON.parse(fs.readFileSync(paths.triggersPath, "utf8")).triggers?.[index], readFile: (path) => repairFiles.has(path) ? fs.readFileSync(path, "utf8") : null }); }
         catch { log("zero_touch_fix_repair_pending", {}); }
         let cfg; let configUnavailable = false;
         try { cfg = config(); } catch { configUnavailable = true; }
+        const { groups } = step();
         const [questions, changes] = await Promise.all([groups.publicSnapshot({ names: cfg?.names ?? {} }), fixes.publicSnapshot()]);
         const selectedGroups = questions.groups.filter((g) => zeroTouchProjectMatches(g.project, project) && (!scopeId || g.scopeId === scopeId));
         const selectedSources = questions.rows.filter((r) => zeroTouchProjectMatches(r.project, project) && (!scopeId || r.scopeId === scopeId));
-        const report = await readZeroTouch({ redis, logsDir: paths.logsDir, retentionDays, indexMax, localHost: env.PI_WORKER_NAME ?? null, now, windowDays, project, scopeId, groups: selectedGroups, fixes: changes.fixes, fs, includeRecords: true });
+        const report = await readZeroTouch({ redis, logsDir: paths.logsDir, retentionDays, indexMax, localHost: env.PI_WORKER_NAME ?? null, now, windowDays, project, scopeId, groups: selectedGroups, fixes: changes.fixes, fs, includeRecords: true, ...(left ? { timeoutMs: left() } : {}) });
         const knownSources = new Set(questions.rows.map((r) => r.runId));
         const missingSources = cfg?.capture && questions.state === "ok" ? report.records.filter((r) => r.reason === "awaiting-input" && zeroTouchProjectMatches(r.project, project) && (!scopeId || r.touchScopeId === scopeId) && !knownSources.has(r.jobId)).map((r) => ({ runId: r.jobId, status: "source-unavailable" })) : [];
         report.grouping = { enabled: cfg?.capture === true, state: configUnavailable ? "configuration-unavailable" : questions.state, partial: questions.partial, pending: selectedSources.filter((r) => r.status === "pending").length, unassigned: selectedSources.filter((r) => !r.groupId).length };
@@ -128,8 +151,8 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         return report;
       }, { timeoutMs: readTimeoutMs });
     },
-    async runs({ before = null, limit = 50, filter = {}, windowDays = 30, scopeId = null } = {}) {
-      const report = await this.read({ windowDays, project: filter.project ?? null, scopeId, includeRecords: true });
+    async runs({ before = null, limit = 50, filter = {}, windowDays = 30, scopeId = null, within: deadline = null } = {}) {
+      const report = await this.read({ windowDays, project: filter.project ?? null, scopeId, includeRecords: true, within: deadline });
       const touched = new Set(report.touchedRunIds);
       const runFilter = filter.project === ZERO_TOUCH_NO_PROJECT ? { ...filter, project: undefined } : filter;
       const records = report.records.filter((r) => touched.has(r.jobId) && runMatches(r, runFilter) && (before === null || Date.parse(r.endedAt) < before)).sort((a, b) => Date.parse(b.endedAt) - Date.parse(a.endedAt) || a.jobId.localeCompare(b.jobId));

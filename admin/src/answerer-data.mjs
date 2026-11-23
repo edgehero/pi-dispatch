@@ -38,6 +38,12 @@ export function answererStats(rows, now) {
   return { sent: total(r => r.disposition === "as-drafted"), edited: total(r => r.disposition === "edited"), dropped: total(r => r.status === "dropped"), passed: total(r => r.status === "passed" || r.status === "classified"), jobs: kept.length, costUsd: costs.reduce((n, r) => n + r.costUsd, 0), costPartial: costs.length !== kept.length };
 }
 
+/**
+ * The bound one command of the answer store has by itself (`makeAnswerDraftStore`'s own default), named here
+ * (issue #988) for a page's deadline: the page's read hands the store this or what the deadline has left.
+ */
+export const ANSWER_STORE_MS = 2_000;
+
 export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.now, redisFn = makeRedisClient, storeFn = makeAnswerDraftStore, readTimeoutMs = CONFIRM_READ_TIMEOUT_MS } = {}) {
   // Every path on the console's bounded client (issue #961). `timed` is for a path that only READS (the page's rows, a
   // draft, a preview): it ends at `readTimeoutMs` whatever is still waiting, its client dropped, and what it throws
@@ -49,13 +55,15 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
   // `valkeyRead`, whose mark is kept where every other is dropped. True of each of them, since none writes.
   // `tracking` hands `fn` the client's write tracker beside the store (`writeTracking`), for a path whose answer depends
   // on whether a write had left when the store gave up on it.
-  const using = async (fn, { timed = false, tracking = false } = {}) => {
+  // `storeMs` (issue #988): the store's bound for each command where a caller names one (a page's read, with what is
+  // left of its deadline), the store's own otherwise.
+  const using = async (fn, { timed = false, tracking = false, storeMs = null } = {}) => {
     const redis = boundedClient(redisFn, paths.valkeyUrl);
     const release = () => {
       try { redis.disconnect?.(); } catch { /* already closed */ }
     };
     const tracked = tracking ? writeTracking(redis) : null;
-    const work = Promise.resolve().then(() => fn(storeFn({ redis: tracked ? tracked.redis : redis, now, retentionDays: Number(env.PI_LOG_RETENTION_DAYS ?? 30) }), tracked));
+    const work = Promise.resolve().then(() => fn(storeFn({ redis: tracked ? tracked.redis : redis, now, retentionDays: Number(env.PI_LOG_RETENTION_DAYS ?? 30), ...(storeMs === null ? {} : { timeoutMs: storeMs }) }), tracked));
     if (!timed) {
       try { return await work; }
       finally { release(); }
@@ -104,7 +112,11 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
     } catch { return { draft: null, problem: "source-unavailable" }; }
   };
   return {
-    async read({ role, runId = null } = {}) {
+    // `within` (issue #988) is a page's deadline: a read's own bound, or what the deadline has left when that is
+    // sooner. The store is made with it, so this read ends inside the page's time with its own answer: the rows not
+    // known, and the rules and standing answers the triggers file holds all the same, which a page that cut the read
+    // from outside could only call unread.
+    async read({ role, runId = null, within: left = null } = {}) {
       return using(async store => {
         const snapshot = await store.publicSnapshot();
         const rows = Array.isArray(snapshot.rows) ? snapshot.rows.map(row => ({ ...row, ...(row.by ? { sentBy: row.by } : {}) })) : [];
@@ -116,7 +128,7 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
         const standing = (config.standingAnswers ?? []).map(answer => ({ ...answer, used: rows.filter(r => r.sources?.some(s => s.kind === "standing" && s.id === answerStandingSource(answer).id)).length }));
         const selected = RUN_RE.test(runId ?? "") ? await currentDraft(store, rows.find(row => row.draftRunId === runId)?.runId ?? runId, config) : null;
         return { state: snapshot.state, partial: Boolean(snapshot.partial), rows, rules: (config.answerRules ?? []).map(rule => ({ ...rule, stats: answererStats(rows.filter(row => row.ruleId === rule.id), now()) })), standing, stats: answererStats(rows, now()), ...(selected ? { privateDraft: selected.draft, privateDraftProblem: selected.problem } : {}) };
-      }, { timed: true });
+      }, { timed: true, storeMs: typeof left === "function" ? left(ANSWER_STORE_MS) : null });
     },
     async privateDraft(runId) { return RUN_RE.test(runId ?? "") ? using(async store => (await currentDraft(store, runId)).draft, { timed: true }) : null; },
     async preview(name, params) {

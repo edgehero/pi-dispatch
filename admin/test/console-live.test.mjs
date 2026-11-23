@@ -8,7 +8,8 @@ import { LIVE_DEFAULTS, makeLiveHub, queryKey, stateOf, TOKENS_BACK_LINE, TOKENS
 import * as realPages from "../src/console/pages.mjs";
 import { PAGE_DEADLINE_MS, PAGE_VIEW_GRACE_MS } from "../src/console/page-deadline.mjs";
 import { handTime } from "./helpers/hand-time.mjs";
-import { createConsoleServer } from "../src/console/server.mjs";
+import { createConsoleServer, STREAMS_TOTAL_MAX } from "../src/console/server.mjs";
+import { consoleConfig } from "../src/console/config.mjs";
 import { SHELL_PANEL_IDS } from "../src/console/shell.mjs";
 import { STREAM_ENDS, STREAM_SHUTDOWN } from "../src/console/session-ends.mjs";
 import * as sessionsModule from "../src/console/sessions.mjs";
@@ -1233,10 +1234,11 @@ test("the REAL loadPageData: a snapshot, a runs page or a run that cannot be rea
   assert.deepEqual(namesIn(res.take()), ["stale"]);
 });
 
-test("the REAL loadPageData cut by its deadline is a failed load to the hub: never a good render, never kept as one, and read again once its time is up", async () => {
+test("the REAL loadPageData cut by its deadline is a failed load to the hub: never a good render, never kept for the page's pageMinMs, and read again at the next tick", async () => {
   // Issue #988: a Valkey that takes every read and answers none. The load is back at its deadline with the page's own
   // read marked failed, as a read that threw is, so the hub keeps a holder's panels and says stale, draws a stream that
-  // holds none the unread panels, and reads again when the page's time is up. The deadline's clock is moved by hand.
+  // holds none the unread panels, and reads again at its next tick, also on a page that is otherwise read at most
+  // once per `pageMinMs`: a load the deadline cut is never kept. The deadline's clock is moved by hand.
   const time = handTime();
   const silent = () => new Promise(() => {});
   const good = { snapshot: async () => ({}), runsPage: async () => ({ runs: [], next: null, mirror: "off", examined: 0 }), runById: async () => ({ missing: true }), parkedCount: async () => 0 };
@@ -1283,12 +1285,13 @@ test("the REAL loadPageData cut by its deadline is a failed load to the hub: nev
       assert.deepEqual(namesIn(opened.text()), ["unread", "panel"], page);
       assert.deepEqual(panelsIn(opened.take()).map((p) => p.html), ["could not be read"], page);
       assert.deepEqual(namesIn(holder.take()), [], `${page}: said once`);
-      // The runs page is read at most every 5 s: for that long the cut load stands, as the failed load it is.
-      if (page === "runs") assert.equal(loads, 0, "no second load inside the page's five seconds");
-      else assert.ok(loads >= 1, "a page read every tick is read again");
-      // Valkey answers again: the next load that is due is a good one, and both streams are told fresh.
+      // The runs page is read at most every 5 s, but never from a load its deadline cut: the new stream's own first
+      // tick reads, and the tick a second later reads again.
+      assert.equal(loads, 2, `${page}: a cut load is kept by neither tick`);
+      // Valkey answers again: the very next tick's load is a good one, and both streams are told fresh, with no wait
+      // for the page's five seconds.
       fleet = good;
-      now.advance(5000);
+      now.advance(1000);
       assert.equal(await ticked(), 0);
       assert.deepEqual(namesIn(holder.take()), ["fresh"], `${page}: nothing changed since its last good render`);
       assert.deepEqual(namesIn(opened.text()), ["fresh", "panel"], page);
@@ -1299,6 +1302,232 @@ test("the REAL loadPageData cut by its deadline is a failed load to the hub: nev
   } finally {
     h.hub.close();
   }
+});
+
+/** A few turns of the loop, so every reaction that is ready has run before a test looks. */
+const turns = async () => { for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve)); };
+
+/** The unhandled rejections raised while `body` ran. */
+async function unhandledDuring(body) {
+  const raised = [];
+  const note = (reason) => raised.push(reason);
+  process.on("unhandledRejection", note);
+  try {
+    await body();
+    await turns();
+  } finally {
+    process.off("unhandledRejection", note);
+  }
+  return raised;
+}
+
+test("a tick starts every key's load before it waits for any (issue #988): each key's panels and log lines go out in the keys' order, held by no key after it", async () => {
+  const now = clock();
+  const content = { overview: new Map([["p-a", "a1"]]), fleet: new Map([["p-b", "b1"]]), config: new Map([["p-c", "c1"]]) };
+  const pending = new Map();
+  const started = [];
+  let mode = "answer";
+  const h = hubOn({
+    now,
+    content,
+    load: (pageName) => {
+      started.push(pageName);
+      if (mode === "answer") return Promise.resolve({ pageName });
+      if (mode === "throw" && pageName === "fleet") throw Object.assign(new Error("thrown as it was called"), { code: "EPIPE" });
+      return new Promise((resolve, reject) => pending.set(pageName, { resolve, reject }));
+    },
+  });
+  // What goes out, to whichever stream, in the order it went.
+  const sent = [];
+  const pages = ["overview", "fleet", "config"];
+  for (const page of pages) {
+    const res = fakeRes();
+    const write = res.write;
+    res.write = (text) => { const event = /event: (panel|stale|fresh)/.exec(text); if (event) sent.push(`${page} ${event[1]}`); return write(text); };
+    h.hub.subscribe({ res, sessionId: "s1", session: OP, page, query: {} });
+  }
+  const raised = await unhandledDuring(async () => {
+    await h.hub.tick();
+    assert.deepEqual(sent, ["overview fresh", "overview panel", "fleet fresh", "fleet panel", "config fresh", "config panel"]);
+    // Every load is held: all three are started before one has answered, in the keys' order.
+    mode = "hold";
+    started.length = 0;
+    sent.length = 0;
+    for (const page of pages) content[page] = new Map([[`p-${page[0]}`, `${page} two`]]);
+    now.advance(1000);
+    const ticking = h.hub.tick();
+    await turns();
+    assert.deepEqual(started, pages, "all three are being read, and none has answered");
+    // The last key's load answers first, and the middle one's fails: neither says anything before the first key's has.
+    pending.get("config").resolve({ pageName: "config" });
+    pending.get("fleet").reject(Object.assign(new Error("its socket was reset"), { code: "ECONNRESET" }));
+    await turns();
+    assert.deepEqual([sent, h.logs], [[], []], "a key waits for the keys before it");
+    pending.get("overview").resolve({ pageName: "overview" });
+    await ticking;
+    assert.deepEqual(sent, ["overview panel", "fleet stale", "config panel"], "each in its turn");
+    assert.deepEqual(h.logs, ["console: live data for page fleet failed (ECONNRESET); its streams keep their last panels"]);
+    // The first key's load answers while the others are still read: its panels go out at once, held by no key after it.
+    started.length = 0;
+    sent.length = 0;
+    for (const page of pages) content[page] = new Map([[`p-${page[0]}`, `${page} held`]]);
+    now.advance(1000);
+    const held = h.hub.tick();
+    await turns();
+    pending.get("overview").resolve({ pageName: "overview" });
+    await turns();
+    assert.deepEqual(sent, ["overview panel"], "not when the slowest load of the tick has answered");
+    pending.get("config").resolve({ pageName: "config" });
+    pending.get("fleet").resolve({ pageName: "fleet" });
+    await held;
+    assert.deepEqual(sent, ["overview panel", "fleet fresh", "fleet panel", "config panel"]);
+    assert.deepEqual(h.logs.slice(1), ["console: live data for page fleet is read again"]);
+    h.logs.length = 1;
+    // A load that throws as it is called is its own key's failure too: the keys after it are still read, and drawn.
+    mode = "throw";
+    started.length = 0;
+    sent.length = 0;
+    for (const page of pages) content[page] = new Map([[`p-${page[0]}`, `${page} three`]]);
+    now.advance(1000);
+    const again = h.hub.tick();
+    await turns();
+    assert.deepEqual(started, pages);
+    for (const page of ["overview", "config"]) pending.get(page).resolve({ pageName: page });
+    await again;
+    assert.deepEqual(sent, ["overview panel", "fleet stale", "config panel"], "the key that threw is told in its turn, and the key after it is drawn");
+    assert.deepEqual(h.logs.slice(1), ["console: live data for page fleet failed (EPIPE); its streams keep their last panels"]);
+  });
+  assert.deepEqual(raised.map((reason) => reason?.message), [], "a load that fails while an earlier key is drawn is nobody's unhandled rejection");
+  h.hub.close();
+});
+
+test("no cap on the loads a tick starts at once: one per data key, and the console holds no more streams than STREAMS_TOTAL_MAX, a token PI_CONSOLE_MAX_STREAMS of them", async () => {
+  // The numbers the hub leans on, where they are set: a change to either is a reason to look at the hub again.
+  assert.equal(STREAMS_TOTAL_MAX, 32);
+  assert.equal(consoleConfig({ env: {}, dir: "/srv/deployment" }).maxStreams, 4);
+  assert.match(consoleConfig({ env: { PI_CONSOLE_MAX_STREAMS: String(STREAMS_TOTAL_MAX + 1) }, dir: "/srv/deployment" }).refusal, /PI_CONSOLE_MAX_STREAMS/);
+  // With every stream the console can hold on a view of its own, a tick starts that many loads, all before one answers.
+  const pending = [];
+  let hold = false;
+  const h = hubOn({ load: (pageName, query) => (hold ? new Promise((resolve) => pending.push(() => resolve({ pageName, query }))) : Promise.resolve({ pageName, query })) });
+  for (let i = 0; i < STREAMS_TOTAL_MAX; i += 1) h.hub.subscribe({ res: fakeRes(), sessionId: "s1", session: OP, page: "runs", query: { before: String(i) } });
+  await h.hub.tick();
+  hold = true;
+  h.now.advance(1000);
+  const ticking = h.hub.tick();
+  await turns();
+  assert.equal(pending.length, STREAMS_TOTAL_MAX, "every key's load is in flight at once");
+  for (const answer of pending) answer();
+  await ticking;
+  h.hub.close();
+});
+
+test("a load the page's deadline cut is never kept for the page's pageMinMs, whether its own read failed or not; any other load is", async () => {
+  const now = clock();
+  let next = { words: "read" };
+  let loads = 0;
+  const h = hubOn({ now, pageMinMs: { runs: 5000 }, load: async () => ((loads += 1), next), pagePanels: async (_page, { data }) => [{ id: "p-main", html: data.words }] });
+  const res = fakeRes();
+  h.hub.subscribe({ res, sessionId: "s1", session: OP, page: "runs", query: {} });
+  await h.hub.tick();
+  assert.deepEqual([loads, panelsIn(res.take()).map((p) => p.html)], [1, ["read"]]);
+  // A good load is kept: a second later the page is drawn from it, and nothing is read.
+  now.advance(1000);
+  await h.hub.tick();
+  assert.equal(loads, 1);
+  // Its five seconds are up, and the next load is cut by its deadline with the page's own read answered: drawn by its
+  // tick, as the good render it is, and not kept. Each tick after it reads again.
+  next = { words: "the mirror could not be read", deadlineSpent: true };
+  now.advance(4000);
+  await h.hub.tick();
+  assert.deepEqual([loads, panelsIn(res.take()).map((p) => p.html)], [2, ["the mirror could not be read"]]);
+  now.advance(1000);
+  await h.hub.tick();
+  assert.equal(loads, 3, "read again a second later, not after five");
+  // Cut with the page's own read failed: a failed load, and not kept either.
+  next = { words: "could not be read", deadlineSpent: true, readFailed: true };
+  now.advance(1000);
+  await h.hub.tick();
+  now.advance(1000);
+  await h.hub.tick();
+  assert.equal(loads, 5);
+  assert.deepEqual(namesIn(res.take()), ["stale"], "its panels are kept, and nothing of a failed load is drawn over them");
+  // Valkey answers again: the next tick draws it at once, and that load is kept as any good one is.
+  next = { words: "read again" };
+  now.advance(1000);
+  await h.hub.tick();
+  assert.deepEqual([loads, namesIn(res.text()), panelsIn(res.take()).map((p) => p.html)], [6, ["fresh", "panel"], ["read again"]]);
+  now.advance(1000);
+  await h.hub.tick();
+  assert.equal(loads, 6, "kept for the page's five seconds");
+  // A failed load that no deadline cut is kept as before: the page is read again when its five seconds are up.
+  next = { words: "could not be read", readFailed: true };
+  now.advance(4000);
+  await h.hub.tick();
+  now.advance(1000);
+  await h.hub.tick();
+  assert.equal(loads, 7);
+  h.hub.close();
+});
+
+test("the live transcripts of a tick are read together, each job's pages one after another; a job that fails is its own, and a throw ends the tick only once every job has ended", async () => {
+  const entry = (id, text) => ({ id, kind: "assistant", ts: T0, text, tool: null, error: false, truncated: false, outcome: null });
+  const reads = [];
+  const pending = new Map();
+  let hold = false;
+  const answers = { a: () => ({ entries: [entry("1-1", "a one")], next: "1-1", ended: false, outcome: null }), b: () => ({ entries: [entry("1-1", "b one")], next: "1-1", ended: false, outcome: null }), c: () => ({ entries: [entry("1-1", "c one")], next: "1-1", ended: false, outcome: null }) };
+  const h = hubOn({
+    transcriptSince: (jobId, after) => {
+      reads.push(`${jobId} ${after}`);
+      if (!hold) return Promise.resolve({ entries: [], next: after, ended: false, outcome: null });
+      return new Promise((resolve, reject) => pending.set(jobId, { resolve: () => resolve(answers[jobId]()), reject }));
+    },
+  });
+  const streams = Object.fromEntries(["a", "b", "c"].map((jobId) => [jobId, fakeRes()]));
+  for (const [jobId, res] of Object.entries(streams)) h.hub.subscribeTranscript({ res, sessionId: "s1", session: OP, jobId });
+  const raised = await unhandledDuring(async () => {
+    await h.hub.tick();
+    hold = true;
+    reads.length = 0;
+    h.now.advance(1000);
+    const ticking = h.hub.tick();
+    await turns();
+    assert.deepEqual(reads, ["a null", "b null", "c null"], "every job is being read, and none has answered");
+    // The last job answers first and is sent its entry at once: no job waits for another's read.
+    pending.get("c").resolve();
+    await turns();
+    assert.match(streams.c.take(), /c one/);
+    // One job cannot be read: its streams wait for the next tick, and the others are not held by it.
+    pending.get("a").reject(Object.assign(new Error("socket"), { code: "ETIMEDOUT" }));
+    await turns();
+    assert.deepEqual(h.logs, ["console: a live transcript could not be read; its streams wait for the next tick"]);
+    pending.get("b").resolve();
+    await ticking;
+    assert.match(streams.b.take(), /b one/);
+    assert.equal(streams.a.take(), "");
+
+    // An entry that cannot be drawn throws out of its job's fan-out. The tick fails for it, as before, but only once
+    // the other jobs have ended: no read of a tick is left going behind the next one.
+    answers.b = () => ({ entries: [{ get id() { throw Object.assign(new Error("an entry with no id"), { code: "EBADENTRY" }); } }], next: "1-2", ended: false, outcome: null });
+    answers.c = () => ({ entries: [entry("1-2", "c two")], next: "1-2", ended: false, outcome: null });
+    reads.length = 0;
+    h.logs.length = 0;
+    h.now.advance(1000);
+    let over = false;
+    const failing = h.hub.tick().then(() => { over = true; });
+    await turns();
+    pending.get("b").resolve();
+    await turns();
+    assert.equal(over, false, "the tick waits for the jobs still being read");
+    pending.get("a").resolve();
+    pending.get("c").resolve();
+    await failing;
+    assert.match(streams.c.take(), /c two/);
+    assert.match(streams.a.take(), /a one/);
+    assert.deepEqual(h.logs, ["console: a live transcript is read again", "console: live tick failed (EBADENTRY)"]);
+  });
+  assert.deepEqual(raised, []);
+  h.hub.close();
 });
 
 // ---- /api/state's projection ----

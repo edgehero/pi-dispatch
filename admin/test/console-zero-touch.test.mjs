@@ -107,7 +107,10 @@ test("page reads its bounded report once, without a fleet snapshot or classifier
   const query = { days: 7, project: "api", scope: null };
   const data = await loadPageData("zero-touch", query, { now: () => NOW, zeroTouch: async (q) => { calls.push(q); return zeroTouchFixture(NOW); }, fleet: { snapshot: () => assert.fail("no snapshot"), parkedCount: async () => 0 } }, { role: "viewer" });
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], { windowDays: 7, project: "api", scopeId: null, role: "viewer" });
+  // The read is also handed the page's deadline (`within`, issue #988), a function and no part of what is asked for.
+  const { within, ...asked } = calls[0];
+  assert.equal(typeof within, "function");
+  assert.deepEqual(asked, { windowDays: 7, project: "api", scopeId: null, role: "viewer" });
   assert.deepEqual(data.zeroTouch.groups, []);
   assert.equal(data.zeroTouch.totals.touched, 38);
 });

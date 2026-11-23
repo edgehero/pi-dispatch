@@ -140,6 +140,9 @@ test("trusted shared live loads keep the operator draft while viewer, agent and 
   const calls = [];
   const deps = { now: () => AT, answerer: { read: async request => { calls.push(request); return {}; } }, fleet: { runById: async () => ({ missing: true }) } };
   for (const who of [{ role: "operator" }, { live: true }, { role: "viewer" }, { role: "agent" }, {}, { live: true, role: "viewer" }, { live: true, role: "agent" }]) await loadPageData("run", { id: "gh-source" }, deps, who);
-  assert.deepEqual(calls.slice(0, 2), [{ role: "operator", runId: "gh-source" }, { role: "operator", runId: "gh-source" }]);
-  assert.deepEqual(calls.slice(2), [{ role: "viewer" }, { role: "agent" }, { role: "viewer" }, { role: "viewer" }, { role: "agent" }]);
+  // Each read is also handed the page's deadline (`within`, issue #988), a function and no part of what is asked for.
+  assert.deepEqual(calls.map((request) => typeof request.within), new Array(7).fill("function"));
+  const asked = calls.map(({ within, ...request }) => request);
+  assert.deepEqual(asked.slice(0, 2), [{ role: "operator", runId: "gh-source" }, { role: "operator", runId: "gh-source" }]);
+  assert.deepEqual(asked.slice(2), [{ role: "viewer" }, { role: "agent" }, { role: "viewer" }, { role: "viewer" }, { role: "agent" }]);
 });

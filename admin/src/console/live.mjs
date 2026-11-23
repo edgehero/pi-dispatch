@@ -25,7 +25,10 @@
  *   3. `loadPageData` runs ONCE per distinct page + data key, however many streams show it, and for a page with a
  *      `pageMinMs` (the runs, run and Parked pages) at most once per that many ms. The data key is the part of the
  *      query the page's data depends on (`dataQueryOf`, issue #737): the overview's grouping, zoom and project only
- *      regroup one snapshot, so every overview query shares one load; any other page's is its whole query;
+ *      regroup one snapshot, so every overview query shares one load; any other page's is its whole query. The
+ *      loads of a tick are started together (issue #988), and each key then waits for its own in the order the keys
+ *      have, so a tick's loads take the longest of them and not their sum, and what is sent keeps its order. A load
+ *      the page's deadline cut (`data.deadlineSpent`) is drawn by its tick and never kept for `pageMinMs`;
  *   4. `pagePanels` renders each view (page + whole query + the viewer's role and name: the role rule makes a viewer's
  *      panels differ from an operator's), and only the panels whose digest changed are written, each as
  *      `id: <seq>`, `event: panel`, `data: {"id","html"}`. Run-page panels have no event id: only transcript entries
@@ -78,7 +81,8 @@
  * an operator. It shares everything above that is not a page: the slots (the server takes them for both kinds alike),
  * the session re-check with `peek` and its `event: end`, the 2 MiB cut, the ping and the one timer. Its own step 5:
  *
- *   5. `transcriptSince` runs ONCE per distinct job per tick, from the OLDEST cursor among that job's streams, and the
+ *   5. `transcriptSince` runs ONCE per distinct job per tick (the jobs read together, each job's pages one after
+ *      another), from the OLDEST cursor among that job's streams, and the
  *      page is fanned out to each stream from its own cursor (`id: <stream id>`, `event: entry`, `data: {"html"}`, the
  *      html server-rendered by `transcript.mjs`, or, for a `format=json` stream (issue #647), the structured entry
  *      `transcriptEntryJson` rebuilds). Streams at the tip, however many, cost one read; a stream that came
@@ -205,6 +209,7 @@ export function makeLiveHub({
   /**
    * dataKey -> {at, data, viewersOnly}: the last load of a page with a `pageMinMs`, reused until it is that old, and
    * not for an operator's stream when it was made for viewers alone (it may lack what only an operator is drawn).
+   * Never a load the page's deadline cut (issue #988): what it could not read in time is not the page's data.
    */
   const loaded = new Map();
   /** Data and view keys that failed at their last attempt, so a lasting failure is logged once. */
@@ -447,8 +452,14 @@ export function makeLiveHub({
       if (!byData.has(dk)) byData.set(dk, { page: sub.page, query: sub.dquery, subs: [] });
       byData.get(dk).subs.push(sub);
     }
+    // Every key's load is started before any is waited for (issue #988). One after another, a tick took the sum of
+    // its pages' loads, so on a Valkey that had stopped answering a tab learned it only after every page before it
+    // had waited out its deadline. Started together they overlap, and each key then waits for its own load, in the
+    // order the keys have always had: its panels and its log lines go out in that order, held by the keys before it
+    // and never by one after it. No cap on how many start at once: one load per data key, and no more keys than
+    // streams, of which the server holds `STREAMS_TOTAL_MAX` in all and one token `PI_CONSOLE_MAX_STREAMS`.
+    const loading = new Map();
     for (const [dk, { page, query, subs: group }] of byData) {
-      let data;
       const minMs = Object.hasOwn(pageMinMs, page) ? pageMinMs[page] : 0;
       const refresh = group.some((sub) => sub.refresh);
       // A new Sandboxes or setup document already holds its own HTTP read. Its first stream must read again,
@@ -457,11 +468,25 @@ export function makeLiveHub({
       if (refresh) loaded.delete(dk);
       const held = minMs > 0 ? loaded.get(dk) : undefined;
       const viewersOnly = !group.some((sub) => sub.session.role === "operator");
+      const kept = Boolean(held && t - held.at < minMs && (viewersOnly || !held.viewersOnly));
+      // Called inside an async function: a load that throws as it is called is a load that rejected, its key's alone.
+      const load = kept ? null : (async () => loadPageData(page, query, group.every((sub) => sub.session.role === "agent") ? { role: "agent", readOnly, live: true } : viewersOnly ? { role: "viewer", readOnly, live: true } : { readOnly, live: true }))();
+      // A rejection is its key's to take in its turn below. While an earlier key is drawn it must not be one that
+      // nobody handles, which would end the process.
+      load?.catch(() => {});
+      loading.set(dk, { minMs, refresh, held, viewersOnly, load });
+    }
+    for (const [dk, { page, subs: group }] of byData) {
+      let data;
+      const { minMs, refresh, held, viewersOnly, load } = loading.get(dk);
       try {
-        if (held && t - held.at < minMs && (viewersOnly || !held.viewersOnly)) data = held.data;
+        if (load === null) data = held.data;
         else {
-          data = await loadPageData(page, query, group.every((sub) => sub.session.role === "agent") ? { role: "agent", readOnly, live: true } : viewersOnly ? { role: "viewer", readOnly, live: true } : { readOnly, live: true });
-          if (minMs > 0 && !(refresh && data?.readFailed === true)) loaded.set(dk, { at: t, data, viewersOnly });
+          data = await load;
+          // A load the page's deadline cut (`deadlineSpent`, issue #988) is never kept: it says what a Valkey that did
+          // not answer in time left unread, so it is this tick's to draw and no later one's. The next tick reads again,
+          // and a Valkey that answers again is drawn at once, not when the page's `pageMinMs` has run out.
+          if (minMs > 0 && data?.deadlineSpent !== true && !(refresh && data?.readFailed === true)) loaded.set(dk, { at: t, data, viewersOnly });
         }
       } catch (e) {
         failed(`data\n${dk}`, `console: live data for page ${page} failed (${codeOf(e)}); its streams keep their last panels`);
@@ -588,7 +613,10 @@ export function makeLiveHub({
       if (!byJob.has(sub.jobId)) byJob.set(sub.jobId, []);
       byJob.get(sub.jobId).push(sub);
     }
-    for (const [jobId, group] of byJob) {
+    // One job's reads follow one another (each page is read from the cursor the last one left), and the jobs are read
+    // together (issue #988): a transcript that does not answer holds its own streams for its bound, not every job's
+    // after it. A stream shows one job, so what it is sent keeps its order.
+    const jobTick = async ([jobId, group]) => {
       for (let page = 0; page < transcriptPagesPerTick; page += 1) {
         const live = group.filter((s) => subs.has(s) && !s.transcriptDone);
         if (live.length === 0) break;
@@ -625,7 +653,11 @@ export function makeLiveHub({
         const full = read.entries.length >= TRANSCRIPT_PAGE_MAX;
         if (!full || !group.some((s) => subs.has(s) && compareTranscriptIds(s.cursor, read.next) <= 0)) break;
       }
-    }
+    };
+    // Every job is waited for before a throw is passed on, so a tick never ends with a read of its own still going.
+    const ended = await Promise.allSettled([...byJob].map(jobTick));
+    const thrown = ended.find((end) => end.status === "rejected");
+    if (thrown) throw thrown.reason;
   }
 
   /** One tick; a tick asked for while one runs is folded into one more run after it, never run alongside. */
