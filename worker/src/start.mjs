@@ -4092,12 +4092,21 @@ export async function startWorker(
 				// Issue #1040: a run killed at its bound leaves at most its CPU-reserve helper, named after the child's pid. On a
 				// daemon of another machine no later doctor removes it, and the leftover pass runs only after a start, so one
 				// would pile up per killed run until the next start: one bounded `rm -f` of that name, through the reserve's own
-				// runner, on whichever daemon it reaches. Only where this worker keeps a helper venue (the doctor child reads the
-				// same facts, so it runs a helper exactly there); elsewhere no helper was made, and a docker CLI that is not
-				// there would only make a failure to say. Said only when the rm failed (`doctor_helper_not_removed`): a name not
-				// there exits 0.
+				// runner, on whichever daemon it reaches. Only where the `local` venue is in use, which covers every place the
+				// child reads the docker reserve (doctor's `localUsed`), where it runs a helper if its own read of the daemon
+				// says cgroupfs, at a moment of its own (issue #1049). The worker's reserve state for `local` says
+				// that only once the worker's own facts read has answered, so on a slow daemon a child that ran a helper could
+				// be killed while the worker had none yet: a missing state is no reason to skip. A state that says another
+				// method (systemd's driver, a remote systemd daemon, rootless, cgroup v1, a driver not reported) is: the
+				// child reads the same daemon, so no helper was made, and an rm there could only fail on a slow or stopped
+				// daemon and say a helper was not removed that never existed. Where `local` is not in use no helper was made
+				// either, and a docker CLI that is not there would only make a failure to say. Said only when the rm failed
+				// (`doctor_helper_not_removed`): a name not there exits 0, so a kill after which no helper was left costs one
+				// bounded call and no line while the daemon answers.
 				afterKill: async (pid, say) => {
-					if (!cpuReserve.states().some((s) => s.method === "helper")) return;
+					if (!localBlessed) return;
+					const local = cpuReserve.states().find((s) => s.venue === DEFAULT_BACKEND);
+					if (local !== undefined && local.method !== "helper") return;
 					const failed = await removeKilledDoctorHelper({ run: reserveRun, workerName: config.workerNameDeclared ? config.workerName : "", pid });
 					if (failed) say("doctor_helper_not_removed", { pid, reason: failed });
 				},

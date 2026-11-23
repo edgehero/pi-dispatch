@@ -381,11 +381,12 @@ that writes no stdout logs no first output. Both numbers are durations, and ever
 the wall time it was written, in UTC with milliseconds (issue #1040). So on a host whose log has no time of its own
 (the macOS launchd service writes the worker's output to a plain file) these lines, `sandbox_reaper_pass` and
 `cpu_reserve_fail_open` can be lined up against another clock, such as your VM's own view of a slow window. The run was
-spawned `ms` before `container_first_output`'s `time`, to the millisecond (both are read in the one moment that line
-is written), and up to one poll step (250 ms) more before `container_created`'s, or more if the worker's event loop
-was held, since that line is written when the poll sees the file. That is also why `container_created` can come after
-`container_first_output` when the create was very fast. Under systemd, journald stamps each line with its own time as
-well (local time, to the second, unless `journalctl -o short-iso-precise` asks for more).
+spawned `ms` before `container_first_output`'s `time`, within a millisecond (two reads of the clock, one after the
+other, as that line is written), and up to one poll step (250 ms) more before `container_created`'s, or more if the
+worker's event loop was held, since that line is written when the poll sees the file. That is also why
+`container_created` can come after `container_first_output` when the create was very fast. Under systemd, journald
+stamps each line with its own time as well (local time, to the second, unless `journalctl -o short-iso-precise` asks
+for more).
 A backend whose argv carries no `--cidfile` logs neither, and one whose CLI writes the file at another moment, or
 prints on stdout itself, would make a line mean something else.
 

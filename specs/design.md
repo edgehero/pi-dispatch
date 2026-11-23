@@ -855,14 +855,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     daemon this host does not own nothing is listed (the pid test is about this process table), and the worker's pass
     runs only until a venue is done, so one helper per killed run would pile up there until the worker's next start: the
     worker, which knows its doctor child's pid and that the child is dead, runs one bounded `rm -f` of that child's name
-    after killing it at the 120 s bound, on any daemon, wherever it keeps a helper venue itself, and logs
-    `doctor_helper_not_removed` only when that rm failed. Not after a child its shutdown killed: the worker must not
+    after killing it at the 120 s bound, on any daemon, wherever its `local` venue is in use and its own read of that
+    venue does not already say another method (AMENDED 2026-11-23, #1049: its own reserve's helper state alone missed
+    a child killed before the worker's facts read had answered), and logs `doctor_helper_not_removed` only when that
+    rm failed. Not after a child its shutdown killed: the worker must not
     wait on a daemon while it stops, and the next start's pass takes that helper once it is ten minutes old. Residual:
     what the worker's rm does not take on a daemon this host does not own (a create landing after it, a doctor killed
     outside the worker or by its shutdown) goes with the leftover pass while it runs, or waits for the next start, at
-    most one per such run. Residual: the canary sweep's PID-namespace caveat holds for this sweep too: a doctor in a
-    container with the daemon's socket mounted reads the daemon as owned while it sees another process table, so it can
-    remove a live host doctor's helper, whose read is then unreadable for that run, never a false verdict. Browser
+    most one per such run. Residual: the canary sweep's caveats in "a daemon this host owns" hold for this sweep too:
+    a doctor in a container with the daemon's socket mounted reads the daemon as owned while it sees another process
+    table, and so does this host's doctor on a daemon it owns that another host also reaches, so it can remove a live
+    doctor's helper, whose read is then unreadable for that run, never a false verdict. Browser
     setup's read-only doctor runs neither the sweep nor the helper (issue #774) and says the quota was not read there.
     Residual: two hosts' doctors with one pid and one worker name on one shared daemon would share a name, as every
     doctor did. Rejected: keeping the plain `rm` (it still removes another doctor's `created` helper), and a random
@@ -3706,20 +3709,22 @@ passes are bounded (the bullet above); the session and fork-source turns are as 
   so a wrong answer never publishes another deployment's queue, and the adoption is recorded in the folder
   (`.pi-dispatch-valkey-volume.json`, 0600, create-only: the volume's name and `CreatedAt`), so that very volume needs
   no question again while one made anew does. A daemon that stops answering held `up` at any docker step with no end
-  (issue #1021), so the short ones before a Valkey starts are bounded, each at thirty seconds: `docker version` (said
-  as the daemon not answering), the job image's presence read on each engine a venue pulls it into (`docker image
-  inspect`, `podman image exists`, of the image the worker runs, the default or `PI_JOB_IMAGE`'s) and the openshell
-  venues' image capability read on the gateway's engine, docker or podman (AMENDED 2026-11-22, #1040: these were
-  unbounded while this entry said every short call was, and an engine that stopped answering there held `up` after
-  "Docker daemon reachable", or after the OpenShell gateway's line, with no word), the ownership reads (the container
-  inspect, `ps -a --filter volume=` and the volume inspect, each read that overran refusing as docker not answering,
-  with the command) and the owner check's exec, stop and rm. An image read that overran is said as its engine not
-  answering, with the command, and is met as that venue's refused gate is (#1040): it stops `up` there with nothing
-  started where the gate's refusal would (the docker venue's read; the podman venue's with no docker venue beside it),
-  and an openshell venue's read where openshell is the only venue or another venue runs on the engine that did not
-  answer, whose every later step asks it again; otherwise only the venue that read it is skipped and the others' steps
-  all run (`local` beside openshell on podman, `podman` beside openshell on docker, `local` beside a podman venue whose
-  read overran), and an openshell venue skipped so makes `up` exit non-zero at the end, as its refused gate does.
+  (issue #1021), so these calls before a Valkey starts are bounded, each at thirty seconds (CORRECTED 2026-11-23,
+  #1049: it said the short ones, and short calls before a Valkey starts stay unbounded, listed below): `docker
+  version` (said as the daemon not answering), the job image's presence read on each engine a venue pulls it into
+  (`docker image inspect`, `podman image exists`, of the image the worker runs, the default or `PI_JOB_IMAGE`'s) and
+  the openshell venues' image capability read on the gateway's engine, docker or podman (AMENDED 2026-11-22, #1040:
+  these were unbounded while this entry said every short call was, and an engine that stopped answering there held
+  `up` after "Docker daemon reachable", or after the OpenShell gateway's line, with no word), the ownership reads (the
+  container inspect, `ps -a --filter volume=` and the volume inspect, each read that overran refusing as docker not
+  answering, with the command) and the owner check's exec, stop and rm. An image read that overran is said as its
+  engine not answering, with the command, and is met as that venue's refused gate is (#1040): it stops `up` there with
+  nothing started where the gate's refusal would (the docker venue's read; the podman venue's with no docker venue
+  beside it), and an openshell venue's read where openshell is the only venue or another venue runs on the engine that
+  did not answer, whose every later step asks it again; otherwise only the venue that read it is skipped and the
+  others' steps all run (`local` beside openshell on podman, `podman` beside openshell on docker, `local` beside a
+  podman venue whose read overran), and an openshell venue skipped so makes `up` exit non-zero at the end, as its
+  refused gate does.
   Rejected: stopping the whole pass on any overrun (a podman store that did not answer would hold back the docker
   venue's Valkey, against `up`'s rule that one venue's failure leaves the others' steps running), and going on beside
   a venue on the same engine (its next read with no bound of its own, the egress step's on docker or the stack step's
@@ -3731,13 +3736,15 @@ passes are bounded (the bullet above); the session and fork-source turns are as 
   nothing, where a stop would wait out its grace on a daemon already past its bound), and the refusal names that
   command, since the daemon can still make the container after it. The check's answer counts only once its plain `rm`
   exits 0, so no Valkey starts on the volume beside the check's own; a stop that overran leaves it running, which that
-  `rm` refuses. The openshell gate's own reads, its engine's `version` among them, have that gate's 15 s read bound.
+  `rm` refuses. The openshell gate's own reads, its engine's `version` among them, have that gate's 15 s read bound,
+  and the podman venue's gate its `podman info` read's own 15 s.
   Unbounded still, and on purpose: the job image's pull and tag, compose, the Valkey volume's create, and the Valkey and
   egress proxy containers' own runs, stops and removals, long by nature or streamed for the operator to watch; the
   egress step's own reads (the proxy's inspect, the network inspect), which come after the Valkey step; and on podman
   the pull and tag and every command of the stack step (its `ps` and `inspect` reads, systemctl and loginctl), which
   runs after a gate saw podman answer (`podman info` for the podman venue, the bounded `podman version` for an
-  openshell venue on podman) and after the bounded image read.
+  openshell venue on podman) and after the bounded image read. An engine that stops answering at one of these holds
+  `up` there with nothing more said than what came before it (AMENDED 2026-11-23, #1049).
   Rejected: the container's name
   as proof (two deployments on one host share it); a lock file (a second account's `up` cannot see it); recreating an
   unlabelled volume to label it (a copy of a live queue); and `--yes` adopting one (a script would take another
@@ -18429,10 +18436,10 @@ file is the last problem, after every one the card orders. No golden draws it: t
     the kill is SIGKILL and doctor's own cleanups never run. A killed run leaves at most its CPU-reserve read helper,
     named after its pid (AMENDED 2026-11-22, #1040: it shared one name with every doctor, which the next doctor removed
     before its own read), which the worker removes itself right after the kill with one bounded `rm -f` of that name
-    (`afterKill`, on any daemon where it keeps a helper venue, not after a shutdown kill), and otherwise the next
-    doctor's CPU-reserve step once that pid is dead, on a daemon this host owns, or the worker's leftover pass on any
-    daemon once it has sat `created` ten minutes, while that pass still runs (`DES-HOST-BUDGET`); its pid-named canary
-    network and probes, which the
+    (`afterKill`, on any daemon wherever its `local` venue is in use and not read as another method, not after a
+    shutdown kill), and otherwise the next doctor's CPU-reserve step once that pid is dead, on a daemon this host
+    owns, or the worker's leftover pass on any daemon once it has sat `created` ten minutes, while that pass still
+    runs (`DES-HOST-BUDGET`); its pid-named canary network and probes, which the
     next doctor's canary sweep removes by name once that pid is dead (on a daemon this host owns, with the egress policy
     armed and, since issue #1021, off; the podman venue's canary runs only under `--live`, which the worker never
     passes); and its in-image gh
@@ -19941,6 +19948,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-23 (#1049) | **`DES-WORKER-ON-HOST` CORRECTED and AMENDED**, the Decision's bounded docker steps: it said the short calls before a Valkey starts are bounded, while the tag after each pull, the Valkey volume's create and on podman the stack step's `ps` and `inspect` reads are short and unbounded, so a podman that stops answering after the bounded image read still holds `up` at `podman ps` with no word; it now says these calls are bounded and names the podman venue's gate read (`podman info`, its own 15 s) beside the openshell gate's. The list of what stays unbounded is as it was (the tag and the volume's create run streamed, as it says) and AMENDED with what an engine that stops answering at one of them does: it holds `up` there with nothing more said than what came before it. **`DES-HOST-BUDGET` AMENDED**, the issue #1040 paragraph: the worker's `rm -f` after killing its doctor child runs wherever its `local` venue is in use and its own read of that venue does not already say another method, not only where its own reserve already holds a helper venue; the canary sweep's residual names another host reaching a daemon this host owns beside the PID namespace. **`DES-DOCTOR-RESULTS-PUBLISHED` AMENDED**, the worker's run residual: `afterKill` runs wherever the `local` venue is in use and not read as another method. UNCHANGED, checked: `DES-CONCURRENCY-3` (one worker per daemon, so the other-host case is outside what is supported), `DES-PODMAN-NATIVE-ROOTLESS-BACKEND` (no podman step changes; only what this entry says of them). **Code evidence**: worker/src/up.mjs -> the bounds comment, DOCKER_STEP_TIMEOUT_MS; worker/src/backend-podman.mjs -> PODMAN_INFO_TIMEOUT_MS; worker/src/start.mjs -> startWorker (the doctor spawner's afterKill, localBlessed, the reserve's states). |
 | 2026-11-22 (#1008, console) | **`DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY` AMENDED**, a dated **Note**: the record now says which credential carried each call (`notionalProviders` and `tokens.costNotional`), so the fold classes those rows `subscription` with no declaration, and this file still states the price (a declared plan covering such a row wins); the decision is UNCHANGED, checked. **`DES-COST-FOLD-BY-SCAN` AMENDED**, a dated bullet: the `subscription` class, both record keys required and a `costNotional` not above the cost (the worker's floor rule); a record with no ledger split the worker's way (`classifiedRows`); `usd` is billed and the list price rides as `notional`, taking no part in a value's class; `fmtCost`'s two notional shapes; `meteredRunMicros` counts a run on subscriptions alone as $0, and `recordSpendOf` counts billed only, plan-covered or not, with `notionalMicros` beside. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, NEW bullet **What that preview skips**: a model the published status binds to a subscription with no paid extra usage is not judged against the cap, where that union of the hosts' bindings holds and where it does not; the console's reserve estimates read the same status; doctor's cap line skips such a model on this host's own verdicts. `DES-OPERATOR-CONSOLE` UNCHANGED, checked. **Code evidence**: admin/src/costs.mjs -> recordNotionalProviders, recordNotionalMicros, classifiedRows, classifyRow, combineContributions, combineRowCosts, meteredRunMicros; admin/src/panel.mjs -> fmtCost; worker/src/doctor.mjs -> notionalRoute, costCapFitChecks; admin/src/insights-assembly.mjs -> recordSpendOf; admin/src/subscription-auth-view.mjs -> notionalBoundProviders; admin/src/read-model.mjs -> readSubscriptionStatusOf; admin/src/trigger-environment-plans.mjs -> judgeModels, notionalProviders; admin/src/console/actions.mjs -> reserveInputsLive; worker/src/reserve-estimate.mjs -> estimateReserve |
 | 2026-11-22 (#1008, allowance) | **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: NEW paragraph **The subscription allowance**: `run.maxSubscriptionUsd`, sent as `PI_SUBSCRIPTION_ALLOWANCE_MICROS`, is the policy guard's third part (`createAllowanceGuard`), after the cost guard, handed the same gated notional set and the meter's `notionalMicros()`; it refuses a notional call once the settled notional list price is at or above it, with no bound, hold or wait, so the calls in flight finish and count; the stop `subscription-allowance` brakes every later call; a model off its pinned price and an unreadable total fail closed, the total unreadable once a notional call's cost was absent, not finite or negative (`notionalUnread`); a zero-priced model is unbounded; the guard order decides only which rule refuses an off-price notional call under a cap; the 70% warning watches the allowance on the settled notional total; an allowance the runner cannot apply refuses as `cost-cap-unenforceable`; the exit line's `allowanceMicros`; the `subscriptionAllowance` capability; two rejected designs. **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` AMENDED**: what bounds a notional call names the allowance. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: the `subscription-allowance` stop's fixed sentence, paged like every `RUNNER_POLICY_REASONS` member. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: `CARD_FIELDS` gains `maxSubscriptionUsd`, which joins `TOOL_PROOF_FIELDS`; `dispatch_trigger_edit` keeps its nine fields, UNCHANGED, checked. UNCHANGED, checked: `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` (one new accessor, `notionalMicros`, outside `snapshot()`, no change to how a call is observed), `DES-MODEL-FAILOVER`, `DES-STORE-VERSION-WHEN-NEEDED` (the rule; the triggers file at 11 and job data at 12 are `INT-TRIGGERS-FILE-CONTRACT`'s). **Code evidence**: image/runner/src/usage-meter.mjs -> createAllowanceGuard, createPolicyGuard, createUsageMeter (notionalMicros), assertPoliciesEnforceable; worker/src/comment-tables.mjs -> TERMINAL_COMMENTS; admin/src/trigger-edit-core.mjs -> CARD_FIELDS. |
 | 2026-11-22 (#1008) | **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: NEW paragraph **Notional calls** in the runner half (one set of notional providers from the verified entries, the subscription admission and the model list, handed to the meter and the cost guard; such a call is admitted after the pinned-price checks with no bound, hold, wait, final-payload re-bound or charge and stays out of `spend()`; the meter writes `costNotional` after `costUnreported` only with subscription entries; a child, an unmarked entry or an older worker counts every call; no capability label); NEW worker item 12 **Billed calls only** (the worker's marker, `reserveVerdict`: no billed route reserves nothing and keeps the real cap, `billedModelRows`, `candidateWindowReservation`, the fork check; settlement on the billed part with the notional part rounded down, absent all billed, malformed or above the cost the floor on the whole cost, untrusted never read; `costNotional` and `notionalProviders` in the record; the floor-counter limitation; the marker only on a snapshot that carries the checked row's `bindingSignature`; `missing: "costNotional"` on `dollar_unreserved_spent`); four NEW **Rejected** entries. **`DES-MODEL-FAILOVER` AMENDED**, the #968 bullet: the cap bounds a mixed pool's API-key and paid-overage draws, and a notional candidate skips its model window check. **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` AMENDED**, Boundaries: billed calls only, the marker and two residuals (ChatGPT purchased credits; Claude extra usage turned on at the provider during a running notional job with no credit edit, billed with no dollar bound). **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` UNCHANGED, checked**: SPENT still carries the cost guard's `spend()`, which now holds billed calls only, the number a child's cap judges; child ledgers gain no field. **Code evidence**: image/runner/src/usage-meter.mjs -> notionalProviders, createCostGuard, createPolicyGuard, createUsageMeter; worker/src/reserve-estimate.mjs -> notionalConnection, notionalProvidersOf, notionalSnapshotProviders, billedModelRows, candidateWindowReservation, reserveVerdict; worker/src/dollar-budget.mjs -> notionalMicros, dollarSettlement; worker/src/processor.mjs -> withNotional, the reserve step; worker/src/model-ref.mjs -> subscriptionRoutes; worker/src/subscription-runtime.mjs -> prepare; worker/src/doctor.mjs -> notionalCapChecks. |
