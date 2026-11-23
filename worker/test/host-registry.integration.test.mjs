@@ -140,3 +140,43 @@ test("through a real Valkey, a row that is not a hash is a row not read, named w
 	await w.readLiveHosts(w.redis);
 	assert.equal(await w.redis.sismember(w.HOST_SET, broken), 1);
 });
+
+// Issue #1036: a Valkey user that may not HGETALL. The row is a sound hash; Valkey answers its read with NOPERM. Every
+// error reply was worded as a key of the wrong type, so doctor told an operator to remove a healthy host's key.
+test("through a real Valkey, a sound row read by a user without HGETALL is answered with NOPERM: a permission, lasting, whose remedy is never the key (#1036)", { skip }, async (t) => {
+	const w = await world(t);
+	const { makeRedisClient, replyErrorClass, REPLY_ERROR_CLASSES } = await import("../src/connection.mjs");
+	const { randomBytes } = await import("node:crypto");
+	const { name, reg } = w.host("acl");
+	await reg.start({});
+	// A user of this test's own, taken away at its end whatever it finds.
+	const user = `pdacl${process.pid}x${Date.now().toString(36)}`;
+	const password = randomBytes(12).toString("hex");
+	try {
+		await w.redis.call("ACL", "SETUSER", user, "on", `>${password}`, "~*", "&*", "+@all", "-hgetall");
+	} catch (err) {
+		t.skip(`this Valkey does not let the test make a user (${String(err?.message ?? err).split(" ")[0]})`);
+		return;
+	}
+	const asUser = new URL(url);
+	asUser.username = user;
+	asUser.password = password;
+	const limited = makeRedisClient(asUser.toString(), {});
+	limited.on("error", () => {});
+	try {
+		const read = await w.readLiveHosts(limited, { prune: false });
+		assert.ok(Array.isArray(read.hosts), JSON.stringify(read).slice(0, 300));
+		assert.equal(read.hostErrors?.[name], "NOPERM", `the row is listed and not read (${read.incomplete})`);
+		assert.ok(!read.hosts.some((h) => h.name === name));
+		const cls = replyErrorClass(read.hostErrors[name]);
+		assert.deepEqual([cls, REPLY_ERROR_CLASSES[cls].lasting], ["permission", true]);
+		assert.doesNotMatch(REPLY_ERROR_CLASSES[cls].remedy, /remove|repair/);
+		// The key is a hash all along: the same read as a user that may read it lists the host, with nothing to repair.
+		assert.equal(await w.redis.type(w.hostKey(name)), "hash");
+		const whole = await w.readLiveHosts(w.redis, { prune: false });
+		assert.ok(whole.hosts.some((h) => h.name === name) && !(whole.hostErrors && Object.hasOwn(whole.hostErrors, name)));
+	} finally {
+		limited.disconnect();
+		await w.redis.call("ACL", "DELUSER", user).catch(() => {});
+	}
+});

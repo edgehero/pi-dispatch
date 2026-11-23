@@ -78,9 +78,9 @@ import { JOB_FIELD, META_FIELD, QUEUE_KEY, SCHEDULER_ID_MAX, SCHEDULER_ID_RE, SC
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
-import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, passwordDeclinedOf, refusedDatabaseOf, replyErrorCode, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_COMMAND_TIMEOUT_MS, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
+import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, passwordDeclinedOf, refusedDatabaseOf, replyErrorCode, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_COMMAND_TIMEOUT_MS, VALKEY_CONTEXT_KEYS, REPLY_ERROR_CLASSES, replyErrorClass, REPLY_CODES_BY_CLASS } from "@edgehero/pi-dispatch/connection";
 import { pointerState } from "./deployment-pointer.mjs";
-import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
+import { UNREAD_HOSTS_MAX, hostErrorsShown, readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { readDoctorResults } from "@edgehero/pi-dispatch/doctor-results";
 import { CAPACITY_WINDOWS, computeCapacity } from "@edgehero/pi-dispatch/capacity";
 import { readCapacityRecords } from "@edgehero/pi-dispatch/capacity-records";
@@ -417,7 +417,8 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
       // out can tell "some were not read" from "none was".
       pausedState, ...(pausedPartial && { pausedPartial }), counts, queues: names.length, workers: resolved.count, workerNames: resolved.names, cronNext,
       ...(unavailableQueues.length > 0 ? { partial: true, unavailableQueues, ...(Object.keys(queueErrors).length > 0 ? { queueErrors } : {}) } : {}),
-      ...(blind || incomplete ? { queuesMayBeShort: true } : {}), ...(blindPartial === true ? { registryReadInPart: true } : {}), ...(hostErrors ? { hostErrors } : {}),
+      // `hostErrors` names at most `UNREAD_HOSTS_MAX` hosts, `hostErrorsMore` counting the rest (`hostErrorsShown`).
+      ...(blind || incomplete ? { queuesMayBeShort: true } : {}), ...(blindPartial === true ? { registryReadInPart: true } : {}), ...hostErrorsShown(hostErrors),
     };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
@@ -679,7 +680,9 @@ export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutM
  * when it has something: `unreadHosts`, the hosts of a registry read in part whose rows were not read; `hostErrors`,
  * those of them whose row Valkey answered with an error, `{ <host>: <code> }`; and `shortErrors`, `{ registry?, scan? }`,
  * the code of the reply when the registry's index or the look for queues was answered with one. A code is the reply's
- * first word alone (`replyCodeOf`). Waiting does not read any of these; a read that got no answer may be read next time.
+ * first word alone (`replyCodeOf`). Whether waiting reads one of these depends on its code's class (`replyErrorClass`:
+ * a key of another type and a permission last, a busy or loading Valkey passes); a read that got no answer may be read
+ * next time.
  */
 export async function fleetQueuesOn(redis, { timeoutMs = 2500, prune, readLiveHostsFn = readLiveHosts, discoverFn = discoverHostQueuesReporting } = {}) {
   // CONCURRENTLY, sharing one budget. Serialising them doubled the worst case, so a status read against
@@ -723,6 +726,29 @@ export async function fleetQueuesOn(redis, { timeoutMs = 2500, prune, readLiveHo
  */
 export function replyCodeOf(value) {
   return typeof value === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(value) ? value : null;
+}
+
+/**
+ * What a sentence may say of ONE read of `key` that Valkey answered with `code` (issue #1036), by the code's class and
+ * nothing past it (`replyErrorClass`, whose table is in the worker's connection.mjs): `said`, the key and the code;
+ * `first`, what has to be put right before anything else, for a class that lasts, else null (a key of another type is
+ * removed or repaired; a permission is the Valkey user's ACL, never the key); `again`, whether "try again" is true,
+ * which it is of a passing class alone; `lasting`, the class's own true, false or null; `waiting`, the clause the class
+ * allows about waiting, or null. The words every admin surface that names a remedy builds its sentence from (the
+ * trigger edit's gate, `dispatch_cancel`'s refusal, the `/dispatch` panel), so that an ACL user without HGETALL is
+ * never told to remove a sound key, and a Valkey that was busy for a moment is never called a cause waiting does not end.
+ */
+/**
+ * What an error reply's code means, in one sentence for a text that cannot ask the table case by case (a tool's
+ * description, which a model reads before it sees any code). Built from the worker's own lists
+ * (`REPLY_CODES_BY_CLASS`), so a code that joins a class there is named here with it.
+ */
+export const REPLY_CODE_MEANING = `What a code means: ${REPLY_CODES_BY_CLASS.key.join(", ")}, the key holds another kind of value and has to be removed or repaired; ${REPLY_CODES_BY_CLASS.permission.join(", ")}, this deployment's Valkey user lacks a permission (its ACL) and no key is at fault; ${REPLY_CODES_BY_CLASS.passing.join(", ")}, Valkey could not serve the read then and a later call may read it; any other code says no more than itself. Only the first two last until someone puts them right.`;
+
+export function erroredReadWords(key, code) {
+  const cls = replyErrorClass(code);
+  const { lasting, waiting } = REPLY_ERROR_CLASSES[cls];
+  return { class: cls, lasting, waiting, said: `Valkey answers ${key} with ${code}`, first: cls === "key" ? "Remove or repair that key first" : cls === "permission" ? "Fix this Valkey user's ACL first" : null, again: cls === "passing" };
 }
 
 /**
@@ -4942,8 +4968,9 @@ export const TRIGGER_SKEW_READ_MS = FLEET_READ_TIMEOUT_MS;
 /** A snapshot's read of one queue that Valkey answered with an error (issues #1053, #1064), beside the reply's code. */
 const ERRORED_READ = Symbol("errored-read");
 
-/** How many hosts a snapshot's `queue.unreadHosts` names (issue #1036); `queue.unreadHostsMore` counts the rest. */
-export const UNREAD_HOSTS_MAX = 20;
+// How many hosts a snapshot's `queue.unreadHosts` names (issue #1036), `queue.unreadHostsMore` counting the rest: the
+// registry module's one cap for every list of hosts not read (`UNREAD_HOSTS_MAX`), handed on under its own name.
+export { UNREAD_HOSTS_MAX };
 
 // Longer than every read this file bounds for itself, so this decides only the reads that have no bound of their own.
 const FLEET_COMMAND_TIMEOUT_MS = 5_000;
@@ -5155,17 +5182,34 @@ export function createFleetReader(
   // they are.
   let lastHostsAt = null;
 
-  const fleetQueues = async () => {
+  // THE REGISTRY AS ONE READ SAW IT (issue #1036): what `fleetRead` hands its caller beside the queues, frozen, the
+  // eight values above as that read left them. A snapshot is assembled over many awaits, and until this it read the
+  // reader's own variables at the end of them, where another call's registry read may have written since, or be half
+  // way through writing: the read reset `fleetUnread` and `fleetUnasked`, awaited the consumers' health, and only then
+  // set them, so a snapshot assembled in that gap said `registryReadInPart: true` with `unreadHosts: []`, the running
+  // jobs whole and the schedule list whole, while the host it had not read was named by nobody (60 to 81 of 450 answers
+  // of /api/state on a console with two pages open). The rows of the tests published no `consumers`, so that await did
+  // no I/O and none saw it; every real worker's row publishes them. Two rules now. NOTHING IS WRITTEN BEFORE THE LAST
+  // AWAIT: the registry and the consumers' health are read first, and the eight are then set together with nothing
+  // awaited between, so the reader's state is whole at every instant another call can look. AND AN ANSWER BUILT OVER
+  // AWAITS READS ITS OWN VIEW, never the variables: the queues a snapshot asked are the ones its own read named, so its
+  // marks must be that read's too, or a read that was whole could vouch for a snapshot whose queue set was short.
+  const fleetView = () => Object.freeze({ names: lastNames, degraded: fleetDegraded, partial: fleetPartial, error: fleetError, unread: fleetUnread, unasked: fleetUnasked, hosts: lastHosts, hostsAt: lastHostsAt });
+  const fleetRead = async () => {
     const fleet = await readLiveHostsFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS, prune }).catch((err) => ({
       unreachable: err?.message ?? String(err),
     }));
-    fleetPartial = false;
-    fleetError = null;
-    fleetUnread = [];
-    fleetUnasked = false;
-    if (fleet?.unreachable || !Array.isArray(fleet?.hosts)) {
+    const answered = !fleet?.unreachable && Array.isArray(fleet?.hosts);
+    // The last await of this read: the health of the consumers the rows it read publish, one bounded round trip per
+    // queue they name. From here to the return nothing is awaited.
+    const health = answered ? await readConsumerStatus(redis, fleet.hosts, { now: nowFn }) : null;
+    const fresh = answered ? fleet.hosts.map((h, i) => ({ ...h, consumerHealth: { state: health[i].state, rows: health[i].rows } })) : null;
+    if (!answered) {
       fleetDegraded = fleet?.unreachable ?? "registry unreadable";
+      fleetPartial = false;
       fleetError = fleet?.unreachable ? replyCodeOf(fleet.error) : null;
+      fleetUnread = [];
+      fleetUnasked = false;
       lastHosts = lastHosts.map((h) => ({ ...h, consumerHealth: { state: "unknown", rows: [] } }));
     } else if (fleet.incomplete) {
       // Read in part (issue #1062): the registry is still degraded, in its own words, since a host whose row was not
@@ -5175,10 +5219,6 @@ export function createFleetReader(
       // where the CLI's switch reached every host it read. `lastHostsAt` (`hostsReadAt`) is this read's instant, since
       // the rows it read are of now, and each kept row is marked `notRead`, so a surface that dates a row
       // (`dispatch_hosts`' beat) never dates a kept one by this read.
-      fleetDegraded = fleet.incomplete;
-      fleetPartial = true;
-      const health = await readConsumerStatus(redis, fleet.hosts, { now: nowFn });
-      const fresh = fleet.hosts.map((h, i) => ({ ...h, consumerHealth: { state: health[i].state, rows: health[i].rows } }));
       // Only a host whose row did not answer is kept (`unreadHosts`): one whose row answered empty was pruned and is
       // gone, as a whole read drops it, and so is one no longer in the index. A reader handed in without the list keeps
       // every last row it did not read now.
@@ -5187,22 +5227,31 @@ export function createFleetReader(
       // Issue #1036: the hosts not read, by name, with the code of a row Valkey answered with an error. One with no
       // last row is in no row of `lastHosts`, so until now nothing named it; and its queue is not asked. A listing
       // that says it is not whole without saying which rows leaves that unknown, which is the same floor.
-      fleetUnread = unreadHostsOf(fleet);
-      fleetUnasked = unreadNames === null || fleetUnread.some((u) => !kept.some((h) => h.name === u.name));
+      const unread = unreadHostsOf(fleet);
+      fleetDegraded = fleet.incomplete;
+      fleetPartial = true;
+      fleetError = null;
+      fleetUnread = unread;
+      fleetUnasked = unreadNames === null || unread.some((u) => !kept.some((h) => h.name === u.name));
       lastNames = unionQueueNames(fleetQueueNames(fresh), fleetQueueNames(kept));
       lastHosts = [...fresh, ...kept].sort((a, b) => String(a.name).localeCompare(String(b.name)));
       lastHostsAt = nowFn();
     } else {
       fleetDegraded = null;
+      fleetPartial = false;
+      fleetError = null;
+      fleetUnread = [];
+      fleetUnasked = false;
       lastNames = fleetQueueNames(fleet.hosts);
-      const health = await readConsumerStatus(redis, fleet.hosts, { now: nowFn });
-      lastHosts = fleet.hosts.map((h, i) => ({ ...h, consumerHealth: { state: health[i].state, rows: health[i].rows } }));
+      lastHosts = fresh;
       lastHostsAt = nowFn();
     }
     // A host that left keeps its queue open until dispose. Closing it here would race a pause already in flight
     // against it, and an idle BullMQ Queue costs one connection -- cheaper than that race.
-    return lastNames.map(queueNamed);
+    return { queues: lastNames.map(queueNamed), view: fleetView() };
   };
+  // The queues alone, for a caller that reads none of the registry's state after it.
+  const fleetQueues = async () => (await fleetRead()).queues;
 
   // One job by id across the fleet's queues (the first that knows it): the Job, null when no queue holds it, or undefined
   // when that cannot be said. Its `.data` stays with the caller in this file. The queues are the by-id lookup's
@@ -5259,13 +5308,15 @@ export function createFleetReader(
     const deploymentUrl = plan.deploymentUrl ?? (plan.urls.length > 1 ? plan.urls[1] : plan.urls[0]);
     return deploymentUrl === paths.valkeyUrl ? ownQueueNames() : [];
   };
-  const killSwitchNames = async () => {
+  // `registryNames`: the registry's queues as the caller's own read named them (`fleetRead`'s view), since the scan is
+  // awaited here and the reader's `lastNames` may be another call's by the time it answers.
+  const killSwitchNames = async (registryNames) => {
     // The seam answers `discoverHostQueuesReporting`'s shape or a bare list, which reads as whole (`fleetQueuesOn`'s
     // reading); a part-read keyspace still pauses what it read, and the preview says the set may be short.
     const got = await discoverHostQueuesFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS });
     const existing = Array.isArray(got) ? got : Array.isArray(got?.names) ? got.names : [];
     const whole = Array.isArray(got) || (Array.isArray(got?.names) && (got.incomplete === null || got.incomplete === undefined));
-    const found = unionQueueNames(lastNames, existing);
+    const found = unionQueueNames(registryNames, existing);
     return { names: unionQueueNames([...found, ...ownHere()], []), incomplete: whole ? null : SWITCH_SCAN_INCOMPLETE, found: new Set(found) };
   };
 
@@ -5275,9 +5326,11 @@ export function createFleetReader(
   // keyspace unioned onto it. ONE function for the switch (`poolSet`) and for the snapshot that previews a fleet or a
   // queue write (`snapshot({ switchQueues: true })`, issue #737), so a preview names, and its Undo pauses again, the
   // queues the write reaches: a stopped host's queue the registry no longer names included.
+  // `view` is that registry read's (`fleetRead`), handed on so a preview's snapshot and a switch's outcome say what
+  // THIS read saw of the registry, whatever another call reads meanwhile.
   const switchQueueNames = async () => {
-    await fleetQueues();
-    return killSwitchNames();
+    const { view } = await fleetRead();
+    return { ...(await killSwitchNames(view.names)), view };
   };
   const switchQueues = async () => queuesNamed((await switchQueueNames()).names);
 
@@ -5298,16 +5351,16 @@ export function createFleetReader(
   // while a preview writes nothing. A read-only reader's queue no longer writes by being built (issue #1036), so for
   // the console and the agent's failed read this is the first reason alone.
   const switchPreviewQueues = async (queue, { lookupBound = false } = {}) => {
-    const { names, incomplete, found } = await switchQueueNames();
+    const { names, incomplete, found, view } = await switchQueueNames();
     const readable = names.filter((n) => found.has(n));
     const unread = names.filter((n) => !found.has(n));
     const flipped = new Set(readable);
-    const ordered = [...new Set([...lastNames, ...readable])].filter((n) => flipped.has(n));
-    const bound = lookupBound ? Math.max(new Set(lastNames).size, WAITING_QUEUES_MAX) : SWITCH_PREVIEW_QUEUES_MAX;
+    const ordered = [...new Set([...view.names, ...readable])].filter((n) => flipped.has(n));
+    const bound = lookupBound ? Math.max(new Set(view.names).size, WAITING_QUEUES_MAX) : SWITCH_PREVIEW_QUEUES_MAX;
     const chosen = new Set(ordered.slice(0, bound));
     if (typeof queue === "string" && flipped.has(queue)) chosen.add(queue);
     const read = readable.filter((n) => chosen.has(n));
-    return { queues: queuesNamed(read), total: names.length, truncated: read.length < readable.length, incomplete, unread };
+    return { queues: queuesNamed(read), total: names.length, truncated: read.length < readable.length, incomplete, unread, view };
   };
 
   // Flip every kill-switch queue on THIS reader's Valkey through the held pool, `setQueuePaused`'s result shape
@@ -5335,23 +5388,29 @@ export function createFleetReader(
     const discover = () => withTimeout(switchQueueNames().catch(unread), switchStepTimeoutMs, null).then((found) => found ?? unread());
     let names;
     let incomplete;
+    // Whether the registry was read, by this switch's own discovery (`view`, issue #1036), taken before a queue is
+    // flipped: read off the reader's variable after the flips, it was whatever a snapshot beside this switch had read
+    // by then. A discovery that threw or outlived its bound read nothing itself, and the reader's last word stands.
+    let blind;
     if (paused) {
       const held = [...new Set([...lastNames, ...pool.keys(), ...own])];
       const first = flip(held);
       const found = await discover();
+      blind = found.view ? found.view.degraded : fleetDegraded;
       await Promise.all([first, flip(found.names.filter((n) => !held.includes(n)))]);
       names = [...found.names, ...held.filter((n) => !found.names.includes(n))];
       incomplete = found.incomplete;
     } else {
       const found = await discover();
+      blind = found.view ? found.view.degraded : fleetDegraded;
       const named = found.found instanceof Set ? found.names.filter((n) => found.found.has(n)) : found.names;
       // A discovery that was short (the registry or the scan unread) is filled from the queues this reader holds,
       // each named by an earlier discovery: they are resumed after the ones it did name, or named as not tried.
-      names = found.incomplete || fleetDegraded ? [...named, ...[...pool.keys()].filter((n) => !named.includes(n))] : named;
+      names = found.incomplete || blind ? [...named, ...[...pool.keys()].filter((n) => !named.includes(n))] : named;
       incomplete = found.incomplete;
       await flip(names);
     }
-    return switchOutcome({ paused, names, steps, blind: fleetDegraded, incomplete });
+    return switchOutcome({ paused, names, steps, blind, incomplete });
   };
   // This host's own queue goes with the plan's deployment Valkey alone (`killSwitchSet`'s `alsoNames`, issue #964): to the
   // pool when that is this reader's, else to the one-shot switch of the other.
@@ -5521,8 +5580,8 @@ export function createFleetReader(
     const slot = live ? "live" : "request";
     if (lookupReads[slot] === null) {
       lookupReads[slot] = (async () => {
-        const registry = await fleetQueues();
-        const registryRead = fleetDegraded === null;
+        const { queues: registry, view } = await fleetRead();
+        const registryRead = view.degraded === null;
         const found = live ? (discovered ?? NO_DISCOVERY) : await existingQueueNames();
         return { registry, registryRead, seq: found.seq, ...lookupSetOf(registry, registryRead, found) };
       })().finally(() => {
@@ -5613,10 +5672,8 @@ export function createFleetReader(
   // registry was not read this call (`fleetDegraded`) or the keyspace discovery behind the set was not whole. Judged per
   // call over a copy, never on the kept read, since two calls inside one window can see the registry differently.
   let waitingCache = null;
-  const waitingOf = async (queues, projects, triggers, fresh = false) => {
+  const waitingOf = async (queues, projects, triggers, fresh = false, registryUnread = fleetDegraded !== null) => {
     const registry = [...new Set(queues.map((q) => q?.name).filter((n) => typeof n === "string"))];
-    // Read before the discovery is waited for: the caller's registry read is the one just before this call.
-    const registryUnread = fleetDegraded !== null;
     const discovery = await existingQueueNames();
     const found = discovery.names;
     const short = registryUnread || discovery.whole !== true;
@@ -5650,10 +5707,10 @@ export function createFleetReader(
     // so each preview of a slow Valkey left one running. This shares the snapshot's window and its one read (`waitingOf`), and a read
     // that failed answers `{ unreachable: true }`, which `readTriggerSkew` calls incomplete: never an empty line.
     async waiting() {
-      const queues = await fleetQueues();
+      const { queues, view } = await fleetRead();
       const projects = readProjects({ projectsPath: paths.projectsFile });
       const triggers = readTriggers({ triggersPath: paths.triggersPath, fs });
-      return waitingOf(queues, Array.isArray(projects?.projects) ? projects.projects : null, Array.isArray(triggers?.triggers) ? triggers.triggers : null);
+      return waitingOf(queues, Array.isArray(projects?.projects) ? projects.projects : null, Array.isArray(triggers?.triggers) ? triggers.triggers : null, false, view.degraded !== null);
     },
     // `viaFs` (issue #800): a preview asks what the PROPOSED file would refuse, by handing in the dry run's file system.
     // `timeoutMs` (issue #988): the bound of each job's lookup where a caller names one (a page hands it what is left
@@ -5672,7 +5729,10 @@ export function createFleetReader(
       // answering each waits out a bound of its own, and one after the other a kill switch preview paid for both.
       const mergedRead = mergedRunsOn(redis, { logsDir: paths.logsDir, limit: RUNS_ON_DASHBOARD, prune }).catch(() => ({ runs: [], hosts: [], mirror: "off" }));
       const preview = opts?.switchQueues === true ? await switchPreviewQueues(opts?.queue, { lookupBound: opts?.switchLookupBound === true }) : null;
-      const queues = preview !== null ? preview.queues : await fleetQueues();
+      // The registry as THIS snapshot's own read saw it (`fleetRead`'s view, issue #1036), beside the queues that read
+      // named. Every mark below that speaks of the registry is this value's, never the reader's variables, which
+      // another call may write while this one waits on its queues.
+      const { queues, view: registry } = preview !== null ? preview : await fleetRead();
       const merged = await mergedRead;
       // The cron ids this deployment declares, read from the triggers file the same tick already reads SYNCHRONOUSLY.
       // Since issue #267 each scheduler's stall count is its own key, so the reader has to name them -- and naming them
@@ -5691,7 +5751,7 @@ export function createFleetReader(
       const projectsView = readProjects({ projectsPath: paths.projectsFile });
       // Issue #737: the waiting jobs, started now beside the queue reads and awaited at the end (cached, so at most one
       // read per WAITING_TTL_MS). Null when this call did not ask for them.
-      const waitingRead = waiting === true ? waitingOf(queues, Array.isArray(projectsView?.projects) ? projectsView.projects : null, Array.isArray(triggersView?.triggers) ? triggersView.triggers : null, opts?.freshWaiting === true) : null;
+      const waitingRead = waiting === true ? waitingOf(queues, Array.isArray(projectsView?.projects) ? projectsView.projects : null, Array.isArray(triggersView?.triggers) ? triggersView.triggers : null, opts?.freshWaiting === true, registry.degraded !== null) : null;
       // A queue whose paused state or counts Valkey answers with an error (its meta key holding a string, say) is that
       // one queue not read, named in `queueErrors` with the reply's code, never a snapshot that fails for the whole
       // fleet. On a switch preview's read since issue #1053, where the one-queue preview had refused every queue for it;
@@ -5734,7 +5794,7 @@ export function createFleetReader(
       // was not read and that has no last row here is in no set (issue #1036: a console whose FIRST registry read was in
       // part, or a row Valkey answers with an error from the start). A host not read that has a last row keeps its queue
       // in the set, so it does not count. The lists read queue by queue (`active`, `schedulers`) are floors while true.
-      const hostQueuesUnasked = (fleetDegraded !== null && lastHostsAt === null) || fleetUnasked;
+      const hostQueuesUnasked = (registry.degraded !== null && registry.hostsAt === null) || registry.unasked;
       // The queues whose read got an error reply, each with the first reply's code, and every other queue as it was
       // read: an errored queue is in neither `queueCounts` nor the sums, and `queueErrors` names it,
       // `{ <queue>: <code> }`, the name and shape `pi-dispatch status` prints (`{}` when none).
@@ -5760,7 +5820,7 @@ export function createFleetReader(
       // (PII), so it never enters the snapshot (no-pii-in-logs, INT-RUN-HISTORY-FILE-CONTRACT). The host is read off
       // the registry rows this tick already holds (a host publishes the ids it runs), never off the Job.
       const hostOfJob = new Map();
-      for (const h of lastHosts) for (const j of parseLiveJobs(h?.jobs).jobs ?? []) if (typeof h?.name === "string") hostOfJob.set(j.id, { host: h.name, project: j.p ?? null, size: j.m !== null || j.c !== null ? { memMiB: j.m, cpuCenti: j.c } : null });
+      for (const h of registry.hosts) for (const j of parseLiveJobs(h?.jobs).jobs ?? []) if (typeof h?.name === "string") hostOfJob.set(j.id, { host: h.name, project: j.p ?? null, size: j.m !== null || j.c !== null ? { memMiB: j.m, cpuCenti: j.c } : null });
       // Issue #646: of a Job's `.data`, ONE boolean (`steer`) and the run id it names (`recoveryOf`, through `runIdOf`)
       // are read, and the run id never leaves this function: it only spells the inbox keys below and, since issue #662,
       // the progress keys (a #645 recovery writes its progress under its RUN's id, so a `.r1` row read by its own id
@@ -5949,14 +6009,14 @@ export function createFleetReader(
         dollars,
         // `registryReadInPart` (issue #1062): `fleetDegraded` is a registry that answered with some rows not read in
         // time, so a surface says it was read in part rather than that it could not be read.
-        // Issue #1036, always present: `fleetError`, the code Valkey answered the registry's index with (`fleetDegraded`
-        // is then a cause that waiting does not end), or null; `unreadHosts`, the hosts of a registry read in part whose
+        // Issue #1036, always present: `fleetError`, the code Valkey answered the registry's index with (whether waiting
+        // ends that is its class's to say, `replyErrorClass`), or null; `unreadHosts`, the hosts of a registry read in part whose
         // rows were not read, `[{ name, error }]`, at most `UNREAD_HOSTS_MAX` named and `unreadHostsMore` the count past
         // them (only when there is one). `error` is the code Valkey answered that row with, or null for a row that got
         // no answer; a host named here with no row in `hostBudgets` was never read by this reader.
         queue: {
-          pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded, ...(fleetPartial ? { registryReadInPart: true } : {}),
-          fleetError, unreadHosts: fleetUnread.slice(0, UNREAD_HOSTS_MAX), ...(fleetUnread.length > UNREAD_HOSTS_MAX ? { unreadHostsMore: fleetUnread.length - UNREAD_HOSTS_MAX } : {}),
+          pausedState, pausedPartial, counts, workers, queues: queues.length, fleetDegraded: registry.degraded, ...(registry.partial ? { registryReadInPart: true } : {}),
+          fleetError: registry.error, unreadHosts: registry.unread.slice(0, UNREAD_HOSTS_MAX), ...(registry.unread.length > UNREAD_HOSTS_MAX ? { unreadHostsMore: registry.unread.length - UNREAD_HOSTS_MAX } : {}),
         },
         // Issue #1064: the queues Valkey answered with an error, left out of `queueCounts` and of `queue.counts`
         // (`queue.queues` still counts them), `{ <queue>: <code> }`, on every read, `{}` when none.
@@ -5966,11 +6026,11 @@ export function createFleetReader(
         // Issue #596, phase 3: each live host's budget and use, as the registry publishes them (integers as text, `off`,
         // or "" while unknown). Read by the PROJECTS view; nothing here judges them. Issue #599, phase 3: with what the
         // HOSTS view's live lines read off the same rows (`hostRowOf`), so that view adds no read to this tick.
-        hostBudgets: lastHosts.map(hostRowOf),
+        hostBudgets: registry.hosts.map(hostRowOf),
         // Issue #712: each host's last published doctor run, `{ hosts, more }` or `{ unreachable }`, through the worker's
         // own allowlist (`readDoctorResults`). Labels are another host's redacted text: every surface escapes them.
         doctor: await doctorResults(),
-        subscriptionAuth: await readSubscriptionStatus(redis, lastHosts.map((h) => h.name)).catch(() => ({ state: "unavailable", partial: true, connections: [] })),
+        subscriptionAuth: await readSubscriptionStatus(redis, registry.hosts.map((h) => h.name)).catch(() => ({ state: "unavailable", partial: true, connections: [] })),
         // This console's or panel's own host, by the worker's name rule over the deployment's env, so a "does not load"
         // sentence quotes this host's doctor before another's (each host has its own copy of the files). Null when the
         // declared name is one the worker refuses.
@@ -6009,7 +6069,7 @@ export function createFleetReader(
         secretBundles: secretBundlesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs, fs }),
         // Issue #712: the secret profiles view (`secretProfilesView`): each profile's source, roots status, triggers,
         // projects, last resolve and the live hosts that advertise it. Names and words only, never a resolver path.
-        secretProfiles: secretProfilesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs, hosts: fleetDegraded && !fleetPartial ? null : lastHosts.filter((h) => h.notRead !== true).map(hostRowOf), hostsUnreadable: Boolean(fleetDegraded) && !fleetPartial, hostsReadInPart: fleetPartial, fs }),
+        secretProfiles: secretProfilesView({ triggers: triggersView, settings, env: dollarEnvFn() ?? {}, projects: projectsView, runs: merged.runs, hosts: registry.degraded && !registry.partial ? null : registry.hosts.filter((h) => h.notRead !== true).map(hostRowOf), hostsUnreadable: Boolean(fleetDegraded) && !fleetPartial, hostsReadInPart: fleetPartial, fs }),
         // Issue #712: the PI_SECRET_PROFILES names this deployment declares (`envSecretProfiles`; never a path here, the
         // names-only rule of the overlay list beside it), so no surface says "none declared" over env-declared profiles.
         secretProfilesEnv: (() => {
@@ -6047,7 +6107,7 @@ export function createFleetReader(
         spendByHour: fold.spendByHour,
         softHoldToday: fold.softHoldToday,
         // Issue #737: when the registry rows in `hostBudgets` were read (the reader's clock), null before any read.
-        hostsReadAt: lastHostsAt,
+        hostsReadAt: registry.hostsAt,
         // Issue #737: the waiting jobs (`readWaiting`'s shape, or `{ unreachable: true }`), only on a call that asked; with
         // `queuesShort: true` when the queues read may not be all of them (`waitingOf`, issue #963).
         ...(waitingJobs !== null ? { waiting: waitingJobs } : {}),
@@ -6140,8 +6200,8 @@ export function createFleetReader(
     },
     /** This reader's held client, local index and clock, for `readRunsPage`/`readRunById` off the same connection. */
     async historySources() {
-      await fleetQueues();
-      return { hosts: lastHosts.map((h) => h.name).filter((h) => h !== doctorSelfName(dollarEnvFn() ?? {})), partial: fleetDegraded };
+      const { view } = await fleetRead();
+      return { hosts: view.hosts.map((h) => h.name).filter((h) => h !== doctorSelfName(dollarEnvFn() ?? {})), partial: view.degraded };
     },
     async historyPage({ query, cursor = null, host = null, excludeHosts = [] }) {
       if (host === "@mirror") {
@@ -6171,11 +6231,13 @@ export function createFleetReader(
     async runById(jobId, { historyHost = null, timeoutMs, within = null } = {}) {
       const local = await readRunById(redis, { logsDir: paths.logsDir, jobId, fs, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
       if (local.record || local.invalid || !historyHost) return local;
-      const bounded = typeof within === "function";
-      if (bounded) await withTimeout(fleetQueues(), within(Infinity), null);
-      else await fleetQueues();
-      if (!lastHosts.some((h) => h.name === historyHost)) return { unreadable: "the host holding this run is not available" };
-      const got = await readHostHistory({ redis, host: historyHost, query: { id: jobId }, ...(bounded ? { timeoutMs: within(HOST_HISTORY_READ_MS) } : {}) });
+          const bounded = typeof within === "function";
+          // This read's own view of the registry (issue #1036), under the page's deadline where one is handed (issue #988):
+          // past it the hosts are the last rows read, as before.
+          const read = bounded ? await withTimeout(fleetRead(), within(Infinity), null) : await fleetRead();
+          const hosts = read ? read.view.hosts : lastHosts;
+          if (!hosts.some((h) => h.name === historyHost)) return { unreadable: "the host holding this run is not available" };
+          const got = await readHostHistory({ redis, host: historyHost, query: { id: jobId }, ...(bounded ? { timeoutMs: within(HOST_HISTORY_READ_MS) } : {}) });
       return got.record?.jobId === jobId ? { record: shownRecord(got.record), source: "host" } : { unreadable: "the host could not provide this run's record" };
     },
     // The live transcript (issue #643), off this reader's held client and bounded by its timeout: `readTranscriptSince`
@@ -6456,10 +6518,10 @@ export function createFleetReader(
         if (!pool.has(queue)) {
           const found = await withTimeout(switchQueueNames(), switchStepTimeoutMs, null);
           if (found === null) return { unreachable: "the deployment's queues could not be read within the bound" };
-          const { names } = found;
+          const { names, view } = found;
           // The registry read's own error stays out of it: a client's words, which can name a host, and this is a page's.
           // Over a registry read in part (issue #1062) the queue may be a host's whose row did not answer: said so.
-          if (!names.includes(queue)) return { invalid: `${JSON.stringify(queue)} is not a queue this deployment drains (${names.join(", ")})${fleetDegraded ? (fleetPartial ? "; the host registry was read in part, so the queue of a host whose row did not answer may be missing from that list" : "; the host registry could not be read, so a host's queue may be missing from that list") : ""}. Nothing was changed` };
+          if (!names.includes(queue)) return { invalid: `${JSON.stringify(queue)} is not a queue this deployment drains (${names.join(", ")})${view.degraded ? (view.partial ? "; the host registry was read in part, so the queue of a host whose row did not answer may be missing from that list" : "; the host registry could not be read, so a host's queue may be missing from that list") : ""}. Nothing was changed` };
         }
         const q = queueNamed(queue);
         const step = await switchStep(q, paused, switchStepTimeoutMs);
@@ -6489,12 +6551,12 @@ export function createFleetReader(
     },
     // Only dedicated operator page/action reads ask for these. snapshot()/api/state never carry them.
     async sandboxInventory() {
-      await fleetQueues();
-      return readSandboxInventoriesFn(redis, { now: nowFn, hosts: lastHosts.map((h) => h.name) });
+      const { view } = await fleetRead();
+      return readSandboxInventoriesFn(redis, { now: nowFn, hosts: view.hosts.map((h) => h.name) });
     },
     async sandboxSessions() {
-      await fleetQueues();
-      return readSandboxSessionsFn(redis, { now: nowFn, hosts: lastHosts.map((h) => h.name), timeoutMs: FLEET_READ_TIMEOUT_MS });
+      const { view } = await fleetRead();
+      return readSandboxSessionsFn(redis, { now: nowFn, hosts: view.hosts.map((h) => h.name), timeoutMs: FLEET_READ_TIMEOUT_MS });
     },
     // The helper ends each of its steps by a timer of its own and answers `state: "unknown"` for whatever they threw,
     // at its first lookup as at its add. `asked` (issue #987) says which it was: whether anything but a read had been
@@ -6984,6 +7046,16 @@ function pausedAsk(redis, q) {
 }
 
 /**
+ * What `pausedAsk`'s answer (`batched`'s `{ value }` or `{ error }`) says: `{ paused, error }`, `paused` true or false
+ * where the flag was read, and null where the look failed, with `error` the code of Valkey's error reply for it or null
+ * when it got no answer (issue #1036). A failed look read as "not paused", which is a statement nobody read.
+ */
+function pausedFlagOf(command, answer) {
+  if (answer?.error !== undefined) return { paused: null, error: replyErrorCode(answer.error) };
+  return { paused: isPausedFlag(command, answer?.value), error: null };
+}
+
+/**
  * Send `commands` (`[name, ...args]`) as ONE pipeline when the client has one, else the same commands direct, and answer
  * each as `{ value }` or `{ error }`: one bad key (a stray key of the wrong type) costs its own answer, never the read.
  * A pipeline that cannot be sent at all rejects, and the caller reads that as unreachable.
@@ -7082,7 +7154,7 @@ function waitingProjectOf({ record, kind, deid, jobId, projectList, triggerList 
 }
 
 /**
- * Hydrate `entries` (`[{ q, jobId, state, score, queuePaused }]`) into waiting rows and scheduled entries, in two more
+ * Hydrate `entries` (`[{ q, jobId, state, score, queuePaused }]`, `queuePaused` null where the flag was not read) into waiting rows and scheduled entries, in two more
  * pipelined rounds: each job's short hash fields, its defer record (a delayed job's), its hold (`heldIds` members, or
  * every job when `heldIds` is null), then the scheduler's next instant for each job that names a scheduler. A job whose
  * hash is gone (it left between the reads) is no row. `nowMs` is the read's clock, against which a delayed job is `due`.
@@ -7147,8 +7219,10 @@ async function hydrateWaiting(redis, entries, { heldIds, projectList, triggerLis
     if (overdue) bucket = "due";
     else if (e.state === "delayed") bucket = record !== null ? record.bucket : held !== null ? "check" : "none";
     // A paused queue keeps its prioritized jobs in their set (BullMQ's pause renames only the wait list), so a job there
-    // waits on the pause, not on a slot.
-    else if (e.state === "paused" || e.queuePaused) bucket = "paused";
+    // waits on the pause, not on a slot. Where the queue's flag was not read (`queuePaused` null, issue #1036) the two
+    // cannot be told apart: `unknown`, marked below, never a slot nobody saw free.
+    else if (e.state === "paused" || e.queuePaused === true) bucket = "paused";
+    else if (e.queuePaused === null) bucket = "unknown";
     else bucket = "slot";
     const { project, from } = waitingProjectOf({ record, kind, deid, jobId: e.jobId, projectList, triggerList });
     // The scheduler's run of slot `<millis>` became eligible AT that slot; its hash's timestamp is when the run before it
@@ -7187,6 +7261,8 @@ async function hydrateWaiting(redis, entries, { heldIds, projectList, triggerLis
       recovery: RECOVERY_JOB_ID_RE.test(e.jobId),
       schedulerNext,
       held,
+      // Only on a row whose bucket rests on a paused flag that was not read (`readWaiting`'s `pausedUnread`).
+      ...(bucket === "unknown" && e.queuePaused === null && e.state !== "delayed" ? { pausedUnknown: true } : {}),
     });
   }
   return { rows, scheduled };
@@ -7227,6 +7303,16 @@ function triggerListOf(triggers) {
  * bucket; `byQueue` per queue read `{ queue, inLine, scheduled, truncated }`; `queuesCut` how many of `queues` were not
  * read, past the first `WAITING_QUEUES_MAX`; `truncated` whether the rows are a floor (a queue truncated, or a queue
  * cut). A queue is truncated when a list holds more than the read takes, or a member the read refuses as no run id.
+ *
+ * `pausedUnread` (issue #1036), present only when not empty: the queues whose paused flag this read asked for and did
+ * not read, `[{ queue, error }]`, `error` the code of Valkey's error reply (`replyErrorCode`) or null for a look that
+ * got no answer; each of them also carries `pausedUnread: true` in `byQueue`. The flag decides whether a job in the
+ * wait list or the prioritized set waits for a free slot or on a pause, and this read is the only one that looks at
+ * it for a queue the registry does not name (a stopped host's, found by the keyspace scan): an error reply there read
+ * as "not paused", so such a job was listed as waiting for a slot and nothing said otherwise. Such a row is KEPT, since
+ * the job is there and waits, in the bucket `unknown` with `pausedUnknown: true`: neither `slot` nor `paused`, which
+ * this read cannot tell apart for it. A job in that queue's paused list is `paused` as before (the list itself says
+ * so), and a delayed one keeps its record's bucket.
  *
  * WHY A JOB WAITS is the worker's own record of it (`defer:job:<id>`, written as it defers: `INT-DEFER-REASON-KEY`),
  * never a guess from the job:
@@ -7285,11 +7371,15 @@ export async function readWaiting(redis, { queues, now = () => Date.now(), perLi
     const heldIds = new Set(Array.isArray(heldRaw) ? heldRaw.filter((id) => typeof id === "string") : []);
     const entries = [];
     const perQueueInfo = [];
+    const pausedUnread = [];
     list.forEach((q, qi) => {
       const base = qi * 5;
       const lists = [idsOf(got[base], { withScores: true }), idsOf(got[base + 1]), idsOf(got[base + 2]), idsOf(got[base + 3])];
       const [delayed, prioritized, wait, paused] = lists.map((l) => l.ids);
-      const queuePaused = isPausedFlag(cmds[base + 4][0], got[base + 4]?.value);
+      // The flag, or null where the look at it failed (issue #1036): an error reply, kept by its code, or no answer.
+      const flag = pausedFlagOf(cmds[base + 4][0], got[base + 4]);
+      const queuePaused = flag.paused;
+      if (queuePaused === null) pausedUnread.push({ queue: q.name, error: flag.error });
       // A member that is no run id is a job this read cannot show (`idsOf`): the queue's rows are then a floor.
       let truncated = lists.some((l) => l.refused > 0);
       // The delayed and prioritized sets are read from their head (soonest due, next to run): the extra is the last.
@@ -7311,20 +7401,21 @@ export async function readWaiting(redis, { queues, now = () => Date.now(), perLi
       add(cut(prioritized, true), "prioritized");
       add(cut(wait, false), "waiting");
       add(cut(paused, false), "paused");
-      perQueueInfo.push({ queue: q.name, truncated });
+      perQueueInfo.push({ queue: q.name, truncated, pausedUnread: queuePaused === null });
     });
     const { rows, scheduled } = await hydrateWaiting(redis, entries, { heldIds, projectList, triggerList, nowMs: at });
     rows.sort(byQueuedAt);
     scheduled.sort((a, b) => (a.dueAt ?? Infinity) - (b.dueAt ?? Infinity) || (a.jobId < b.jobId ? -1 : a.jobId > b.jobId ? 1 : 0));
     const byBucket = Object.fromEntries(DEFER_BUCKETS.map((b) => [b, 0]));
     for (const r of rows) byBucket[r.bucket] += 1;
-    const byQueue = perQueueInfo.map(({ queue, truncated }) => ({
+    const byQueue = perQueueInfo.map(({ queue, truncated, pausedUnread: unread }) => ({
       queue,
       inLine: rows.filter((r) => r.queue === queue).length,
       scheduled: scheduled.filter((s) => s.queue === queue).length,
       truncated,
+      ...(unread ? { pausedUnread: true } : {}),
     }));
-    return { at, rows, scheduled, byBucket, byQueue, truncated: queuesCut > 0 || byQueue.some((q) => q.truncated), queuesCut };
+    return { at, rows, scheduled, byBucket, byQueue, truncated: queuesCut > 0 || byQueue.some((q) => q.truncated), queuesCut, ...(pausedUnread.length > 0 ? { pausedUnread } : {}) };
   };
   try {
     return await withTimeout(read(), timeoutMs, { unreachable: true });
@@ -7345,7 +7436,7 @@ export async function readWaitingRow(redis, { q, jobId, state, now = () => Date.
   const read = async () => {
     const ask = pausedAsk(redis, q);
     const [meta, score] = await batched(redis, [ask, ...(state === "delayed" ? [["zscore", queueKeyOf(q, QUEUE_KEY.delayed), jobId]] : [])]);
-    const entry = { q, jobId, state, score: score?.value ?? null, queuePaused: isPausedFlag(ask[0], meta?.value) };
+    const entry = { q, jobId, state, score: score?.value ?? null, queuePaused: pausedFlagOf(ask[0], meta).paused };
     const { rows, scheduled } = await hydrateWaiting(redis, [entry], { heldIds: null, projectList: projectListOf(projects), triggerList: triggerListOf(triggers), nowMs: now() });
     if (scheduled.length > 0) return { scheduled: scheduled[0] };
     return rows.length > 0 ? { row: rows[0] } : { gone: true };

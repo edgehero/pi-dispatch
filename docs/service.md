@@ -44,8 +44,8 @@ From any terminal:
   (`[registry incomplete: 2 of 3 host rows not read]`), a second line says the list of queues may be short and to pause (or resume)
   again once Valkey answers; the exit code stays 0. A host row Valkey answered with an error (its key is not a hash) is one of
   those rows, and the words name it with what Valkey answered: `[registry incomplete: 1 of 3 host rows not read, of which
-  Valkey answered with an error: hostw (WRONGTYPE)]`. Waiting does not read such a row: `pi-dispatch doctor` names the key
-  to remove or repair. The registry's rows are read side by side within one bound, so a
+  Valkey answered with an error: hostw (WRONGTYPE)]`. What to do about such a row depends on the code
+  ([what an error reply's code means](#what-an-error-replys-code-means)), and `pi-dispatch doctor` says it row by row. The registry's rows are read side by side within one bound, so a
   Valkey that holds them costs that bound once, however many hosts are registered, and leaves the rest of the five
   seconds for the writes.
   Both wait about five seconds on a Valkey, as `status` does. When a queue is not confirmed, the command exits 1
@@ -118,8 +118,24 @@ find is in none of the sums. The line then has `queuesMayBeShort: true`, and a `
 `pi-dispatch status` again once Valkey answers. Registry rows that were not read in time count the same, and the line
 names them in `fleetIncomplete` ("2 of 3 host rows not read"), as `fleet` names a registry that could not be read. That alone does not change the exit code; a queue it found that did not
 answer still does. `status --target` says the same. A host row Valkey answered with an error is one of them: `fleetIncomplete`
-names it, and `hostErrors` gives each such host with the code of Valkey's reply (`{"hostw":"WRONGTYPE"}`), on both lines. That
-row is not read on the next run either, until its key (`host:h:<name>`) is removed or repaired.
+names it, and `hostErrors` gives each such host with the code of Valkey's reply (`{"hostw":"WRONGTYPE"}`), on both lines: at most
+20 hosts, in name order, with `hostErrorsMore` counting the rest. Whether the next run reads the row depends on the code.
+
+### What an error reply's code means
+
+When Valkey answers a read with an error, pi-dispatch keeps the reply's first word, its code, and every sentence built on
+a code says only what that code supports:
+
+| Code | What it means | Does waiting end it | What to do |
+|---|---|---|---|
+| `WRONGTYPE` | The key holds another kind of value (a host's row or a queue's `meta` key that is not a hash, say). | No | Remove or repair the key that is named. |
+| `NOPERM`, `NOAUTH`, `WRONGPASS` | The Valkey user this process connects as may not run the command or read the key, or is not signed in. | No | Give that user the permission in its ACL, or connect as one that has it. The key itself is not at fault: never remove it for this. |
+| `BUSY`, `LOADING`, `TRYAGAIN`, `CLUSTERDOWN`, `MASTERDOWN` | Valkey could not serve the command just then: a script still running, a dataset still loading, a cluster moving a slot or without its primary. | It may | Try again. Nothing has to be repaired. |
+| any other code | Only that Valkey answered with it. | Not known | Nothing is claimed; look at what Valkey answers for that key. |
+
+`pi-dispatch doctor` prints one warning per host row answered with an error, worded by this table, for at most 20 rows, and
+one more line that counts the rest. A trigger edit that needs every host read refuses by the same table: it names the key
+and the code, says what to put right first for the first two rows of the table, and says to try again only for the third.
 
 `waitingDetails.rows` explains a bounded sample of delayed entries. A row contains `jobId`, `queue`, `dueAt`,
 `bucket`, `why` and `until`; the two times are epoch milliseconds, and absent reason fields are `null`. For example,

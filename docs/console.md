@@ -2564,8 +2564,9 @@ not steer-armed or its inbox could not be read). A part the console could not re
 `parkedUnknown`, `activeUnknown`, `schedulersReadInPart`, `unreachable`), never with the error, and when Valkey cannot be read at all the answer is `503` with
 a short `error` sentence. Beside `fleetDegraded`, `registryReadInPart` says the host registry answered and some hosts' rows were not read, and
 `unreadHosts` names those hosts, each with the code of Valkey's error reply for its row (`WRONGTYPE` for a key that is not a hash) or null
-for a row that got no answer; `fleetError` is that code for the registry itself. A row with a code is not read by waiting: its key has to be
-removed or repaired. `queueErrors` names each queue whose paused state or counts Valkey answered with an error, with that reply's code, such as
+for a row that got no answer; `fleetError` is that code for the registry itself. Whether waiting reads a row with a code depends on the code:
+a key of another type or a missing permission lasts, a busy or loading Valkey passes ([what an error reply's code means](service.md#what-an-error-replys-code-means)).
+An agent session's copy carries the same codes. `queueErrors` names each queue whose paused state or counts Valkey answered with an error, with that reply's code, such as
 `{"pi-jobs@hostb":"WRONGTYPE"}` for a queue whose `bull:<queue>:meta` key is not a hash, and is `{}` when there is none. Such a queue is in
 neither `queues` nor `counts`, and whether it is paused is not known: `paused.state` is false while `queueErrors` is not empty, and
 `paused.partial` is true only when a queue that was read is paused. The key and its shape are those of `pi-dispatch status`
@@ -2897,7 +2898,7 @@ overlay; what the worker's own service environment sets cannot be seen from here
 Any of these can stop a job at pickup, so what a preview says of an added server holds beside them: "a job that reaches its container connects to" it.
 
 Either exclusion makes the proposed file need version 2 and job data version 3, and so does a row of the file that already holds one. The preview then reads each
-live worker's release, and so does the Confirm, and each refuses on a lower one, none, or a registry it cannot read whole (a host row not read in time counts: that host may read less; so does a row Valkey answers with an error, and that refusal says to remove or repair its key first, since trying again reads the same). It reads live workers alone, not receivers or stopped workers. A host that reads less would hold every job this file touches. A host
+live worker's release, and so does the Confirm, and each refuses on a lower one, none, or a registry it cannot read whole (a host row not read in time counts: that host may read less; so does a row Valkey answers with an error, or the registry's own index: that refusal names the key and the reply's code and says what the code supports, to remove or repair the key first for `WRONGTYPE`, to fix the Valkey user's ACL first for a missing permission, and to try again only where Valkey could not serve the read just then ([what an error reply's code means](service.md#what-an-error-replys-code-means))). It reads live workers alone, not receivers or stopped workers. A host that reads less would hold every job this file touches. A host
 that publishes no version is from before issue #761: it drops what it does not know and can run a job wider on a clean record. The refusal names each, and what to do is to upgrade it
 ([what a fleet needs](upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)). Where they all read it, it says "mini1 and mini2 each read what this change needs.", and with no live host, "No host is live right now, so no host's release could be checked." Neither says anything of an image, which has its own line above. It says what the write does to the file's stamp: "Stamps the file version 2:
 a host from before 5.0.0 ignores that and runs this trigger's jobs wider, and a later host that reads less waits on every trigger's jobs.", "The file stays at version 2.", or "The file no longer needs version 2, so

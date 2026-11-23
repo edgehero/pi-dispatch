@@ -45,8 +45,12 @@ When Valkey answers one queue's read with an error (its `bull:<queue>:meta` key 
 panel read every other queue and say so under the counts: "Not read, so not in these counts: pi-jobs@hostb (Valkey answered
 WRONGTYPE); whether it is paused is not known". Neither calls the deployment paused while a queue is left out: where every queue
 that was read is paused they say partly paused, where none is, running, and where no queue was read, not known (the panel's header:
-NOT READ). Waiting does not read such a queue: its key has to be removed or repaired. Only a Valkey that gives no answer at all is
-"unreachable".
+NOT READ). What to do about such a queue depends on the code ([what an error reply's code means](service.md#what-an-error-replys-code-means)):
+a key of another type has to be removed or repaired, a missing permission is the Valkey user's ACL, and a busy or loading Valkey
+reads again by itself. Only a Valkey that gives no answer at all is "unreachable".
+
+The HOSTS view (`u`) says the same of a host registry read in part: it names each host whose row was not read, and says whether
+that host is shown as it was last read or was never read by this panel and so has no row.
 
 `/dispatch console` opens the web console or prints how to reach it, signed in when you have one operator token, the
 console runs and a browser on this machine will open it ([console](console.md#from-pi-dispatch-console)), and

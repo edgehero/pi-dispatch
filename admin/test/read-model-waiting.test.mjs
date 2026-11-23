@@ -278,6 +278,60 @@ test("readWaiting: a paused queue's lists and its prioritized set wait on the pa
   assert.deepEqual(got.rows.map((r) => [r.jobId, r.state, r.bucket]).sort(), [["gh-p1", "paused", "paused"], ["gh-p2", "prioritized", "paused"], ["gh-r1", "prioritized", "slot"]]);
 });
 
+/** Make the fake answer the look at `queue`'s paused flag with `error`, as a pipeline hands one command's failure. */
+function flagAnswersWith(v, queue, error) {
+  const pipeline = v.redis.pipeline.bind(v.redis);
+  v.redis.pipeline = () => {
+    const p = pipeline();
+    const exec = p.exec;
+    p.exec = async () => {
+      const from = v.redis.log.length;
+      const out = await exec();
+      return out.map((pair, i) => (["hget", "hexists"].includes(v.redis.log[from + i][0]) && v.redis.log[from + i][1] === `bull:${queue}:meta` ? [error, null] : pair));
+    };
+    return p;
+  };
+}
+
+// Issue #1036: the waiting read is the only read that looks at the paused flag of a queue the registry does not name,
+// and a look Valkey answered with an error read as "not paused".
+test("readWaiting: a queue whose paused flag Valkey answered with an error is named with the code, and its jobs in the wait list and the prioritized set are in neither the slot nor the paused bucket (#1036)", async () => {
+  const v = fakeValkey();
+  addJob(v, "pi-jobs@gone", "gh-w1", { state: "waiting" });
+  addJob(v, "pi-jobs@gone", "gh-w2", { state: "prioritized" });
+  addJob(v, "pi-jobs@gone", "gh-w3", { state: "paused" });
+  addJob(v, "pi-jobs@gone", "gh-w4", { state: "delayed", record: rec("retry", { attempt: 2, attempts: 3 }) });
+  addJob(v, "pi-jobs", "gh-r1", { state: "waiting" });
+  flagAnswersWith(v, "pi-jobs@gone", Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+  const got = await readWaiting(v.redis, { queues: [fakeQueue("pi-jobs"), fakeQueue("pi-jobs@gone")], now: () => AT });
+  assert.deepEqual(got.pausedUnread, [{ queue: "pi-jobs@gone", error: "WRONGTYPE" }]);
+  assert.deepEqual(got.byQueue.map((q) => [q.queue, q.inLine, q.pausedUnread === true]), [["pi-jobs", 1, false], ["pi-jobs@gone", 4, true]], "its rows are kept: the jobs are there and wait");
+  const by = Object.fromEntries(got.rows.map((r) => [r.jobId, [r.state, r.bucket, r.pausedUnknown === true]]));
+  assert.deepEqual(by, {
+    "gh-w1": ["waiting", "unknown", true],
+    "gh-w2": ["prioritized", "unknown", true],
+    "gh-w3": ["paused", "paused", false],
+    "gh-w4": ["delayed", "retry", false],
+    "gh-r1": ["waiting", "slot", false],
+  }, "the paused list says so itself, a delayed job keeps its record's bucket, and the other queue is as read");
+  assert.deepEqual([got.byBucket.slot, got.byBucket.paused, got.byBucket.unknown, got.byBucket.retry], [1, 1, 2, 1]);
+  assert.ok(!JSON.stringify(got).includes("Operation against"), "the reply's code alone");
+  // A look that got no answer is the same unknown, with no code.
+  const silent = fakeValkey();
+  addJob(silent, "pi-jobs", "gh-s1", { state: "waiting" });
+  flagAnswersWith(silent, "pi-jobs", new Error("Command timed out"));
+  const none = await readWaiting(silent.redis, { queues: [fakeQueue("pi-jobs")], now: () => AT });
+  assert.deepEqual([none.pausedUnread, none.rows.map((r) => [r.bucket, r.pausedUnknown])], [[{ queue: "pi-jobs", error: null }], [["unknown", true]]]);
+  // Read whole: no such key, on the read or on a row.
+  const whole = fakeValkey();
+  addJob(whole, "pi-jobs", "gh-ok", { state: "waiting" });
+  const fine = await readWaiting(whole.redis, { queues: [fakeQueue("pi-jobs")], now: () => AT });
+  assert.deepEqual([Object.hasOwn(fine, "pausedUnread"), Object.hasOwn(fine.byQueue[0], "pausedUnread"), Object.hasOwn(fine.rows[0], "pausedUnknown"), fine.rows[0].bucket], [false, false, false, "slot"]);
+  // One job's row, the cancel planner's read, by the same rule.
+  const one = await readWaitingRow(v.redis, { q: fakeQueue("pi-jobs@gone"), jobId: "gh-w1", state: "waiting", now: () => AT });
+  assert.deepEqual([one.row.bucket, one.row.pausedUnknown], ["unknown", true]);
+});
+
 test("readWaiting: the project from the record, a forge job's dedup id, a cron trigger's folder, or not known", async () => {
   const v = fakeValkey();
   const projects = [{ id: "shop", members: ["github:acme/web"] }, { id: "ops", members: ["/srv/ops"] }];

@@ -138,9 +138,24 @@ export function keyedRedis(keys = {}, { registryDown = () => false, scanDown = (
   };
 }
 
-/** The registry keys of `rows`: a host name to its row as the worker writes it (every field a string). */
+/**
+ * The two fields every running worker's row carries beside its beat: when its process started, and the health of its
+ * consumers as its supervisor publishes it (`consumers`, the shared queue's and its own), in the worker's own format
+ * (`parseConsumerHealth` reads it; a test holds that). A reader of such a row asks Valkey how each consumer's queue
+ * stands, one round trip per queue, which a row without the field never makes it do: with rows that publish none, a
+ * read that goes wrong while that round trip is in flight is seen by no test (issue #1036).
+ */
+export function consumersPublished(startedAt = Date.UTC(2026, 10, 21, 11)) {
+  const consumer = (role) => ({ role, state: "running", connection: "ready", active: 0, rateLimited: false, lastFetchAt: null, lastSuccessAt: null, lastTakenAt: null, fetchAgeMs: null, successAgeMs: null });
+  return { startedAt: String(startedAt), consumers: JSON.stringify({ v: 1, startedAt, rows: [consumer("shared"), consumer("host")] }) };
+}
+
+/**
+ * The registry keys of `rows`: a host name to its row as the worker writes it (every field a string), its consumers'
+ * health with it (`consumersPublished`), as every real worker's row has.
+ */
 export function registryKeys(rows) {
   const keys = { [HOST_SET]: Object.keys(rows) };
-  for (const [name, row] of Object.entries(rows)) keys[hostKey(name)] = { name, ...row };
+  for (const [name, row] of Object.entries(rows)) keys[hostKey(name)] = { name, ...consumersPublished(), ...row };
   return keys;
 }

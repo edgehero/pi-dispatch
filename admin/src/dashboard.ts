@@ -44,7 +44,7 @@ import { FORGE_JOB_RETENTION_DAYS, LOCAL_JOB_KEPT_FAILED_S } from "@edgehero/pi-
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 // The one vocabulary both surfaces read (issue #710): outcome words, the venue label, the Spend and Held titles.
-import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, SWITCH_ERRORED_READS, VENUE_LABEL, outcomeWord, queueErrorsLine, queueErrorsOf, reasonWords, recordReason, rowNumber, switchErroredQueue, switchListShort, switchShortNote } from "./words.mjs";
+import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, SWITCH_ERRORED_READS, VENUE_LABEL, listed, outcomeWord, queueErrorsLine, queueErrorsOf, reasonWords, recordReason, rowNumber, switchErroredQueue, switchListShort, switchShortNote } from "./words.mjs";
 import { outcomeNote } from "./loaded-words.mjs";
 import { beatAgeOf, doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorStale } from "./doctor-view.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
@@ -2505,6 +2505,30 @@ function statusHeader(queue: any, inner: number, styler: any, fetchedAt: any, su
 }
 
 /**
+ * The HOSTS view's line over a registry read in part (issues #1062, #1036): the read's own words, then what became of
+ * each host it did not read, by name (`queue.unreadHosts`, `queue.unreadHostsMore` counting those past the ones
+ * named). A host this panel read before keeps its last row, marked `notRead` in `hostBudgets`, and is said to be
+ * shown as last read. One it NEVER read has no row at all, and is said so: "the rows not read are the last read",
+ * which this line said of both, was false of a host whose row Valkey has answered with an error since before the panel
+ * opened, since no last read of it exists. Over a snapshot that names no host, the sentence says both cases.
+ */
+function registryPartText(snapshot: any): string {
+  const q = snapshot?.queue ?? {};
+  const lead = `host registry read in part (${cellOf(q.fleetDegraded)})`;
+  const unread: string[] = (Array.isArray(q.unreadHosts) ? q.unreadHosts : []).map((u: any) => u?.name).filter((n: any) => typeof n === "string");
+  if (unread.length === 0) return `${lead}: a row not read now is shown as it was last read, and a host never read here has no row`;
+  const lastRows = new Set((Array.isArray(snapshot?.hostBudgets) ? snapshot.hostBudgets : []).filter((h: any) => h?.notRead === true).map((h: any) => h?.name));
+  const kept = unread.filter((n) => lastRows.has(n));
+  const never = unread.filter((n) => !lastRows.has(n));
+  const more = Number.isSafeInteger(q.unreadHostsMore) && q.unreadHostsMore > 0 ? q.unreadHostsMore : 0;
+  return `${lead}: ${[
+    ...(kept.length > 0 ? [`${listed(kept.map(cellOf))} ${kept.length === 1 ? "is" : "are"} shown as last read`] : []),
+    ...(never.length > 0 ? [`${listed(never.map(cellOf))} ${never.length === 1 ? "was" : "were"} never read here and ${never.length === 1 ? "has" : "have"} no row`] : []),
+    ...(more > 0 ? [`${more} more ${more === 1 ? "host is" : "hosts are"} not named`] : []),
+  ].join("; ")}`;
+}
+
+/**
  * The queues the snapshot left out because Valkey answered their read with an error (issue #1064), in warning colour
  * under the header, or nothing: which queues and what Valkey answered, that they are in none of the header's counts
  * (the delayed one among them), and that whether they are paused is not known. The sentence every surface shares
@@ -3390,8 +3414,8 @@ function hostsView(snapshot: any, info: any, iw: number, styler: any): { title: 
   };
   const now = Number.isSafeInteger(snapshot?.fetchedAt) ? snapshot.fetchedAt : null;
 
-  // Issue #1062: a registry read in part is said so; the rows it read are this read's and the others the last read.
-  if (snapshot?.queue?.fleetDegraded) lines.push(...wrapped(snapshot.queue.registryReadInPart === true ? `host registry read in part (${cellOf(snapshot.queue.fleetDegraded)}): the rows not read are the last read` : `host registry unreadable (${cellOf(snapshot.queue.fleetDegraded)}): the rows last read`, "warning"));
+  // Issue #1062: a registry read in part is said so; the rows it read are this read's (`registryPartText`).
+  if (snapshot?.queue?.fleetDegraded) lines.push(...wrapped(snapshot.queue.registryReadInPart === true ? registryPartText(snapshot) : `host registry unreadable (${cellOf(snapshot.queue.fleetDegraded)}): the rows last read`, "warning"));
   if (!info || info.loading) lines.push(...wrapped("reading the last 7 days of run records", "dim"));
   else if (info.refreshing) lines.push(...wrapped("reading the last 7 days again", "dim"));
   else if (info.unwired) lines.push(...wrapped("history not wired in this panel (no capacity reader)", "dim"));

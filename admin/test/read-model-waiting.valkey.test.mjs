@@ -182,6 +182,34 @@ test("a paused queue's jobs, waiting and prioritized, wait on the pause; a runni
   }
 });
 
+// Issue #1036: a queue whose meta key is not a hash. HEXISTS on it is answered with WRONGTYPE, which read as "not paused".
+test("a queue whose meta key holds a string: its paused flag is named as answered with WRONGTYPE, and its waiting job is in neither the slot nor the paused bucket (#1036)", { skip, timeout: 30_000 }, async () => {
+  const v = await setup();
+  let broken = null;
+  try {
+    broken = await v.q();
+    const sound = await v.q();
+    const a = v.id("broken-a");
+    const b = v.id("sound-b");
+    await broken.add("github", { kind: "github" }, { jobId: a });
+    await sound.add("github", { kind: "github" }, { jobId: b });
+    await v.redis.del(`bull:${broken.name}:meta`);
+    await v.redis.set(`bull:${broken.name}:meta`, "not a hash");
+    const got = await readWaiting(v.redis, { queues: [broken, sound] });
+    assert.deepEqual(got.pausedUnread, [{ queue: broken.name, error: "WRONGTYPE" }]);
+    assert.deepEqual(Object.fromEntries(got.rows.map((r) => [r.jobId, [r.state, r.bucket, r.pausedUnknown === true]])), { [a]: ["waiting", "unknown", true], [b]: ["waiting", "slot", false] });
+    assert.deepEqual(got.byQueue.map((q) => [q.queue, q.pausedUnread === true]), [[broken.name, true], [sound.name, false]]);
+    // Its key repaired, the same read says a slot again and names no queue.
+    await v.redis.del(`bull:${broken.name}:meta`);
+    const whole = await readWaiting(v.redis, { queues: [broken, sound] });
+    assert.deepEqual([Object.hasOwn(whole, "pausedUnread"), whole.rows.map((r) => r.bucket)], [false, ["slot", "slot"]]);
+  } finally {
+    // A string left in place would fail the queue's own teardown: taken away first, whatever an assertion did.
+    if (broken !== null && (await v.redis.type(`bull:${broken.name}:meta`).catch(() => null)) === "string") await v.redis.del(`bull:${broken.name}:meta`).catch(() => {});
+    await v.done();
+  }
+});
+
 test("over the real client every read is a pipelined read-only command, and none asks a job hash for its data", { skip, timeout: 30_000 }, async () => {
   const { exists: isCommand, hasFlag } = await import("@ioredis/commands");
   const v = await setup();

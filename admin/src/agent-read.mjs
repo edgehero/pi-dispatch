@@ -26,9 +26,15 @@ const PRIVATE = new Set(["closeActors", "reviewAuthors", "text", "body", "task",
  * dropped every one and a reader got `{}`: that something was answered with an error, and neither what nor with what.
  * A name passes as an id and a code as one word of letters, digits and `_` (the reply's first word, never its
  * sentence); any other entry is left out.
+ *
+ * The same code in its two other places in the state document (issue #1036): `fleetError`, the registry's own, and
+ * the `error` of each entry of `unreadHosts`. Both are strings under keys this table does not know, so an agent's copy
+ * had no `fleetError` at all and its `unreadHosts` named hosts without saying which of them Valkey had answered with
+ * an error: the one fact that tells a row to repair from a row to wait for. Each passes as a code or is null.
  */
 const ERROR_MAPS = new Set(["queueErrors", "hostErrors"]);
 const REPLY_CODE = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
+const replyCode = (value) => (typeof value === "string" && REPLY_CODE.test(value) ? value : null);
 
 export function agentReadProjection(value, key = "", depth = 0) {
   if (depth > 16 || value === undefined) return undefined;
@@ -42,6 +48,7 @@ export function agentReadProjection(value, key = "", depth = 0) {
   if (value === null || typeof value === "boolean") return value;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value === "string") {
+    if (key === "fleetError") return replyCode(value);
     if (key === "mirror") return value === "off" ? "off" : /unreachable/.test(value) ? "unreachable" : "bounded";
     if (key === "folder" || ["scope", "members"].includes(key) && /^(?:\/|[A-Za-z]:[\\/])/.test(value)) { const name = basename(value); return ID.test(name) ? name : null; }
     if (/Usd$/.test(key) || key === "cap") return /^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(value) ? value : null;
@@ -71,6 +78,7 @@ export function agentReadProjection(value, key = "", depth = 0) {
     // fixed words and a count, so it holds no name; the field holds a tool's name that only its shape vouches for, so it goes.
     if (field === "outcomeNote" && isOutcomeNote(v)) { out.note = v; continue; }
     if (field === "loaded") { const note = outcomeNote(value); if (note !== null) out.note = note; continue; }
+    if (key === "unreadHosts" && field === "error") { out.error = replyCode(v); continue; }
     if (PRIVATE.has(field)) continue;
     if (field === "invalid" && Array.isArray(v)) { out.invalid = v.filter((name) => ["maxCostUsd", "dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd"].includes(name)); continue; }
     // A yes or no about a read, in place of what it said. `unreadable` holds an OS code or a sentence about a record, and with it dropped a file that

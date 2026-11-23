@@ -1451,6 +1451,21 @@ test("status and status --target name a host whose row Valkey answered with an e
 	assert.equal(Object.hasOwn(lateTarget.status, "hostErrors"), false);
 });
 
+// Issue #1036: one hostErrors entry per broken row, with no bound: 23 rows gave 23.
+test("status and status --target name at most twenty hosts in hostErrors and count the rest in hostErrorsMore (#1036)", { timeout: 15_000 }, async () => {
+	const wrongtype = () => Promise.reject(Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }));
+	const names = Array.from({ length: 23 }, (_, i) => `bad${String(i).padStart(2, "0")}`);
+	const probe = { on() {}, disconnect() {}, async smembers() { return names; }, hgetall: wrongtype, async scan() { return ["0", []]; } };
+	for (const argv of [["status"], ["status", "--target", "owner/repo#12"]]) {
+		const got = await silentStatus({ argv, queues: { "pi-jobs": false }, probe, deadlineMs: 3_000 });
+		assert.deepEqual([Object.keys(got.status.hostErrors), got.status.hostErrorsMore], [names.slice(0, 20), 3], argv.join(" "));
+	}
+	// Twenty or fewer: every one, and no count.
+	probe.smembers = async () => names.slice(0, 20);
+	const twenty = await silentStatus({ queues: { "pi-jobs": false }, probe, deadlineMs: 3_000 });
+	assert.deepEqual([Object.keys(twenty.status.hostErrors).length, Object.hasOwn(twenty.status, "hostErrorsMore")], [20, false]);
+});
+
 test("a resume through a real Valkey whose scan stalls, with three registry hosts, ends within its deadline and resumes what it found (#1062, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
 	const { makeQueue } = await import("../src/queue.mjs");
 	const { makeRedisClient, parseConnection } = await import("../src/connection.mjs");

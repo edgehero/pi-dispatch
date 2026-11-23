@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { emptyRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
+import { consumersPublished, emptyRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
 import { queueSwitchErrored, queueSwitchUnconfirmed } from "../src/read-model.mjs";
 import { LOOKUP_TOLD_MAX, REFUSALS_TOP, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUNS_WINDOW_PROJECTS_MAX, RUNS_WINDOW_VALUES_MAX, SWITCH_PREVIEW_QUEUES_MAX, SWITCH_SCAN_INCOMPLETE, UNREAD_HOSTS_MAX, WAITING_DISCOVERY_TTL_MS, WAITING_QUEUES_MAX, createFleetReader, fleetQueuesOn, listRunsMerged, readHeldJobs, readHosts, readQueueState, readSchedulers, replyCodeOf, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
 import { spawnSync } from "node:child_process";
@@ -742,10 +742,14 @@ const askedQueue = (asked) => (_c, opts) => {
   const name = opts?.name ?? "pi-jobs";
   return { name, async isPaused() { return false; }, async getJobCounts() { return { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }; }, async getWorkers() { return []; }, async getJobSchedulers() { return []; }, async getActive() { asked.push(name); return []; }, async getFailed() { return []; }, async close() {} };
 };
-/** A registered host's row under the client's prefix, as the beat of a worker that runs nothing writes it. */
+/**
+ * A registered host's row under the client's prefix, as the beat of a worker that runs nothing writes it: its
+ * consumers' health with it (`consumersPublished`), so a reader of the row asks Valkey how their queues stand, as it
+ * does for every real worker's row.
+ */
 const seedHost = async (redis, name) => {
   await redis.sadd("host:live", name);
-  await redis.hset(`host:h:${name}`, { name, routes: "true", beatAt: String(AT), jobs: "[]" });
+  await redis.hset(`host:h:${name}`, { name, routes: "true", beatAt: String(AT), jobs: "[]", ...consumersPublished(AT - 60 * MIN) });
 };
 /** The index lists `name` and its key is a string: Valkey answers the row's read with WRONGTYPE. */
 const breakHost = async (redis, name) => {
@@ -807,6 +811,151 @@ test("createFleetReader on a real Valkey: a host whose row is not a hash is name
   }
 });
 
+// Issue #1036: the reader wrote the marks of a registry read in part on both sides of an await, and a snapshot read
+// them off the reader at its end. It took rows that publish `consumers`, as every worker's does: that await is the
+// read of their queues, a round trip, and with rows that publish none it never yielded.
+test("createFleetReader on a real Valkey: two snapshots that overlap each say what their own registry read saw, the host not read named and the lists floors, while the other is mid-read (#1036, VALKEY_TEST_URL)", { skip: live, timeout: 30_000 }, async () => {
+  const { parseConsumerHealth } = await import("../../worker/src/consumer-health.mjs");
+  const redis = await prefixed("overlap1036");
+  const logsDir = tempDir("pd-1036-overlap-");
+  // Two gates, each open or held: the consumers' queues read (the reader's one EVAL), and a queue's paused read.
+  const gate = () => {
+    const g = { open: true, left: 0, release: null, held: Promise.resolve(), arrived: null, onArrive: null };
+    // Closed, it holds the next `only` arrivals (every one by default) and lets the ones after them pass.
+    g.close = ({ only = Infinity } = {}) => {
+      g.open = false;
+      g.left = only;
+      g.held = new Promise((resolve) => { g.release = resolve; });
+      g.arrived = new Promise((resolve) => { g.onArrive = resolve; });
+    };
+    g.pass = async () => {
+      if (!g.open && g.left > 0) {
+        g.left -= 1;
+        g.onArrive();
+        await g.held;
+      }
+    };
+    g.reopen = () => {
+      g.open = true;
+      g.release();
+    };
+    return g;
+  };
+  const evalGate = gate();
+  const queueGate = gate();
+  // The reader's own client, which it ends when it is disposed: a duplicate of the prefixed one, so every key is this test's.
+  const client = new Proxy(redis.duplicate(), { get: (target, key) => (key === "eval" ? async (...args) => { await evalGate.pass(); return target.eval(...args); } : typeof target[key] === "function" ? target[key].bind(target) : target[key]) });
+  const make = askedQueue([]);
+  const reader = createFleetReader({ valkeyUrl: URL_, logsDir, triggersPath: join(logsDir, "none.json") }, {
+    makeQueueFn: (c, opts) => {
+      const q = make(c, opts);
+      return { ...q, async isPaused() { await queueGate.pass(); return false; } };
+    },
+    parseConnectionFn: () => ({}), redisFn: () => client, discoverHostQueuesFn: async () => ({ names: [] }), nowFn: () => AT,
+  });
+  const marksOf = (s) => [s.queue.registryReadInPart, s.queue.unreadHosts, s.activeUnreachable, s.schedulersReadInPart, s.hostBudgets.map((h) => h.name)];
+  const PART = [true, [{ name: "hostw", error: "WRONGTYPE" }], true, true, ["hosta"]];
+  // Every snapshot started here, settled before the reader is disposed whatever an assertion does.
+  const started = [];
+  const snapshot = () => {
+    const s = reader.snapshot();
+    started.push(s.catch(() => {}));
+    return s;
+  };
+  try {
+    await seedHost(redis, "hosta");
+    await breakHost(redis, "hostw");
+    assert.notEqual(parseConsumerHealth(await redis.hgetall("host:h:hosta")), null, "the row publishes its consumers as a worker does");
+    // The first snapshot reads the registry in part and waits on its queues.
+    queueGate.close();
+    const first = snapshot();
+    await queueGate.arrived;
+    // The second reads the registry too and is held in the read of the consumers' queues, its own marks half made.
+    evalGate.close();
+    const second = snapshot();
+    await evalGate.arrived;
+    // The first is assembled now, while the second is mid-read: it says what ITS read saw.
+    queueGate.reopen();
+    assert.deepEqual(marksOf(await first), PART, "the host that was not read is named, and the lists it could be in are floors");
+    evalGate.reopen();
+    assert.deepEqual(marksOf(await second), PART);
+
+    // The other direction: a read that is WHOLE, in flight beside one in part, vouches for neither's marks but its own.
+    queueGate.close();
+    const part = snapshot();
+    await queueGate.arrived;
+    await redis.del("host:h:hostw");
+    await seedHost(redis, "hostw");
+    const whole = await (async () => {
+      // This one's queues are not held: its registry read is whole and it finishes first.
+      queueGate.open = true;
+      const s = await snapshot();
+      queueGate.open = false;
+      return s;
+    })();
+    assert.deepEqual(marksOf(whole), [undefined, [], false, false, ["hosta", "hostw"]]);
+    queueGate.reopen();
+    assert.deepEqual(marksOf(await part), PART, "the snapshot whose queue set lacked hostw still says so, though a whole read came between");
+
+    // A read in part held in its own consumers' read while a WHOLE read starts and ends: what it then writes and hands
+    // on is all its own, never the registry's words and flag of the other read beside its own names. hostw has a last
+    // row by now, so its queue is asked and the lists are whole; hosta publishes two consumers, so two reads are held.
+    await breakHost(redis, "hostw");
+    evalGate.close({ only: 2 });
+    const held = snapshot();
+    await evalGate.arrived;
+    await redis.del("host:h:hostw");
+    await seedHost(redis, "hostw");
+    assert.deepEqual(marksOf(await snapshot()), [undefined, [], false, false, ["hosta", "hostw"]], "the whole read, made and ended meanwhile");
+    evalGate.reopen();
+    const mine = await held;
+    assert.deepEqual(marksOf(mine), [true, [{ name: "hostw", error: "WRONGTYPE" }], false, false, ["hosta", "hostw"]]);
+    assert.deepEqual([mine.queue.fleetDegraded, mine.hostBudgets.map((h) => h.notRead === true)], [ROW_WORDS, [false, true]], "its own words, and hostw's row marked as the last one read");
+  } finally {
+    queueGate.open = true;
+    queueGate.release?.();
+    evalGate.open = true;
+    evalGate.release?.();
+    await Promise.all(started);
+    await reader.dispose();
+    await redis.cleanup();
+  }
+});
+
+// Issue #1036: the reader's own switch took "was the registry read" off the reader's variable after its flips, where
+// it was whatever a snapshot beside the switch had read by then.
+test("createFleetReader: a pause over a registry it could not read says so, though a snapshot reads the registry whole while its queues are being paused (#1036)", async () => {
+  const logsDir = tempDir("pd-1036-switch-view-");
+  let down = true;
+  let scans = 0;
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const make = quietQueue();
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") }, {
+    makeQueueFn: (c, opts) => ({ ...make(c, opts), async pause() { await held; }, async resume() {} }),
+    parseConnectionFn: () => ({}), redisFn: () => emptyRedis(), nowFn: () => AT,
+    readLiveHostsFn: async () => (down ? { unreachable: "ECONNREFUSED 127.0.0.1" } : { hosts: [{ name: "hosta", routes: true }] }),
+    discoverHostQueuesFn: async () => { scans += 1; return { names: [], incomplete: null }; },
+  });
+  try {
+    const pausing = reader.pause();
+    // The switch has read the registry (not read) and looked for queues, and now waits on its queues' pauses.
+    while (scans === 0) await new Promise((resolve) => setImmediate(resolve));
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    // Meanwhile the registry answers, and a snapshot reads it whole.
+    down = false;
+    assert.equal((await reader.snapshot()).queue.fleetDegraded, null);
+    release();
+    const [{ res }] = (await pausing).results;
+    assert.deepEqual([res.ok, res.blind], [true, "ECONNREFUSED 127.0.0.1"], "its own discovery read no registry, so its set of queues may be short");
+    // A switch whose own discovery read the registry says nothing of the kind.
+    assert.equal(Object.hasOwn((await reader.resume()).results[0].res, "blind"), false);
+  } finally {
+    release();
+    await reader.dispose();
+  }
+});
+
 test("on a real Valkey: the held money over a host row answered with an error is unknown, never $0 held, and readQueueState and readHosts name the row (#1036, VALKEY_TEST_URL)", { skip: live, timeout: 30_000 }, async () => {
   const { readHeldForAgent } = await import("../src/tool-reads.mjs");
   const redis = await prefixed("held1036");
@@ -852,6 +1001,51 @@ test("fleetQueuesOn: the registry's index or the look for queues answered with a
   assert.deepEqual([part.names, part.blindPartial, part.unreadHosts, part.hostErrors, Object.hasOwn(part, "shortErrors")], [["pi-jobs", "pi-jobs@hosta"], true, ["hostv", "hostw"], { hostw: "WRONGTYPE" }, false]);
   // A code is one word of Valkey's; anything else a seam hands in is no code.
   assert.deepEqual(["WRONGTYPE", "error", "ERR", "two words", "<b>", "", null, 7, "A".repeat(33)].map(replyCodeOf), ["WRONGTYPE", "error", "ERR", null, null, null, null, null, null]);
+});
+
+// Issue #1036: six behaviours of the first change that no test held (each stayed green when it was taken away).
+test("the registry's error keys, each held: readHosts' code beside unreachable, queuesMayBeShort from a scan that did not finish, the names a reader is handed, a code that is no code, and the bound with its count on every list (#1036)", async () => {
+  const { stateOf } = await import("../src/console/live.mjs");
+  const { hostsForAgent } = await import("../src/tool-reads.mjs");
+  const reply = (message) => Promise.reject(Object.assign(new Error(message), { name: "ReplyError" }));
+  const logsDir = tempDir("pd-1036-pins-");
+  const quiet = (_c, opts) => ({ name: opts?.name ?? "pi-jobs", async isPaused() { return false; }, async getJobCounts() { return { waiting: 0 }; }, async getWorkers() { return []; }, async close() {} });
+  // readHosts: the index answered with an error carries the reply's code beside the words; a failure that is no reply has none.
+  const index = (smembers) => readHosts({ url: "redis://unused", redisFn: () => ({ on() {}, disconnect() {}, smembers }) });
+  assert.deepEqual(await index(() => reply("WRONGTYPE Operation against a key holding the wrong kind of value")), { unreachable: "WRONGTYPE Operation against a key holding the wrong kind of value", error: "WRONGTYPE" });
+  assert.deepEqual(Object.keys(await index(() => Promise.reject(new Error("Connection is closed.")))), ["unreachable"]);
+  // readQueueState: a look for queues that did not finish makes the counts a floor too, with the registry read whole.
+  const scanFails = { on() {}, disconnect() {}, async smembers() { return []; }, scan: () => Promise.reject(new Error("Command timed out")) };
+  const short = await readQueueState({ url: "redis://unused", makeQueueFn: quiet, parseConnectionFn: () => ({}), redisFn: () => scanFails });
+  assert.deepEqual([short.queuesMayBeShort, Object.hasOwn(short, "registryReadInPart"), short.unreachable], [true, false, undefined]);
+  const scanWhole = { ...scanFails, async scan() { return ["0", []]; } };
+  assert.equal(Object.hasOwn(await readQueueState({ url: "redis://unused", makeQueueFn: quiet, parseConnectionFn: () => ({}), redisFn: () => scanWhole }), "queuesMayBeShort"), false);
+  // readQueueState: its hostErrors names at most the bound, and counts the rest.
+  const many = Array.from({ length: UNREAD_HOSTS_MAX + 3 }, (_, i) => `bad${String(i).padStart(2, "0")}`);
+  const broken = { ...scanWhole, async smembers() { return many; }, hgetall: () => reply("WRONGTYPE Operation against a key holding the wrong kind of value") };
+  const capped = await readQueueState({ url: "redis://unused", makeQueueFn: quiet, parseConnectionFn: () => ({}), redisFn: () => broken });
+  assert.deepEqual([Object.keys(capped.hostErrors), capped.hostErrorsMore, capped.registryReadInPart], [many.slice(0, UNREAD_HOSTS_MAX), 3, true]);
+  // A reader handed a listing through its seam: a name that is no worker's is not named, and a code that is no code is none.
+  let registry = async () => ({ hosts: [{ name: "hosta", routes: true }], incomplete: "4 of 5 host rows not read", unreadHosts: ["hostw", "not a name", "x".repeat(65), 7], hostErrors: { hostw: "WRONGTYPE", "not a name": "ERR" } });
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") }, { makeQueueFn: quietQueue(), parseConnectionFn: () => ({}), redisFn: () => emptyRedis(), readLiveHostsFn: () => registry(), discoverHostQueuesFn: async () => [], nowFn: () => AT });
+  try {
+    assert.deepEqual((await reader.snapshot()).queue.unreadHosts, [{ name: "hostw", error: "WRONGTYPE" }]);
+    registry = async () => ({ unreachable: "the registry said something", error: "WRONGTYPE Operation against a key" });
+    const sentence = await reader.snapshot();
+    assert.deepEqual([sentence.queue.fleetError, stateOf(sentence, "viewer", { now: AT }).fleetError], [null, null], "the reply's words are no code");
+    registry = async () => ({ unreachable: "the registry said something", error: "NOPERM" });
+    const coded = await reader.snapshot();
+    assert.deepEqual([coded.queue.fleetError, stateOf(coded, "viewer", { now: AT }).fleetError], ["NOPERM", "NOPERM"]);
+    assert.equal(stateOf({ queue: { fleetError: "two words" } }, "viewer", { now: AT }).fleetError, null, "and the state API checks what it is handed");
+    // dispatch_hosts: twenty named, the rest counted.
+    registry = async () => ({ hosts: [{ name: "hosta", routes: true }], incomplete: `${many.length} of ${many.length + 1} host rows not read`, unreadHosts: many, hostErrors: Object.fromEntries(many.map((n) => [n, "WRONGTYPE"])) });
+    const hosts = hostsForAgent(await reader.snapshot());
+    assert.deepEqual([hosts.unreadHosts.length, hosts.unreadHostsMore, Object.keys(hosts.hostErrors).length], [UNREAD_HOSTS_MAX, 3, UNREAD_HOSTS_MAX]);
+    registry = async () => ({ hosts: [{ name: "hosta", routes: true }], incomplete: "20 of 21 host rows not read", unreadHosts: many.slice(0, UNREAD_HOSTS_MAX) });
+    assert.equal(Object.hasOwn(hostsForAgent(await reader.snapshot()), "unreadHostsMore"), false, "at the bound nothing is counted");
+  } finally {
+    await reader.dispose();
+  }
 });
 
 test("createFleetReader: a registry read in part names every host it did not read up to the bound and counts the rest, and one with no last row makes the lists floors (#1036)", async () => {
