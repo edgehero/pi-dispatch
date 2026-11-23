@@ -358,14 +358,38 @@ at another daemon is invisible to it, and only the rules above protect it.
   and the slowest answer the runtime gave about one run.
   **Beside a job the sweep gives way** (issue #1023). A burst of removals while a job's container is starting can
   stall a container runtime that runs in a VM, and the jobs pay for it. So a pass waits while one of this worker's
-  job containers is starting (before it asks the runtime anything, once it has listed what is open, and again after
-  each run), for at most 20 seconds a pass; that wait does not count toward the pass's 20 seconds. And while a job container is starting or running, a
-  pass removes at most 5 runs and rests at least 1 second after each. A worker that always has a job running still
-  removes about five runs a minute (a pass a minute), which is some 7,200 a day. The sweep at boot is not slowed,
-  since no job runs yet. A pass that waited says for how long in its line (`waitedForStartsMs`, which is part of the
-  time the pass took), and a pass that ran beside a job says `busy: true`. Only this worker's own job containers
-  count: a sandbox you open, a canary replay and doctor's probes are started by other programs, and a pass beside
-  them is not slowed. These four numbers are chosen, not yet measured on a slow runtime.
+  job containers is starting: before it asks the runtime anything, once it has listed what is open, after each run,
+  and once more before each removal. That last look is for a container that began starting while the runtime was
+  answering about a run: the pass waits for it and then asks the runtime about that run again, so it never deletes
+  on an answer that is older than the wait. A pass waits at most 20 seconds in all; once that is used up it goes on,
+  and the wait does not count toward the pass's 20 seconds, so a pass beside jobs can take 20 seconds longer. While
+  a job container is starting or running, a pass makes at most 5 removals (a session network it asked the runtime
+  about counts as one) and rests at least 1 second after each. A container that has not shown itself up 120 seconds
+  after its run began counts as running from then on, so a start that never reports cannot hold the sweep.
+
+  What that leaves: at most about five runs a minute beside jobs, and fewer on a slow runtime, because the next pass
+  starts a minute after the last one ended. Measured on this sweep over a simulated hour:
+
+  | The worker's jobs | Runtime answers in tens of milliseconds | 2 s answers, 1.5 s deletes |
+  |---|---|---|
+  | none | 44 runs a minute | not measured |
+  | one always running | 4.7 | 2.2 |
+  | one every 6 seconds (3 s to start, 20 s to run) | 4.3 | 1.3 |
+  | a container always starting | 3.5 | 1.8 |
+
+  With a container always starting and a runtime that takes 25 seconds to list what is open, it was 0.5 a minute,
+  some 770 runs a day. The host this was built for kept about 640 runs a day, so a worker that is always starting
+  containers on a runtime that slow removes little more than it creates. If that is your host, stop keeping
+  sandboxes for the runs nobody opens: a trigger with `run.retainSandbox: false` keeps none, which takes the load
+  away where it starts.
+
+  The sweep at boot is not slowed, since no job runs yet. A pass that waited says for how long in its line
+  (`waitedForStartsMs`, which is part of the time the pass took) and how many times it asked the runtime again after
+  a wait (`askedAgain`); a pass that ran beside a job says `busy: true`. Only this worker's own job containers
+  count, and only from the moment the worker starts the container's network or the container itself: the checks it
+  makes before that (the image, the job's user, the egress proxy), a sandbox you open, a canary replay and doctor's
+  probes all ask the runtime too, and a pass beside them is not slowed. The four numbers here (20 seconds of waiting
+  a pass, 5 removals, a 1 second rest, 120 seconds for a start) are chosen, not yet measured on a slow runtime.
 - **The retention window is bounded but not quota'd.** At the default daily cap that is roughly 25
   directories at a time. There is no byte ceiling; `doctor` reports the count.
 - **One worker per retention directory.** `PI_SANDBOX_DIR` belongs to one worker, as a Docker daemon does

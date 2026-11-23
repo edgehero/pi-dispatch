@@ -97,3 +97,16 @@ test("the default clock needs no argument and steps forward on its own (issue #1
 	run.ended();
 	assert.deepEqual(counts(activity), [0, 0]);
 });
+
+test("the default clock is the monotonic one, not the wall clock: a clock set ten minutes on does not age a start (issue #1023)", (t) => {
+	// The bound on a start is a duration. Read off the wall clock, a time sync or an operator setting the clock forward
+	// would end every start at once (the sweep then stops waiting for containers that are still coming up), and one
+	// set back would keep a start that never reports alive past its two minutes.
+	t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+	const activity = makeContainerActivity();
+	const run = activity.enter();
+	t.mock.timers.setTime(1_000_000 + 5 * CONTAINER_START_MAX_MS);
+	assert.deepEqual(counts(activity), [1, 0], "still starting, whatever the wall clock says");
+	run.ended();
+	assert.deepEqual(counts(activity), [0, 0]);
+});

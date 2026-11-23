@@ -120,7 +120,9 @@ export const SANDBOX_TOMBSTONE_STUCK_MS = 10 * 60 * 1000;
 export const SANDBOX_TOMBSTONE_RELOG_MS = DAY_MS;
 
 /**
- * The bound on ONE pass of the retention sweep (issue #978): wall time from the pass's start, its rests included. A
+ * The bound on ONE pass of the retention sweep (issue #978): wall time from the pass's start, its rests included and
+ * its waits for starting job containers left out (issue #1023: a pass that waits can last `SANDBOX_START_WAIT_MAX_MS`
+ * longer). A
  * boot after a long gap used to sweep its whole backlog in one go before the worker took a job (959 `reaped_sandbox`
  * lines back to back on one host), one runtime ask and one recursive delete per run with nothing between them, all of
  * it before pickup. How long that took there was never measured; a thousand such removals took 10 to 18 s on a healthy
@@ -154,11 +156,13 @@ export const SANDBOX_REST_POLL_MS = 250;
 /**
  * How long ONE pass waits, in all, for job containers that are starting (issue #1023), in slices of
  * `SANDBOX_REST_POLL_MS`. A container start is the daemon's most loaded moment (a network, a create, a start), and
- * a burst of removals beside it is what stalled a VM-backed daemon under running jobs. So a pass asks the worker's
- * count (`activity.starting()`, container-activity.mjs) before its first runtime call, once that call has answered
- * and after each rest, and waits while it is above zero. Bounded per pass, so a host that starts a job every few seconds still sweeps: once this is
- * used up the pass goes on, in the small steps below. The wait is not charged to `SANDBOX_PASS_BUDGET_MS`: a pass that
- * waited 20 s and then ran out of time would have removed nothing, every time.
+ * a burst of removals beside it is what the issue's host had while its VM-backed daemon stalled. So a pass asks the
+ * worker's count (`activity.starting()`, container-activity.mjs) before its first runtime call, once that call has
+ * answered, after each rest, and once more before each removal (after a run's runtime has answered, and before a
+ * leftover tombstone is read), and waits while it is above zero. Bounded per pass, so a host that starts a job every
+ * few seconds still sweeps: once this is used up the pass goes on, in the small steps below. The wait is not charged
+ * to `SANDBOX_PASS_BUDGET_MS`: charged, a pass that waited 20 s would stop at its first boundary with one run
+ * removed, every time.
  * Not measured on a slow daemon; a start that takes longer than this is met by the small passes instead.
  */
 export const SANDBOX_START_WAIT_MAX_MS = 20_000;
@@ -166,10 +170,21 @@ export const SANDBOX_START_WAIT_MAX_MS = 20_000;
 /**
  * The bounds on a pass while a job container is starting or running (issue #1023), in place of
  * `SANDBOX_PASS_MAX_REAPS` and `SANDBOX_REST_MIN_MS`: at most this many removals, and at least this long a rest after
- * each entry. Read at every loop boundary and every rest, so a job that starts in the middle of a pass tightens what
- * is left of it and one that ends loosens it. The time budget is the same. A pass still visits one entry before any
- * bound can stop it and the follow-up passes still come a minute apart (`makeSweepFollowUps`), so a host that always
- * runs a job still removes about five runs a minute, 7,200 a day (the host of issue #1023 retained about 640 a day).
+ * each entry. Beside a job a session network the sweep asked the daemon about counts as a removal too, removed or not
+ * (the sweeper does not say which, and each was a daemon call); beside none the networks are not counted, as before.
+ * Read at every loop boundary and every rest, so a job that starts in the middle of a pass tightens what is left of
+ * it and one that ends loosens it. The time budget is the same. A pass still visits one entry before any bound can
+ * stop it, and a follow-up pass starts a minute after the last one ENDED (`makeSweepFollowUps`).
+ *
+ * WHAT THAT LEAVES. Five a pass is a ceiling of about five runs a minute, which no host reaches, and a slow daemon
+ * stays well under it. Measured on this reaper with the real follow-ups over a simulated hour, in runs removed a
+ * minute: 44.2 beside no job; 4.67 beside a job that always runs and 4.33 beside a job every 6 s (3 s to start, 20 s
+ * to run) on a daemon that answers in tens of milliseconds, 3.5 while a container is always starting; with 2 s asks
+ * and 1.5 s deletes 2.15, 1.33 and 1.75; and 0.53 while a container is always starting and the listing of the open
+ * sandboxes takes 25 s. That last is 768 runs a day, where the host of issue #1023 retained about 640 a day: a host
+ * that is always starting containers on a daemon that slow removes little more than such a host creates. What takes
+ * that load away at its source is not keeping a sandbox for runs nobody opens (`run.retainSandbox: false` on the
+ * trigger, the same issue).
  * Not measured on a slow daemon either: small enough that the removals beside a running job are a few a minute.
  */
 export const SANDBOX_PASS_MAX_REAPS_BUSY = 5;
@@ -499,13 +514,20 @@ export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = (
  * (container-activity.mjs); start.mjs hands the one every venue's run function reports through. With it a pass:
  *   - WAITS while a container is starting, before its first runtime call (the listing of the open sandboxes), once
  *     that listing has answered and after each rest, in slices of `SANDBOX_REST_POLL_MS` and for at most
- *     `SANDBOX_START_WAIT_MAX_MS` in all, outside the time budget. Only ever there: never between an entry's guards
- *     (the runtime's answer, the fresh read, the read through the tombstone) and the removal they guard, where a wait
- *     would have the removal act on a look that is seconds old;
- *   - is SMALLER while one is starting or running: `SANDBOX_PASS_MAX_REAPS_BUSY` removals and a rest of at least
- *     `SANDBOX_REST_MIN_BUSY_MS`, each read at the boundary or the rest it applies to.
+ *     `SANDBOX_START_WAIT_MAX_MS` in all, outside the time budget;
+ *   - LOOKS AGAIN BEFORE EACH REMOVAL: once a run's runtime has answered, and before a leftover tombstone is read. A
+ *     container that began starting while the runtime answered (seconds, on a slow daemon) is waited for there, out
+ *     of the same allowance, and the run's runtime is then ASKED AGAIN, so nothing ever waits between a guard (the
+ *     runtime's answer, the fresh read, the read through the tombstone) and the removal it guards: a removal never
+ *     acts on a look that is as old as a wait. With the allowance used up the removal goes ahead. The session
+ *     networks have no such look: their guards and their `rm` are the sweeper's own (`sandbox.mjs`), and a start that
+ *     begins while one is asked about is met after that network, by its rest and the wait behind it;
+ *   - is SMALLER while one is starting or running: `SANDBOX_PASS_MAX_REAPS_BUSY` removals, the networks it asked
+ *     the daemon about among them, and a rest of at least `SANDBOX_REST_MIN_BUSY_MS`, each read at the boundary or
+ *     the rest it applies to. A pass that has made its removals among the runs leaves the networks to the next.
  * It still visits one entry before anything can stop it, so the lap moves on every pass however busy the host is. The
- * pass says how long it waited (`waitedForStartsMs`, in the result and the line) and that it ran beside a job
+ * pass says how long it waited (`waitedForStartsMs`, in the result and the line), how many times it asked a runtime
+ * again after a wait (`askedAgain`, in both, when it did) and that it ran beside a job
  * (`busy: true`, in the line only: on a result that word already means a call that met a pass in flight). Without an
  * `activity` (every caller but the worker), and with one that counts nothing (the boot pass, before any job), a pass is
  * exactly the pass it was. A count that throws or is no number reads as zero: the sweep's contract is that it never
@@ -569,6 +591,9 @@ export function makeSandboxReaper({
 		// Issue #1023: what is left of this pass's wait for starting containers, how many slices it waited and how long
 		// that took on the pass's clock, and whether a boundary or a rest found a job starting or running.
 		Object.assign(tally, { waitLeft: SANDBOX_START_WAIT_MAX_MS, waits: 0, waitedMs: 0, busy: false });
+		// And: how many times a run's runtime was asked again after a wait that fell between its answer and the removal,
+		// and how many session networks the network sweep asked the daemon about (they count toward the cap beside a job).
+		Object.assign(tally, { askedAgain: 0, networks: 0 });
 		try {
 			return await sweep(stopped);
 		} finally {
@@ -705,6 +730,9 @@ export function makeSandboxReaper({
 			// When this entry began asking a runtime or deleting, for the rest after it (issue #978); null for an entry
 			// that did neither, which costs the daemon nothing and so rests for nothing.
 			let began = null;
+			// What this pass had waited for starting containers by then (issue #1023): a wait inside the entry is not time
+			// the entry took, and the rest after it is as long as the entry took.
+			const waitedBefore = tally.waitedMs;
 			try {
 				// lstat: a symlink here resolves on the host, and this tree is agent-written.
 				if (!fs.lstatSync(dir).isDirectory()) {
@@ -765,15 +793,34 @@ export function makeSandboxReaper({
 				// deletions), after an open's container started. So the run's own runtime is asked once more, here, and a
 				// run it reports open, or cannot answer for, is held. What is left is the microseconds from this answer
 				// to the rename, which the opener's post-launch look covers.
+				//
+				// AND THE COUNT IS LOOKED AT AGAIN, ONCE THE RUNTIME HAS ANSWERED (issue #1023). The ask is a call to the
+				// daemon, seconds long on the slow daemon this is for, and a job container that began starting meanwhile had
+				// this run's delete beside it: measured with 2 s asks and a start every 6 s, 80 of 120 removals. So with a
+				// container starting and wait left the pass waits here, and then ASKS THE RUNTIME AGAIN: the answer it had
+				// is as old as the wait, and nothing may wait between a guard and the act it guards. The new answer decides,
+				// and the fresh read below comes after the last wait, so it is asked once. Each wait uses at least one slice
+				// of the pass's `SANDBOX_START_WAIT_MAX_MS`; once that is used up nothing waits and the removal goes ahead,
+				// so one run cannot hold a pass: at most 80 asks again a pass, and a start that lasts seconds leaves a few.
 				let hold = null;
-				try {
-					if ((await isOpen({ name, read })) === true) hold = "opened-during-pass";
-				} catch {
-					hold = "runtime-unanswered";
+				let asked = began;
+				for (let again = false; ; again = true) {
+					if (again) {
+						tally.askedAgain += 1;
+						asked = clock();
+					}
+					hold = null;
+					try {
+						if ((await isOpen({ name, read })) === true) hold = "opened-during-pass";
+					} catch {
+						hold = "runtime-unanswered";
+					}
+					// How long the runtime took to answer, the one measure here that sees a loaded VM (issue #978): the
+					// slowest of the pass goes in its summary line. A reading, not a decision.
+					tally.slowestCheckMs = Math.max(tally.slowestCheckMs, clock() - asked);
+					if (hold !== null || activity === null || !(await holdForStarts(stopped))) break;
+					if (stopped()) return finish(false, true);
 				}
-				// The runtime's own round trip, the one measure here that sees a loaded VM (issue #978): the slowest of
-				// the pass goes in its summary line. A reading, not a decision.
-				tally.slowestCheckMs = Math.max(tally.slowestCheckMs, clock() - began);
 				if (hold) {
 					tally.held.add(name);
 					log("sandbox_reaper_skipped", { entry: name, reason: hold });
@@ -838,7 +885,7 @@ export function makeSandboxReaper({
 				// reaped. It replaces the bare turn this loop yielded per tree (#924), which a removal that finishes at
 				// once still needs and a slow daemon needed far more of. Never between the ask and the delete, since it
 				// runs only once the entry is done.
-				if (began !== null) await rest(clock() - began, stopped);
+				if (began !== null) await rest(clock() - began - (tally.waitedMs - waitedBefore), stopped);
 			}
 		}
 
@@ -857,6 +904,9 @@ export function makeSandboxReaper({
 		// on THAT pass's listing, as they always were, so nothing about which network is kept changes.
 		if (more) return finish(true);
 		if (lap.phase === "runs") enter("networks");
+		// Issue #1023: beside a job the cap covers the networks too, so a pass that has made its removals among the runs
+		// leaves the networks to the next one, which starts here. Without a job the pass goes on as it always did.
+		if (busy() && budgetSpent()) return finish(true);
 
 		// The session networks, after the directories. Reached only when `listRunning` ANSWERED and the
 		// directory listing was read, which is the same precondition the directory pass has: without either,
@@ -891,8 +941,12 @@ export function makeSandboxReaper({
 			// PACED like the directories (issue #978): the sweeper calls this after each network it asked the daemon about,
 			// never between its last look and the `rm` (`sandbox.mjs`), and it rests as long as that network took and then
 			// answers whether the pass may go on. False once the budget is spent: the sweeper stops there and says `more`.
+			// Issue #1023: each call is one network the sweeper asked the daemon about, and it counts toward the cap a pass
+			// has beside a job (`spent`). The sweeper does not say which of them it removed, so each one counts: every one
+			// was at least one daemon call. Beside no job nothing reads the count, and the pass is the pass it was.
 			let mark = clock();
 			const pace = async () => {
+				tally.networks += 1;
 				await rest(clock() - mark, stopped);
 				mark = clock();
 				return !spent() && !stopped();
@@ -945,13 +999,15 @@ export function makeSandboxReaper({
 	/**
 	 * Whether this pass has spent its budget (issue #978): `SANDBOX_PASS_BUDGET_MS` of its own clock since it started,
 	 * rests included (its waits for starting containers not, issue #1023), or `SANDBOX_PASS_MAX_REAPS` removals made
-	 * (`SANDBOX_PASS_MAX_REAPS_BUSY` beside a job). Asked only at the loop boundaries named in the header, never inside
-	 * one entry's stretch, and through `budgetSpent` there.
+	 * (`SANDBOX_PASS_MAX_REAPS_BUSY` beside a job, the networks asked about among them). Asked only at the loop
+	 * boundaries named in the header, never inside one entry's stretch, and through `budgetSpent` there.
 	 */
 	function spent() {
 		// Issue #1023: the time waited for starting containers is not the pass's own, and the removals allowed are fewer
-		// beside a job, read here, at the boundary that asks.
-		return clock() - tally.started - tally.waitedMs >= SANDBOX_PASS_BUDGET_MS || tally.removals >= (busy() ? SANDBOX_PASS_MAX_REAPS_BUSY : SANDBOX_PASS_MAX_REAPS);
+		// beside a job, read here, at the boundary that asks. Beside a job the networks the sweep asked the daemon about
+		// count with the runs and tombstones removed; beside none only those two, as before.
+		if (clock() - tally.started - tally.waitedMs >= SANDBOX_PASS_BUDGET_MS) return true;
+		return busy() ? tally.removals + tally.networks >= SANDBOX_PASS_MAX_REAPS_BUSY : tally.removals >= SANDBOX_PASS_MAX_REAPS;
 	}
 
 	/** `read()` as a count (issue #1023): zero for a throw and for anything that is no positive number. */
@@ -976,11 +1032,14 @@ export function makeSandboxReaper({
 	 * Wait while a job container is starting (issue #1023): slices of `SANDBOX_REST_POLL_MS`, `stopped` asked before
 	 * each, until none is starting or this pass's `SANDBOX_START_WAIT_MAX_MS` is used up. Like a rest it ends by the
 	 * slices it asked for, and what it took on the pass's clock is what the budget leaves out and the summary says.
-	 * Called at the top of a pass, after its listing of the open sandboxes and at the end of a rest only: each is
-	 * between entries, with no guard pending.
+	 * Called at the top of a pass, after its listing of the open sandboxes and at the end of a rest, each between
+	 * entries with no guard pending; and for one entry before its removal, where the caller asks that entry's guards
+	 * again after a wait: once a run's runtime has answered, and before a leftover tombstone is read. Resolves whether
+	 * it waited at all, which is what tells such a caller that a guard it holds is no longer fresh.
 	 */
 	async function holdForStarts(stopped) {
 		const from = clock();
+		const before = tally.waits;
 		while (tally.waitLeft > 0 && !stopped() && countOf(() => activity.starting()) > 0) {
 			tally.busy = true;
 			const slice = Math.min(tally.waitLeft, SANDBOX_REST_POLL_MS);
@@ -989,6 +1048,7 @@ export function makeSandboxReaper({
 			tally.waits += 1;
 		}
 		tally.waitedMs += clock() - from;
+		return tally.waits > before;
 	}
 
 	/**
@@ -1022,7 +1082,8 @@ export function makeSandboxReaper({
 	 * unfinished), so a quiet pass on a tidy host says nothing and the line a slow daemon produces carries the reading
 	 * that would tell the cause: how long the pass took, how much of that was rest, and the slowest runtime answer.
 	 * Issue #1023 adds `waitedForStartsMs` to both for a pass that waited for a starting job container (`ms` is the whole
-	 * pass, that wait and the rests included), and `busy: true` to the line for a pass that met a job starting or running.
+	 * pass, that wait and the rests included), `askedAgain` to both for a pass that asked a run's runtime again after
+	 * such a wait (how many times), and `busy: true` to the line for a pass that met a job starting or running.
 	 */
 	function finish(more, wasStopped = false) {
 		const summary = {
@@ -1034,6 +1095,7 @@ export function makeSandboxReaper({
 			slowestCheckMs: Math.round(tally.slowestCheckMs),
 			// Issue #1023: only for a pass that waited, so every other pass's result and line are what they were.
 			...(tally.waits > 0 ? { waitedForStartsMs: Math.round(tally.waitedMs) } : {}),
+			...(tally.askedAgain > 0 ? { askedAgain: tally.askedAgain } : {}),
 			...(wasStopped ? { stopped: true } : {}),
 		};
 		// `busy` in the line and not in the result: `{ busy: true }` is already what a call that met a pass in flight gets.
@@ -1088,6 +1150,10 @@ export function makeSandboxReaper({
 	 */
 	async function clearTombstone(name, at, stopped) {
 		const path = join(sandboxDir, name);
+		// Issue #1023: the count once more, BEFORE the read this tombstone's removal acts on. The pass last looked at the
+		// end of a rest or at its top, and a tombstone it then held yielded a turn, in which a job can begin to start.
+		// Nothing below waits between the read and the delete. A pass told to stop during that wait removes nothing.
+		if (activity !== null && (await holdForStarts(stopped)) && stopped()) return null;
 		const read = readRetained(fs, path);
 		const keepUntil = Date.parse(read.manifest?.keepUntil ?? "");
 		let held = false;
