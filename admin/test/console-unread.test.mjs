@@ -14,7 +14,7 @@ import { HOST_CAPACITY_WORDS } from "../src/console/panels/host.mjs";
 import { fileTrouble } from "../src/console/panels/config.mjs";
 import { ANSWERER_STANDING_UNREAD } from "../src/console/panels/answerer.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { fileViewsFixture, noSnapshotFleet } from "./helpers/no-snapshot.mjs";
+import { fileViewsFixture, noSnapshotFleet, RUNS_PAGE_IN_OUTAGE } from "./helpers/no-snapshot.mjs";
 import { SETUP_DRAW, setupFixture, setupAvailable, SETUP_AT } from "./helpers/setup-goldens.mjs";
 import { setupState } from "../src/setup-view.mjs";
 import { FLEET_DRAW } from "./helpers/fleet-goldens.mjs";
@@ -57,6 +57,41 @@ test("fileViews answers the files under the snapshot's own keys and asks Valkey 
   assert.ok(views.scopedLimits && views.pauseWindows && views.stagedPackages && views.overlayMcp);
   assert.ok(!JSON.stringify(views).includes("be brief") && !JSON.stringify(views).includes("tidy up"), "no instructions and no task text");
   assert.deepEqual(asked, [], "no Valkey command and no queue call");
+});
+
+test("the outage fixtures are the real reader's answers over a Valkey that does not answer, and two pinned fields beside them", async () => {
+  // Issue #988. What only the reader's own parsers add says the views came through them: a project's name, a limit's
+  // other windows, a pause window's minutes and zone, a cron rule's task mark. A view written out by hand had none.
+  const read = fileViewsFixture({ pinned: false });
+  assert.deepEqual(Object.keys(read).sort(), ["envelopeSet", "overlayMcp", "pauseWindows", "projects", "schedulerStallMax", "scopedLimits", "settings", "stagedPackages", "triggers"]);
+  assert.ok(!Object.hasOwn(read.triggers, "path"), "the reader's triggers view names no path");
+  assert.ok(!read.triggers.doesNotLoad, "the fixture's triggers file is one the worker loads");
+  assert.deepEqual(read.triggers.triggers.map((t) => [t.type, t.index, t.task ?? null]), [["cron", 0, true], ["label", 1, null]]);
+  assert.ok(!JSON.stringify(read).includes("tidy the folder"), "no task text");
+  assert.deepEqual(read.projects.projects, [{ id: "web", name: null, members: ["github:acme/web"] }]);
+  assert.deepEqual(read.scopedLimits.limits.map((l) => [l.scope, l.day, l.week, l.month]), [["acme/web", 10, null, null]]);
+  assert.deepEqual(read.pauseWindows.windows, [{ scope: "*", from: "01:00", to: "02:00", fromMin: 60, toMin: 120, tz: "UTC" }]);
+  assert.deepEqual(read.settings.overlay, { maxTurns: 30, maxCostUsd: "2" });
+  assert.match(read.settings.path, /[\\/]deployment[\\/]settings\.json$/, "drawn by its last two parts, so no temp path reaches a page");
+  // The views the three pinned goldens hold are those, but for the two fields the helper names.
+  const pinned = fileViewsFixture();
+  assert.deepEqual({ ...pinned, triggers: read.triggers, pauseWindows: read.pauseWindows }, read);
+  assert.deepEqual(pinned.triggers, { path: "/srv/deployment/triggers.json", ...read.triggers });
+  assert.deepEqual(pinned.pauseWindows, { windows: [{ scope: "*", from: "01:00", to: "02:00" }] });
+  // The reader's own answers in the outage: the snapshot rejects, and the reads that never throw say what they lack.
+  const fleet = noSnapshotFleet();
+  await assert.rejects(fleet.snapshot(), /Command timed out/);
+  await assert.rejects(fleet.snapshot({ waiting: true }), /Command timed out/);
+  assert.equal(await fleet.parkedCount(), null, "no count, and no throw");
+  const page = await fleet.runsPage();
+  assert.deepEqual(page.runs, []);
+  assert.match(page.mirror, /^unreachable \(/, "the mirror's own word, with the client's error");
+  assert.deepEqual(RUNS_PAGE_IN_OUTAGE, page, "the constant is that same read");
+  assert.equal((await fleet.waiting()).unreachable, true);
+  assert.deepEqual(fleet.fileViews(), pinned);
+  assert.deepEqual(noSnapshotFleet({}, { pinned: false }).fileViews(), read);
+  // A caller's own read still lies over the reader's.
+  assert.equal(await noSnapshotFleet({ parkedCount: async () => 3 }).parkedCount(), 3);
 });
 
 test("loadPageData keeps the file views only where the snapshot failed, and a reader without them or one that throws costs nothing", async () => {
