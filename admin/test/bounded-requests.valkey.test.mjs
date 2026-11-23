@@ -5,7 +5,8 @@
 // said nothing was queued, none or one where it said may or may not.
 // Issue #987 adds what a forge enqueue says before its add was ever sent: through a forwarder that takes the connection
 // and closes it, with an approval that is no longer the pending one, and with the queue an approval is routed to
-// stopped at its connect.
+// stopped at its connect. And the budget writes: a plan stopped at its first read, a revert stopped at its
+// compare-and-set (one bound, and what it leaves to be seen), and two plans racing on one basis.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
@@ -20,7 +21,9 @@ import { freezingProxy } from "../../worker/test/helpers/freezing-proxy.mjs";
 import { commandOn, trippingProxy } from "./helpers/tripping-proxy.mjs";
 import { closingForwarder } from "./helpers/closing-forwarder.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { DISPATCH_RUN_COUNT_SCRIPT, applyPriorities, cancelQueuedJob, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planCancelQueued, planEnvelopeWrite, planParkedAnswer, planRerun, readEnvelope, revertAllocation, writeEnvelope } from "../src/read-model.mjs";
+import { DISPATCH_RUN_COUNT_SCRIPT, applyPriorities, cancelQueuedJob, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planCancelQueued, planEnvelopeWrite, planParkedAnswer, planRerun, readAllocations, readEnvelope, revertAllocation, writeEnvelope } from "../src/read-model.mjs";
+import { makeAllocationState } from "@edgehero/pi-dispatch/allocation";
+import { historyBehind } from "../src/render.mjs";
 import { APPROVAL_NOT_PENDING, CONNECT_ENDED, dispatchRunAlready, enqueueUnconfirmed } from "../src/job-actions.mjs";
 import { enqueueTriggerFire, FIRE_UNCONFIRMED, planTriggerFire } from "../src/trigger-fire.mjs";
 import { readUpdates } from "../src/updates-view.mjs";
@@ -523,6 +526,135 @@ test("the budget writes on a Valkey that stops answering: an envelope's digest, 
   } finally {
     proxy.thaw();
     proxy.close();
+    await s.done();
+  }
+});
+
+/** A split of this test's own under its own key prefix: the envelope files, the allocation inputs and the keys. */
+function splitScene(s, name) {
+  const prefix = `alloc-${s.tag}`;
+  const dir = tempDir(name);
+  const files = { projects: join(dir, "projects.json"), envelope: join(dir, "envelope.json"), logs: join(dir, "logs") };
+  writeFileSync(files.projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }, { id: "platform", members: ["github:acme/infra"] }] }));
+  writeFileSync(files.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", platform: "10", _other: "0" }, defaultWeights: { shop: 1, platform: 1, _other: 0 }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }));
+  const r = readEnvelope({ envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000 });
+  const NOW = Date.parse("2026-10-05T12:00:00Z");
+  const keys = { plan: `${prefix}:plan`, lock: `${prefix}:lock`, log: `${prefix}:log`, expected: `${prefix}:envelope:expected` };
+  return {
+    prefix, files, r, NOW, keys,
+    /** What a budget write is handed, through `url`, at `at`. */
+    alloc: (url, at = NOW) => ({ url, envelope: r.envelope, digest: r.digest, projects: r.projects, host: "live", logsDir: files.logs, now: new Date(at), prefix, redisFn: clientHere, connectTimeoutMs: CONNECT }),
+    /** The neutral split seeded by a host, on a connection the proxy is not on. */
+    seed: () => makeAllocationState({ redis: s.redis, host: "seed", audit: { append() {} }, prefix }).reconcile({ envelope: r.envelope, digest: r.digest, now: NOW - 60_000 }),
+    /**
+     * A write's client whose drop is held back until the scene ends. The proxy stands between the write and Valkey and
+     * drops what it holds for a connection once that connection closes, where a Valkey that stopped answering already
+     * has those bytes in its socket and runs them when it wakes. A budget write drops its client the moment it answers.
+     */
+    keptOpen: (url, options) => {
+      const client = clientHere(url, options);
+      const drop = client.disconnect.bind(client);
+      client.disconnect = () => s.onDone(drop);
+      return client;
+    },
+    /** The rows this host's allocations file holds, oldest first. */
+    fileRows: () => readFileSync(join(files.logs, "allocations", "2026-10.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)),
+    logRows: async () => (await s.redis.lrange(keys.log, 0, -1)).map((text) => JSON.parse(text)),
+  };
+}
+
+test("a priorities plan on a Valkey that stops answering at its first read says nothing was sent, and nothing of it is there after the wake: no lock, no plan, no row (#987)", live, async () => {
+  const s = await scene("t987");
+  const proxy = await trippingProxy(s.url);
+  const split = splitScene(s, "pd-987-plan-read-");
+  try {
+    await split.seed();
+    const seeded = await s.redis.get(split.keys.plan);
+    const rows = await s.redis.llen(split.keys.log);
+    const frozen = proxy.freezeAt(commandOn("get", split.keys.plan));
+    const got = await clocked(applyPriorities({ ...split.alloc(proxy.url), redisFn: split.keptOpen, plan: { projects: [{ id: "shop", weight: 3 }, { id: "platform", weight: 1 }] }, keepOther: true }));
+    assert.equal(await stoppedAt(frozen), "stopped", "Valkey stopped answering at the plan's first GET");
+    // Only a read had left: Valkey could not be reached and nothing was changed, where the read's own mark said the
+    // change may or may not have been made.
+    assert.deepEqual([got.res.thrown?.valkeyNotSent, got.res.thrown?.valkeyMayStillRun, got.res.thrown?.code], [true, undefined, "ETIMEDOUT"], JSON.stringify(got.res.thrown?.message ?? got.res));
+    assert.ok(got.ms < BOUND + 2000, `${got.ms} ms`);
+    proxy.thaw();
+    await sleep(500);
+    assert.deepEqual([await s.redis.exists(split.keys.lock), await s.redis.get(split.keys.plan) === seeded, await s.redis.llen(split.keys.log)], [0, true, rows], "the wake brings no lock, no changed plan and no new row");
+  } finally {
+    proxy.thaw();
+    proxy.close();
+    await s.done();
+  }
+});
+
+test("a revert on a Valkey that stops answering at its compare-and-set ends in ONE bound and says may or may not; at the wake the split is the revert's, its row is in the file and not in the history, and the page's notice says so (#987)", live, async () => {
+  const s = await scene("t987");
+  const proxy = await trippingProxy(s.url);
+  const split = splitScene(s, "pd-987-revert-cas-");
+  try {
+    await split.seed();
+    // The first script of this write that names the plan's key is its compare-and-set: the split is seeded, so
+    // nothing is seeded here, and the lock before it is a SET.
+    let stoppedMs = null;
+    const frozen = proxy.freezeAt(new RegExp(`\\r\\n\\$4\\r\\neval\\r\\n[\\s\\S]*${split.keys.plan}`, "i")).then(() => (stoppedMs = Date.now()));
+    const at = split.NOW + 1000;
+    const got = await clocked(revertAllocation({ ...split.alloc(proxy.url, at), redisFn: split.keptOpen, target: { at: new Date(split.NOW).toISOString(), outcome: "neutral", planId: null, weights: { shop: 1, platform: 1, _other: 0 } } }));
+    const answeredMs = Date.now();
+    assert.equal(await stoppedAt(frozen), "stopped", "Valkey stopped answering at the compare-and-set");
+    assert.deepEqual([got.res.thrown?.valkeyMayStillRun, got.res.thrown?.valkeyNotSent], [true, undefined], JSON.stringify(got.res.thrown?.message ?? got.res));
+    // One bound: the lock's release in the worker's `finally` is not sent after a lost answer, where it waited out a
+    // second bound on the Valkey that had just not answered.
+    assert.ok(answeredMs - stoppedMs < 1.6 * BOUND, `${answeredMs - stoppedMs} ms after the stop, with a bound of ${BOUND} ms`);
+    assert.equal(JSON.parse(await s.redis.get(split.keys.plan)).writer, "default", "nothing reached Valkey while it did not answer");
+    proxy.thaw();
+    let state = null;
+    for (const until = Date.now() + 3000; Date.now() < until && state?.writer !== "operator-revert"; await sleep(50)) state = JSON.parse(await s.redis.get(split.keys.plan));
+    assert.deepEqual([state.writer, state.appliedAt], ["operator-revert", new Date(at).toISOString()], "the compare-and-set Valkey had been sent ran at the wake");
+    // The file has the row, written before the write; the history never got it: the writer had stopped before its push.
+    assert.deepEqual(split.fileRows().map((row) => row.outcome), ["reverted"]);
+    assert.deepEqual((await split.logRows()).map((row) => row.outcome), ["neutral"]);
+    // What the page then reads, through the real reader: the split has no row in its history, said once it is 15 s old.
+    const alloc = await readAllocations({ url: s.url, prefix: split.prefix, redisFn: clientHere, limit: 20 });
+    assert.equal(alloc.state.writer, "operator-revert");
+    assert.deepEqual(historyBehind(alloc.state, alloc.log, { limit: 20, nowMs: at + 60_000 }), { writer: "operator-revert", at: "10-05 12:00" });
+    assert.equal(historyBehind(alloc.state, alloc.log, { limit: 20, nowMs: at + 5_000 }), null);
+  } finally {
+    proxy.thaw();
+    proxy.close();
+    await s.done();
+  }
+});
+
+test("two plans racing on one basis on a real Valkey: one applies, and its split has its row in the history whatever the loser pushed after it (#987)", live, async () => {
+  const s = await scene("t987");
+  const split = splitScene(s, "pd-987-plan-race-");
+  // One client a side, so the commands race on the server; the same writer at the same instant on both.
+  const sides = [clientHere(s.url, {}), clientHere(s.url, {})];
+  s.onDone(() => sides.forEach((side) => side.disconnect()));
+  try {
+    const losers = {};
+    for (let round = 0; round < 10; round += 1) {
+      const stale = await s.redis.keys(`${split.prefix}:*`);
+      if (stale.length > 0) await s.redis.del(...stale);
+      const [a, b] = sides.map((redis, i) => makeAllocationState({ redis, host: `side${i}`, audit: { append() {} }, prefix: split.prefix }));
+      await a.reconcile({ envelope: split.r.envelope, digest: split.r.digest, now: split.NOW });
+      const apply = (state, weights) => state.applyPlan({ envelope: split.r.envelope, digest: split.r.digest, projects: split.r.projects, text: JSON.stringify({ version: 1, basis: null, projects: Object.entries(weights).map(([id, weight]) => ({ id, weight })) }), writer: { kind: "operator-session" }, now: split.NOW + 1000 });
+      const answers = await Promise.all([apply(a, { shop: 3, platform: 1, _other: 0 }), apply(b, { shop: 1, platform: 3, _other: 0 })]);
+      const won = answers.filter((answer) => answer.outcome === "applied");
+      assert.equal(won.length, 1, `round ${round}: ${JSON.stringify(answers)}`);
+      const lost = answers.find((answer) => answer.outcome !== "applied");
+      losers[lost.reason] = (losers[lost.reason] ?? 0) + 1;
+      const alloc = await readAllocations({ url: s.url, prefix: split.prefix, redisFn: clientHere, limit: 20 });
+      assert.equal(alloc.state.planId, won[0].planId, `round ${round}: the split is the winner's`);
+      // The history holds one `applied` row, the winner's, and the loser's row beside it, pushed before or after.
+      assert.deepEqual(alloc.log.filter((row) => row.outcome === "applied").map((row) => row.planId), [won[0].planId], `round ${round}: ${JSON.stringify(alloc.log.map((row) => row.outcome))}`);
+      assert.ok(alloc.log.some((row) => row.outcome !== "applied" && row.outcome !== "neutral"), `round ${round}: the loser's attempt has its row`);
+      assert.equal(historyBehind(alloc.state, alloc.log, { limit: 20, nowMs: split.NOW + 61_000 }), null, `round ${round}: ${JSON.stringify(alloc.log.map((row) => row.outcome))}`);
+    }
+    // Which way the losers lost is the server's to decide; each way is one this test took.
+    assert.ok(Object.keys(losers).every((reason) => ["plan-stale", "plan-busy", "plan-too-soon"].includes(reason)), JSON.stringify(losers));
+  } finally {
     await s.done();
   }
 });

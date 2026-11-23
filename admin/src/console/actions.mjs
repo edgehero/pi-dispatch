@@ -948,12 +948,14 @@ const configActions = [
       const got = planned(ctx.a.plans.planEnvelope({ params: { ...obj(body, "envelope") }, paths: ctx.a.paths, env: ctx.a.env, fs: ctx.fs }));
       if (!got.plan) return got;
       const p = got.plan;
+      // What `alloc:envelope:expected` holds now (issue #987): one more line, never a refusal.
+      const expectedLine = await envelopeExpectedLine(ctx, p);
       return {
         target: p.target,
         expect: p.expect,
         diff: diffHtmlOf(p.beforeText, p.afterText, { file: p.target }),
         payload: { files: p.files, change: p.change },
-        summary: [p.title, ...(Array.isArray(p.summary) ? p.summary : []), "This host’s envelope file is written. Every host re-bases the split with no step; a host with another copy refuses governed jobs as envelope-mismatch until it has this envelope."],
+        summary: [p.title, ...(Array.isArray(p.summary) ? p.summary : []), "This host’s envelope file is written. Every host re-bases the split with no step; a host with another copy refuses governed jobs as envelope-mismatch until it has this envelope.", ...(expectedLine ? [expectedLine] : [])],
         // The envelope's own digests (the parsed envelope's, the worker's comparison), as the tool's audit row has them.
         beforeDigest: p.beforeDigest ?? null,
         afterDigest: p.digest ?? null,
@@ -1029,6 +1031,44 @@ const configActions = [
     },
   },
 ];
+
+/** How long the `envelope-set` preview's read of the expected digest may take. */
+const ENVELOPE_EXPECTED_READ_MS = 2_500;
+
+/**
+ * What the `envelope-set` preview says of `alloc:envelope:expected` (issue #987). An envelope write records the new
+ * digest in that key before it writes the file, and a record that was sent and not answered can land when Valkey wakes,
+ * after the confirm said so once and wrote no file. The next preview of the same change showed nothing of it. `same`:
+ * the key already holds the digest this change would record. `other`: it holds a digest that is neither this host's
+ * file's, nor the applied split's, nor this change's. `unread`: it could not be read.
+ */
+export const ENVELOPE_EXPECTED_LINES = Object.freeze({
+  same: "alloc:envelope:expected already holds this envelope's digest: an earlier write of this change recorded it and did not write this host's file. Confirming writes the file.",
+  other: (digest) => `alloc:envelope:expected holds another digest (${digest}) than this host's file: a write that did not finish, or one made on another host. Confirming replaces it.`,
+  unread: "Whether alloc:envelope:expected holds another digest could not be read from Valkey.",
+});
+
+/**
+ * The line an `envelope-set` preview adds for what the expected key holds, or null for nothing to say: the key is
+ * absent, or it holds this host's file's digest or the applied split's (the envelope the fleet runs on, which this
+ * change replaces as every envelope change does). One bounded read, and never a refusal: the plan is made from the
+ * files, and a Valkey that cannot be read is the confirm's to refuse.
+ */
+async function envelopeExpectedLine(ctx, plan) {
+  if (typeof ctx.a.rm?.readAllocations !== "function") return null;
+  let alloc;
+  try {
+    alloc = await ctx.a.rm.readAllocations({ url: ctx.a.paths.valkeyUrl, limit: 1, timeoutMs: ENVELOPE_EXPECTED_READ_MS });
+  } catch {
+    return ENVELOPE_EXPECTED_LINES.unread;
+  }
+  if (!alloc || alloc.unreachable !== undefined) return ENVELOPE_EXPECTED_LINES.unread;
+  const expected = alloc.expected;
+  if (typeof expected !== "string" || expected === "") return null;
+  if (expected === plan.digest) return ENVELOPE_EXPECTED_LINES.same;
+  if (expected === plan.beforeDigest || expected === alloc.state?.envelopeDigest) return null;
+  return ENVELOPE_EXPECTED_LINES.other(/^[0-9a-f]{8}/.test(expected) ? expected.slice(0, 8) : "?");
+}
 
 /** A run field's value as one line of text: a list joined, an object by its keys, anything else as a string. */
 // Allocation writes return closed ladder facts beside the browser's explanatory refusal. Rationale

@@ -996,8 +996,10 @@ function forgeUnsent(err) {
  * Whether a forge enqueue's throw before any add came of a Valkey that did not answer (issue #987): the routed queue
  * that did not connect, and an approval state that could not be read (a read that failed or was not answered; a state
  * Valkey answered and the store could not use throws the same, and is taken the same way). After one of these no
- * further Valkey command is waited for, as after a lost answer. Every other throw there is a refusal Valkey had no
- * part in (a builder's, a stale approval read off an answer), after which a command is answered as any other.
+ * further Valkey command is waited for, as after a lost answer. Its one caller is a re-run (a fork with it), for whose
+ * job every other throw there is a builder's refusal, which Valkey had no part in: a command after it is answered as
+ * any other. A stale approval is not among them: a re-run and a fork carry no `approvalRequestId`, so that throw is the
+ * parked answer's alone, which has no touch intent to take back and does not ask this.
  */
 const unansweredBeforeAdd = (err) => err?.routeUnreached === true || err?.message === "approval-state-unavailable";
 
@@ -1715,10 +1717,11 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
     return await done({ ok: true, jobId: res.jobId, queue: res.queue ?? plan.queue });
   } catch (err) {
     if (forging && !sent) {
-      // A forge job refused before any add (issue #987). A refusal Valkey had no part in takes its intent back BEFORE
-      // the answer leaves, so "nothing was queued" is never said over a tracker still begun (left begun, it is what
-      // makes the Zero touch page read unavailable). Where Valkey did not answer, the abort is started and not waited
-      // for, as after a lost answer.
+      // A forge job refused before any add (issue #987). A builder's refusal, which Valkey had no part in, asks for
+      // its intent's abort and waits for it before the answer leaves, so the refusal leaves no tracker begun behind it
+      // (left begun, it is what makes the Zero touch page read unavailable) unless that abort itself gets no answer:
+      // the touch store gives it 2 seconds and hands back its failure, and the intent then stays pending. Where Valkey
+      // did not answer, the abort is started and not waited for, as after a lost answer.
       lost = unansweredBeforeAdd(err);
       return forgeUnsent(err);
     }

@@ -29,6 +29,8 @@ const expected = {
   "spend-split-unreachable.viewer": ["The queue is not answering"],
   "spend-split-newer.viewer": ["Split not usable: newer"],
   "spend-split-outside-edit.operator": ["The split was edited outside the plan writer"],
+  "spend-split-expected-other.operator": ["The expected envelope is not this host's", "alloc:envelope:expected names envelope 01234567, not this host's (89abcdef)", "set the key back by hand (docs/allocation.md)"],
+  "spend-split-history-behind.operator": ["The applied split has no row in the history", "The applied split (written by operator-revert at 10-08 15:00) has no row in this history", "may hold the row"],
   "spend-capacity.viewer": ["Fleet busy", "build3", "mini1", "mini2", "Jobs only: a machine busy with other work reads as idle"],
   "spend-capacity-no-time.viewer": ["No time in this window yet"],
   "spend-capacity-unreadable.viewer": ["Capacity not read", "The other Spend views still work."],

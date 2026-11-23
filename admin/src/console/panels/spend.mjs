@@ -24,13 +24,15 @@ import {
   footerHtml,
   insightsWindowLabel,
   INSIGHTS_CAPACITY_JOBS_ONLY,
+  splitExpectedOtherText,
+  splitHistoryBehindText,
 } from "../../insights-html.mjs";
 import {
   graphNodesHtml,
   insightsFullPaths,
   WHATIF_FLOW_RE,
 } from "./insights.mjs";
-import { OUTCOME_WORD_OF } from "../../words.mjs";
+import { OUTCOME_WORD_OF, capitalised } from "../../words.mjs";
 import { newerSkippedSentence } from "../../newer-release.mjs";
 import { canAct, timeHtml, RUN_ID_RE, shownPath } from "./common.mjs";
 
@@ -1320,19 +1322,34 @@ export function splitStates(v) {
                   "The split was made for another envelope",
                   "Another envelope is in force: hosts need the same envelope. Governed jobs refuse as envelope-mismatch.",
                 ]
-              : a?.outsideEdit
+              : a?.expectedOther
                 ? [
+                    // Issue #987: what an envelope write whose record was sent and not answered leaves, said for
+                    // as long as it stays, where it was said once in the failed confirm.
                     "attention",
-                    "The envelope changed outside the console",
-                    "The split was edited outside the plan writer. A host with another envelope refuses governed jobs as envelope-mismatch.",
+                    "The expected envelope is not this host's",
+                    splitExpectedOtherText(a.expectedOther),
                   ]
-                : !a?.state
+                : a?.historyBehind
                   ? [
-                      "idle",
-                      "No split applied yet",
-                      "No split yet: the next pickup can write the neutral split.",
+                      // Issue #987: a plan or a revert whose answer was lost and that landed has no row in the history.
+                      "attention",
+                      "The applied split has no row in the history",
+                      capitalised(splitHistoryBehindText(a.historyBehind)),
                     ]
-                  : null;
+                  : a?.outsideEdit
+                    ? [
+                        "attention",
+                        "The envelope changed outside the console",
+                        "The split was edited outside the plan writer. A host with another envelope refuses governed jobs as envelope-mismatch.",
+                      ]
+                    : !a?.state
+                      ? [
+                          "idle",
+                          "No split applied yet",
+                          "No split yet: the next pickup can write the neutral split.",
+                        ]
+                      : null;
   return card(
     "Other states",
     state

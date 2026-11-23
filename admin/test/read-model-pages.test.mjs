@@ -1186,17 +1186,20 @@ test("writeEnvelope carries a Valkey client's words only bounded: control bytes 
     throw new Error(words);
   };
   const client = (over) => () => ({ on() {}, status: "ready", set: async () => null, eval: async () => 1, disconnect() {}, ...over });
-  // The client could not be made, its SET failed, and, once the file could not be replaced, its put-back failed.
+  // The client could not be made, Valkey refused its SET, and, once the file could not be replaced, its put-back failed.
   const unmade = await write({ redisFn: fails });
-  const unset = await write({ redisFn: client({ set: async () => fails() }) });
+  const unset = await write({ redisFn: client({ set: async () => { throw Object.assign(new Error(words), { name: "ReplyError" }); } }) });
   const unput = await write({ redisFn: client({ eval: async () => fails() }), fs: { ...nodeFs, writeFileSync: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); } } });
   for (const [what, res] of [["unmade", unmade], ["unset", unset], ["unput", unput]]) {
     assert.ok(typeof res.invalid === "string" && res.invalid.includes(`(${bounded})`), `${what}: ${res.invalid}`);
     assert.ok(!res.invalid.includes(words.slice(0, 40)) && !/[\u0000-\u001f]/.test(res.invalid), `${what}: no control byte, and cut`);
   }
   assert.match(unmade.invalid, /^could not reach Valkey to record the new envelope's digest in /);
-  assert.match(unset.invalid, /^could not record the new envelope's digest in /);
+  assert.match(unset.invalid, /^Valkey refused the record of the new envelope's digest in /);
   assert.match(unput.invalid, /could not be put back to absent \(/);
+  // A SET that never left the client (issue #987) is thrown on as nothing sent, its words bounded the same way.
+  const unsent = await write({ redisFn: client({ set: async () => fails() }) }).then(() => "wrote", (error) => error);
+  assert.deepEqual([unsent?.valkeyNotSent, unsent?.message], [true, bounded]);
 });
 
 // --- the runs page's window, parked projects and the switch preview (issue #737) -----------------------------------------
