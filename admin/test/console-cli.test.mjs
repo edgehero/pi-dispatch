@@ -869,8 +869,21 @@ test("a fake deployment names no Valkey a client can be built for, so no test he
   const paths = fakeModules().readModel.resolvePaths(deployment().env);
   assert.equal(paths.valkeyUrl, NO_VALKEY_URL);
   assert.equal(Object.hasOwn(deployment().env, "VALKEY_URL"), false, "and a test deployment sets none of its own");
-  assert.throws(() => makeRedisClient(paths.valkeyUrl), { code: "ERR_INVALID_URL" });
-  assert.throws(() => makeRedisClient(paths.valkeyUrl, { commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }), { code: "ERR_INVALID_URL" }, "the console's bounded client too");
+  // What building a client does: the error it throws, or null. A client that WAS built is closed before anything is
+  // asserted, so the day this pin fails it fails, and does not hold the file open on a socket that keeps reconnecting.
+  const refusal = (...options) => {
+    let client = null;
+    try {
+      client = makeRedisClient(paths.valkeyUrl, ...options);
+      return null;
+    } catch (error) {
+      return error;
+    } finally {
+      client?.disconnect();
+    }
+  };
+  assert.equal(refusal()?.code, "ERR_INVALID_URL");
+  assert.equal(refusal({ commandTimeoutMs: 5000, disconnectTimeoutMs: 0 })?.code, "ERR_INVALID_URL", "the console's bounded client too");
 });
 
 // Issue #842: a stop of the console on a Valkey that stopped answering. The reader's dispose waits on Valkey, and one
