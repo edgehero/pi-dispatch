@@ -118,6 +118,14 @@ Accounting publication can fail after a successful action. Pending intents and e
 without repeating the action. Read the returned warning, restore the unavailable source and reload; do not repeat an
 edit because its metric is pending. Conflicting later edits leave uncertain evidence partial.
 
+A change that was made is never lost from the fix history: when its completion could not be written, the page
+completes it the next time it is read, as soon as its file shows the change, whatever other fix wrote the same bytes.
+A change that was REFUSED can leave its accounting open when Valkey did not answer. While such an entry is open and
+its file does not show the change, the page says "Fix history is incomplete: the accounting of 1 change did not finish
+and its file does not show it, so a reload does not settle it", with how long its record lives at most (the history's
+retention). If the same bytes are written later, by the same change made again or by hand, the open entry is
+completed too, so one change can read as two fixes; that needs Valkey silent exactly at a refusal's accounting.
+
 ## Roles and interaction
 
 Viewers receive rates, counts, causes, streaks and safe fix descriptions. Operators additionally receive question

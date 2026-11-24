@@ -27,6 +27,7 @@ import { watchDurationMs, WATCH_ID_RE as WATCH_RULE_ID_RE } from "@edgehero/pi-d
 import { makeWatchStore } from "@edgehero/pi-dispatch/watch-store";
 import { MODEL_WHY, providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
 import * as nodeFs from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
 import { GIT_READ_FLAGS } from "@edgehero/pi-dispatch/git-hardening";
 import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:path";
@@ -2175,43 +2176,88 @@ const QUEUE_LOOKUPS = Object.freeze(["getJob", "getJobs", "getJobCounts", "getJo
 /** The same for a job such a lookup hands back. */
 const JOB_LOOKUPS = Object.freeze(["getState", "isCompleted", "isFailed", "isActive", "isWaiting", "isDelayed", "toJSON", "asJSON"]);
 
+/** The tracker a command is counted for (`queueWriteTracking`): the one under whose `run` it was asked, and whether it was asked inside a named lookup. */
+const queueScope = new AsyncLocalStorage();
+/** The clients whose commands are counted, each hooked once for as long as it lives. */
+const countedClients = new WeakSet();
+/**
+ * Count AT THE CLIENT (issue #987): every command this client is asked for under a tracker's `run`, outside a named
+ * lookup, that is not a read by `writeTracking`'s list. A queue hands out many objects that reach Valkey (a job, a list
+ * of jobs, a job's own queue, its scripts, its connection), and a tracker that wrapped only what it knew of let a
+ * job out of a list be removed with nothing counted. Every one of those paths ends in this client's `sendCommand`, so
+ * that is where it is counted, by the scope the command was asked in: two requests on one queue's client do not count
+ * for each other, and a command asked under no tracker is nobody's. A `duplicate()` of this client is another client
+ * and is not counted: the helper makes none.
+ */
+function countAtClient(client) {
+  if (client === null || typeof client !== "object" || typeof client.sendCommand !== "function" || countedClients.has(client)) return;
+  countedClients.add(client);
+  const send = client.sendCommand;
+  client.sendCommand = function countedSend(command, ...rest) {
+    const scope = queueScope.getStore();
+    if (scope !== undefined && !scope.quiet && !ALLOCATION_READS.includes(String(command?.name).toLowerCase())) scope.tracker.wrote = true;
+    return send.call(this, command, ...rest);
+  };
+}
+
 /**
  * `writeTracking` for a helper that is handed a BullMQ queue and not a client (issue #987, the worker's
- * `enqueueSandboxPreparation`): `{ queue, wrote }`. `queue` forwards everything to the queue it was given. `wrote`
- * turns true before any call on the queue leaves that is not a named lookup (`QUEUE_LOOKUPS`), before any call on a job
- * a lookup handed back that is not one either (`JOB_LOOKUPS`), and before any command but a read leaves through the
- * queue's own client (which the helper takes for its slot claim), by `writeTracking`'s list. FAIL CLOSED, as
- * `writeTracking` is: a method these lists do not know (`remove`, `pause`, `addBulk`, a job's `update`, one BullMQ adds
- * later) counts as a write, since "only looked up" is what lets a confirm say nothing was changed. So a helper that
- * swallows what its own timers threw can still be answered for by what it had asked of Valkey.
+ * `enqueueSandboxPreparation`): `{ queue, wrote, run }`. The helper is called under `run`, with `queue`, which
+ * forwards everything to the queue it was given. `wrote` turns true:
+ *
+ *  - before any command but a read leaves the queue's own client, whoever asked it and through whatever object, as
+ *    long as it was asked under `run` and outside a named lookup (`countAtClient`). This is the rule no object path
+ *    walks around: a job taken out of a list, a job's own `queue`, a script object, the connection itself;
+ *  - before any call on `queue` that is not a named lookup (`QUEUE_LOOKUPS`), and any call on a job a lookup handed
+ *    back, alone or in a list, that is not one either (`JOB_LOOKUPS`). That is what counts for a queue that is no
+ *    BullMQ queue (a test's), and it is why a lookup's own commands are not counted: a lookup called through `queue`,
+ *    or through a job it handed back, runs quietly.
+ *
+ * FAIL CLOSED, as `writeTracking` is: a method the lists do not know (`remove`, `pause`, `addBulk`, a job's `update`,
+ * one BullMQ adds later) counts as a write, and so does a lookup asked of an object this tracker did not hand out,
+ * since "only looked up" is what lets a confirm say nothing was changed. So a helper that swallows what its own timers
+ * threw can still be answered for by what it had asked of Valkey.
  */
 export function queueWriteTracking(queue) {
+  const tracker = { wrote: false };
   let called = false;
   let client = null;
-  const counting = (target, lookups, wrap = (value) => value) =>
+  let tracked = null;
+  const counting = (target, lookups, wrap = (value) => value, own = () => undefined) =>
     new Proxy(target, {
       get(inner, name) {
+        const mine = own(name);
+        if (mine !== undefined) return mine;
         const value = Reflect.get(inner, name);
         if (typeof name !== "string" || typeof value !== "function") return value;
         return (...args) => {
-          if (!lookups.includes(name)) called = true;
-          const out = value.apply(inner, args);
+          const lookup = lookups.includes(name);
+          if (!lookup) called = true;
+          const out = lookup ? queueScope.run({ tracker, quiet: true }, () => value.apply(inner, args)) : value.apply(inner, args);
           return typeof out?.then === "function" ? out.then(wrap) : wrap(out);
         };
       },
     });
-  /** A job a lookup handed back, tracked the same way; anything else as it is. */
-  const jobOf = (value) => (value !== null && typeof value === "object" && typeof value.getState === "function" ? counting(value, JOB_LOOKUPS) : value);
-  const tracked = new Proxy(counting(queue, QUEUE_LOOKUPS, jobOf), {
-    get(target, name) {
-      if (name === "client") return Promise.resolve(queue.client).then((redis) => (client ??= writeTracking(redis)).redis);
-      return Reflect.get(target, name);
-    },
-  });
+  /** A job a lookup handed back, alone or in a list, tracked the same way, its `queue` this tracked one; anything else as it is. */
+  const jobOf = (value) => {
+    if (Array.isArray(value)) return value.map(jobOf);
+    return value !== null && typeof value === "object" && typeof value.getState === "function" ? counting(value, JOB_LOOKUPS, undefined, (name) => (name === "queue" ? tracked : undefined)) : value;
+  };
+  const clientOf = () =>
+    Promise.resolve(queue.client).then((redis) => {
+      countAtClient(redis);
+      return (client ??= writeTracking(redis)).redis;
+    });
+  tracked = counting(queue, QUEUE_LOOKUPS, jobOf, (name) => (name === "client" ? clientOf() : undefined));
   return {
     queue: tracked,
     get wrote() {
-      return called || client?.wrote === true;
+      return called || client?.wrote === true || tracker.wrote;
+    },
+    /** Call the helper under this tracker. Its client is hooked first: this is queued ahead of anything the helper asks of the same client. */
+    run(fn) {
+      void Promise.resolve(queue.client).then(countAtClient, () => {});
+      return queueScope.run({ tracker, quiet: false }, fn);
     },
   };
 }
@@ -6308,7 +6354,7 @@ export function createFleetReader(
     async sandboxPrepare(request) {
       if (!enqueueSandboxPreparationFn) return { refused: "sandbox-not-wired", message: "Sandbox requests are not wired in this console." };
       const tracked = queueWriteTracking(sandboxQueue(request.host));
-      const result = await enqueueSandboxPreparationFn(tracked.queue, request, { now: nowFn });
+      const result = await tracked.run(() => enqueueSandboxPreparationFn(tracked.queue, request, { now: nowFn }));
       return result?.state === "unknown" ? { ...result, asked: tracked.wrote } : result;
     },
     async sandboxPreparationStatus(host, id) { return readSandboxPreparationFn ? readSandboxPreparationFn(sandboxQueue(host), id) : { id, host, state: "unknown" }; },
