@@ -8458,7 +8458,9 @@ validator rather than a second copy of it.
   imports its tables from the leaf and re-exports them under the names they always had. The MCP pickup refusals are the
   one template read: `mcpRefusalComment(reason, null)` in `mcp-preflight.mjs`, the processor's own comment without a
   server name. The catalog writes a general sentence for a reason whose comment carries runtime values (a wait profile,
-  an image ref, a cap's numbers), for one that posts no comment, and for the nine a record cannot tell apart, each
+  an image ref, a cap's numbers), for one with no comment of its own at its call site (since issue #969 the refusal
+  net posts exactly that sentence on a forge job's item, `REQ-JOB-STATUS-COMMENTS`), and for the nine a record cannot
+  tell apart, each
   posted by two or more paths with different comments and no `why` saying which: `model-not-allowed` (the pickup and
   the runner), `mcp-config-invalid` (the pickup and the runner), `secret-name-reserved` (`run.secrets` and a bundle),
   `operator-cancel` (a cancel while running, and one before the start, which posts `CANCELLED_BEFORE_START_COMMENT`),
@@ -16399,3 +16401,4 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-19 (Opus scoped quota) | **`INT-SUBSCRIPTION-QUOTA-KEY` CORRECTED**: admission receives a physical model route and projects applicable evidence; the reviewed Fable scope does not block exact Opus 5.5. Parse fractional reset times through nine digits, rounded upward. UNCHANGED, checked: stored fields, opaque IDs, key identity, CAS and generation semantics, `INT-SUBSCRIPTION-CREDENTIAL-STORE`. |
 | 2026-11-20 (explicit auxiliary routes) | `INT-TRIGGERS-FILE-CONTRACT` AMENDED with the finite hand-authored auxiliary grant and trigger/job version 9/11 propagation. `INT-CONTAINER-JOB-INPUTS` uses its existing finite allowlist and shared cap for the admitted union. UNCHANGED, checked: subscription snapshot shape, runner wire capabilities, run-record shape and credential stores. |
 | 2026-11-20 (append snapshots) | `INT-RUNNER-EXIT-CODE-PROTOCOL` and `INT-RUN-HISTORY-FILE-CONTRACT` AMENDED: optional two-source `promptAdditions`, full and compact retention, minimal omission, closed hash validation and secret checks. Hashes are a fourth explicitly forgeable shaped residual, not prompt attestation. `INT-DOCTOR-RESULTS-KEY`, record versions, signing, monetary fields and numeric exit meanings UNCHANGED, checked; the doctor observation uses existing publication rules. |
+| 2026-11-24 (#969) | **`INT-REASON-CATALOG` AMENDED**: a sentence the catalog writes for a reason with no comment at its call site is now also a forge comment, posted by the refusal net (`REQ-JOB-STATUS-COMMENTS`, `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`) when a refusal before spend told its item nothing, so it stays word for word what the issue was told. No sentence changed. UNCHANGED, checked: `INT-FORGE-TERMINAL-RECEIPT` (its body and eligibility), `INT-ON-FAILURE-HOOK-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT` (no record field or reason added) and the job data (no field added). |

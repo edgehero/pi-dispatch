@@ -6,7 +6,8 @@ fixed word, such as `scope-cap` or `oom-killed`. This page says what each one me
 The worker keeps one short explanation and one next step per reason in `worker/src/reason-catalog.mjs`, for the
 console and the `/dispatch` panel to show beside a link to the entry here. Where the worker posts a fixed comment on
 the issue for a reason, that comment is the explanation, word for word, so the issue and the explanation never
-disagree.
+disagree. A forge job refused before anything was spent whose refusal has no comment of its own gets the explanation
+here as its comment (issue #969), so the item always says why nothing started.
 
 ## How to read a reason
 

@@ -1398,7 +1398,7 @@ adversarial passes did.
 - **Raised by**: issue #60.
 
 
-## OQ-023 — a prepare-stage refusal is silent on the issue
+## OQ-023 — a prepare-stage refusal is silent on the issue: RESOLVED (the refusal net, issue #969)
 
 - **Question**: `unprotected-branch` and the spend refusals post a comment saying why nothing ran. A
   refusal raised inside `prepareWorkspace` does not: `sha-gone` has been silent since it shipped, and
@@ -1414,6 +1414,13 @@ adversarial passes did.
   `processor.mjs`, which is a small change with one real question attached — a repo whose `.pi/` breaches
   a cap would then comment on EVERY delivery, so it wants the dedup the spend refusals already have.
 - **Raised by**: issue #60, while adding the cap refusals that made the existing silence load-bearing.
+- **Status, 2026-11-24**: **RESOLVED by issue #969.** The silence was wider than this row: the pickup's model
+  selection and subscription refusals were silent too, and a label job's requester waited hours for a job that would
+  never come. The refusal net (`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`) posts the reason catalog's sentence for every
+  forge refusal before spend whose attempt posted nothing, these six included. The dedup this row asked for is the one
+  the spend refusals have: one job per delivery, so at most one comment per delivery on the item that asked, and a
+  cron job has no item. No store was added for more; a `.pi/` cap breach now says so on each delivery, which is the
+  point.
 
 ---
 
@@ -2926,3 +2933,4 @@ adversarial passes did.
 | 2026-11-22 (#1021) | **`OQ-007` AMENDED**, one bullet, status stays RESOLVED: `cpu_reserve_leftovers_removed` becomes `{ venue, listed, removed, failed, young, kept, complete }`, every count that pass's (`removed` was the process's total), with `reason` on a pass cut short, said for every pass that removed something and once per process for each of a pass cut short, a refusal and a pass that left something young or kept, so none repeats every re-check; the removal stops only after a complete pass with nothing young and nothing refused, checked again against the reopen clause (runtime objects, no timer of its own, one bounded listing per re-check only while something young or refused is left). `OQ-002`, `OQ-008` UNCHANGED, checked: no concurrency axis, no state in Valkey. **Code evidence**: worker/src/cpu-reserve.mjs -> removeLegacyHelpers, makeCpuReserve. |
 | 2026-11-22 (#1040) | **`OQ-007` AMENDED**, one bullet, status stays RESOLVED: an image whose labels could not be read cuts the CPU-reserve leftover pass short on the same verdict line, once per process, with `complete: false` and `reason` `image-<failure>` or the NEW token `image-unreadable` (also a row with no image id), its rows in no count, where they were counted `kept` and ended the removal; the issue #1021 bullet CORRECTED twice in place (`kept` is a fingerprint that misses only once the image was read; a pass cut short also keeps the passes going), checked again against the reopen clause (runtime objects, no timer of its own, one bounded listing per re-check while an image stays unread). `OQ-002`, `OQ-008` UNCHANGED, checked: no concurrency axis, no state in Valkey; doctor's sweep of killed doctors' helpers prints doctor lines, and the worker's one `rm -f` after a doctor child killed at its bound logs only its failure (`doctor_helper_not_removed`), the doctor spawner's own fault line beside `doctor_spawn_failed`, no sweep of this row. **Code evidence**: worker/src/cpu-reserve.mjs -> removeLegacyHelpers, makeCpuReserve, removeKilledDoctorHelper; worker/src/start.mjs -> startWorker (the doctor spawner's afterKill). |
 | 2026-11-23 (#1023) | **`OQ-007` AMENDED**, one clause, status stays RESOLVED: the sandbox sweep's pass line `sandbox_reaper_pass` gains three readings, `waitedForStartsMs` on a pass that waited for one of the worker's job containers to start, `askedAgain` (a count) on a pass that asked a run's runtime again after a wait before its removal, and `busy: true` on a pass that met a job starting or running (`DES-RETENTION-SWEEPS-ON-A-TIMER`, `INT-SANDBOX-CONTRACT`). No new event name: they ride the pass's own line, which stays the pass's evidence and is neither a fault nor a per-entry verdict. **Code evidence**: worker/src/sandbox-store.mjs -> `makeSandboxReaper` (`finish`); worker/test/sandbox-store.test.mjs (the line's three fields, and no new field on a pass that met no job). |
+| 2026-11-24 | Issue #969. **`OQ-023` RESOLVED**: the refusal net posts the reason catalog's sentence for a forge refusal before spend whose attempt posted nothing, so the prepare stage's six refusals (and the pickup's selection and subscription refusals, silent the same way) now tell the item why. The dedup the row asked for is the spend refusals' own, one comment per delivery; no store was added. **`OQ-034` UNCHANGED, checked**: the hook's conventions are untouched, and the net pages nobody. |

@@ -12215,6 +12215,43 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK
 
+- **The refusal net (2026-11-24, #969)**: a GitHub label job refused at pickup for `auth-mixed-billing`, or queued
+  before a trigger's pool edit and refused `model-selection-policy-changed`, posted nothing and kept its label; the
+  trigger fires on the add, so four pull requests waited 30 minutes to 3 hours for a job that would never come.
+  `REQ-JOB-STATUS-COMMENTS` already asked for a comment on "each pre-spend refusal": every silent one found (the
+  pickup's model selection and its `auth-*` and `subscription-*` refusals, `settings-overlay-invalid`, the processor's
+  subscription admission, `model-selection-continuation-unavailable`, three `approval-*` refusals, and the prepare
+  stage's of `OQ-023`) was silent by omission, not by decision. So `processor` (index.mjs) hands each attempt a
+  COUNTED comment adapter (`attemptComment`), threaded through `processJob`, `pickup` and `runJob`'s per-call deps
+  (the shared deps are not per job, so the count cannot live there), and after the attempt returns, an attempt whose
+  result is a `policy` outcome with `budgetReserved: false`, on a forge job with a target, that posted NOTHING, posts
+  the reason catalog's sentence for its reason (`refusalNetText`): fixed, path-free by the catalog's own rule, and
+  word for word what `docs/reasons.md` says. A count is of calls made, not posts that succeeded: the adapter swallows
+  a failed POST, and a second post after it would say the refusal twice. `operator-cancel` (the pickup's cancel
+  rewrite of a refusal) posts `CANCELLED_BEFORE_START_COMMENT`, as the pickup's own cancel does, since the catalog's
+  sentence for that token is the general one; a token the catalog cannot explain posts `REFUSED_UNEXPLAINED_COMMENT`,
+  never nothing. Awaited, so the explanation is on the item before the completed listener runs.
+  **Silent by decision** (`SILENT_REFUSALS`, worker/src/refusal-net.mjs): `not-parked` (an ordinary reply; taking the
+  stale label off is the visible act), `recovery-superseded` (its superseding outcome already spoke),
+  `answer-draft-refused` and `answer-draft-config-changed` (the provenance check gates every credential mint), and
+  `duplicate-request` (the notice posts its own comment, and a malformed one is answered by the record alone).
+  Outside the net by job shape: local jobs (`REQ-LOCAL-JOB-VISIBILITY`, and every cron package canary is one), answer
+  drafts, watches, question groupings, and a lost-lock replay (the first attempt already ran the net). No phrase
+  guard: no refusal comment has carried one, and the receiver's bot-loop guard drops the worker's own comments first.
+  `OQ-023`'s hazard, a `.pi/` cap breach commenting on every delivery, is bounded the way every spend refusal already
+  is: at most one comment per delivery, on the item that asked, and a cron job has no item. `CONST-BUDGET-BEFORE-TOKENS`
+  UNCHANGED, checked (the net runs after the refusal and mints as every refusal comment does) and
+  `CONST-RETRY-INFRA-ONLY` UNCHANGED, checked (it never throws, never runs for a throw and never changes the result).
+  The trigger label is not touched: the sentence is the catalog's, which says nothing of labels. Rejected: a comment
+  at each silent site (fixes these and misses the next one written; more than eighty refusals return between the
+  pickup and the container); a knob (the rejection below stands); a store to dedup repeated refusals on one item (it
+  costs more than the noise it saves, the same judgement as crash dedup below); commenting local jobs (their log line
+  is their surface); taking the label off (a new forge write on every refusal, an `unlabeled` delivery, and a pull
+  request label trigger's job does not carry the label that fired). Residual: a fork comment or a console answer
+  trail counts as said; no silent refusal follows either today. **Code evidence**: worker/src/refusal-net.mjs;
+  worker/src/index.mjs -> processor, settledReplay; worker/test/refusal-net.test.mjs,
+  worker/test/refusal-net-pickup.test.mjs.
+
 - **A used-up quota says so (2026-11-21, #960)**: a final `container-infra-exit` posted the generic "an error stopped
   this job", so an operator could not tell a subscription past its usage limit from a broken image without the worker
   log. start.mjs's failed listener now picks the reason's row of `FAILED_COMMENT_BY_REASON`, else, for
@@ -12330,8 +12367,8 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   suppressed job is NOT completed in the queue: it stays in BullMQ's failed set with the stall reason, so
   the admin's views and `getJobCounts` show it failed while the worker log and the run record say it
   completed; the record is the authority (`INT-RUN-HISTORY-FILE-CONTRACT`). `OQ-023`'s
-  prepare-policy silence stands untouched -- #288 is post-spend only, and that row's own hazard (a
-  `.pi/` cap breach commenting on every delivery) is exactly why.
+  prepare-policy silence stood untouched by #288, which is post-spend only; the refusal net (#969, above) ends it,
+  and that row's hazard (a `.pi/` cap breach commenting on every delivery) is bounded as the net's bullet says.
 - **Traces to**: `REQ-JOB-STATUS-COMMENTS`, `REQ-OPERATOR-FAILURE-NOTIFICATION`,
   `CONST-RETRY-INFRA-ONLY`, `INT-ON-FAILURE-HOOK-CONTRACT`, `INT-WAIT-PROFILES-CONTRACT` (the
   operator-command model)
@@ -21322,3 +21359,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-19 (Opus scoped quota) | **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` CORRECTED**: review the exact modern Fable scope against the provider plan guide; map its existing opaque IDs to applicability for exact Opus 5.5, retaining conservative handling for every other shape. Accept microsecond/nanosecond reset timestamps with upward millisecond rounding. UNCHANGED, checked: credential ownership, raw-data privacy and unknown exhaustion persistence. |
 | 2026-11-20 (explicit auxiliary routes) | `DES-HOST-OWNED-SUBSCRIPTION-AUTH` and `DES-MODEL-FAILOVER` AMENDED: hand-authored finite auxiliary grants survive root selection, receive independent auth/quota admission and share the existing meter and cost cap. Whole-panel admission is conservative. `DES-STORE-VERSION-WHEN-NEEDED` applied to trigger version 9 and job-data version 11. UNCHANGED, checked: root candidate billing, subscription identity custody, API fallback prohibition, request guards and accounting ledgers. |
 | 2026-11-20 (append snapshots) | `DES-OPERATOR-GLOBAL-OVERLAY`, `DES-OPERATOR-CONSOLE` and `DES-DOCTOR-RESULTS-PUBLISHED` AMENDED: immutable loader append snapshots, watch and answer-draft overlay wiring, shaped source hashes in Loaded and a content-free doctor check. Rejected rereads, prompt-text records and claims of complete wire-prompt proof. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: optional metadata, legal absence, no new store or migration. |
+| 2026-11-24 (#969) | **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: the refusal net. Each attempt counts its comments, and a forge refusal before spend that posted none gets the reason catalog's sentence once from the pickup; five reasons stay silent by decision (named on one line a test reads); the knob, per-site comments, a dedup store and label removal are rejected. OQ-023's prepare-policy silence is ended, its every-delivery hazard bounded as every spend refusal's is. UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, the post-spend terminals, the failure hook and its paging, and `INT-FORGE-TERMINAL-RECEIPT`. |

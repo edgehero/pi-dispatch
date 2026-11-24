@@ -429,12 +429,13 @@ test("the processor's waiter bookkeeping lives in ONE wrapper: budget deferral k
 	}
 	// #899 adds an outer terminal-result boundary. Budget bookkeeping still wraps the whole pickup inside
 	// processJob; the outer boundary must await it, including its finally, before it may release the window.
-	const start = body.indexOf("const processJob = async (job, token, signal) => {");
+	// Issue #969: processJob takes the attempt's counted comment adapter, and the refusal net runs between it and the release.
+	const start = body.indexOf("const processJob = async (job, token, signal, said = attemptComment(deps?.comment)) => {");
 	const end = body.indexOf("return async function processor(job, token, signal) {");
 	assert.ok(start !== -1 && end > start, "both wrappers are present and ordered");
 	const wrapper = body.slice(start, end);
 	for (const call of ["hostBudget.suspend(", "hostBudget.forget(", "hostBudget.enter(", "hostBudget.leave("]) assert.ok(wrapper.includes(call), `${call} is in the wrapper`);
-	assert.match(body.slice(end), /const result = await processJob\(job, token, signal\);\s*if \(shouldReleaseSemanticWindow\(result\)\) await releaseSemanticWindow/);
+	assert.match(body.slice(end), /const result = await processJob\(job, token, signal, said\);\s*const net = refusalNetText\([\s\S]*?await Promise\.resolve\(deps\.comment\(job\.data, net\.text\)\)\.catch\(\(\) => \{\}\);\s*\}\s*if \(shouldReleaseSemanticWindow\(result\)\) await releaseSemanticWindow/);
 	assert.equal(body.split("hostBudget.gate(").length - 1, 1, "one gate");
 });
 

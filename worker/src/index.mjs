@@ -18,6 +18,7 @@ import { BACKEND_NOT_REGISTERED } from "./backend-registry.mjs";
 import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey, agentCancelReqKey, agentCancelAckKey } from "./cancel-state.mjs";
 import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, NewerReleaseHold, TERMINAL_COMMENTS, runJob, checkDraftAnswerSource } from "./processor.mjs";
 import { CANCELLED_BEFORE_START_COMMENT, SIZE_REFUSAL_COMMENTS } from "./comment-tables.mjs";
+import { attemptComment, refusalNetText } from "./refusal-net.mjs";
 import { NETNS_KEEPER_YOUNG_HOLD_MAX_MS, netnsKeeperCrashLoopSentence, netnsKeeperLoopAgainSentence } from "./netns-keeper.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, PODMAN_RESTART_HOLD_MAX_MS, PODMAN_RESTART_HOLD_RECHECK_MS } from "./runtime-observations.mjs";
 import { earlierFrom, recordOfThisJob, recordReadable, targetFor } from "./run-history.mjs";
@@ -438,6 +439,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 	// and the `DelayedError` throw the gates always made; `noteRetry` records an infrastructure retry's backoff before its
 	// throw. Built once per processor, so its log episode (one line per outage, not per wake) spans every job it defers.
 	const { deferTo, noteRetry } = makeDeferTo({ redis, DelayedError, now, hostName, log: (event, fields) => deps?.log?.(event, fields) });
+	// The lost-lock gate's replays (issue #969): the first attempt already ran the refusal net before its completion was
+	// refused, so a replayed refusal must not post its sentence a second time.
+	const settledReplays = new WeakSet();
+	const settledReplay = (result) => { settledReplays.add(result); return result; };
 	const firstRejection = (key) => {
 		if (rejectedSeen.has(key)) return false;
 		rejectedSeen.add(key);
@@ -449,7 +454,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 	// wait, a full scope, a busy endpoint) keeps its waiter SUSPENDED, so it holds no room it could not use; a job that
 	// ended any other way (it ran, it was refused, it failed) is no waiter at all. Listing this per exit is how one of
 	// the many deferral sites would come to leave a live hold behind.
-	const pickup = async (job, token, signal, budgetState) => {
+	// `said` is this attempt's counted comment adapter (refusal-net.mjs): every comment the attempt posts goes through it, so
+	// the refusal net in `processor` below knows whether the item was already told why.
+	const pickup = async (job, token, signal, budgetState, said = attemptComment(deps?.comment)) => {
 		// THE LOST-LOCK GATE, first because it is free and because it can only ever stop a run (CONST-RETRY-INFRA-ONLY).
 		// BullMQ hands a job to the processor again after its stall check took it back. That happens to a job whose
 		// processor FINISHED when Valkey was unreachable for longer than the lock renewal window: the record was
@@ -476,10 +483,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// it knows and so pages nobody, and the `job_completed` line names the outcome alone.
 				if (!recordReadable(record)) {
 					deps?.log?.("job_lost_lock_after_completion", { jobId: job.id, outcome: record.outcome });
-					return { outcome: record.outcome, reason: null, exitCode: null, turns: null, tokens: null, budgetReserved: null };
+					return settledReplay({ outcome: record.outcome, reason: null, exitCode: null, turns: null, tokens: null, budgetReserved: null });
 				}
 				deps?.log?.("job_lost_lock_after_completion", { jobId: job.id, outcome: record.outcome, ...(record.reason ? { reason: record.reason } : {}) });
-				return { outcome: record.outcome, reason: record.reason ?? null, exitCode: record.exitCode ?? null, turns: record.turns ?? null, tokens: record.tokens ?? null, budgetReserved: record.budgetReserved ?? null };
+				return settledReplay({ outcome: record.outcome, reason: record.reason ?? null, exitCode: record.exitCode ?? null, turns: record.turns ?? null, tokens: record.tokens ?? null, budgetReserved: record.budgetReserved ?? null });
 			}
 		}
 
@@ -599,8 +606,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// `stalledCounter` raised). Both are kept, the higher winning, rather than one chosen from `stalledCounter`:
 		// BullMQ never lowers that count, so a job that stalled once and later failed would look for the stalled
 		// attempt's number, miss its own failed record, and a failover retry with no model attempt key would then be
-		// refused `model-failover-no-candidate` (a comment, a used-up delivery, a disarmed one-shot). What that leaves: a
-		// stall that wrote no record leaves the attempt before it to answer, which is still this job's own.
+		// refused `model-failover-no-candidate` (a comment, the refusal net's since issue #969, a used-up delivery, a
+		// disarmed one-shot). What that leaves: a stall that wrote no record leaves the attempt before it to answer, which is
+		// still this job's own.
 		// Each side (this host's file, the fleet's copy) is held to the rule BEFORE the higher attempt is kept
 		// (`previousRecord`'s `keep`), so a stale record at a higher attempt cannot hide this job's own on the other side,
 		// and the answer is judged again after, so a reader that ignores `keep` cannot hand the stale record back. The count
@@ -704,7 +712,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				if (!multiHost || (job.queueName ?? QUEUE) !== QUEUE) {
 					const reason = `job-size-exceeds-${misfit}`;
 					deps?.log?.(reason.replaceAll("-", "_"), { jobId: job.id, project, ...sizeFields });
-					if (deps?.comment) await Promise.resolve(deps.comment(job.data, SIZE_REFUSAL_COMMENTS[reason])).catch(() => {});
+					if (said.comment) await Promise.resolve(said.comment(job.data, SIZE_REFUSAL_COMMENTS[reason])).catch(() => {});
 					const at = new Date(now()).toISOString();
 					const result = { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, budgetReserved: false, hostBudget: { memMiB: budgetNow.memMiB, cpuCenti: budgetNow.cpuCenti, hostShare: share } };
 					// Above the wait gate, so through the recorder's own arguments rather than the bound one below it: the
@@ -749,7 +757,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				deps?.log?.(logEvent, { jobId: job.id, ...fields });
 				// The comment names the FIELD and the operator's own words for the condition, never a
 				// resolver path or a vault topology -- `secret-profile-unknown` sets that rule.
-				if (sentence && deps?.comment) await Promise.resolve(deps.comment(job.data, sentence)).catch(() => {});
+				if (sentence && said.comment) await Promise.resolve(said.comment(job.data, sentence)).catch(() => {});
 				const result = { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, budgetReserved: false };
 				await settleSteer({ result });
 				recordRun({ job, result, startedAt: at, endedAt: new Date().toISOString(), earlier });
@@ -1409,12 +1417,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// Issue #761: a retry whose previous attempt's record a newer pi-dispatch wrote, with no model attempt key to
 					// lock to. That record's `reason`, `budgetReserved` and `exitCode` are outside its stable core, so it cannot
 					// say the attempt never started a container, and the selection would refuse the retry
-					// (`model-failover-no-candidate`) rather than start over from the primary. That refusal comments, records,
-					// uses up a forge delivery and disarms a one-shot over work nothing is wrong with; the job waits instead, as
-					// it does for every store this build cannot read, until a host that reads the record takes it or a later
-					// record replaces it. Exactly that case and no other: a model attempt key keeps the lock to its model, and a
-					// record this build can read keeps today's answers. The key is read here only in that case (the selection
-					// reads it again when it is there), and a throw is the selection's own read failing, handled below as such.
+					// (`model-failover-no-candidate`) rather than start over from the primary. That refusal comments (the refusal
+					// net's, issue #969), records, uses up a forge delivery and disarms a one-shot over work nothing is wrong with;
+					// the job waits instead, as it does for every store this build cannot read, until a host that reads the record
+					// takes it or a later record replaces it. Exactly that case and no other: a model attempt key keeps the lock to
+					// its model, and a record this build can read keeps today's answers. The key is read here only in that case
+					// (the selection reads it again when it is there), and a throw is the selection's own read failing, handled
+					// below as such.
 					// The record is the pickup's (`priorAttemptRecord`), which counts only when it is this job's previous
 					// attempt's (`recordOfThisJob`, `ownPrior` at the pickup's read): one an older job left under a reused id, or an
 					// earlier attempt's, says nothing about the attempt being retried, so the retry is judged as one with no
@@ -2066,6 +2075,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// runJob context is unchanged.
 				...(endpointSnapshot ? { modelEndpoints: endpointSnapshot } : {}),
 				...deps,
+				// This attempt's counted adapter in place of the shared one (issue #969): what the processor posts counts too.
+				...(said.comment ? { comment: said.comment } : {}),
 				...(job.data?.localEvent && deps.localEventRuntime ? { claimLocalEvent: async () => {
 					try { return await deps.localEventRuntime.claim(job, String(token ?? job.id)); }
 					catch (error) {
@@ -2329,7 +2340,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				const beforeStart = retryable && !spent;
 				const result = { outcome: "policy", reason: cancellationReason, exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, ...(spent && error.usage ? { usage: error.usage } : {}), provider: error?.provider ?? null, model: error?.model ?? null, session: error?.session ?? null, budgetReserved: retryable ? spent : (error?.budgetReserved ?? null), ...(error?.dollars ? { dollars: error.dollars } : {}), ...(spent && error?.resources ? { resources: error.resources } : {}), ...(spent && error?.progress ? { progress: error.progress } : {}), ...(error?.loaded ? { loaded: error.loaded } : {}) };
 				deps?.log?.("job_cancelled_instead_of_retry", { jobId: job.id, spent, retryable, ...(retryable ? {} : { failure: scrubCredentials(String(error?.message ?? error)).slice(0, 300) }) });
-				if (deps?.comment) await Promise.resolve(deps.comment(job.data, beforeStart && cancellationReason !== "agent-cancel" ? CANCELLED_BEFORE_START_COMMENT : TERMINAL_COMMENTS[cancellationReason])).catch(() => {});
+				if (said.comment) await Promise.resolve(said.comment(job.data, beforeStart && cancellationReason !== "agent-cancel" ? CANCELLED_BEFORE_START_COMMENT : TERMINAL_COMMENTS[cancellationReason])).catch(() => {});
 				await settleSteer({ result });
 				recordAfterGate({ job, result, startedAt, endedAt: new Date().toISOString() });
 				return result;
@@ -2532,7 +2543,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			await awaitKeeper?.stop().catch(() => {});
 		}
 	};
-	const processJob = async (job, token, signal) => {
+	const processJob = async (job, token, signal, said = attemptComment(deps?.comment)) => {
 		// First, before any gate reads the data: a job queued by a newer pi-dispatch, whose fields this build would drop
 		// or misread, waits for a worker that can read it (issue #761). A deferral, never a refusal: a refusal would use up
 		// a forge delivery (its id deduplicates a redelivery for `FORGE_JOB_RETENTION_DAYS`) and spend a one-shot
@@ -2571,7 +2582,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// a no-op for it: a notice is added with no window, so it holds none and can free none.
 		if (isDuplicateNotice(job.data)) {
 			const text = duplicateRequestComment(job.data);
-			if (text !== null && deps?.comment) await Promise.resolve(deps.comment(job.data, text)).catch(() => {});
+			if (text !== null && said.comment) await Promise.resolve(said.comment(job.data, text)).catch(() => {});
 			deps?.log?.("refused_duplicate_request", { jobId: job.id, survivingJobId: duplicateOfId(job.data) });
 			return recordBeforePickup(job, { outcome: "policy", reason: DUPLICATE_REQUEST_REASON });
 		}
@@ -2640,7 +2651,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			return recordBeforePickup(job, sandboxBoundary);
 		}
 		if (!hostBudget) {
-			const result = await pickup(job, token, signal, { budgetDeferred: false });
+			const result = await pickup(job, token, signal, { budgetDeferred: false }, said);
 			if (job.data?.answerDraft && result?.outcome !== "completed") await deps.answerDraftRuntime?.refused(job.data, result).catch(() => {});
 			return result;
 		}
@@ -2649,7 +2660,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// its first attempt still runs here) can never give back the first's hold.
 		const budgetState = { budgetDeferred: false, ticket: hostBudget.enter(job.id) };
 		try {
-			const result = await pickup(job, token, signal, budgetState);
+			const result = await pickup(job, token, signal, budgetState, said);
 			if (job.data?.answerDraft && result?.outcome !== "completed") await deps.answerDraftRuntime?.refused(job.data, result).catch(() => {});
 			hostBudget.forget(job.id);
 			return result;
@@ -2678,7 +2689,16 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// BullMQ job owns the stored key; its compare-and-delete cannot clear a newer run's window (#899).
 			// A terminal cancel is not proof that a failed container stop succeeded: that existing exception retains its
 			// orphaned resource holds. The semantic window bounds repeated intent, not isolation or resource admission.
-			const result = await processJob(job, token, signal);
+			const said = attemptComment(deps?.comment);
+			const result = await processJob(job, token, signal, said);
+			// THE REFUSAL NET (issue #969, refusal-net.mjs): a forge job refused before it spent anything that told its item
+			// nothing gets the reason catalog's sentence for its reason, here, once, for every way out above. Awaited, so the
+			// explanation is on the item before the completed listener runs; the adapter never throws.
+			const net = refusalNetText({ data: job.data, result, posted: said.posted(), replay: settledReplays.has(result) });
+			if (net !== null && deps?.comment) {
+				deps?.log?.(net.unexplained ? "refusal_net_unexplained" : "refusal_net_posted", { jobId: job.id, reason: result.reason });
+				await Promise.resolve(deps.comment(job.data, net.text)).catch(() => {});
+			}
 			if (shouldReleaseSemanticWindow(result)) await releaseSemanticWindow(job, deps?.log, { cause: "policy" });
 			// Settlement failure must not retry a command that already finished. Reconciliation observes its terminal
 			// queue state and completes the same compare-by-generation transition after the connection recovers.

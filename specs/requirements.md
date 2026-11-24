@@ -708,6 +708,20 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   completion emits none. A successful final retry of the original job remains eligible.
   Delivery is best-effort: a missing receipt remains unknown and never starts a paid retry.
 
+- **AMENDED 2026-11-24 (#969, the refusal net)**: a forge-backed job refused before spend (a returned `policy`
+  outcome with `budgetReserved: false`) whose attempt posted no comment gets one: the reason catalog's sentence for its
+  reason (`INT-REASON-CATALOG`), posted once by the pickup after the refusal is recorded (`worker/src/refusal-net.mjs`).
+  Before #969 the pickup's model selection (`auth-mixed-billing`, `model-selection-policy-changed` and the other
+  `model-selection-*` refusals, `model-failover-no-candidate`, `auth-route-unbounded`, the other `auth-*` and
+  `subscription-*` refusals), `settings-overlay-invalid`, the processor's subscription admission and the prepare stage
+  (`sha-gone`, the `pi-*` caps, the `skills-dir-*` refusals, OQ-023) refused in silence, against "each pre-spend
+  refusal" below, and a label job's requester waited for a job that would never come. A reason the catalog cannot
+  explain posts `REFUSED_UNEXPLAINED_COMMENT`, never nothing. Silent by decision, each with its why in
+  `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`: `not-parked`, `recovery-superseded`, the two answer-draft provenance
+  refusals and `duplicate-request`. Answer drafts, watches, question groupings and local jobs are outside it
+  (`REQ-LOCAL-JOB-VISIBILITY` UNCHANGED, checked). The sentence is the catalog's word for word, so the trigger label is
+  not mentioned and is not removed.
+
 - **AMENDED 2026-10-31 (#772)**: Jobs with purpose `answer-draft` never post status, terminal, policy-refusal, failure, recovery, progress or chain comments. Their verdict/failure is reported on the console. This exception does not suppress the source workload’s own question or its later person-confirmed answer trail.
 
 - **Statement**: Each **forge-backed** job shall comment on its triggering issue, pull request or merge
@@ -10438,3 +10452,4 @@ instead of drifting.
 | 2026-11-19 (Opus scoped quota) | **`REQ-SUBSCRIPTION-AUTHENTICATION` CORRECTED**: a reviewed Fable-only weekly limit no longer blocks exact Opus 5.5. Every finite route is checked separately. UNCHANGED, checked: account limits, unknown-scope refusal, paid-overage refusal and free admission. |
 | 2026-11-20 (explicit auxiliary routes) | `REQ-SUBSCRIPTION-AUTHENTICATION` and `REQ-MODEL-POLICY` AMENDED: ordinary flows can explicitly authorize finite auxiliary subscription/API calls with a positive shared cap; all declared routes must pass free admission. UNCHANGED, checked: automatic root billing fallback is forbidden, hard cost enforcement, host credential custody and internal classifier role restrictions. |
 | 2026-11-20 (append snapshots) | `REQ-GLOBAL-PI-OVERLAY` and `REQ-OPERATOR-CONSOLE-SCREENS` AMENDED: stable append text, optional source hashes with unknown distinct from absent, and doctor observations without prompt text. External auxiliary-call composition is not inferred. Budget, role, output and owner authority are UNCHANGED, checked. |
+| 2026-11-24 (#969) | **`REQ-JOB-STATUS-COMMENTS` AMENDED**: the refusal net. A forge job refused before spend whose attempt posted no comment gets the reason catalog's sentence for its reason, once, from the pickup, so the pickup's model selection, `settings-overlay-invalid`, the subscription admission and the prepare stage (OQ-023) no longer refuse in silence; an unexplained token posts a fixed fallback; five reasons stay silent by decision (`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`). UNCHANGED, checked: `REQ-LOCAL-JOB-VISIBILITY` (local jobs keep their log line), the Acceptance's one completion or failure comment (the net posts only where nothing was posted), the answer-draft exception and the trigger label, which stays on. |
