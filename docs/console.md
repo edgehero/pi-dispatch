@@ -1024,9 +1024,13 @@ not load where it was read and is refused. That holds on Triggers, a project's p
 Watch, Sandboxes, Models, Zero touch, Connections, the overview's Caps card and the flows page. Sandboxes names the
 file that stopped a preparation, and says a projects file the deployment names does not exist when it is absent. A
 file that does not load is not a read that failed, so a live page's pill stays Live over it. Triggers says a rule had 0 runs where
-the run history was read, and "unknown" only where a side of it was not. A refused run's page says its host has no
+the run history was read, and "unknown" only where a side of it was not. A count of a trigger's runs, on Triggers, on
+the trigger's own page and on a project's page, is said as it is only where the history was read whole (the fleet's
+newest 1,000 runs, when it holds fewer); otherwise it is "at least", and Triggers says why in one line ("Counts and
+spend are lower bounds: ..."). The three pages count the same runs for a trigger, each over its own window. A refused run's page says its host has no
 live registry row, published no doctor result or has no queue listed where the hosts were read and that is so, and
-"could not be read" only of what was not read. Fleet says the hosts could not
+"could not be read" only of what was not read. Where the registry answered before and does not now, it says "not
+read this time: the host registry could not be read", and shows no beat's age for a row that is as last seen. Fleet says the hosts could not
 be read rather than that none is registered, and with the overview it says the running jobs are not known rather than
 that nothing is running; a schedule's stalls it did not read are "not known". When only some hosts' rows answered in
 time, the pages say the host registry was read in part rather than that it could not be read: a host whose row did not
@@ -1037,10 +1041,15 @@ Spend, the budget split's agreement (never "All hosts agree"), which hosts serve
 whether a queue a one-queue pause does not know belongs to such a host. Models says the waiting jobs and doctor's
 proposals are not known rather than that there are none. Meanwhile a live page's pill says Not live (its tooltip says
 the console could not read all it needs for the page), also when only a part was not read: the host registry, the
-running jobs or the parked runs on any page, and on each live page whatever a card there says could not be read (the
-waiting jobs, the failed jobs or the doctor results on the overview, Fleet, Set up and a host's page; the run history
-or its last 24 hours on Runs; a run's record, transcript, inbox or chat; the open shells or cleanup notices on
-Sandboxes; the answer rules on Parked). A page whose reads were cut short says Not live too. A list that is full is
+running jobs or the parked runs on any page, and on each live page whatever a card there says could not be read: on
+the overview the waiting jobs, the failed jobs, the doctor results, the day's runs and a settings overlay nobody could
+read; on Fleet the waiting jobs, the failed jobs, the doctor results and the held jobs; on Set up the doctor results
+and a triggers file nobody could read; on a host's page the waiting jobs and the doctor results, and the run records
+of a host with no row; the run history or its last 24 hours on Runs; a run's record, transcript, inbox or chat, and
+for a refused run its host's doctor results and the day's runs; the open shells or cleanup notices on Sandboxes, and
+its configuration where a file of it could not be read; the answer rules on Parked where the triggers file could not
+be read, and a question's check that could not be made. A file that was read and does not load is said as that and
+is not a read that failed. A page whose reads were cut short says Not live too. A list that is full is
 not one that could not be read: with more open shells or cleanup notices than the 256 a list holds, or with an entry
 that does not parse, the page says that and stays Live. The pill does not follow what a host published about itself as unreadable, or a host's capacity history,
 which is read when the page loads. A page kept as last seen shows no Parked count until it is read again.

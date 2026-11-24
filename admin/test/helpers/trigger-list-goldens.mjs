@@ -5,7 +5,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./temp-dir.mjs";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
-import { normalizeTriggerForDisplay } from "../../src/read-model.mjs";
+import { normalizeTriggerForDisplay, WIDE_RUNS_CUT_TEXT } from "../../src/read-model.mjs";
 import { triggerListOf } from "../../src/trigger-list.mjs";
 import { checkTriggerEvent } from "../../src/trigger-check.mjs";
 import { loadPageData, renderPage } from "../../src/console/pages.mjs";
@@ -26,13 +26,13 @@ function checked(input) {
   }
   return checkTriggerEvent({ triggersPath: checkerPath, input });
 }
-export async function triggerListGolden({ role = "operator", state = "history-cut", readOnly = false, check = null, kind = "all", extraTriggers = [], recordsOverride = undefined, complete = false, coverage = complete ? {} : { truncated: true } } = {}) {
+export async function triggerListGolden({ role = "operator", state = "history-cut", readOnly = false, check = null, kind = "all", extraTriggers = [], recordsOverride = undefined, whole = false, coverage = whole ? { whole: true } : { cut: WIDE_RUNS_CUT_TEXT } } = {}) {
   const triggers = entries.map((entry, index) => ({ ...normalizeTriggerForDisplay(entry), index }));
   triggers.push(...extraTriggers);
   if (state === "spent") triggers.push({ index: 4, type: "issue", forge: "github", flow: "close", action: ["closed"], number: 42, once: true, disarmed: { jobId: "gh-spent", at: new Date(NOW - 3600000).toISOString() } });
   if (state === "dense") triggers[0].pattern = "* * * * *";
   const snapshot = {
-    readAt: NOW, triggers: state === "unreadable" ? { invalid: true } : { triggers: state === "empty" ? [] : triggers },
+    readAt: NOW, triggers: state === "unreadable" ? { unreadable: "EACCES" } : state === "refused" ? { invalid: "triggers file is not valid JSON" } : { triggers: state === "empty" ? [] : triggers },
     runs: [], schedulers: [{ key: "nightly", pattern: state === "dense" ? "* * * * *" : "0 3 * * *", next: NOW + 3600_000 }],
     waiting: { rows: [] }, settings: { overlay: {} },
     pauseWindows: { windows: parsePauseWindows(JSON.stringify({ windows: [{ scope: "github:acme/web", from: "22:00", to: "06:00", tz: "Europe/Amsterdam" }] }), "fixture") },
@@ -63,9 +63,14 @@ export const TRIGGER_LIST_DRAW = Object.freeze({
   "triggers-spent.operator": () => triggerListGolden({ state: "spent" }),
   "triggers-dense.operator": () => triggerListGolden({ state: "dense" }),
   "triggers-empty.viewer": () => triggerListGolden({ role: "viewer", state: "empty" }),
+  // One word per case (issue #988): a file nobody could read, and one that was read and is refused.
   "triggers-unreadable.viewer": () => triggerListGolden({ role: "viewer", state: "unreadable" }),
+  "triggers-file-refused.viewer": () => triggerListGolden({ role: "viewer", state: "refused" }),
   "triggers-no-snapshot.operator": () => triggerListGolden({ state: "no-snapshot" }),
   "triggers-history-cut.operator": () => triggerListGolden(),
+  // Issue #988: a history its reader says was read whole. Every count is itself and nothing says "at least"; each
+  // other golden of this page draws a history that is cut.
+  "triggers-history-whole.operator": () => triggerListGolden({ whole: true }),
   "triggers-history-unknown.viewer": () => triggerListGolden({ role: "viewer", state: "history-unknown" }),
   "triggers-zone-unknown.operator": () => triggerListGolden({ state: "zone-unknown" }),
   "triggers-readonly.operator": () => triggerListGolden({ readOnly: true }),

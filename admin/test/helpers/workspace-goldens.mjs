@@ -19,11 +19,14 @@ export function workspaceFixture({ state = "open", role = "operator", readOnly =
   if (state === "unknown") data.workspace = { unknown: true, sessionsUnknown: true };
   if (state === "deleted") data.run = { missing: true };
   if (state === "stale") { data.workspace = { unknown: true, sessionsUnknown: true }; data.browserGateways.partial = true; }
+  // Issue #988: a list of open shells that was read and is full, and one that holds a registration that does not parse.
+  if (state === "shells-full") data.workspace = { unknown: true, sessionsUnknown: true, sessionsUnread: false, sessionsMore: 3, sessionsUnreadable: 0 };
+  if (state === "shells-unparsed") data.workspace = { unknown: true, sessionsUnknown: true, sessionsUnread: false, sessionsMore: 0, sessionsUnreadable: 1 };
   if (state === "fork") data.forkPoints = { ok: true, entries: [{ id: "safe-point", positions: ["at"], role: "assistant" }] };
   return { data, query: { id: record.jobId }, session: { name: role === "operator" ? "sam" : "watcher", role }, role, name: "sam", readOnly, env: {}, now: NOW };
 }
 
-const states = ["open", "shared", "kept", "failed", "awaiting", "unsupported", "running", "recovery", "never-started", "refused", "expired", "swept", "retention-off", "unknown", "stale", "fork"];
+const states = ["open", "shared", "kept", "failed", "awaiting", "unsupported", "running", "recovery", "never-started", "refused", "expired", "swept", "retention-off", "unknown", "stale", "shells-full", "shells-unparsed", "fork"];
 export const WORKSPACE_DRAW = Object.freeze({
   ...Object.fromEntries(states.map((state) => [`run-workspace-${state}.operator`, async () => String((await renderPage("run", workspaceFixture({ state }))).html)])),
   "run-workspace-readonly.operator": async () => String((await renderPage("run", workspaceFixture({ readOnly: true }))).html),

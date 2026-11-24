@@ -15,6 +15,7 @@ import { QUEUE_CLOSE_TIMEOUT_MS, readRunById, RUN_MIRROR_UNREAD } from "./read-m
 import { boundedClient, checkTriggerFixSource, connectedQueue, CONFIRM_READ_TIMEOUT_MS, refusedByValkey, STORE_TIMEOUTS, TRIGGER_FIX_UNCHECKED, unconfirmedWrite, valkeyRead, within } from "./job-actions.mjs";
 import { runMatches } from "./run-filter.mjs";
 import { planZeroTouchGroup, planZeroTouchName, planZeroTouchInstruction, planZeroTouchInstructionUndo, applyZeroTouchFilePlan } from "./zero-touch-actions.mjs";
+import { fileCaseOfError } from "./file-case.mjs";
 const hash = (text) => createHash("sha256").update(text).digest("hex");
 
 /**
@@ -206,7 +207,8 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         // answer; one nobody could read is unread; one that was read and is refused does not load.
         let cfg; let configUnavailable = false; let configuration = null;
         try { cfg = config(); } catch (error) {
-          if (error?.code !== "ENOENT") { configUnavailable = true; configuration = typeof error?.code === "string" && /^E[A-Z0-9]+$/.test(error.code) ? "unreadable" : "invalid"; }
+          const fileCase = fileCaseOfError(error);
+          if (fileCase !== "absent") { configUnavailable = true; configuration = fileCase === "unreadable" ? "unreadable" : "invalid"; }
         }
         const { groups } = step();
         const [questions, changes] = await Promise.all([groups.publicSnapshot({ names: cfg?.names ?? {} }), fixes.publicSnapshot()]);

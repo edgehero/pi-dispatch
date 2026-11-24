@@ -23,6 +23,8 @@ import { dollarWindowSpecs } from "./dollar-windows.mjs";
 import { doctorStale } from "./doctor-view.mjs";
 import { meteredRunMicros } from "./costs.mjs";
 import { newerSkippedSentence, readableRecords } from "./newer-release.mjs";
+import { FILE_WORDS, fileCaseOfError, fileCaseOfView } from "./file-case.mjs";
+import { mirrorStateOf } from "./mirror-words.mjs";
 
 /** The waits the Models page lists beside cooldowns, issue #1008's quota reserve among them. */
 const MODEL_WAIT_REASONS = Object.freeze(["model-cooldown", "model-window", "subscription-quota", "subscription-reserve"]);
@@ -215,8 +217,8 @@ export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], dep
  * read failed (an errno, or the settings reader's own word for it), and it "does not load" where it was read and is
  * refused. A file that does not exist never comes here: it is an empty document.
  */
-const fileProblemWord = (error) => (error?.settingsUnreadable === true || (typeof error?.code === "string" && /^E[A-Z0-9]+$/.test(error.code)) ? "could not be read" : "does not load");
-const settingsRefusal = (invalid) => Object.assign(new Error("invalid settings"), { settingsUnreadable: /^settings file unreadable/.test(String(invalid)) });
+const fileProblemWord = (error) => FILE_WORDS[error?.settingsUnreadable === true ? "unreadable" : fileCaseOfError(error)];
+const settingsRefusal = (invalid) => Object.assign(new Error("invalid settings"), { settingsUnreadable: fileCaseOfView({ invalid }) === "unreadable" });
 
 function readText(path, fs, { missing = null } = {}) {
   if (!path) return missing;
@@ -257,7 +259,7 @@ export async function readModelsHistory({ fleet, now, seed = null, within = null
     let page;
     try { page = await fleetRead(within, (bound) => fleet.runsPage({ before, limit: 100, ...bound })); } catch { partial = true; break; }
     if (!Array.isArray(page?.runs) || page.unreachable || page.refusal) { partial = true; break; }
-    if (page.mirror !== "ok" || page.truncated) partial = true;
+    if (mirrorStateOf(page.mirror) !== "read" || page.truncated) partial = true;
     for (const record of page.runs.slice(0, MODELS_LIMITS.records - records.length)) if (runId(record?.jobId) && Number.isFinite(atOf(record)) && atOf(record) <= now && atOf(record) >= now - MODELS_LIMITS.days * DAY && records.length < MODELS_LIMITS.records) records.push(record);
     if (page.runs.length > 100 || records.length >= MODELS_LIMITS.records) { truncated = page.next !== null || page.runs.length > 100; break; }
     if (page.next === null || page.next === undefined || page.next <= now - MODELS_LIMITS.days * DAY) break;

@@ -35,6 +35,7 @@ import {
 import { OUTCOME_WORD_OF, capitalised } from "../../words.mjs";
 import { newerSkippedSentence } from "../../newer-release.mjs";
 import { canAct, timeHtml, RUN_ID_RE, shownPath } from "./common.mjs";
+import { FILE_WORDS } from "../../file-case.mjs";
 
 export const SPEND_VIEWS = Object.freeze([
   ["insights", "/insights", "Spend"],
@@ -522,9 +523,7 @@ export function spendCaps(v) {
       dollar.invalid?.length ||
       dollar.limits?.invalid ||
       b.scopedInvalid
-        ? note(
-            "The settings file or counters could not be read; amounts marked unknown are not zero.",
-          )
+        ? note(capsTroubleText(b, dollar))
         : null
     }${["day", "week", "month"].map((key) =>
       b[key]?.cap
@@ -735,6 +734,27 @@ function envelopeForm(p) {
  * The Spend view's split card where the split's read did not answer (`kind: "unreachable"`, issue #962): a split may
  * well be in force, so "No budget split is available." is not said.
  */
+/**
+ * Why the caps card marks an amount unknown, by its cause (issue #988). One sentence, "The settings file or counters
+ * could not be read", was said of a counter read that failed, of a settings overlay that does not load, of a dollar
+ * cap that does not parse and of a scoped-limits file that does not load alike.
+ */
+function capsTroubleText(b, dollar) {
+  const causes = [
+    b.unreachable || dollar.countersUnreachable ? "the counters could not be read" : null,
+    b.settingsInvalid || dollar.settingsInvalid ? `the settings overlay ${FILE_WORDS[b.settingsCase] ?? FILE_WORDS.refused}` : null,
+    dollar.invalid?.length ? "a dollar cap of the settings does not parse" : null,
+    dollar.limits?.invalid || b.scopedInvalid ? `the scoped-limits file ${FILE_WORDS.refused}` : null,
+  ].filter(Boolean);
+  return `${capitalised(causes.join(", and "))}; amounts marked unknown are not zero.`;
+}
+
+/** The envelope file's trouble, one word per case (issue #988, `normAllocation`'s `fileCase`). */
+const ENVELOPE_WORDS = Object.freeze({
+  absent: Object.freeze({ title: "The envelope file does not exist", body: "The envelope file does not exist. Check PI_ENVELOPE_FILE." }),
+  unreadable: Object.freeze({ title: "The envelope file could not be read", body: "The envelope file could not be read. Check PI_ENVELOPE_FILE and who may read it." }),
+  refused: Object.freeze({ title: "The envelope does not load", body: "The envelope does not load. Check its fields in Configuration." }),
+});
 export const SPLIT_UNREAD_TEXT =
   "The budget split could not be read: the queue is not answering. Whether a split is in force is not known.";
 function allocation(v) {
@@ -1133,11 +1153,12 @@ export function splitPriorities(v) {
 export function splitEnvelope(v) {
   const p = payload(v).allocation;
   const e = envelopeForm(p);
-  if (!e)
-    return empty(
-      "Envelope",
-      "The envelope is missing or could not be read. Check PI_ENVELOPE_FILE.",
-    );
+  if (!e) {
+    // The envelope file in the word of its case (issue #988). One sentence said "missing or could not be read" of every
+    // case, beside a banner that said "does not load" of every case.
+    const a = allocation(v);
+    return empty("Envelope", a?.kind === "problem" ? ENVELOPE_WORDS[a.fileCase].body : a?.kind === "unset" ? "No envelope is configured: PI_ENVELOPE_FILE is unset." : "The envelope could not be read. Check PI_ENVELOPE_FILE.");
+  }
   return card(
     "Envelope",
     html`${ui.facts(
@@ -1299,11 +1320,7 @@ export function splitStates(v) {
           "No envelope: set an envelope before splitting a budget. PI_ENVELOPE_FILE is unset, so delegation is off.",
         ]
       : a?.kind === "problem"
-        ? [
-            "failed",
-            "The envelope does not load",
-            "The envelope does not load. Check its fields in Configuration.",
-          ]
+        ? ["failed", ENVELOPE_WORDS[a.fileCase].title, ENVELOPE_WORDS[a.fileCase].body]
         : a?.kind === "unreachable"
           ? [
               "failed",
@@ -1502,8 +1519,9 @@ export function breakdownRows(v) {
     html`${note("By flow and by project are on the Spend view.")}
       <h3>By trigger</h3>
       ${f.byTrigger === null
-        // Not computed, and only a file that could not be read leaves it so here (`assembleCosts`): an empty table would read as no trigger having spent.
-        ? note("The triggers file could not be read, so this spend is not split by trigger.")
+        // Not computed, which a triggers file that could not be read or does not load leaves it (`assembleCosts`, the fold's
+        // `triggersFile`): an empty table would read as no trigger having spent. One word per case (issue #988).
+        ? note(`The triggers file ${FILE_WORDS[f.triggersFile] ?? FILE_WORDS.unreadable}, so this spend is not split by trigger.`)
         : html`<div class="table-scroll">
         <table class="table">
           <thead>

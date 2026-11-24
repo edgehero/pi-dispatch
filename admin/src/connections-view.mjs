@@ -24,6 +24,7 @@ import { doctorHostsOf, doctorStale } from "./doctor-view.mjs";
 import { PANEL_SERVICE_KEYS } from "./read-model.mjs";
 import { DOLLAR_ENV_NAMES } from "@edgehero/pi-dispatch/money";
 import { readHookRuns, hookRunsView } from "@edgehero/pi-dispatch/hook-runs";
+import { fileCaseOfView } from "./file-case.mjs";
 
 /** A closed display vocabulary: arbitrary strings, even numeric-looking secrets, are never printed. */
 export const CONNECTION_ENV_TYPES = Object.freeze({
@@ -209,7 +210,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   const incompleteKeys = new Set([...(metadata?.unread ?? []).map((r) => r.key), ...(metadata?.hazardSkipped ?? [])]);
   const triggers = snapshot?.triggers?.triggers;
   // The triggers file was read and is refused (issue #988): "does not load", where a file nobody could read "could not be read".
-  const triggersRefused = !Array.isArray(triggers) && Boolean(snapshot?.triggers?.invalid);
+  const triggersRefused = !Array.isArray(triggers) && fileCaseOfView(snapshot?.triggers, "triggers") === "refused";
   let defaultProvider = null;
   try { defaultProvider = snapshot?.settings?.overlay?.provider ?? providerFrom(file); } catch { /* The declaration remains shown as set; no malformed provider enters a source lookup. */ }
   const providerNames = [...new Set([defaultProvider, ...(triggers ?? []).map((t) => t.provider)].filter((p) => safeName(p)))];

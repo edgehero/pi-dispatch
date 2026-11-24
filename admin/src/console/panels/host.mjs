@@ -416,11 +416,16 @@ export const hostBudget = card("Slots and budget", (h, v) => {
     beatAgeOf(h) <= 60000;
   const readable = !h.jobsUnreadable && Array.isArray(h.jobs);
   const complete = readable && h.jobsMore === 0;
+  // Why the slots are not drawn, by its cause (issue #988). One sentence said "this host is late or its running-job
+  // list was not read whole" of a healthy host whose slot count the page did not hold, which is all an agent's copy
+  // of a row lacks: neither was so.
+  const late = beatAgeOf(h) === null || beatAgeOf(h) > 60000;
+  const slotsUnknownWhy = !complete ? "its running-job list was not published whole." : late ? "this host is late." : "its slot count is not known here.";
   const occupied = complete
     ? `${jobsKnown ? "" : "Last published: "}${running + orphans} of ${slots ?? "unknown"} slots taken: ${running} running, ${orphans} held by orphaned containers.`
     : readable && running + orphans > 0
       ? `At least ${running + orphans} occupied ${running + orphans === 1 ? "slot is" : "slots are"} listed: ${running} running, ${orphans} held by orphaned containers. The whole occupied count is not known.`
-      : "The occupied slot count is not known: the job inventory was not read whole.";
+      : "The occupied slot count is not known: the host's job list was not published whole.";
   return html`<div class="hd-slots hd-sls">${
     jobsKnown
       ? ui.slots({
@@ -428,7 +433,7 @@ export const hostBudget = card("Slots and budget", (h, v) => {
           hold: orphans,
           free: Math.max(0, slots - running - orphans),
         })
-      : html`<p> Free slots are not known: this host is late or its running-job list was not read whole. </p>`
+      : html`<p> Free slots are not known: ${slotsUnknownWhy} </p>`
   } <p> ${occupied} PI_CONCURRENCY ${slots ?? "unknown"}. </p></div> ${budgetMeter(
     h,
     "budgetMemMiB",

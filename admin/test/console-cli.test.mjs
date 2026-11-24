@@ -1550,6 +1550,29 @@ test("a page load's deadline reaches each view's own reads through the console's
   assert.equal(seen.updates[1].redis, null);
 });
 
+test("the browser terminals' view without a broker says which way its list of open shells is short, over an enrolled gateway registry", async () => {
+  // Issue #988: a list that is full, or that holds a registration that does not parse, is not a read that failed, and
+  // the run page tells them apart by these three fields beside `partial`. Zeroed, a console with a gateway registry
+  // would call a full list unread again.
+  const dep = deployment();
+  writeFileSync(join(dep.dir, "sandbox-gateways.json"), JSON.stringify({ version: 1, consoleOrigin: "http://localhost:4790", hosts: { mini1: { origin: "http://127.0.0.1:4791" } } }), { mode: 0o600 });
+  const modules = fakeModules();
+  let shells = null;
+  let captured;
+  modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+  const built = modules.readModel.createFleetReader;
+  modules.readModel.createFleetReader = (...args) => Object.assign(built(...args), { sandboxSessions: async () => shells });
+  let stop;
+  const until = new Promise((resolve) => { stop = resolve; });
+  assert.equal(await runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, uid: process.geteuid?.(), out: () => {}, err: () => {}, until, onListening: () => stop() }), 0);
+  const view = async (answer) => { shells = answer; return captured.pageDeps.gatewayView(); };
+  const open = { host: "mini1", id: "gh-1" };
+  assert.deepEqual(await view({ sessions: [open], more: 0, unreadable: 0 }), { enabledHosts: ["mini1"], sessions: [open], partial: false, unread: false, more: 0, unreadable: 0 }, "read whole");
+  assert.deepEqual(await view({ sessions: [open], more: 3, unreadable: 0 }), { enabledHosts: ["mini1"], sessions: [open], partial: true, unread: false, more: 3, unreadable: 0 }, "a full list: cut, and read");
+  assert.deepEqual(await view({ sessions: [], more: 0, unreadable: 2 }), { enabledHosts: ["mini1"], sessions: [], partial: true, unread: false, more: 0, unreadable: 2 }, "registrations that do not parse: read");
+  assert.deepEqual(await view({ unreachable: true }), { enabledHosts: ["mini1"], sessions: [], partial: true, unread: true, more: 0, unreadable: 0 }, "a read that did not answer: the one that is unread");
+});
+
 test("the rules read joins retained local history, mirrored records and verified scheduler clocks without changing shared state", async () => {
   const dep = deployment();
   let t = T0;
@@ -1575,11 +1598,19 @@ test("the rules read joins retained local history, mirrored records and verified
   assert.deepEqual(read.scheduleZones, { nightly: { zone: "Europe/Amsterdam" } });
   assert.deepEqual(zoneReads[0].triggers, snapshot.triggers.triggers);
   assert.equal(zoneReads[0].now(), T0);
-  assert.equal(read.coverage.complete, false, "a full local scan alone cannot promise full foreign history");
+  // Issue #988: whole is said only where the window says it of itself; a full local scan alone cannot promise the
+  // fleet's history, and neither can a window that carries no word.
+  assert.deepEqual([read.coverage.whole, read.coverage.partial], [false, false], "a window that does not say it is whole is not");
   assert.deepEqual(read.subscriptions, [{ provider: "plan:test" }]);
   assert.equal(read.snapshot, snapshot);
   await captured.pageDeps.triggerList(snapshot);
   assert.equal(scans.length, 1, "the retained local scan is cached on the injected clock");
+  assert.equal((await captured.pageDeps.triggerList({ ...snapshot, recordsWhole: true })).coverage.whole, true, "the window's own word");
+  const sideUnread = await captured.pageDeps.triggerList({ ...snapshot, recordsWhole: false, parkedUnreachable: "the run mirror could not be read" });
+  assert.deepEqual([sideUnread.coverage.whole, sideUnread.coverage.partial], [false, "a side of the fleet's run records could not be read"]);
+  // No window at all (its fold failed): the newest runs stand in, and nothing says that list is whole.
+  const newest = await captured.pageDeps.triggerList({ triggers: snapshot.triggers, runs: [mirror], recordsWhole: true });
+  assert.deepEqual([newest.records, newest.coverage.whole], [[local, mirror], false]);
   // A snapshot of the files alone says the fleet's Valkey was not read: the zones are not asked of it a second time.
   const zonesAsked = zoneReads.length;
   const filesOnly = await captured.pageDeps.triggerList({ triggers: snapshot.triggers, schedulersUnread: true });
@@ -1595,7 +1626,7 @@ test("the rules read joins retained local history, mirrored records and verified
   modules.readModel.scanRunRecords = () => ({ unreachable: "read failed" });
   const unknown = await captured.pageDeps.triggerList({ triggers: snapshot.triggers });
   assert.equal(unknown.records, null, "an unread local history and absent mirror are not an empty readable history");
-  assert.equal(unknown.coverage.partial, true);
+  assert.deepEqual([unknown.coverage.partial, unknown.coverage.whole], ["this host's run records could not be read", false], "the side is named");
   const real = await loadModules();
   assert.equal(typeof real.scheduleZones.readTriggerScheduleZones, "function");
   assert.equal(typeof real.triggerCheck.checkTriggerEvent, "function");

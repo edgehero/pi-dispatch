@@ -278,8 +278,11 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
     // Match the worker/receiver rule: unset defaults here, explicit empty remains invalid.
     const path = configured.PI_TRIGGERS_FILE === "" ? "" : resolve(root, configured.PI_TRIGGERS_FILE ?? "triggers.json");
     const raw = reads.document ? reads.document(path) : metadataBytes(path, fs, uid);
-    if (raw === null) throw Error();
-    const doc = parseTriggersDocument(typeof raw === "string" ? raw : JSON.stringify(raw), path);
+    // A triggers file that does not exist is an empty document (issue #988): no trigger names a provider, which is a
+    // read's answer and leaves the list whole. It was "Some provider references could not be read." A setting that
+    // names no file at all (explicit empty) is not that: which file the workers run is then not known.
+    if (raw === null && path === "") throw Error();
+    const doc = raw === null ? { triggers: [], modelRoles: {} } : parseTriggersDocument(typeof raw === "string" ? raw : JSON.stringify(raw), path);
     for (const row of doc.triggers) {
       if (row.run.provider) use(row.run.provider, "trigger");
       // Issue #1029: a watch rule's classifier needs its provider's credential like the rule's own model, and may bring

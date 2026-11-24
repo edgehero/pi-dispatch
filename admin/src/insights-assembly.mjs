@@ -55,6 +55,7 @@ import { parseLiveJobs, parseJobsMore } from "@edgehero/pi-dispatch/live-jobs";
 import { deploymentDollarCaps } from "./dollar-windows.mjs";
 import { fromNewerRelease, readableRecords } from "./newer-release.mjs";
 import { windowState } from "@edgehero/pi-dispatch/budget";
+import { fileCaseOfView } from "./file-case.mjs";
 
 /** The environment a caller that names none reads: this process's own. */
 export function processEnv() {
@@ -127,9 +128,11 @@ export function assembleCosts(paths, window, { flow, repo, project, pricing, now
   // The trigger join over the SCOPED records (a flow-filtered fold attributes only what it folds),
   // the same file-read-plus-pure-fold path the dashboard seam takes.
   const triggersView = readTriggers({ triggersPath: paths.triggersPath });
-  // No join for a file nobody could read: `byTrigger` then reads as not computed, where an empty list of triggers would file
-  // every forge run under no trigger, and a page would report that as what the runs were.
-  const triggerJoin = triggersView?.unreadable ? null : attributeRunsToTriggers({ records: scoped, triggers: Array.isArray(triggersView?.triggers) ? triggersView.triggers : [] });
+  // No join for a file nobody could read, nor for one that was read and is refused (issue #988): `byTrigger` then reads as
+  // not computed, where an empty list of triggers would file every forge run under no trigger, and a page would report
+  // that as what the runs were. `triggersFile` on the fold says which case, for the page's word.
+  const triggersCase = fileCaseOfView(triggersView, "triggers");
+  const triggerJoin = triggersCase === "unreadable" || triggersCase === "refused" ? null : attributeRunsToTriggers({ records: scoped, triggers: Array.isArray(triggersView?.triggers) ? triggersView.triggers : [] });
   const fold = foldCosts({
     records: scoped,
     subscriptions: Array.isArray(subs?.subscriptions) ? subs.subscriptions : [],
@@ -140,6 +143,7 @@ export function assembleCosts(paths, window, { flow, repo, project, pricing, now
     triggerJoin,
   });
   if (newerSkipped > 0) fold.newerSkipped = newerSkipped;
+  if (triggerJoin === null) fold.triggersFile = triggersCase;
   return { fold, records: scoped };
 }
 
@@ -260,7 +264,7 @@ export async function assembleBudgetView(paths, { redisFn, env, nowMs = Date.now
   });
   return {
     unreachable,
-    ...(env ? { dollars: await readDollarWindows({ paths, env, now: new Date(nowMs), redisFn }), settingsInvalid: Boolean(view?.invalid), settings: overlay } : {}),
+    ...(env ? { dollars: await readDollarWindows({ paths, env, now: new Date(nowMs), redisFn }), settingsInvalid: Boolean(view?.invalid), ...(view?.invalid ? { settingsCase: fileCaseOfView(view) } : {}), settings: overlay } : {}),
     softHoldPct: pct,
     day: slotWindow("day", "dailyCap"),
     week: slotWindow("week", "weeklyCap"),
@@ -325,7 +329,8 @@ export async function assembleAllocationView(paths, counts, { fullPaths = false,
   if (!read.envelope) {
     const file = String(paths.envelopeFile);
     const invalid = read.invalid !== undefined && !fullPaths ? String(read.invalid).split(file).join(basename(file)) : read.invalid;
-    return { problem: envelopeProblem({ ...read, invalid }) };
+    // `envelopeCase` (issue #988): which case the file is in, for a page that says it in one word (`file-case.mjs`).
+    return { problem: envelopeProblem({ ...read, invalid }), envelopeCase: read.missing ? "absent" : read.unreadable ? "unreadable" : "refused" };
   }
   const e = read.envelope;
   const head = { window: e.window, totalMicros: e.totalMicros, floors: { ...e.floors }, delegation: e.delegation?.enabled === true, ...(consoleView ? { envelope: e, digest: read.digest, file: fullPaths && role === "operator" ? paths.envelopeFile : basename(paths.envelopeFile) } : {}) };

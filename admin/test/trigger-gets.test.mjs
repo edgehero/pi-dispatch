@@ -152,10 +152,18 @@ test("a file a newer release wrote draws no card: its entries may use fields thi
   const data = await loadPageData("trigger", parsed.query, { now: () => NOW, env: {}, paths: { triggersPath: TRIGGER_GETS_PATH }, fs: fileOnlyFs(text), fleet: { snapshot: async () => snapshot }, hostLoads: async () => null, triggerEditor: () => ({}) }, { role: "operator" });
   const page = String((await renderPage("trigger", { query: parsed.query, session: { name: "ops", role: "operator" }, data })).html);
   assert.equal(panelOf(page, "p-trigger-gets").replace(/<section[^>]*>/, ""), "");
-  // The row can still be read when only the snapshot says the file is bad: the snapshot's word stands.
+  // One reading of the file for the whole load (issue #988): where the snapshot read a file that did not load and
+  // the load's own reading takes it, the page is drawn from the reading, row and card alike. It drew a row from one
+  // read beside "does not load" from the other.
   const bad = await loadPageData("trigger", parsed.query, { now: () => NOW, env: {}, paths: { triggersPath: TRIGGER_GETS_PATH }, fs: fileOnlyFs(getsFile()), fleet: { snapshot: async () => ({ ...snapshot, triggers: { invalid: "broken" } }) }, hostLoads: async () => null, triggerEditor: () => ({}) }, { role: "operator" });
   const badPage = String((await renderPage("trigger", { query: parsed.query, session: { name: "ops", role: "operator" }, data: bad })).html);
-  assert.equal(panelOf(badPage, "p-trigger-gets").replace(/<section[^>]*>/, ""), "");
+  assert.ok(Array.isArray(bad.snapshot.triggers.triggers) && panelOf(badPage, "p-trigger-gets").includes("What its jobs get") && !textOf(badPage).includes("The triggers file does not load"), "the reading's word, everywhere on the page");
+  // And the other way: the snapshot holds the row, and the load's reading finds the file gone. The row is the last
+  // read, the card says so, and nothing on the page says anything else of the file.
+  const gone = await loadPageData("trigger", parsed.query, { now: () => NOW, env: {}, paths: { triggersPath: TRIGGER_GETS_PATH }, fs: { readFileSync: () => { throw Object.assign(new Error("no such file"), { code: "ENOENT" }); }, existsSync: () => false }, fleet: { snapshot: async () => ({ ...snapshot, triggers: readTriggers({ triggersPath: TRIGGER_GETS_PATH, fs: fileOnlyFs(getsFile()) }) }) }, hostLoads: async () => null, triggerEditor: () => ({}) }, { role: "operator" });
+  const gonePage = textOf(String((await renderPage("trigger", { query: parsed.query, session: { name: "ops", role: "operator" }, data: gone })).html));
+  assert.ok(gonePage.includes("This page could not read this trigger's row from the file, so it shows the last read and offers no change.") || gonePage.includes("This page could not read this trigger’s row from the file, so it shows the last read and offers no change."), gonePage.match(/[^.]{0,60}last read[^.]{0,60}/)?.[0]);
+  assert.ok(!gonePage.includes("The triggers file does not exist") && !gonePage.includes("The triggers file does not load"));
 });
 
 test("a page that came from a refused run says a change here is not linked to it, because the banner above says changes are", async () => {
@@ -626,14 +634,23 @@ test("a person's page keeps one editor for each key and says where the rows went
   assert.ok(text.includes("Secret profile:"));
   assert.ok(!text.includes("not in an agent’s read"));
   for (const says of ["This trigger has instructions.", "Forge gitlab", "Who may fire it The actor must be a GitLab project member", "run.kind gitlab", "run.progress true", "Hosts missing its required secret"]) assert.ok(text.includes(says), says);
-  // No card over a file the snapshot calls invalid, and the rows it would have drawn are not lost with it.
-  const fs = fileOnlyFs(getsFile(FULL_ENTRY));
-  const snapshot = { readAt: NOW, triggers: { invalid: "triggers file failed its check" }, runs: [], waiting: { rows: [] } };
+  // No card over a file that does not load, and the rows it would have drawn are not lost with it. The file is one
+  // whose row can be read and whose list cannot (`triggers` is no array): what the snapshot says of it and what the
+  // load's own reading says are one thing.
+  const fs = fileOnlyFs(JSON.stringify({ triggers: { ...JSON.parse(getsFile(FULL_ENTRY)).triggers } }));
+  const { readTriggers } = await import("../src/read-model.mjs");
+  const snapshot = { readAt: NOW, triggers: readTriggers({ triggersPath: TRIGGER_GETS_PATH, fs }), runs: [], waiting: { rows: [] } };
+  assert.equal(typeof snapshot.triggers.invalid, "string");
   const parsed = parsePageQuery("trigger", "index=2");
   const data = await loadPageData("trigger", parsed.query, { now: () => NOW, env: {}, paths: { triggersPath: TRIGGER_GETS_PATH }, fs, fleet: { snapshot: async () => snapshot }, hostLoads: async () => null, triggerEditor: () => ({}) }, { role: "viewer" });
   const invalid = textOf(String((await renderPage("trigger", { query: parsed.query, session: VIEWER_SESSION, data })).html));
   assert.ok(!invalid.includes("are in What its jobs get."), "no card, so nothing points at one");
   assert.ok(invalid.includes("run.flow"));
+  // And each reader of the load was handed that one reading: the file is opened once.
+  let opens = 0;
+  const counting = { ...fs, readFileSync: (...args) => { opens += 1; return fs.readFileSync(...args); } };
+  await loadPageData("trigger", parsed.query, { now: () => NOW, env: {}, paths: { triggersPath: TRIGGER_GETS_PATH }, fs: counting, fleet: { snapshot: async () => { throw new Error("down"); } }, hostLoads: async () => null, triggerEditor: () => ({}), triggerFireCheck: (index, { fs: reading } = {}) => { reading.readFileSync(TRIGGER_GETS_PATH, "utf8"); return { refusal: "checked" }; } }, { role: "operator" });
+  assert.equal(opens, 1, "the card's entry, the texts, the row and Fire now's check read one reading");
 });
 
 test("turning the staged packages on over a file's false is planned, takes the key away, and its Undo puts the file back", async () => {
@@ -694,7 +711,8 @@ test("a page that cannot match runs to a row says nothing of its runs, while the
     }
   }
   // A file that does not load still gives the page its row, and the runs cannot be matched to it.
-  const invalid = textOf(panelOf(await draw({ invalid: "triggers file failed its check" }, { fs: fileOnlyFs(getsFile()) }), "p-trigger-runs"));
+  // (A file whose row can be read and whose list cannot: `triggers` is no array. One reading says both.)
+  const invalid = textOf(panelOf(await draw({ invalid: "triggers file must have a \"triggers\" array" }, { fs: fileOnlyFs(JSON.stringify({ triggers: { ...JSON.parse(getsFile()).triggers } })) }), "p-trigger-runs"));
   assert.ok(invalid.includes("This page could not match runs to this row, so it says nothing of them."), invalid);
   for (const never of ["No runs were found", "the queue could not be read", "runs in the last 24 hours"]) assert.ok(!invalid.includes(never), never);
   // The file read: the same run is its row's, no run is what it says where none is, and the queue is what the queue is.

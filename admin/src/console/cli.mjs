@@ -950,23 +950,31 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
           // A snapshot of the files alone (issue #844) says the fleet's Valkey was not read: no second wait on it for zones.
           snapshot?.schedulersUnread === true ? {} : m.scheduleZones.readTriggerScheduleZones({ url: side.paths.valkeyUrl, triggers: snapshot?.triggers?.triggers ?? [], now, ...(within ? { timeoutMs: within(SCHEDULE_ZONES_TIMEOUT_MS) } : {}) }),
         ]);
-        const mirrored = snapshot?.recordDetails instanceof Map ? [...snapshot.recordDetails.values()] : Array.isArray(snapshot?.runs) ? snapshot.runs : null;
+        // The fleet's side is the snapshot's wide window (issue #988). Its newest 50 runs stand in only where the
+        // window's fold failed, and then nothing says the list is whole.
+        const wide = snapshot?.recordDetails instanceof Map ? [...snapshot.recordDetails.values()] : null;
+        const mirrored = wide ?? (Array.isArray(snapshot?.runs) ? snapshot.runs : null);
         const records = Array.isArray(history) ? [...history, ...(mirrored ?? [])] : mirrored;
         return m.triggerList.triggerListOf({
           snapshot, records, now: now(), pricing, scheduleZones: zones,
           subscriptions: m.readModel.readSubscriptions({ subscriptionsPath: side.paths.subscriptionsPath, fs }).subscriptions ?? [],
-          // The local scan has the full retained window; foreign history is only the bounded mirror. A fleet
-          // view cannot promise completeness from a readable local directory alone.
-          coverage: { complete: false, partial: !Array.isArray(history) },
+          // A count is bare only over a list read whole: this host's scan answered, and the window says of itself
+          // that it holds every run both sides have (`recordsWhole`). A side that did not answer is `partial`.
+          coverage: {
+            partial: !Array.isArray(history) ? "this host's run records could not be read" : snapshot?.parkedUnreachable ? "a side of the fleet's run records could not be read" : false,
+            whole: Array.isArray(history) && wide !== null && snapshot.recordsWhole === true,
+            cut: m.readModel.WIDE_RUNS_CUT_TEXT,
+          },
         });
       },
       triggerEditor: () => m.readModel.readTriggerEditor({ paths: side.paths, env: side.env, deploymentDir: config.dir, fs, platform: io.platform ?? process.platform, uid }),
-      triggerFireCheck: (index) => m.readModel.planTriggerFire({
+      triggerFireCheck: (index, { fs: reading = fs } = {}) => m.readModel.planTriggerFire({
         index, triggersPath: side.paths.triggersPath, url: side.paths.valkeyUrl,
         env: side.env, grantsEnv: shellEnv,
         overlay: m.readModel.readSettingsView({ settingsFile: side.paths.settingsFile, fs }).overlay ?? {},
         modelEndpoints: endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs })?.(),
-        builtinModel: m.modelCatalog?.builtinModel, fs, now,
+        // `reading`: the page load's one reading of the triggers file (issue #988), where the page hands one.
+        builtinModel: m.modelCatalog?.builtinModel, fs: reading, now,
         // A page load, not a preview (issue #961): past this the panel says Fire now could not be checked and draws no form.
         planTimeoutMs: TRIGGER_FIRE_CHECK_TIMEOUT_MS,
       }),

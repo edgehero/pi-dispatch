@@ -1471,7 +1471,7 @@ test("no cap on the loads a tick starts at once: one per data key, and the conso
   h.hub.close();
 });
 
-test("only a load whose page says nothing unread is kept for the page's pageMinMs: one its deadline cut, one whose own read failed and one with a part of its page unread are each read again at the next tick", async () => {
+test("a load Valkey did not answer is never kept for the page's pageMinMs, and one with a part of its page unread is read again at the next tick when the page has just turned", async () => {
   const now = clock();
   let next = { words: "read" };
   let loads = 0;
@@ -1532,6 +1532,86 @@ test("only a load whose page says nothing unread is kept for the page's pageMinM
   now.advance(1000);
   await h.hub.tick();
   assert.equal(loads, 10);
+  h.hub.close();
+});
+
+test("a part of a page that STAYS unread is read at the page's own pace: every tick only for the first pageMinMs after the page turned, then once per pageMinMs, for as long as it lasts", async () => {
+  // Issue #988: a kept page that said unread was read at every tick, so one part unread on a Valkey that answers (the
+  // run mirror alone, for five minutes) cost 2.4 times the commands and three times the connections while it lasted.
+  const now = clock();
+  const whole = { page: "runs", words: "read whole", runsPage: { runs: [], mirror: "ok" }, runsWindow: { partial: false } };
+  const part = { page: "runs", words: "the mirror could not be read", runsPage: { runs: [], mirror: "unreachable (Command timed out)" }, runsWindow: { partial: true } };
+  let next = whole;
+  let loads = 0;
+  const h = hubOn({ now, pageMinMs: { runs: 5000 }, load: async () => ((loads += 1), next), pagePanels: async (_page, { data }) => [{ id: "p-main", html: data.words }] });
+  const res = fakeRes();
+  h.hub.subscribe({ res, sessionId: "s1", session: OP, page: "runs", query: {} });
+  const minute = async () => { const before = loads; for (let second = 0; second < 60; second += 1) { now.advance(1000); await h.hub.tick(); } return loads - before; };
+  await h.hub.tick();
+  assert.equal(await minute(), 12, "a page that reads whole: one load per five seconds");
+  // The mirror stops answering, and stays so. The page turns at its next load: every tick for five seconds, then its pace.
+  next = part;
+  const first = await minute();
+  assert.ok(first >= 12 && first <= 18, `${first} loads in the minute it turned: five seconds of ticks, then one per five seconds`);
+  assert.deepEqual(namesIn(res.take()).filter((name) => ["fresh", "unread", "stale"].includes(name)), ["fresh", "unread"], "told unread once");
+  for (let k = 0; k < 4; k += 1) assert.equal(await minute(), 12, `minute ${k + 2} of a part that stays unread: the page's own pace, not 60`);
+  assert.deepEqual(namesIn(res.take()).filter((name) => ["fresh", "unread", "stale"].includes(name)), [], "and said nothing more of it");
+  // It answers again: seen at the page's pace, within its five seconds, and kept from then on.
+  next = whole;
+  let seconds = 0;
+  while (!namesIn(res.take()).includes("fresh")) { now.advance(1000); await h.hub.tick(); seconds += 1; assert.ok(seconds <= 5, "whole again within the page's five seconds"); }
+  assert.equal(await minute(), 12);
+  h.hub.close();
+});
+
+test("the thaw: after loads Valkey did not answer, the load that straddles its return is read again at the next tick, and the page is whole a second later", async () => {
+  // What the fast re-read was made for, and what its bound must keep: a Valkey that stopped for long, then answers.
+  // The load in flight as it comes back holds early reads that failed and late ones that answered: the page has just
+  // turned from not answered to partly unread, so it is not kept, however long the outage before it lasted.
+  const now = clock();
+  const whole = { page: "parked", words: "read whole" };
+  const down = { page: "parked", words: "could not be read", readFailed: true, deadlineSpent: true };
+  const straddling = { page: "parked", words: "the hosts could not be read", snapshot: { queue: { fleetDegraded: "Command timed out" }, parked: [] } };
+  for (const outage of [6, 20, 120]) {
+    let next = whole;
+    let loads = 0;
+    const h = hubOn({ now, pageMinMs: { parked: 5000 }, load: async () => ((loads += 1), next), pagePanels: async (_page, { data }) => [{ id: "p-main", html: data.words }] });
+    const res = fakeRes();
+    h.hub.subscribe({ res, sessionId: "s1", session: OP, page: "parked", query: {} });
+    await h.hub.tick();
+    next = down;
+    for (let second = 0; second < outage; second += 1) { now.advance(1000); await h.hub.tick(); }
+    res.take();
+    const before = loads;
+    next = straddling;
+    now.advance(1000);
+    await h.hub.tick();
+    next = whole;
+    now.advance(1000);
+    await h.hub.tick();
+    assert.equal(loads - before, 2, `after ${outage} s of no answer: the straddling load is not kept`);
+    assert.deepEqual([namesIn(res.text()).filter((name) => ["fresh", "unread", "stale"].includes(name)).at(-1), panelsIn(res.take()).at(-1)?.html], ["fresh", "read whole"], `after ${outage} s: Live one tick after the load that straddled the return`);
+    h.hub.close();
+  }
+  // The same for a page that had been partly unread for long BEFORE Valkey stopped: the loads it did not answer end
+  // that stretch, so the load that straddles its return is a page that has just turned, and is not kept either.
+  let next = straddling;
+  let loads = 0;
+  const h = hubOn({ now, pageMinMs: { parked: 5000 }, load: async () => ((loads += 1), next), pagePanels: async (_page, { data }) => [{ id: "p-main", html: data.words }] });
+  const res = fakeRes();
+  h.hub.subscribe({ res, sessionId: "s1", session: OP, page: "parked", query: {} });
+  for (let second = 0; second < 30; second += 1) { await h.hub.tick(); now.advance(1000); }
+  next = down;
+  for (let second = 0; second < 20; second += 1) { await h.hub.tick(); now.advance(1000); }
+  res.take();
+  const before = loads;
+  next = straddling;
+  await h.hub.tick();
+  now.advance(1000);
+  next = whole;
+  await h.hub.tick();
+  assert.equal(loads - before, 2, "partly unread, then no answer, then the return: the straddling load is not kept");
+  assert.equal(panelsIn(res.take()).at(-1)?.html, "read whole");
   h.hub.close();
 });
 

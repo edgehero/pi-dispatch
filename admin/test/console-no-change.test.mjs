@@ -13,7 +13,7 @@ import { loadPageData, parsePageQuery } from "../src/console/pages.mjs";
 import { deploymentUnread } from "../src/console/panels/common.mjs";
 import { noChangeText } from "../src/console/panels/config-ui.mjs";
 import { TRIGGER_GETS_WORDS as W } from "../src/trigger-gets-view.mjs";
-import { downQueue, downRedis } from "./helpers/fleet-reader-fakes.mjs";
+import { downQueue, downRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
 import { consoleOn, drawn, failing, healthy, mirroring, rolesOf, FAR, HOST, RUN, STATES } from "./helpers/real-console.mjs";
 
 const INSTRUCTIONS = "Keep the diff small.";
@@ -177,4 +177,35 @@ test("a run mirror that did not answer makes a trigger's and a project's counts 
     const empty = await drawn("trigger", "index=1", on(state), "operator");
     assert.ok(empty.words.includes("No runs were found in the available history.") && / 0 runs in the last 24 hours/.test(empty.words) && !/at least 0 runs/.test(empty.words), name);
   }
+});
+
+test("Fire now is offered only where its check read what it rests on: the schedule in the queue, the triggers file, and a deployment that was read", async () => {
+  // The real planner over the real triggers file, on the queue this console is on. A cron trigger of a folder this
+  // host has: the row the check can fire.
+  const fireable = { triggers: [TRIGGERS.triggers[0], { on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: process.cwd(), flow: "tidy", task: TASK } }] };
+  const page = async (state, role = "operator", files = {}) => {
+    const got = await drawn("trigger", "index=1", consoleOn({ records: [STARTED], redis: healthy(HOST), ...state, triggers: fireable, files }), role);
+    return { ...got, fire: actionsOf(got.whole).includes("trigger-fire"), check: got.data.triggerFireCheck ?? null };
+  };
+  const queueWith = (getJobScheduler) => (connection, opts) => ({ ...quietQueue()(connection, opts), getJobScheduler });
+  // Every read answered: Fire now is offered, with its form.
+  const well = await page({});
+  assert.deepEqual([well.fire, well.check.plan.schedulerId, well.words.includes("Fire now")], [true, "nightly", true]);
+  // The schedule could not be read: no form, and the page says the check could not be made.
+  const unread = await page({ queue: queueWith(async () => { throw new Error("Command timed out"); }) });
+  assert.deepEqual([unread.fire, Object.keys(unread.check)], [false, ["unreachable"]]);
+  assert.ok(unread.words.includes("Fire now could not be checked: the deployment's queue did not answer."));
+  // The queue holds no schedule for it: refused, in the planner's words.
+  const none = await page({ queue: queueWith(async () => null) });
+  assert.deepEqual([none.fire, none.words.includes("This cron trigger's schedule is not in this deployment's queue. Nothing was queued.")], [false, true]);
+  // A deployment that could not be read offers no change, whatever a check answers.
+  const down = await page({ redis: downRedis(), queue: downQueue() });
+  assert.deepEqual([down.fire, deploymentUnread({ data: down.data })], [false, true]);
+  // A viewer and an agent are offered nothing, and no check is made for them.
+  for (const role of ["viewer", "agent"]) assert.deepEqual([(await page({}, role)).fire, (await page({}, role)).check], [false, null], role);
+  // The planner's own word for the triggers file, one per case: its "does not load" was said of all three.
+  const refusalOf = async (state) => { const deps = consoleOn({ redis: healthy(HOST), triggers: fireable, files: { triggers: state } }); return (await deps.triggerFireCheck(1)).refusal; };
+  assert.equal(await refusalOf("absent"), "The triggers file does not exist. Nothing was queued.");
+  assert.equal(await refusalOf("unreadable"), "The triggers file could not be read. Nothing was queued.");
+  assert.equal(await refusalOf("invalid"), "The triggers file does not load. Run pi-dispatch doctor and fix its named check. Nothing was queued.");
 });

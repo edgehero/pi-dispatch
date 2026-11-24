@@ -19,7 +19,7 @@ const expected = {
   "spend-costs-unreadable.viewer": ["Costs could not be read. The other Spend views still work."],
   "spend-unknown-holds.operator": ["Holds not published by: old-worker", "Those jobs are not counted as zero"],
   "spend-midnight-run.operator": ["Settled in today's records", "$0.60", "Counter beyond recorded window charges and holds"],
-  "spend-counters-unreadable.operator": ["The settings file or counters could not be read"],
+  "spend-counters-unreadable.operator": ["The counters could not be read, and the settings overlay does not load; amounts marked unknown are not zero."],
   "spend-split.operator": ["Why the plan says so", "Preview the plan", "Revert row 2", "Same as row 2", "No split to go back to"],
   "spend-split.viewer": ["Budget split", "History", "0123456789abcdef"],
   "spend-split-no-envelope.viewer": ["No envelope: set an envelope"],

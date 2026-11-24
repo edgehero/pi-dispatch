@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeLiveHub } from "../src/console/live.mjs";
 import { loadPageData, PAGES, pagePanels, parsePageQuery } from "../src/console/pages.mjs";
-import { consoleOn, drawn, failing, failingQueue, FAR, healthy, HOST, mirroring, NOW, pillOf, REFUSED, rolesOf, RUN, saysUnread, saysWhatIsMissing, STATES, unanswered, wordsOf } from "./helpers/real-console.mjs";
+import { consoleOn, drawn, failing, failingKey, failingQueue, FAR, healthy, HOST, mirroring, NOT_THE_PILLS, NOW, pillOf, READS, REFUSED, rolesOf, RUN, saysUnread, saysWhatIsMissing, STATES, unanswered, UNREAD_WORDS, wordsOf } from "./helpers/real-console.mjs";
 
 /**
  * The live pill agrees with the page (issue #988): it says Not live wherever a panel of the page says "could not be
@@ -134,6 +134,15 @@ const NOT_LIVE_AND_SILENT = new Map([
   ...["/setup", "/parked", "/run?id=gh-2"].flatMap((page) => ["operator", "viewer"].map((role) => [`the queue's getActive is not answered | ${page} for ${role}`, EVERY_PAGES_PARTS])),
   ...["/setup", "/fleet"].flatMap((page) => ["operator", "viewer"].map((role) => [`this host's run files cannot be listed | ${page} for ${role}`, EVERY_PAGES_PARTS])),
   ...["operator", "viewer"].map((role) => [`this host's run files cannot be listed | /host?name=build9 for ${role}`, "a host with no row whose page says no retained run record names it, of run files that could not be listed: goes when that page says its run records could not be read"]),
+  // The same two classes under the states that fail one READ, by its key (issue #988): the registry's set and rows
+  // and the mirror are parts every page is judged by, and a refused run's page marks what only an operator's cards draw.
+  ["the registry's host set: not answered | /setup for agent", EVERY_PAGES_PARTS],
+  ...["operator", "viewer", "agent"].map((role) => [`the registry's host set: not answered | /parked for ${role}`, EVERY_PAGES_PARTS]),
+  ...["operator", "viewer"].map((role) => [`the hosts' rows: not answered | /parked for ${role}`, EVERY_PAGES_PARTS]),
+  ...["the run mirror's index", "the run mirror's records"].flatMap((read) => ["/fleet", "/setup"].flatMap((page) => ["operator", "viewer"].map((role) => [`${read}: not answered | ${page} for ${role}`, EVERY_PAGES_PARTS]))),
+  ...["the run mirror's index", "the run mirror's records"].flatMap((read) => ["viewer", "agent"].map((role) => [`${read}: not answered | /run?id=gh-1 for ${role}`, AN_OPERATORS_CARDS])),
+  ...["the registry's host set", "the doctor index", "the doctor results", "the run mirror's index", "the run mirror's records", "the budget counters"].flatMap((read) => ["viewer", "agent"].map((role) => [`${read}: not answered | /run?id=gh-2 for ${role}`, AN_OPERATORS_CARDS])),
+  ["the hosts' rows: not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
 ]);
 
 test("the pill agrees with the page on the real reader: a page that says could not be read is Not live, and a page that is Not live says what it lacks", { timeout: 240_000 }, async () => {
@@ -156,6 +165,52 @@ test("the pill agrees with the page on the real reader: a page that says could n
   const held = (found, listed) => ({ new: found.filter((key) => !listed.has(key)), gone: [...listed.keys()].filter((key) => !found.includes(key)) });
   assert.deepEqual(held(said, SAYS_UNDER_A_LIVE_PILL), { new: [], gone: [] }, "says could not be read under a Live pill (new: not listed; gone: listed and now right, so take it off the list)");
   assert.deepEqual(held(silent, NOT_LIVE_AND_SILENT), { new: [], gone: [] }, "Not live and says nowhere what it lacks (new: not listed; gone: listed and now right, so take it off the list)");
+});
+
+test("the words of a failed read and the sentences that are never the pill's are held here: neither list changes unseen", () => {
+  // The structural tests above are only as strict as these two lists. A phrase taken off the first, or a sentence put
+  // on the second, would let a page say a read failed under a Live pill with every other test green: so each is held
+  // by its exact text, and a change to either is a change to this test, which a person reads.
+  assert.deepEqual(UNREAD_WORDS.map((phrase) => phrase.source), ["could not be read", "could not read\\b", "cannot be read", "\\bnot read\\b", "\\bunreadable\\b", "read in part", "did not answer", "\\bincomplete\\b"]);
+  assert.deepEqual(NOT_THE_PILLS.map(([sentence]) => sentence.source), [
+    "The host's capacity history could not be read\\.",
+    "Its list of running jobs could not be read",
+    "The runtime's CPU reserve could not be read\\.",
+    "The \\d+ files? this run kept could not be read here\\.",
+    "\\(its data could not be read\\)",
+    "The console could not read the deployment's data; this is the page as it was last seen\\.",
+    "The retained workspace list is unreadable or was not published by this worker\\.",
+    "(?:Memory|CPU): budget not known yet or unreadable\\.",
+    "[A-Za-z0-9._-]+: publication unreadable\\. Its list is incomplete\\.",
+    "Its doctor result cannot be read|Its published result cannot be read \\(a worker of another version may have written it\\)\\.",
+    "The host's running-job list is unreadable\\.",
+    "CPU reserve [^.]{0,60}?: unreadable",
+    "Published doctor observations are incomplete or stale\\.",
+    "\\b(?!rows\\b)[\\w.@-]+ did not answer in time",
+    "Result unreadable|CPU budget unreadable|running jobs unreadable",
+    "The registered shell list is incomplete: at least \\d+ more(?: and \\d+ unreadable registrations?)?\\.",
+  ]);
+  assert.equal(NOT_THE_PILLS.length, 16);
+  for (const [sentence, why] of NOT_THE_PILLS) assert.ok(sentence.global && typeof why === "string" && why.length > 20, `${sentence.source}: every entry says why`);
+  // Each phrase is seen where a page says it, and a sentence on the second list is not.
+  assert.equal(saysUnread("Held jobs 2 cron schedules; held jobs unreadable"), true);
+  assert.equal(saysUnread("Heartbeat not read this time: the host registry was read in part"), true);
+  assert.equal(saysUnread("The host registry was read in part: some hosts' rows did not answer in time, so those hosts are as they were last seen."), true);
+  assert.equal(saysUnread("MCP server linear did not answer in time. build3: publication unreadable. Its list is incomplete."), false);
+  assert.equal(saysUnread("The triggers file does not load, so its answer rules and standing answers are not shown. No live registry row for build9."), false);
+});
+
+test("Fleet's held jobs that could not be read are said by its card, its header and the pill, with every other read answering", async () => {
+  const held = READS.find(([what]) => what === "the held jobs")[1];
+  for (const role of rolesOf("fleet")) {
+    const got = await drawn("fleet", "", consoleOn({ redis: failingKey(healthy(HOST), held), records: [RUN] }), role);
+    assert.ok(got.words.includes("The held jobs could not be read.") && got.words.includes("held jobs unreadable"), role);
+    assert.deepEqual([got.data.snapshot.held.unreachable !== undefined, got.pill, got.marked], [true, true, true], role);
+    // Nothing else is unread: the hosts, the waiting jobs and the doctor results answered.
+    assert.ok(!got.data.snapshot.queue.fleetDegraded && !got.data.snapshot.activeUnreachable && !got.data.snapshot.parkedUnreachable, role);
+    const well = await drawn("fleet", "", consoleOn({ redis: healthy(HOST), records: [RUN] }), role);
+    assert.deepEqual([well.pill, well.marked, saysUnread(well.words)], [false, false, false], role);
+  }
 });
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/console/", import.meta.url));

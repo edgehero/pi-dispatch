@@ -71,7 +71,7 @@ test("detail counts only this trigger inside the day, uses wide history, orders 
 
 test("cron detail matches the scheduler id, not a neighbouring row, and uses the teardown threshold", () => {
   const trigger = { index: 0, type: "cron", id: "daily" };
-  const got = triggerDetailOf({ readAt: AT, triggers: { triggers: [trigger] }, runs: [rec("manual:daily:123", 1, { triggerIndex: null }), rec("repeat:daily:456", 2, { triggerIndex: null }), rec("manual:other:123", 1, { triggerIndex: null })], schedulers: [{ key: "daily", next: AT + 1000, overdueMs: null }], schedulerStalls: { daily: 2 }, schedulerStallMax: 2 }, 0);
+  const got = triggerDetailOf({ readAt: AT, triggers: { triggers: [trigger] }, runs: [rec("manual:daily:123", 1, { triggerIndex: null, kind: "local" }), rec("repeat:daily:456", 2, { triggerIndex: null, kind: "local" }), rec("manual:other:123", 1, { triggerIndex: null, kind: "local" }), rec("repeat:daily:789", 3, { triggerIndex: null, kind: "github" })], schedulers: [{ key: "daily", next: AT + 1000, overdueMs: null }], schedulerStalls: { daily: 2 }, schedulerStallMax: 2 }, 0);
   assert.equal(got.count24h, 2);
   assert.equal(got.cron.next, AT + 1000);
   assert.equal(got.cron.stalls, 2);

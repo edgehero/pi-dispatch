@@ -40,6 +40,7 @@ import { coreRecordOf, fromNewerRelease, NEWER_RECORD_SENTENCE } from "../newer-
 import { agentReadProjection } from "../agent-read.mjs";
 import { RUN_MODEL_RE, RUN_PROVIDER_RE } from "../run-filter.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
+import { mirrorUnread } from "../mirror-words.mjs";
 
 /** The document's version: a client checks it before it reads a field, and a breaking change bumps it. */
 export const RUN_API_VERSION = 1;
@@ -226,7 +227,7 @@ async function runsOnTarget(fleet, kind, match) {
   } catch {
     return { unreadable: true };
   }
-  if (!Array.isArray(page?.runs) || page.unreachable || (typeof page.mirror === "string" && page.mirror.startsWith("unreachable"))) return { unreadable: true };
+  if (!Array.isArray(page?.runs) || page.unreachable || mirrorUnread(page.mirror)) return { unreadable: true };
   const truncated = page.truncated === true;
   return { runs: page.runs.filter(pred), truncated, floor: truncated ? (Number.isSafeInteger(page.next) ? page.next - 1 : Number.POSITIVE_INFINITY) : null };
 }

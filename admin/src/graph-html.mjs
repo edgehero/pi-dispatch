@@ -1662,6 +1662,7 @@ export function bannersHtml(norm) {
   if (!norm.ok) banners.push("no graph model supplied; the page has nothing to draw");
   if (norm.meta.triggersMissing) banners.push("no triggers file found");
   // One word per case (issue #988): the reader says a file nobody could read in the same field, in its own words.
+  // This module loads nothing (it is the page's own script), so the rule of `file-case.mjs` is written out here.
   if (norm.meta.triggersInvalid !== null) banners.push(/^triggers file could not be read/.test(String(norm.meta.triggersInvalid)) ? String(norm.meta.triggersInvalid) : `triggers file does not load: ${norm.meta.triggersInvalid}`);
   if (banners.length === 0) return "";
   return `<div id="banners">${banners.map((b) => `<div class="banner">${escapeHtml(b)}</div>`).join("")}</div>`;

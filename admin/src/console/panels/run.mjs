@@ -38,7 +38,7 @@ import { ARTIFACT_DROP_REASONS, ARTIFACT_DROP_TEXT, artifactSizeText } from "@ed
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { STEER_MAX_MESSAGES, STEER_TOTAL_MAX_BYTES } from "@edgehero/pi-dispatch/steer-inbox";
-import { plural, SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread, registryReadInPart, SHELLS_SHOWN, shellsShort } from "./common.mjs";
+import { plural, SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread, registryReadInPart, rowLastSeen, SHELLS_SHOWN, shellsShort } from "./common.mjs";
 import { windowFloor } from "./runs.mjs";
 
 const titled = (title, body) => ui.card({ title, body });
@@ -180,7 +180,10 @@ function absentOutcome(view) {
   // A record neither side said it does not hold (`missing`) is one this page could not read, whatever it was handed.
   if (got?.missing !== true) return { cls: "warn", text: runUnreadText(typeof got?.unreadable === "string" ? got.unreadable : RUN_RECORD_UNREAD) };
   if (state === "completed" || state === "failed") return { cls: "warn", text: "This job has ended, but its record is not in this host's history or the fleet's run mirror (another host's run, with the mirror off?)." };
-  const places = runPlaces({ run: got, lookup: view.data?.chat, transcript: view.data?.transcript, progress: view.data?.progress });
+  // The load's own answer where it told one (`data.runPlaces`): an agent's copy of the data holds no transcript and no
+  // progress, and neither is a place that could not be read.
+  const told = view.data?.runPlaces;
+  const places = told !== null && typeof told === "object" && typeof told.shown === "boolean" && Array.isArray(told.unread) ? told : runPlaces({ run: got, lookup: view.data?.chat, transcript: view.data?.transcript, progress: view.data?.progress });
   if (!places.shown && places.unread.length > 0) return { cls: "warn", text: runUntoldText(places.unread) };
   if (typeof state === "string") return { cls: "warn", text: `The queue holds this job in a state this console does not name yet (${state}); its run record is not readable here.` };
   return { cls: "warn", text: "No run with that id is in this host's history or the fleet's run mirror." };
@@ -1170,6 +1173,9 @@ export function runRecovery(view) {
 const REFUSED_WORDS = Object.freeze({
   unread: "could not be read",
   inPart: "not read this time: the host registry was read in part",
+  // The registry answered before and not this time: the rows are as they were last seen, so a host with no row may have
+  // registered since, and a row's beat is not this read's.
+  lastSeen: "not read this time: the host registry could not be read",
   noRow: (host) => `no live registry row for ${cell(host)}`,
   noDoctor: "no doctor result published",
   doctorRefused: "its newest result does not load",
@@ -1188,16 +1194,20 @@ function hostFacts(view, name) {
   const read = s !== null && typeof s === "object";
   const host = (Array.isArray(s?.hostBudgets) ? s.hostBudgets : []).find((h) => h.name === name) ?? null;
   const doctor = doctorHostsOf(s).filter((d) => d.name === name).sort((a, b) => (a.ageMs ?? Infinity) - (b.ageMs ?? Infinity))[0] ?? null;
-  const kind = !read ? "unread" : registryReadInPart(s) && (!host || host.notRead === true) ? "part" : hostsUnread(s) ? "hosts" : host ? null : "none";
-  const hostGap = { unread: REFUSED_WORDS.unread, part: REFUSED_WORDS.inPart, hosts: HOSTS_UNREAD, none: REFUSED_WORDS.noRow(name) }[kind] ?? null;
-  const floorGap = { unread: HOSTS_UNREAD, part: REFUSED_WORDS.inPart, hosts: HOSTS_UNREAD, none: `not known: ${REFUSED_WORDS.noRow(name)}` }[kind] ?? null;
+  // "No live registry row" is said only over a registry read THIS time (`rowLastSeen`): after one good read a registry
+  // that fails shows its rows as last seen, and the cards said "none" of a host that had registered since.
+  const kind = !read ? "unread" : registryReadInPart(s) && (!host || host.notRead === true) ? "part" : hostsUnread(s) ? "hosts" : rowLastSeen(s, host) ? "last" : host ? null : "none";
+  const hostGap = { unread: REFUSED_WORDS.unread, part: REFUSED_WORDS.inPart, hosts: HOSTS_UNREAD, last: REFUSED_WORDS.lastSeen, none: REFUSED_WORDS.noRow(name) }[kind] ?? null;
+  const floorGap = { unread: HOSTS_UNREAD, part: REFUSED_WORDS.inPart, hosts: HOSTS_UNREAD, last: REFUSED_WORDS.lastSeen, none: `not known: ${REFUSED_WORDS.noRow(name)}` }[kind] ?? null;
+  // A row that is as last seen has a beat, and its age is not this read's to tell.
+  const beatUnread = host !== null && (kind === "last" || kind === "part");
   const doctorRead = read && s.doctor !== null && typeof s.doctor === "object" && !s.doctor.unreachable;
   const doctorGap = !doctorRead ? REFUSED_WORDS.unread : doctor === null ? REFUSED_WORDS.noDoctor : doctor.unreadable ? REFUSED_WORDS.doctorRefused : null;
   // The host's own queue is found through the hosts: where they were not read, a queue that is not listed is theirs to
   // explain, and "no queue is listed" is said only over a list that was read whole.
   const queuesRead = read && Array.isArray(s.queueCounts);
-  const queueGap = !queuesRead ? REFUSED_WORDS.unread : kind === "hosts" || kind === "part" ? hostGap : REFUSED_WORDS.noQueue;
-  return { host, doctor, hostGap, floorGap, doctorGap, queueGap };
+  const queueGap = !queuesRead ? REFUSED_WORDS.unread : kind === "hosts" || kind === "part" || kind === "last" ? hostGap : REFUSED_WORDS.noQueue;
+  return { host, doctor, hostGap, floorGap, doctorGap, queueGap, beatUnread };
 }
 
 export function runWhy(view) {
@@ -1219,8 +1229,8 @@ export function runWhy(view) {
 export function runHost(view) {
   const r = recordOf(view);
   if (!refusedBeforeStart(r)) return html``;
-  const { host, doctor, hostGap, doctorGap, queueGap } = hostFacts(view, r.host);
-  const age = beatAgeOf(host), fail = doctorGap === null ? doctorProblems(doctor).find((p) => p.level === "fail") : null;
+  const { host, doctor, hostGap, doctorGap, queueGap, beatUnread } = hostFacts(view, r.host);
+  const age = beatUnread ? null : beatAgeOf(host), fail = doctorGap === null ? doctorProblems(doctor).find((p) => p.level === "fail") : null;
   const queues = Array.isArray(view.data?.snapshot?.queueCounts) ? view.data.snapshot.queueCounts : [];
   const queue = queues.find((q) => q.queue === host?.queue || q.queue === `pi-jobs@${r.host}`);
   return titled("The host", html`${facts([["Host", r.host], [VENUE_LABEL, r.backend ?? UNATTRIBUTED_BACKEND], ["Heartbeat", Number.isFinite(age) ? `${ageText(age)} ago` : hostGap ?? "not published"], ["Newest failing doctor check", fail ? fail.label : doctorGap ?? "none in its newest result"], ["Queue waiting", queue ? count(queue.counts?.waiting) : queueGap], ["Queue running", queue ? count(queue.counts?.active) : queueGap]])}<a href="/fleet">Open Fleet for this host's queues and doctor checks</a>`);

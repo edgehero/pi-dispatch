@@ -38,9 +38,26 @@ test("private reads distinguish malformed, expired, truncated and unreachable ob
 	assert.deepEqual(scoped.sessions, []);
 	assert.equal(scoped.more, 1, "a requested host beyond the global cap is unknown, never a certain empty list");
 	assert.equal(scoped.noticesUnavailable, true, "the independently capped notices also disclose a partial read");
+	// Which way the notices are not whole (issue #988, INT-SANDBOX-SESSIONS-CONTRACT): cut at the bound here, and
+	// neither of the other two.
+	assert.deepEqual([scoped.noticesMore, scoped.noticesUnreadable, scoped.noticesUnread], [true, undefined, undefined]);
 	const corruptNotice = await readSandboxSessions({ ...redis, zrangebyscore: async (key) => key === "sandbox:notices" ? [member] : [], mget: async () => ["private malformed content"] }, { now: () => at });
 	assert.deepEqual(corruptNotice.notices, []);
 	assert.equal(corruptNotice.noticesUnavailable, true);
+	assert.deepEqual([corruptNotice.noticesUnreadable, corruptNotice.noticesMore, corruptNotice.noticesUnread], [true, undefined, undefined], "a notice that does not parse was left out: not a cut, not a read that failed");
+	// The bound itself: 256 notices are a whole list, and one more is a cut.
+	const noticeOf = (i) => JSON.stringify({ host: "mini1", id: `job-${i}`, at, reason: "network-kept" });
+	const noticed = (n) => ({ ...redis, zrangebyscore: async (key) => key === "sandbox:notices" ? Array.from({ length: n }, (_, i) => sandboxSessionMember("mini1", `job-${i}`)) : [], mget: async (...keys) => keys.map((key, i) => (key.startsWith("sandbox:notice:") ? noticeOf(i) : null)) });
+	const full = await readSandboxSessions(noticed(256), { now: () => at });
+	assert.deepEqual([full.notices.length, full.noticesUnavailable, full.noticesMore], [256, undefined, undefined], "a full list is whole");
+	const over = await readSandboxSessions(noticed(257), { now: () => at });
+	assert.deepEqual([over.notices.length, over.noticesUnavailable, over.noticesMore, over.noticesUnread], [256, true, true, undefined], "one past the bound is a cut, and says so");
+	// The notices' read did not answer while the shells' did: unread, and neither of the other two.
+	const silent = await readSandboxSessions({ ...redis, zrangebyscore: async (key) => { if (key === "sandbox:notices") throw new Error("Command timed out"); return [member]; } }, { now: () => at });
+	assert.deepEqual([silent.sessions.length, silent.notices, silent.noticesUnavailable, silent.noticesUnread, silent.noticesMore, silent.noticesUnreadable], [1, [], true, true, undefined, undefined]);
+	// Whole: none of the four keys is there.
+	const whole = await readSandboxSessions({ ...redis, zrangebyscore: async (key) => key === "sandbox:notices" ? [] : [member] }, { now: () => at });
+	assert.deepEqual(["noticesUnavailable", "noticesUnread", "noticesMore", "noticesUnreadable"].filter((key) => Object.hasOwn(whole, key)), []);
 	assert.ok(!JSON.stringify(corruptNotice).includes("private malformed content"));
 });
 

@@ -441,14 +441,14 @@ async function renderInChild() {
       updates: async () => readUpdates({ redis: admin, staged: readStaged({ globalPiDir: fleetPaths.globalPiDir }), triggersDocument: readTriggersDocument({ triggersPath: fleetPaths.triggersPath }), records: [], audit: [], pinned: pricing.piAiVersion(), now: NOW }),
       projectView: (id, snapshot) => readProjectView({ id, snapshot, env, paths: fleetPaths, now: NOW, fleet: reader, pricing }),
       paths: fleetPaths,
-      // Registry fixture workers all publish UTC. Use the actual read snapshot and bounded record payloads,
-      // retaining the same incompleteness contract as serve rather than inventing card totals.
+      // Registry fixture workers all publish UTC. Use the actual read snapshot and its wide window, with the window's
+      // own word for whether it is whole, as serve does (issue #988), rather than inventing card totals.
       triggerList: (snapshot) => triggerListOf({
         snapshot, now: NOW,
         records: snapshot.recordDetails instanceof Map ? [...snapshot.recordDetails.values()] : snapshot.runs,
         scheduleZones: { "nightly-tidy": "UTC", "pm-weekly": "UTC" },
         subscriptions: RM.readSubscriptions({ subscriptionsPath: paths.subs }).subscriptions ?? [],
-        coverage: { complete: false },
+        coverage: { partial: snapshot.parkedUnreachable ? "a side of the fleet's run records could not be read" : false, whole: snapshot.recordDetails instanceof Map && snapshot.recordsWhole === true, cut: RM.WIDE_RUNS_CUT_TEXT },
       }),
       // The fixture serves GitHub webhooks. Presence is metadata, never a credential in rendered output.
       modelsView: async (snapshot) => { const { readModelsView } = await import("../../src/models-view.mjs"); return readModelsView({ paths: fleetPaths, env, now: NOW, snapshot, fleet: reader }); },

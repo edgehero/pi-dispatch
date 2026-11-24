@@ -3,6 +3,7 @@ import * as nodeFs from "node:fs";
 import { delimitedList } from "@edgehero/pi-dispatch/config";
 import { projectOf } from "@edgehero/pi-dispatch/projects";
 import { envSecretProfiles, envBundleProfiles, overlayBundleProfiles, resolverRootsStatus, secretProfilesView, secretBundlesView } from "./read-model.mjs";
+import { FILE_WORDS, fileCaseOfView } from "./file-case.mjs";
 
 const NAME = /^[A-Za-z0-9._-]{1,128}$/;
 const named = (v) => typeof v === "string" && NAME.test(v);
@@ -17,12 +18,10 @@ const safeLast = (last, bundle = false) => last ? { jobId: typeof last.jobId ===
  * unreadable file into `invalid`, and its message says which.
  */
 export function fileUnreadWord(kind, view) {
-  const READ = "could not be read", LOAD = "does not load";
-  if (view === null || typeof view !== "object") return READ;
-  if (kind === "settings") return !view.invalid ? null : /^settings file unreadable/.test(String(view.invalid)) ? READ : LOAD;
-  const rows = kind === "triggers" ? view.triggers : view.projects;
-  if (Array.isArray(rows) || view.missing === true || view.unset === true) return null;
-  return view.invalid ? LOAD : READ;
+  // The case is `fileCaseOfView`'s (issue #988), and the word `FILE_WORDS`': a file that is absent gives no word here,
+  // since its zero is known.
+  const fileCase = fileCaseOfView(view, kind === "settings" ? null : kind);
+  return fileCase === "unreadable" || fileCase === "refused" ? FILE_WORDS[fileCase] : null;
 }
 const SOURCE_NAMES = Object.freeze({ settings: "the settings overlay", triggers: "the triggers file", projects: "the projects file" });
 /**

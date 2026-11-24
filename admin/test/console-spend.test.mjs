@@ -17,6 +17,7 @@ import {
   flowsSelected,
   splitHistory,
   splitEnvelope,
+  splitStates,
   splitPriorities,
   spendToday,
   spendOver,
@@ -243,6 +244,27 @@ test("server-selected map is accessible, links spent run and script-free list ha
   assert.match(list, /Flows list/);
   assert.match(list, /4\. cron Weekly/);
   assert.doesNotMatch(list, /id="graph-nodes"|id="graph"|script/);
+});
+
+test("the budget split says the envelope file's state in the word of its case, on its card and in its banner", () => {
+  // Issue #988: the card said "The envelope is missing or could not be read." of every case, beside a banner that said
+  // "The envelope does not load" of every case.
+  const WORDS = {
+    absent: ["The envelope file does not exist", "The envelope file does not exist. Check PI_ENVELOPE_FILE."],
+    unreadable: ["The envelope file could not be read", "The envelope file could not be read. Check PI_ENVELOPE_FILE and who may read it."],
+    refused: ["The envelope does not load", "The envelope does not load. Check its fields in Configuration."],
+  };
+  for (const [envelopeCase, [title, body]] of Object.entries(WORDS)) {
+    const v = view({ data: { insights: { graph, allocation: { problem: "the envelope file: a reader's own words", envelopeCase } } } });
+    const card = String(splitEnvelope(v)), banner = String(splitStates(v));
+    assert.ok(card.includes(body), `${envelopeCase}: ${card}`);
+    assert.ok(banner.includes(title) && banner.includes(body), `${envelopeCase}: the banner`);
+    for (const [other, [, otherBody]] of Object.entries(WORDS)) if (other !== envelopeCase) assert.ok(!card.includes(otherBody) && !banner.includes(otherBody), `${envelopeCase}: not ${other}'s words`);
+    assert.ok(!card.includes("missing or could not be read") && !card.includes("a reader's own words"), envelopeCase);
+  }
+  // No envelope configured is said as that; a payload that names no case was refused by its reader.
+  assert.ok(String(splitEnvelope(view({ data: { insights: { graph, allocation: { unset: true } } } }))).includes("No envelope is configured: PI_ENVELOPE_FILE is unset."));
+  assert.ok(String(splitEnvelope(view({ data: { insights: { graph, allocation: { problem: "x" } } } }))).includes(WORDS.refused[1]));
 });
 
 test("structured allocation forms use normalized envelope dollars, delegation bounds and human row numbers", () => {
@@ -581,17 +603,22 @@ test("count cap observer thresholds match the next start and scoped counters hav
 });
 
 test("Caps names failed dollar/scoped reads instead of silently omitting their rows", () => {
-  for (const budget of [
-    { dollars: { invalid: ["private-error-marker"] } },
-    { dollars: { countersUnreachable: "private-error-marker" } },
-    { scopedInvalid: "private-error-marker" },
+  // Each by its cause (issue #988): one sentence, "The settings file or counters could not be read", said all of them.
+  for (const [budget, says] of [
+    [{ dollars: { invalid: ["private-error-marker"] } }, "A dollar cap of the settings does not parse; amounts marked unknown are not zero."],
+    [{ dollars: { countersUnreachable: "private-error-marker" } }, "The counters could not be read; amounts marked unknown are not zero."],
+    [{ scopedInvalid: "private-error-marker" }, "The scoped-limits file does not load; amounts marked unknown are not zero."],
+    [{ settingsInvalid: true, settingsCase: "refused" }, "The settings overlay does not load; amounts marked unknown are not zero."],
+    [{ settingsInvalid: true, settingsCase: "unreadable" }, "The settings overlay could not be read; amounts marked unknown are not zero."],
+    [{ unreachable: "private-error-marker", scopedInvalid: "x" }, "The counters could not be read, and the scoped-limits file does not load; amounts marked unknown are not zero."],
   ]) {
     const text = String(
       spendCaps({ role: "viewer", query: {}, data: { insights: { budget } } }),
     );
-    assert.match(text, /settings file or counters could not be read/);
-    assert.doesNotMatch(text, /private-error-marker/);
+    assert.ok(text.includes(says), `${JSON.stringify(budget)}: ${text.match(/<p class="sp-note note"[^>]*>([^<]*)/)?.[1]}`);
+    assert.doesNotMatch(text, /private-error-marker|settings file or counters/);
   }
+  assert.ok(!String(spendCaps({ role: "viewer", query: {}, data: { insights: { budget: {} } } })).includes("amounts marked unknown"), "nothing unread, nothing said");
 });
 
 test("sidebar and KPI facts keep one label/value pair per row at desktop widths", async () => {

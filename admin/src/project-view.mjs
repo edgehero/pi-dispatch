@@ -12,11 +12,14 @@ import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 import { costsSinceMs, recordInProject, recordInRepo } from "./costs.mjs";
 import { assembleAllocationView, recordSpendOf } from "./insights-assembly.mjs";
-import { readProjects, readScopedLimits, readTriggers, readSettingsView, readSubscriptions, scanRunRecords, readSizeSuggestions, hostBudgetsOf, secretBundlesView, attributeRunsToTriggers, RUN_MIRROR_READ_MS } from "./read-model.mjs";
+import { readProjects, readScopedLimits, readTriggers, readSettingsView, readSubscriptions, scanRunRecords, readSizeSuggestions, hostBudgetsOf, secretBundlesView, RUN_MIRROR_READ_MS } from "./read-model.mjs";
+import { recordMatchesTrigger } from "./trigger-match.mjs";
 import { planProjectEdit, planProjectDelete } from "./write-plans.mjs";
 import { outcomeKey, recordReason, reasonWords } from "./words.mjs";
 import { fromNewerRelease, readableRecords } from "./newer-release.mjs";
 import { outcomeNote, projectLoadsOf } from "./loaded-words.mjs";
+import { fileCaseOfView, fileWord as fileWordOf } from "./file-case.mjs";
+import { mirrorUnread } from "./mirror-words.mjs";
 
 const DAY = 86_400_000;
 const instant = (r) => Date.parse(r?.endedAt ?? r?.startedAt ?? "");
@@ -49,7 +52,7 @@ export async function readProjectFleetRuns(fleet, { sinceMs, within = null } = {
     try { got = await fleet.runsPage({ before, limit: 100, ...(typeof within === "function" ? { timeoutMs: within(RUN_MIRROR_READ_MS) } : {}) }); } catch { return { runs, incomplete: true }; }
     if (!Array.isArray(got?.runs)) return { runs, incomplete: true };
     runs.push(...got.runs);
-    if (got.unreachable || got.truncated || typeof got.mirror === "string" && got.mirror.startsWith("unreachable")) return { runs, incomplete: true };
+    if (got.unreachable || got.truncated || mirrorUnread(got.mirror)) return { runs, incomplete: true };
     if (got.next === null || got.next === undefined || got.next <= sinceMs) return { runs, incomplete: false };
     if (!Number.isFinite(got.next) || before !== null && got.next >= before) return { runs, incomplete: true };
     before = got.next;
@@ -110,7 +113,13 @@ export function projectSizeAction(call, id) {
  * "does not exist", it "does not load" (it was read and is refused), or it "could not be read" (nobody could read it,
  * or the read threw). One umbrella, "could not be loaded", said all three.
  */
-const fileWord = (view, key) => (Array.isArray(view?.[key]) && !view.invalid && !view.unreadable ? null : view?.missing === true ? "does not exist" : view?.invalid ? "does not load" : "could not be read");
+const fileWord = (view, key) => fileWordOf(fileCaseOfView(view, key));
+
+/**
+ * The envelope file's trouble in the word of its case (issue #988, the allocation view's `envelopeCase`): it "does not
+ * exist", "could not be read" or "does not load". One sentence, "The allocation file could not be read", said all three.
+ */
+const envelopeWords = (allocation) => `The envelope file ${fileWordOf(allocation?.envelopeCase) ?? "does not load"}. Run pi-dispatch doctor for the reason.`;
 
 /** Only typed facts from the actual preflight may explain a blocker; raw planner text never becomes page copy. */
 function projectRefusal(result, id, operation, words = {}) {
@@ -213,7 +222,7 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
   // What the run counts, the recent list and the records' spend were folded from was not read whole (issue #962): the
   // local scan, the fleet's bounded pages, the mirror behind them, or the snapshot's own newest runs. Each number over
   // it is then a floor, and "no run" is not known.
-  const historyIncomplete = !historyReadable || fleetHistory?.incomplete !== false || !snapshot || typeof snapshot.runMirror === "string" && snapshot.runMirror.startsWith("unreachable") || newerSkipped > 0;
+  const historyIncomplete = !historyReadable || fleetHistory?.incomplete !== false || !snapshot || mirrorUnread(snapshot.runMirror) || newerSkipped > 0;
   const holds = projectHolds(hostRows, { id, window, now, unreadable: registryUnreadable });
   let historySpent = historyReadable ? 0 : null;
   let historyFloor = !historyReadable;
@@ -263,12 +272,11 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
   for (const r of day) { const key = outcomeKey(r.outcome, recordReason(r)); if (key) counts[key]++; }
   const worst = [...day].sort((a, b) => (WORST[outcomeKey(b.outcome, recordReason(b))] ?? 0) - (WORST[outcomeKey(a.outcome, recordReason(a))] ?? 0) || instant(b) - instant(a))[0];
   const queued = Array.isArray(snapshot?.waiting?.rows) ? snapshot.waiting.rows.filter((r) => r.project === id) : [];
-  const attributed = attributeRunsToTriggers({ records: day, triggers: triggers?.triggers ?? [] });
+  // One rule says which records are a trigger's (issue #988, `recordMatchesTrigger`), as on `/triggers` and the
+  // trigger's own page. This page took a record's row number alone, so the three counted one history differently.
   const triggerCounts = new Map();
-  for (const r of day) {
-    const match = attributed?.byJobId?.[r.jobId];
-    const index = Number.isSafeInteger(r.triggerIndex) ? r.triggerIndex : Number.isSafeInteger(match?.index) ? match.index : null;
-    const t = triggers?.triggers?.find((t) => index !== null ? t.index === index : t.type === "cron" && t.id === r.triggerId);
+  for (const r of readableRecords(day).records) {
+    const t = triggers?.triggers?.find((t) => recordMatchesTrigger(r, t));
     if (t) triggerCounts.set(t.index, { index: t.index, type: t.type, forge: t.forge ?? null, id: t.id ?? null, flow: t.flow ?? null, count: (triggerCounts.get(t.index)?.count ?? 0) + 1 });
   }
   const members = current.members.map((m) => {
@@ -288,9 +296,9 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
     ...(newerSkipped > 0 ? { newerSkipped } : {}),
     runs24h: { total: day.length, counts, inLine: snapshot?.waiting && !snapshot.waiting.unreachable ? queued.length : null, inLineIncomplete: snapshot?.waiting?.truncated === true, worst: worst ? runView(worst, subscriptions, pricing) : null },
     recent: recorded.slice(0, 5).map((r) => runView(r, subscriptions, pricing)), totalRuns: recorded.length,
-    spend: { window, since, envelope, usedMicros, settledMicros, heldMicros: holds.micros, heldKnownMicros: holds.knownMicros, heldIncomplete: holds.incomplete, heldUnread: registryUnreadable, ...(registryPart ? { heldReadInPart: true } : {}), floor: envelope ? false : historyFloor || historyIncomplete, shareMicros: amount(allocation?.state?.allocations?.[id]), problem: allocation?.problem ? "The allocation file could not be read. Run pi-dispatch doctor for the reason." : allocation?.unreachable ? "The allocation could not be read from Valkey." : null },
-    allocation: { window, shareMicros: amount(allocation?.state?.allocations?.[id]), totalMicros: amount(allocation?.totalMicros), floorMicros: amount(allocation?.floors?.[id]), weight: amount(weights[id]), totalWeight: amount(totalWeight), split: allocation?.state ? { id: allocation.state.planId ?? null, writer: allocation.state.writer ?? null, appliedAt: allocation.state.appliedAt ?? null, validUntil: allocation.state.validUntil ?? null } : null, refused: selected.filter((r) => recordReason(r) === "allocation-cap").length, unset: !envelope, problem: allocation?.problem || allocation?.unreachable ? "The allocation could not be read." : null },
-    size, sizing: sizingView, sizingUnreadable: (registryUnreadable && !registryPart) || !sizing || Boolean(sizing.unreachable) || !sl || Boolean(sl.invalid || sl.unreadable), ...(registryPart ? { sizingReadInPart: true } : {}), limits: limitRows, limitsUnreadable: !sl || Boolean(sl.invalid || sl.unreadable), bundle, bundleKnown,
+    spend: { window, since, envelope, usedMicros, settledMicros, heldMicros: holds.micros, heldKnownMicros: holds.knownMicros, heldIncomplete: holds.incomplete, heldUnread: registryUnreadable, ...(registryPart ? { heldReadInPart: true } : {}), floor: envelope ? false : historyFloor || historyIncomplete, shareMicros: amount(allocation?.state?.allocations?.[id]), problem: allocation?.problem ? envelopeWords(allocation) : allocation?.unreachable ? "The allocation could not be read from Valkey." : null },
+    allocation: { window, shareMicros: amount(allocation?.state?.allocations?.[id]), totalMicros: amount(allocation?.totalMicros), floorMicros: amount(allocation?.floors?.[id]), weight: amount(weights[id]), totalWeight: amount(totalWeight), split: allocation?.state ? { id: allocation.state.planId ?? null, writer: allocation.state.writer ?? null, appliedAt: allocation.state.appliedAt ?? null, validUntil: allocation.state.validUntil ?? null } : null, refused: selected.filter((r) => recordReason(r) === "allocation-cap").length, unset: !envelope, problem: allocation?.problem ? envelopeWords(allocation) : allocation?.unreachable ? "The allocation could not be read." : null },
+    size, sizing: sizingView, sizingUnreadable: (registryUnreadable && !registryPart) || !sizing || Boolean(sizing.unreachable) || !sl || Boolean(sl.invalid || sl.unreadable), ...(registryPart ? { sizingReadInPart: true } : {}), limits: limitRows, limitsUnreadable: !sl || Boolean(sl.invalid || sl.unreadable), ...(!sl || sl.invalid || sl.unreadable ? { limitsFile: fileWordOf(fileCaseOfView(sl, "limits")) } : {}), bundle, bundleKnown,
     loads: projectLoadsOf(recorded.filter((r) => instant(r) >= now - LOADS_WINDOW_MS), { historyIncomplete }),
     triggers: [...triggerCounts.values()].sort((a, b) => a.index - b.index), triggersKnown: triggersFile === null, ...(triggersFile === null ? {} : { triggersFile }), editRefusal: projectRefusal(edit, id, "edit", fileWords), deleteRefusal: projectRefusal(deletion, id, "delete", fileWords),
   };

@@ -116,6 +116,7 @@ import { selectEntries, keepOnlyDeclaredSkills } from "@edgehero/pi-dispatch/mat
 import { FORGES, RUN_KINDS, isForgeKind, semanticItemOfId } from "@edgehero/pi-dispatch/forges";
 import { hasControls, scrubControls } from "./panel.mjs";
 import { RUN_MODEL_RE, RUN_PROVIDER_RE, parseRunFilter, runMatches, runVenueOf, triggerValueOf } from "./run-filter.mjs";
+import { recordMatchesTrigger } from "./trigger-match.mjs";
 // The two pure text scanners live in graph-model.mjs (the pure side of the graph feature); this module
 // supplies them bytes, never the other way around -- the dependency points read-model -> graph-model.
 import { parseSkillMeta, findSiblingMentions, findLoopHints, triggerMatchLabel } from "./graph-model.mjs";
@@ -1367,6 +1368,8 @@ export { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
  * worker's reserve rule, for the reserve a paid action shows before confirm.
  */
 import { boundedClient, boundedText, connectedQueue, CONFIRM_READ_TIMEOUT_MS, enqueueUnconfirmed, enqueueUnread, heldClearedAnswer, heldRefused, heldRemovalUnanswered, parkedAnswerRefusalOf, refusedByValkey, rerunRefusalOf, RERUN_BAD_ID, within } from "./job-actions.mjs";
+import { fileCaseOfError } from "./file-case.mjs";
+import { mirrorUnread } from "./mirror-words.mjs";
 export { planTriggerFire, enqueueTriggerFire } from "./trigger-fire.mjs";
 export { alreadyQueuedLine, dispatchRunAlready, LOOK_FIRST, BULK_MAX, cancelQueuedJob, cancelQueuedRefusal, enqueueParkedAnswer, enqueueRerun, enqueueSteer, parkedAnswerRefusalOf, planCancelQueued, planFailedBulk, planParkedAnswer, planRerun, rerunRefusalOf, planSteer, planSteerWithdraw, removeFailedJob, removeFailedJobs, retryFailedJob, retryFailedJobs, steerAuditTarget, steerWithdrawSentence, withdrawSteerMessage } from "./job-actions.mjs";
 export { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
@@ -2829,7 +2832,7 @@ export async function readCapacity({ url, env = process.env, window = "7d", host
     // What the report could not ask (issue #962), as names and not only as the sentences of `coverage.reason`: a caller
     // that would say "no such host in this window" must know whether the registry and the fleet's mirror answered. A
     // deployment with no mirror ("off") was read: it has none.
-    const unread = [...(!redis || fleet.unreachable || fleet.incomplete || !Array.isArray(fleet.hosts) ? ["registry"] : []), ...(!redis || read.mirrorState.startsWith("unreachable") ? ["mirror"] : [])];
+    const unread = [...(!redis || fleet.unreachable || fleet.incomplete || !Array.isArray(fleet.hosts) ? ["registry"] : []), ...(!redis || mirrorUnread(read.mirrorState) ? ["mirror"] : [])];
     return { report: shown.report, text: capacityText(shown.report, { since: window }), unread, ...(!fleet.unreachable && fleet.incomplete ? { registryReadInPart: true } : {}) };
   } finally {
     try {
@@ -3822,11 +3825,11 @@ export function triggerDetailOf(snapshot, index, { now = snapshot?.readAt, subsc
   const trigger = snapshot?.triggers?.triggers?.find((t) => t.index === index);
   if (!trigger) return null;
   const value = trigger.type === "cron" ? trigger.id : String(index);
-  const matches = (r) => trigger.runKind === "local"
-    ? r.kind === "local" && r.localEvent?.id === trigger.id && r.localEvent?.forge === trigger.forge && r.localEvent?.type === trigger.type && r.localEvent?.digest === trigger.localEventDigest
-    : triggerValueOf(r) === value && (trigger.type === "cron" || r.triggerType === trigger.type);
-  const history = snapshot.recordDetails instanceof Map ? [...snapshot.recordDetails.values()] : snapshot.runs ?? [];
-  const runs = history.filter((r) => matches(r) && runAt(r) <= now).sort((a, b) => runAt(b) - runAt(a));
+  // The wide window (issue #988), which the snapshot now carries: its newest 50 runs stand in only where the window's
+  // fold failed, which `parkedUnreachable` says. One rule says which records are this trigger's (`recordMatchesTrigger`),
+  // as on `/triggers` and a project's page; a newer release's record is left out, as there.
+  const history = readableRecords(snapshot.recordDetails instanceof Map ? [...snapshot.recordDetails.values()] : snapshot.runs ?? []).records;
+  const runs = history.filter((r) => recordMatchesTrigger(r, trigger) && runAt(r) <= now).sort((a, b) => runAt(b) - runAt(a));
   const runs24h = runs.filter((r) => runAt(r) >= now - DAY_MS && runAt(r) <= now);
   const measured = runs24h.map((r) => meteredRunMicros(r, { subscriptions, ...(pricing ? { pricing } : {}) }));
   const queued = snapshot.waiting?.unreachable || !snapshot.waiting ? null : (snapshot.waiting.rows ?? []).filter((r) => String(r.trigger ?? triggerValueOf(r)) === value);
@@ -3909,7 +3912,7 @@ export function normalizeSecretBundlesForDisplay(value) {
 const watchConfigurationError = (configuration) => Object.assign(new Error(`watch configuration ${configuration === "invalid" ? "does not load" : "unreadable"}`), { watchConfiguration: configuration });
 
 /** Whether the snapshot's word for the fleet's run mirror says it was on and did not answer: "unreachable (why)". */
-const mirrorDidNotAnswer = (word) => typeof word === "string" && word.startsWith("unreachable");
+const mirrorDidNotAnswer = (word) => mirrorUnread(word);
 
 export function readTriggersWithInstructions({ triggersPath, fs = nodeFs, includeTasks = false }) {
   let text = null;
@@ -5091,7 +5094,9 @@ export const SWITCH_SCAN_INCOMPLETE = "the scan for the deployment's queues did 
  * index and the mirror, merged, at most this many. Wider than the TUI's 50 because a parked run waits for a person and
  * may be days old; bounded because it is read on the tick (at most once per `DOLLAR_RECORDS_TTL_MS`).
  */
-const WIDE_RUNS = 1000;
+export const WIDE_RUNS = 1000;
+/** What a page says of a wide window that is not whole (issue #988, `recordsWhole`): why its counts are floors. */
+export const WIDE_RUNS_CUT_TEXT = `the fleet may hold more runs than the ${WIDE_RUNS.toLocaleString("en-US")} read`;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -5236,7 +5241,7 @@ export function createFleetReader(
         // A triggers file that does not exist holds no source (issue #988), as it holds no rule (`listRules`).
         if (err?.code === "ENOENT") return [];
         // One word per case (issue #988): read and refused does not load; a read that failed is unreadable.
-        throw watchConfigurationError(typeof err?.code === "string" && /^E[A-Z0-9]+$/.test(err.code) ? "unreadable" : "invalid");
+        throw watchConfigurationError(fileCaseOfError(err) === "unreadable" ? "unreadable" : "invalid");
       }
       const sources = config.watchSources ?? {};
       return Object.entries(sources).slice(0, 256).map(([id, source]) => ({ id, verify: source.verify, maxBodyBytes: source.maxBodyBytes, maxPerDay: source.maxPerDay }));
@@ -5574,7 +5579,11 @@ export function createFleetReader(
     const runs = mergeRuns(Array.isArray(local?.records) ? local.records : [], mirrored, { limit: WIDE_RUNS });
     // Either side unread makes the window partial: a parked run on that side would be missing without a word.
     const partial = local?.unreachable ?? (typeof degraded === "string" && degraded.startsWith("unreachable") ? "the run mirror could not be read" : null);
-    return { at, runs, mirror: degraded, partial };
+    // Whole (issue #988): every run both sides hold is in `runs`. Both sides answered, this host's index was not cut at
+    // its cap, the mirror's read was not cut at its bound (which it says at the bound itself, since a read cannot tell
+    // a full answer from a cut one), and the merge kept everything. A count over the window is itself only then.
+    const whole = partial === null && local?.capped !== true && (degraded === "ok" || degraded === "off") && runs.length < WIDE_RUNS;
+    return { at, runs, mirror: degraded, partial, whole };
   };
   const wideRuns = async () => {
     const at = nowFn();
@@ -6045,6 +6054,7 @@ export function createFleetReader(
           parkedUnreachable: w.partial ? scrubReason(w.partial) : null,
           recordReasons: newestReasonsOf(w.runs),
           recordDetails: new Map(w.runs.map((r) => [r.jobId, r]).reverse()),
+          recordsWhole: w.whole === true,
           // Issue #897: the window's runs, for which failed jobs a later run has superseded (`supersededFailures`).
           windowRuns: w.runs,
           // Issue #737: the overview's day of runs, its spend per hour and its soft-hold refusals, off the same window.
@@ -6171,6 +6181,11 @@ export function createFleetReader(
         runs: merged.runs,
         runHosts: merged.hosts,
         runMirror: merged.mirror,
+        // Issue #988: the wide window itself, for what counts runs: `/triggers`, a trigger's page and Models. `runs`
+        // above is the newest 50, and a count over it was said bare while the mirror held more. `recordDetails` is the
+        // window's runs by id, and `recordsWhole` says whether it holds every run both sides have (`wideOf`). A fold
+        // that failed carries neither: nothing then vouches for a list, and a count over `runs` is a floor.
+        ...(fold.recordDetails instanceof Map ? { recordDetails: fold.recordDetails, recordsWhole: fold.recordsWhole === true } : {}),
         settings,
         triggers: triggersView,
         ...(triggersView?.triggers?.some((t) => t.runKind === "local") ? { localEventStatuses: await localEventStatusesRead } : {}),
@@ -6495,7 +6510,7 @@ export function createFleetReader(
         const job = await retainedJob(jobId, lookup);
         if (job === undefined) return { unreachable: true };
         const judged = parkedAnswerRefusalOf({ jobId, data: job?.data ?? null, triggersPath: paths.triggersPath ?? null, approval: Array.isArray(job?.data?.gates), fs });
-        return judged.refusal ? { refusal: judged.refusal } : { ok: true };
+        return judged.refusal ? { refusal: judged.refusal, ...(judged.unread === true ? { unread: true } : {}) } : { ok: true };
       } catch {
         return { unreachable: true };
       }
