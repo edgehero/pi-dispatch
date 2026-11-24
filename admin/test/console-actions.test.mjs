@@ -3,7 +3,7 @@ import { makeSandboxService, SANDBOX_END_TIMEOUT, SANDBOX_END_UNCONFIRMED } from
 import { sandboxFixture } from "./helpers/sandbox-goldens.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import * as nodeFs from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
@@ -4933,7 +4933,9 @@ test("what the tracking of a fix could not take back is logged with its cause, a
     assert.equal(i.status, 200, i.text);
     atStage = () => {
       atStage = null;
+      // Stamped through the clock the lock reads (the default Date.now), so it is a live writer's lock at any wall clock.
       writeFileSync(`${paths.triggersPath}.lock`, "");
+      utimesSync(`${paths.triggersPath}.lock`, Date.now() / 1000, Date.now() / 1000);
     };
     const locked = await c.confirm("zero-touch-instruction", i.json().ticket);
     rmSync(`${paths.triggersPath}.lock`, { force: true });
