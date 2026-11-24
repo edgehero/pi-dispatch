@@ -32,10 +32,10 @@ export function failedForAgent(read, { whole = false } = {}) {
 }
 
 /**
- * The waiting jobs (`readWaiting`'s shape, with the fleet reader's `queuesShort`) or the held ones (`readHeldJobs`':
- * `more`, no `queuesCut`). `complete` only over a read that cut nothing: no list truncated, no row past the listing
- * (`more`), no queue past the bound (`queuesCut`); and, for the waiting jobs, over a set of queues that is whole
- * (`queuesShort` is set when the registry or the keyspace scan behind it was not read).
+ * The waiting jobs (`readWaiting`'s shape, with the fleet reader's `queuesShort`; the held ones are `heldForAgent`'s).
+ * `complete` only over a read that cut nothing: no list truncated, no row past the listing (`more`), no queue past the
+ * bound (`queuesCut`); and over a set of queues that is whole (`queuesShort` is set when the registry or the keyspace
+ * scan behind it was not read).
  */
 export function waitingForAgent(read) {
   const rows = !read?.unreachable && Array.isArray(read?.rows) ? read.rows : null;
@@ -44,6 +44,22 @@ export function waitingForAgent(read) {
   return { unavailable: rows === null, more, queuesCut,
     complete: rows !== null && read.truncated === false && (more ?? 0) === 0 && (queuesCut ?? 0) === 0 && read.queuesShort !== true,
     jobs: rows === null ? null : rows.map((r) => ({ jobId: id(r.jobId), queue: id(r.queue), reason: agentReasonToken(r.why), due: n(r.dueAt), bucket: id(r.bucket), known: r.known === true, holder: id(r.holder), state: id(r.state) })) };
+}
+
+/**
+ * The held jobs (`readHeldJobs`' shape: `rows`, `more`, `truncated`) for `dispatch_waits` (issue #1037). Each row as
+ * `{ jobId, target, waitedMs, checks }`: the target through the agent projection's id rule (a repository item, a watch
+ * rule, a local folder's name; null where it is none of those), never the label, which is the operator's own words for
+ * what the job waits on and is not given to a model (#766). The tool handed `waitingForAgent`'s waiting-row keys
+ * before, `queue`, `reason`, `due`, `bucket`, `holder` and `state`, none of which a held row has, so each was always
+ * null, and none of the three its description promised. `complete` only with `truncated` false (the index holds no
+ * member this read did not look at) and `more` 0; `jobs` null over a read that failed, never `[]`.
+ */
+export function heldForAgent(read) {
+  const rows = !read?.unreachable && Array.isArray(read?.rows) ? read.rows : null;
+  const more = n(read?.more);
+  return { unavailable: rows === null, more, complete: rows !== null && read.truncated === false && (more ?? 0) === 0,
+    jobs: rows === null ? null : rows.map((r) => ({ jobId: id(r?.jobId), target: typeof r?.target === "string" ? agentReadProjection(r.target, "target") ?? null : null, waitedMs: n(r?.waitedMs), checks: n(r?.checks) })) };
 }
 
 /**

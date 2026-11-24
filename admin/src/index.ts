@@ -224,7 +224,7 @@ import { panelWrite } from "./audited-write.mjs";
 import { modelToolRefusal, modelToolReadFailure, publicToolRefusal } from "./tool-refusals.mjs";
 import { actionAgentPolicy } from "./action-policy.mjs";
 import { TOOL_ACTIONS, executeToolAction } from "./tool-actions.mjs";
-import { readOperationalTool, waitingForAgent, runForAgent, readHeldForAgent } from "./tool-reads.mjs";
+import { readOperationalTool, heldForAgent, runForAgent, readHeldForAgent } from "./tool-reads.mjs";
 export { setToolReadDepsForTest } from "./tool-reads.mjs";
 import { readModelsTool } from "./models-tools.mjs";
 export { setModelsToolReadsForTest } from "./models-tools.mjs";
@@ -1052,18 +1052,23 @@ function registerTools(pi: ExtensionAPI): void {
     name: "dispatch_waits",
     label: "pi-dispatch held jobs",
     description:
-      "Read-only. Lists the jobs the worker is currently HOLDING on a trigger's run.waitFor condition: the " +
-      "job id, an id-only target, the operator's own words for what it is waiting on, and how long it has " +
-      "waited. A held job has reserved no budget slot and started no container. This is a different set from " +
-      "the queue's `delayed` count, which also mixes cron next-occurrences, retry backoff and quiet hours; " +
-      "only waits appear here. Use the job id for dispatch_wait_cancel.",
+      "Read-only. Lists the jobs the worker is currently HOLDING on a trigger's run.waitFor condition, the " +
+      "longest-waiting first: each job's id (`jobId`), its target as an id (`target`: a repository item, a " +
+      "watch rule or a local folder's name; null where it is none of those), how long it has waited " +
+      "(`waitedMs`) and how many times its condition was checked (`checks`). What a job waits on is the " +
+      "operator's own words and is not given here; the console's Held card shows it. A held job has reserved " +
+      "no budget slot and started no container. This is a different set from the queue's `delayed` count, " +
+      "which also mixes cron next-occurrences, retry backoff and quiet hours; only waits appear here. " +
+      "`jobs` is null when Valkey could not be read, and `complete` is false when more holds exist than are " +
+      "listed (`more` counts them) or the worker's index holds more entries than one read looks at. Use the " +
+      "job id for dispatch_wait_cancel.",
     parameters: Type.Object({}),
     async execute() {
       const paths = resolvePaths(deploymentEnv());
       // `prune: false` (issue #1036): a stale member of the held index is skipped and left. Only the panel and
       // `/dispatch status` prune that index, no service, so the read walks on past stale members (`HELD_LOOK_MAX`).
       const held = await readHeldJobs({ url: paths.valkeyUrl, prune: false });
-      return toolText(JSON.stringify(waitingForAgent(held)));
+      return toolText(JSON.stringify(heldForAgent(held)));
     },
   });
 
