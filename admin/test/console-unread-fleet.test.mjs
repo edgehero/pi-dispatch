@@ -132,7 +132,8 @@ const COULD_NOT = [REGISTRY_UNREAD_TEXT, HOSTS_UNREAD_TEXT, HOSTS_UNREAD, "The h
 
 test("the pages' sentence for a registry read in part promises nothing about waiting: a row Valkey answers with an error is not read on the next try either (#1036)", () => {
   assert.doesNotMatch(REGISTRY_PART_TEXT, /in time|try again|once Valkey answers|did not answer/);
-  assert.match(REGISTRY_PART_TEXT, /^The host registry was read in part: some hosts' rows were not read, /);
+  // And it says "as it was last seen" only of a host that was read before: one never read here has no row at all.
+  assert.equal(REGISTRY_PART_TEXT, "The host registry was read in part: some hosts' rows were not read. A host read before is as it was last seen, and one never read here has no row.");
 });
 
 test("/fleet and the overview over a registry read in part say so, draw the rows that were read, and never say it could not be read (#1062)", async () => {
@@ -192,7 +193,8 @@ test("over a registry read in part a row it did not read is not counted, dated o
   assert.doesNotMatch(noBeat["p-fleetbar"] + noBeat["p-hosts"], /at least 0/);
   assert.match(unread["p-fleetbar"], /unknown hosts beat/);
   // The overview: the row read is current (its beat's age and its slots), the row not read is "as last seen".
-  const lastSeenCount = (text) => text.split(LAST_SEEN_WORDS).length - 1;
+  // The rows' own words, as a word: the banner's sentence says "was last seen" of a host read before.
+  const lastSeenCount = (text) => text.split(new RegExp(`\\b${LAST_SEEN_WORDS}`)).length - 1;
   const base = overviewSnapshot({ ...OVERVIEW_CALM });
   const partRows = notRead(base.hostBudgets, "build3");
   const part = await panelsOf("overview", overviewSnapshot({ ...OVERVIEW_CALM, queue: { ...base.queue, fleetDegraded: "1 of 2 host rows not read", registryReadInPart: true }, hostsReadAt: NOW - 1_000, hostBudgets: partRows }));
@@ -490,10 +492,30 @@ test("dataUnread: a load the deadline cut is unread on any page, and no page out
 });
 
 test("the host page says when the running jobs could not be read, beside what it did read; a read list says nothing of it", async () => {
-  const host = async (over) => (await pagePanels("host", { query: { name: "build3" }, session: OP, data: { page: "host", now: NOW, env: {}, snapshot: snap({ active: [], ...over }) }, readOnly: false })).map((p) => wordsOf(p.html)).join(" ");
-  assert.ok((await host({ activeUnreachable: true })).includes(HOST_ACTIVE_UNREAD_TEXT));
+  const host = async (over, name = "build3") => (await pagePanels("host", { query: { name }, session: OP, data: { page: "host", now: NOW, env: {}, snapshot: snap({ active: [], ...over }) }, readOnly: false })).map((p) => wordsOf(p.html)).join(" ");
+  const published = snap().hostBudgets.find((h) => h.name === "build3").jobs.filter((j) => !j.o);
+  assert.ok(published.length > 0, "the host's row names running jobs (vacuous otherwise)");
+  // The row names jobs that no queue's list held: how many, and why; never the bare "may be missing".
+  const missing = await host({ activeUnreachable: true });
+  assert.match(missing, new RegExp(`build3 says it runs ${published.length === 1 ? "1 job that is" : `${published.length} jobs that are`} not listed here: the running jobs could not be read whole\\.`));
+  assert.ok(!missing.includes(HOST_ACTIVE_UNREAD_TEXT));
   assert.ok(!(await host({ activeUnreachable: false })).includes(HOST_ACTIVE_UNREAD_TEXT));
   assert.ok(!(await host({})).includes(HOST_ACTIVE_UNREAD_TEXT));
+  // Issue #1036. A row read this time, every job of which is drawn: nothing of this host is missing, so the card says
+  // nothing, whatever queue elsewhere was not read or not asked. It said "may be missing here" on every host's page.
+  const drawn = published.map((j) => ({ jobId: j.id, queue: "pi-jobs", startedAt: NOW - 60_000, host: "build3", project: null, size: null }));
+  const whole = await host({ active: drawn, activeUnreachable: true });
+  assert.doesNotMatch(whole, /may be missing here|not listed here/, whole);
+  // A row that cannot vouch for the card keeps the sentence: one drawn as last seen, one whose own list is cut or
+  // unreadable, and a host with no row.
+  const rows = (change) => snap().hostBudgets.map((h) => (h.name === "build3" ? change(h) : h));
+  for (const [what, over] of [
+    ["as last seen", { queue: { ...snap().queue, fleetDegraded: "Command timed out" }, hostsReadAt: NOW - 60_000 }],
+    ["not reached by a read in part", { queue: partQueue(), hostsReadAt: NOW - 1_000, hostBudgets: rows((h) => ({ ...h, notRead: true })) }],
+    ["its own list cut", { hostBudgets: rows((h) => ({ ...h, jobsMore: 2 })) }],
+    ["its own list unreadable", { hostBudgets: rows((h) => ({ ...h, jobs: null, jobsUnreadable: true })) }],
+  ]) assert.ok((await host({ active: drawn, activeUnreachable: true, ...over })).includes(HOST_ACTIVE_UNREAD_TEXT), what);
+  assert.ok((await host({ activeUnreachable: true }, "build9")).includes(HOST_ACTIVE_UNREAD_TEXT), "a host with no row");
 });
 
 test("dispatch_cancel plans no cancel of a queued job while the running jobs could not be read; a job it did read is planned as before", async () => {

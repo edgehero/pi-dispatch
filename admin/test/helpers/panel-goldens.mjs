@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { TRIGGER_DRAW } from "./trigger-goldens.mjs";
 import { SPEND_DRAW } from "./spend-goldens.mjs";
 import { FLEET_DRAW } from "./fleet-goldens.mjs";
+import { MARKS_DRAW } from "./marks-goldens.mjs";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -996,6 +997,7 @@ const DRAW = {
   ...TRIGGER_DRAW,
   ...SPEND_DRAW,
   ...FLEET_DRAW,
+  ...MARKS_DRAW,
   ...RUN_CARD_STATES,
   // ConfirmStates: the slot in every state, after the card that asked.
   "confirm-previewing.operator": async () => openSlotAfter(await fleetLive(), "p-fleetbar", { label: "Pause the fleet" }),

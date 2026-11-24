@@ -1390,7 +1390,10 @@ stateTest(T.unread, async () => {
   assert.doesNotMatch(fleetPage(), /data-unread/, "only on a failed read");
   // A snapshot that was read with a part missing is drawn so too, each part alone; a snapshot read whole is not.
   const pillAttr = (snapshot) => / data-unread>/.test(String(shellHtml("fleet", { ...ctx, data: { snapshot, now: NOW } }, html``)));
-  assert.deepEqual([{ activeUnreachable: true }, { parkedUnreachable: "timeout" }, { queue: { fleetDegraded: "registry" }, hostsReadAt: NOW - 1000 }, { queue: { fleetDegraded: "registry" }, hostsReadAt: null }].map(pillAttr), [true, true, true, true]);
+  // Each part FLEET DRAWS (issue #988: the three parts are held page by page): the active jobs and the registry. The
+  // parked runs are none of its cards', so they do not mark it; the overview draws them, and they mark it.
+  assert.deepEqual([{ activeUnreachable: true }, { parkedUnreachable: "timeout" }, { queue: { fleetDegraded: "registry" }, hostsReadAt: NOW - 1000 }, { queue: { fleetDegraded: "registry" }, hostsReadAt: null }].map(pillAttr), [true, false, true, true]);
+  assert.match(String(shellHtml("overview", { ...ctx, data: { snapshot: { parkedUnreachable: "timeout" }, now: NOW } }, html``)), / data-unread>/);
   assert.deepEqual([{}, { activeUnreachable: false, parkedUnreachable: null, parked: [], active: [], queue: { fleetDegraded: null } }].map(pillAttr), [false, false]);
   const d = boot(drawn);
   assert.equal(pill(d).word, "Not live", "as the server drew it");

@@ -1571,7 +1571,9 @@ test("the thaw: after loads Valkey did not answer, the load that straddles its r
   const now = clock();
   const whole = { page: "parked", words: "read whole" };
   const down = { page: "parked", words: "could not be read", readFailed: true, deadlineSpent: true };
-  const straddling = { page: "parked", words: "the hosts could not be read", snapshot: { queue: { fleetDegraded: "Command timed out" }, parked: [] } };
+  // A part the page draws: Parked draws the parked runs and nothing of the hosts, so a registry that was not read is
+  // no part of it unread (the rule holds the three parts of a snapshot page by page).
+  const straddling = { page: "parked", words: "the parked runs could not be read", snapshot: { parked: [], parkedUnreachable: "Command timed out" } };
   for (const outage of [6, 20, 120]) {
     let next = whole;
     let loads = 0;
@@ -1767,12 +1769,22 @@ test("a good render over a snapshot with a part missing is told unread, never fr
   const tab = fakeRes();
   h.hub.subscribe({ res: tab, sessionId: "s1", session: OP, page: "fleet", query: {} });
   assert.deepEqual(namesIn(tab.take()), ["unread", "panel"]);
-  // Each part alone holds it: the registry (as last seen too) and the parked runs.
-  for (const part of [{ queue: { fleetDegraded: "registry" }, hostsReadAt: T0 }, { parkedUnreachable: "timeout" }]) {
-    snapshot = part;
-    await h.hub.tick();
-    assert.deepEqual(namesIn(res.take()), [], JSON.stringify(part));
-  }
+  // Each part Fleet draws holds it alone: the registry too (as last seen too).
+  snapshot = { queue: { fleetDegraded: "registry" }, hostsReadAt: T0 };
+  await h.hub.tick();
+  assert.deepEqual(namesIn(res.take()), [], "the registry");
+  // The parked runs are no part of Fleet (issue #988: the rule holds the three parts page by page), so over them
+  // alone its stream is fresh: it was told unread on a page that says nowhere what it lacks. Parked's stream is not.
+  snapshot = { parkedUnreachable: "timeout" };
+  const parkedTab = fakeRes();
+  const leaveParked = h.hub.subscribe({ res: parkedTab, sessionId: "s1", session: OP, page: "parked", query: {} });
+  await h.hub.tick();
+  assert.deepEqual(namesIn(res.take()).filter((name) => name !== "panel"), ["fresh"], "Fleet draws no parked run");
+  assert.deepEqual(namesIn(parkedTab.take()).filter((name) => name !== "panel"), ["unread"], "Parked does");
+  leaveParked();
+  snapshot = { active: [], activeUnreachable: true };
+  await h.hub.tick();
+  res.take();
   snapshot = { active: [], activeUnreachable: false, parkedUnreachable: null, queue: { fleetDegraded: null } };
   await h.hub.tick();
   assert.deepEqual(namesIn(res.take()), ["fresh", "panel"], "read whole: fresh");
@@ -1780,6 +1792,29 @@ test("a good render over a snapshot with a part missing is told unread, never fr
   await h.hub.tick();
   assert.deepEqual(namesIn(res.take()), ["unread", "panel"], "and unread again when a part goes missing");
   assert.deepEqual(h.logs, [], "a part missing is not a failed load: nothing is logged, and the view is kept");
+});
+
+test("the hub judges a load for who watches it: a read only an operator's cards say leaves a viewer's page Live and its load kept", async () => {
+  // A run's page whose search for child runs was incomplete: the Chain card says so, and a viewer is not drawn it.
+  const data = { page: "run", run: { record: { jobId: "gh-1", outcome: "completed" } }, children: [], childrenIncomplete: true, inbox: { found: false } };
+  const stream = async (session) => {
+    const now = clock();
+    let loads = 0;
+    const h = hubOn({ now, pageMinMs: { run: 5000 }, load: async () => ((loads += 1), data), pagePanels: async () => [{ id: "p-main", html: "the run" }] });
+    const res = fakeRes();
+    h.hub.subscribe({ res, sessionId: "s1", session, page: "run", query: { id: "gh-1" } });
+    await h.hub.tick();
+    const told = namesIn(res.take()).filter((name) => ["fresh", "unread"].includes(name));
+    const first = loads;
+    now.advance(1000);
+    await h.hub.tick();
+    h.hub.close();
+    return [told, loads - first];
+  };
+  // An operator's view is told unread, and the load is read again at the next tick (a part unread for under 5 s).
+  assert.deepEqual(await stream(OP), [["unread"], 1]);
+  // A viewer's is whole: nothing on their page says it, so it is told fresh, and the load is kept for the page's 5 s.
+  assert.deepEqual(await stream(VIEW), [["fresh"], 0]);
 });
 
 test("stateOf: a schedule's stall counter that could not be read is null, never 0; no counter at all is 0", () => {

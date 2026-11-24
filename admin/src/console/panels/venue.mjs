@@ -6,10 +6,10 @@ import {
   OPENSHELL_UNPUBLISHED_TEXT,
   venuesView,
 } from "../../read-model.mjs";
-import { VENUE_LABEL } from "../../words.mjs";
+import { VENUE_LABEL, listed } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
-import { HOSTS_UNREAD, hostsUnread } from "./common.mjs";
+import { HOSTS_UNREAD, hostsUnread, registryPartText, registryReadInPart, unreadHostsOf } from "./common.mjs";
 
 const model = (view) => venuesView(view.data?.snapshot?.hostBudgets ?? []);
 const selected = (view) =>
@@ -19,7 +19,27 @@ const holderOf = (venue) =>
 // With no snapshot, or one whose registry was never read, nothing was read about the hosts, which is not the same as
 // there being none.
 const read = (view) => !hostsUnread(view.data?.snapshot);
-const names = (rows, view) => (rows.length ? rows.join(", ") : read(view) ? "no live host" : HOSTS_UNREAD);
+/**
+ * The hosts of a registry read in part that this console has NO row of (issue #1036): a row that was not read and
+ * was never read here, so what its host blesses, defaults to or publishes is in none of this page's lists. A host
+ * whose row was not read and is kept is in them as it was last seen, which the note under the card says.
+ */
+const unseen = (view) => unreadHostsOf(view?.data?.snapshot).filter((u) => !u.kept).map((u) => u.name);
+/** Whether that read left a host out of the lists without naming it: more were not read than it names. */
+const unnamed = (view) => registryReadInPart(view?.data?.snapshot) && (unreadHostsOf(view.data.snapshot).length === 0 || Number(view.data.snapshot.queue?.unreadHostsMore) > 0);
+/**
+ * A list of hosts by name, which is "no live host" only over a registry that said so: with a row not read and no last
+ * row to draw, the list is the hosts that were read, and it says which host is missing from it, or that one may be.
+ */
+const names = (rows, view) => {
+  if (!read(view)) return rows.length ? rows.join(", ") : HOSTS_UNREAD;
+  const missing = unseen(view);
+  const gap = missing.length > 0 ? `not known for ${listed(missing)}, whose ${missing.length === 1 ? "row was" : "rows were"} not read` : unnamed(view) ? "not known for a host whose row was not read" : null;
+  if (gap === null) return rows.length ? rows.join(", ") : "no live host";
+  return rows.length ? `${rows.join(", ")}; ${gap}` : `${gap.charAt(0).toUpperCase()}${gap.slice(1)}`;
+};
+/** The note under a card that lists hosts, over a registry read in part: which rows were not read, and what Valkey answered. */
+const partNote = (view) => (registryReadInPart(view.data?.snapshot) && read(view) ? html`<p class="note">${registryPartText(view.data.snapshot)}</p>` : null);
 const word = (p) =>
   html`<span class="chip vw vw--${p.word}${p.word === "enforced" ? " tone-ok" : ""}">${ui.icon(p.word === "enforced" ? "shield" : p.word === "asserted" ? "done" : "minus")}${p.word}</span>`;
 const missing = () =>
@@ -79,15 +99,15 @@ export const venueSummary = panel(
                       .join(", ")}`,
                 )
                 .join("; ")
-            : read(view) ? "No live host published a floor" : HOSTS_UNREAD,
+            : read(view) ? (unseen(view).length > 0 || unnamed(view) ? "No host that was read published a floor" : "No live host published a floor") : HOSTS_UNREAD,
         ],
       ],
       { cols: 1 },
     )}${
       m.unpublished.length
-        ? html`<p class="note"> Not published by ${names(m.unpublished)} (a worker older than this console). </p>`
+        ? html`<p class="note"> Not published by ${m.unpublished.join(", ")} (a worker older than this console). </p>`
         : null
-    }`,
+    }${partNote(view)}`,
 );
 
 const SERVE_LABEL = {
@@ -139,7 +159,7 @@ export const venueHosts = panel("OpenShell on each host", (v, _m, view) =>
             ? OPENSHELL_UNPUBLISHED_TEXT
             : (GATEWAY_TEXT[o.gateway] ?? GATEWAY_TEXT.unknown),
         ]),
-        empty: read(view) ? "No live host blesses this venue." : "Not known: the hosts could not be read.",
+        empty: read(view) ? (unseen(view).length > 0 || unnamed(view) ? "No host that was read blesses this venue." : "No live host blesses this venue.") : "Not known: the hosts could not be read.",
       }),
 );
 

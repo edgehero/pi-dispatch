@@ -16,10 +16,20 @@ import { html as escapedHtml } from "../html.mjs";
 // Keep indented source readable without emitting whitespace-only lines when an optional fragment is absent.
 const html = (strings, ...values) => escapedHtml(strings.map(s => s.replace(/[ \t]*\n[ \t]*/g, "\n")), ...values);
 import * as ui from "../kit.mjs";
-import { noChangeText, canAct, changesOffered, shownPath, runLink, moneyHtml, timeHtml } from "./common.mjs";
+import { noChangeText, canAct, changesOffered, shownPath, runLink, moneyHtml, timeHtml, schedulesShort, waitingFloor } from "./common.mjs";
 import { actForm, field, area, table, facts } from "./config-ui.mjs";
 const card = (title, body) => ui.card({ title, body });
 const detail = (v) => v.data?.triggerDetail ?? {};
+/**
+ * Why this trigger's jobs in line are a floor, in the waiting read's own words (issue #1037: a list not read, a set of
+ * queues that may be short, a bound), or nothing over a read that is whole. The page said "none in view" and a bare
+ * count of jobs that would be refused over each of them.
+ */
+const queuedFloorText = (v, d) => {
+  if (d?.queuedIncomplete !== true) return "";
+  const floor = waitingFloor(v.data?.snapshot?.waiting);
+  return floor === null ? "" : ` ${floor.text}`;
+};
 // The row at this place in the file, as the snapshot's detail found it by the index each row carries, or with Valkey down the row the card read from the
 // file itself, since nothing about that row needs Valkey. REJECTED: the display list's place, which skips an entry it cannot use: with one above it, this
 // page drew the next row's facts and its Delete under this row's number, while the action refused this row.
@@ -178,8 +188,8 @@ export function triggerRuns(v) {
         Jobs in line now:
         ${(d.queued ?? []).map((j) => runLink(j.jobId ?? j.id))}${d.queued
           ?.length
-          ? null
-          : d.queued == null ? "unavailable; the queue could not be read" : "none in view"}.
+          ? d.queuedIncomplete ? " and there may be more" : null
+          : d.queued == null ? "unavailable; the queue could not be read" : d.queuedIncomplete ? "none found, and a job may be missing" : "none in view"}.${queuedFloorText(v, d)}
       </p>`}`,
   );
 }
@@ -386,6 +396,14 @@ ${v.data?.snapshot?.triggerTasks?.[v.query.index] ?? v.data?.fileTexts?.tasks?.[
         : null}`,
   );
 }
+/**
+ * Whether this cron trigger's schedule is missing from a list that was read in part (issue #986,
+ * `schedulersReadInPart`): a host queue's schedules were not read, or a host's own queue was not asked, so a schedule
+ * that is not in the list may be registered all the same. Its next fire is then "not known", where the page said the
+ * schedule was not published, which nobody read.
+ */
+const schedulePartUnread = (v, d) => d.cron?.next == null && schedulesShort(v.data?.snapshot);
+const SCHEDULE_PART_UNREAD = "not known (not every queue's schedules could be read, so this one may be registered)";
 export function triggerKinds(v) {
   const t = trigger(v);
   if (!t) return null;
@@ -394,8 +412,8 @@ export function triggerKinds(v) {
     "Other kinds",
     html`${t.type === "cron"
       ? html`<p>
-            Next fire: ${timeHtml(d.cron?.next ?? t.next)}. Health:
-            ${d.cron?.next == null ? (v.data?.snapshot ? "not known (schedule not published)" : SCHEDULE_UNREAD) : d.cron.overdueMs > 0 ? "overdue" : "on time"}; stalls
+            Next fire: ${schedulePartUnread(v, d) ? "not known" : timeHtml(d.cron?.next ?? t.next)}. Health:
+            ${d.cron?.next == null ? (v.data?.snapshot ? (schedulePartUnread(v, d) ? SCHEDULE_PART_UNREAD : "not known (schedule not published)") : SCHEDULE_UNREAD) : d.cron.overdueMs > 0 ? "overdue" : "on time"}; stalls
             ${t.stalls ?? d.cron?.stalls ?? "not known"} of ${stallCapOf(v, d)}.
           </p>
           ${changesOffered(v)
@@ -437,7 +455,7 @@ export function triggerChange(v) {
         ${t?.runKind === "local" ? "Current and pending generation state is shown in Runs it started." : !t || detail(v).skewed == null
           ? (detail(v).skewReason ??
             "Jobs that would be refused cannot be checked here.")
-          : `${detail(v).skewIncomplete ? "At least " : ""}${detail(v).skewed?.length ?? 0} jobs in view would be refused now.${detail(v).skewIncomplete ? " The queue check was incomplete." : ""}`}
+          : `${detail(v).skewIncomplete ? "At least " : ""}${detail(v).skewed?.length ?? 0} jobs in view would be refused now.${detail(v).skewIncomplete ? ` The queue check was incomplete.${queuedFloorText(v, { queuedIncomplete: true })}` : ""}`}
       </p>
       <p>${othersUnread(v) ? TRIGGER_GETS_WORDS.othersUnread : fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? fileRefused(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? (t ? "This console loads the triggers file." : null)}</p>
       ${(detail(v).skewed ?? []).map(job => html`<p>${runLink(job.jobId)}: ${job.field ?? job.conditions ?? "trigger changed"}</p>`)}

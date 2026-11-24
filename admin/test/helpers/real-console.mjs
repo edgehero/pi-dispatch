@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assignCheckIds, buildDoctorRecord, doctorKey } from "@edgehero/pi-dispatch/doctor-results";
+import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { RUNS_INDEX, runRecordKey } from "@edgehero/pi-dispatch/run-mirror";
 import { loadPageData, PAGES, pagePanels, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
 import { dataUnread } from "../../src/console/panels/common.mjs";
@@ -13,7 +14,7 @@ import { planTriggerFire } from "../../src/trigger-fire.mjs";
 import { configLocationsOf, createFleetReader, readCapacity, readSubscriptions, readSettingsView, readTriggerEditor, scanRunRecords, WIDE_RUNS_CUT_TEXT } from "../../src/read-model.mjs";
 import { makeSandboxService } from "../../src/sandbox-data.mjs";
 import { triggerListOf } from "../../src/trigger-list.mjs";
-import { downQueue, downRedis, keyedRedis, quietQueue, registryKeys } from "./fleet-reader-fakes.mjs";
+import { answeredWith, downQueue, downRedis, keyedRedis, quietQueue, registryKeys } from "./fleet-reader-fakes.mjs";
 import { tempDir } from "./temp-dir.mjs";
 
 /**
@@ -55,9 +56,11 @@ export function deployment(records = [], { logs = "folder", files = {}, triggers
  * deployment folder that holds `records`. `now` is the readers' clock, for a test that lets time pass between two
  * loads (what a reader keeps for a while is read again only once its time is up).
  */
-export function consoleOn({ redis, queue = quietQueue(), records = [], logs = "folder", files = {}, triggers = null, gateway = async () => ({ enabledHosts: [], sessions: [] }), now = () => NOW }) {
+export function consoleOn({ redis, queue = quietQueue(), records = [], logs = "folder", files = {}, triggers = null, gateway = async () => ({ enabledHosts: [], sessions: [] }), now = () => NOW, registryClock = false }) {
   const { dir, paths, env } = deployment(records, { logs, files, triggers });
-  const fleet = createFleetReader(paths, { redisFn: () => redis, makeQueueFn: queue, parseConnectionFn: () => ({}), nowFn: now, readOnly: true, dollarEnvFn: () => env });
+  // `registryClock`: the registry's rows are dated on `now` too, where the reader dates them on the wall clock. For a
+  // page that is held byte for byte, whose beat ages must not move with the day the test runs.
+  const fleet = createFleetReader(paths, { redisFn: () => redis, makeQueueFn: queue, parseConnectionFn: () => ({}), nowFn: now, readOnly: true, dollarEnvFn: () => env, ...(registryClock ? { readLiveHostsFn: (client, opts) => readLiveHosts(client, { ...opts, now }) } : {}) });
   const services = { paths, env, now, redisFn: () => redis };
   return {
     now, env, fleet, paths,
@@ -108,7 +111,11 @@ export const wordsOf = (markup) => String(markup).replace(/<(script|style|templa
  * in other words than "could not be read" cannot sit under a Live pill unseen. A page that says one is Not live, or the
  * sentence is on `NOT_THE_PILLS` below, by name and with why.
  */
-export const UNREAD_WORDS = [/could not be read/, /could not read\b/, /cannot be read/, /\bnot read\b/, /\bunreadable\b/, /read in part/, /did not answer/, /\bincomplete\b/];
+export const UNREAD_WORDS = [/could not be read/, /could not read\b/, /cannot be read/, /\bnot read\b/, /\bunreadable\b/, /read in part/, /did not answer/, /\bincomplete\b/,
+  // The words of the other marks of a snapshot that answered (issues #1037, #1064, #986): a list read short of every
+  // queue ("Not every queue could be found", "Not every queue's schedules could be read"), a queue Valkey answered
+  // with an error ("Not read, so not in these counts"), and a host's own queue that no read asked.
+  /\bNot every [\w' ]{1,40}? could be (?:read|found)\b/, /\bNot read\b/, /\bnot asked\b/];
 /**
  * What a page can say in those words that is not a read the console makes for the page, or not one its stream makes
  * again: never the pill's, each with why. `console-pill.test.mjs` holds the list's length and each sentence, so it
@@ -136,8 +143,12 @@ export const NOT_THE_PILLS = [
 export const saysUnread = (words) => { const left = NOT_THE_PILLS.reduce((rest, [sentence]) => rest.replace(sentence, " "), words); return UNREAD_WORDS.some((phrase) => phrase.test(left)); };
 /** The first of those phrases a page says, with the words around it, for a test's message. */
 export const unreadWordsIn = (words) => { const left = NOT_THE_PILLS.reduce((rest, [sentence]) => rest.replace(sentence, " "), words); return UNREAD_WORDS.map((phrase) => left.match(new RegExp(`[^.]{0,80}(?:${phrase.source})[^.]{0,60}`))?.[0]).find(Boolean) ?? null; };
-/** Whether a page says anywhere what it lacks, in any of the words the panels have for it. */
-export const saysWhatIsMissing = (words) => /could not be read|was read in part|not read this time|could not be counted|cannot be told|not known/.test(words);
+/**
+ * Whether a page says anywhere what it lacks, in any of the words the panels have for it. Not in a sentence that is
+ * never the pill's (`NOT_THE_PILLS`): a host's page always says its capacity history is read once, which is no word
+ * of what a read that failed left out, and it stood in for one on every host's page.
+ */
+export const saysWhatIsMissing = (words) => { const left = NOT_THE_PILLS.reduce((rest, [sentence]) => rest.replace(sentence, " "), words); return /could not be read|was read in part|not read this time|could not be counted|cannot be told|not known|could be found|may be missing|more may be registered|Not read, so not in|(?:was|were) not asked/.test(left); };
 /** Whether a page the server drew carries the pill's mark; null where it draws no pill (a page that is not live). */
 export const pillOf = (page) => {
   const tag = /<span id="live-status"[^>]*>/.exec(page);
@@ -164,7 +175,7 @@ export async function drawn(page, qs, deps, role) {
   }
   const rendered = await renderPage(page, ctx);
   const whole = String(rendered.html);
-  return { data, said, times, pill: dataUnread(data), status: rendered.status, whole, words: wordsOf(whole), marked: pillOf(whole) };
+  return { data, said, times, pill: dataUnread(data, page, role), status: rendered.status, whole, words: wordsOf(whole), marked: pillOf(whole) };
 }
 
 export const RUN = { v: 1, jobId: "gh-1", attempt: 1, kind: "github", target: "acme/web#12", project: "web", host: "build3", backend: "local", flow: "fix", outcome: "completed", reason: null, startedAt: iso(120_000), endedAt: iso(60_000) };
@@ -182,8 +193,8 @@ export function doctorKeys(host, checks) {
  * A Valkey that answers every command these pages send and holds `keys`: `keyedRedis`, with the server's clock, an
  * empty transcript stream, no open shell, and the run mirror's window script over an index that holds nothing.
  */
-export const healthy = (keys = {}) => ({
-  ...keyedRedis(keys),
+export const healthy = (keys = {}, opts = {}) => ({
+  ...keyedRedis(keys, opts),
   async time() { return [String(Math.floor(NOW / 1000)), "0"]; },
   async xlen() { return 0; },
   async xrange() { return []; },
@@ -237,6 +248,26 @@ export const READS = [
   ["the waiting jobs' lists", /^bull:pi-jobs:(?:wait|paused|delayed|prioritized)$/], ["the queue's own record", /^bull:pi-jobs(?:@[^:]*)?:meta$/],
 ];
 
+/**
+ * `client`, with every command that names a key matching `key` ANSWERED WITH AN ERROR by Valkey (a reply whose first
+ * word is `code`, as its client rejects one): the readers keep such a reply by its code, where `failingKey`'s plain
+ * error is a read that got no answer.
+ */
+export const erroringKey = (client, key, code = "WRONGTYPE") => new Proxy(client, {
+  get: (target, name) => (typeof target[name] !== "function" || name === "on" || name === "disconnect" ? target[name]
+    : (...args) => (args.flat().some((arg) => typeof arg === "string" && key.test(arg)) ? answeredWith(code)() : target[name](...args))),
+});
+/** A fleet's queues that answer, but for `calls` of the queues `names`, which Valkey answers with an error (`code`) or, with `code` null, not at all. */
+export const queuesWith = (names, calls, code = "WRONGTYPE") => (connection, opts) => {
+  const queue = quietQueue()(connection, opts);
+  return names.includes(queue.name) ? { ...queue, ...Object.fromEntries(calls.map((call) => [call, code === null ? () => Promise.reject(new Error("Command timed out")) : answeredWith(code)])) } : queue;
+};
+/** A registry row of a host that declared its name, so it has a queue of its own (`pi-jobs@<name>`). */
+const routed = (pid) => ({ version: "5.4.2", image: "pi-job:latest", concurrency: "2", pid, beatAt: String(Date.now() - 2_000), startedAt: String(NOW - 3_600_000), jobs: "[]", jobsMore: "0", routes: "true" });
+/** The registry of one such host, and of two, for a state that reads one row and not the other. */
+export const ROUTED = registryKeys({ build3: routed("1") });
+export const HOSTS = registryKeys({ build3: routed("1"), build4: routed("2") });
+
 /** A pipeline whose commands are taken and whose `exec` is never answered inside its bound. */
 export const unanswered = new Proxy({}, { get: (_, key) => (typeof key === "symbol" || key === "then" ? undefined : key === "exec" ? () => Promise.reject(new Error("Command timed out")) : () => unanswered) });
 /** A queue that answers, but for `calls`. */
@@ -255,4 +286,12 @@ export const STATES = [
   ["this host's run files cannot be listed", () => ({ redis: healthy(HOST), logs: "file" })],
   ...["triggers", "projects", "settings"].flatMap((file) => [["absent", "does not exist"], ["invalid", "is not JSON"], ["unreadable", "may not be read"]].map(([state, words]) => [`the ${file} file ${words}`, () => ({ redis: healthy(HOST), records: [RUN, REFUSED], files: { [file]: state } })])),
   ["nothing is answered", () => ({ redis: downRedis(), queue: downQueue(), records: [RUN, REFUSED] })],
+  // A read Valkey ANSWERS WITH AN ERROR, where every state above is one that got no answer (issues #1036 and #1064):
+  // the snapshot answers, and names what it did not read with the reply's code.
+  ["a host's own queue is answered with an error", () => ({ redis: healthy(ROUTED), queue: queuesWith(["pi-jobs@build3"], ["isPaused", "getJobCounts"]), records: [RUN, REFUSED] })],
+  ["the shared queue's counts are answered with an error", () => ({ redis: healthy(ROUTED), queue: queuesWith(["pi-jobs"], ["getJobCounts"]), records: [RUN, REFUSED] })],
+  ["a host's row this console never read is answered with an error", () => ({ redis: erroringKey(healthy(HOSTS), /^host:h:build4$/), records: [RUN, REFUSED] })],
+  ["the shared queue's wait list is answered with an error", () => ({ redis: erroringKey(healthy(ROUTED), /^bull:pi-jobs:wait$/), records: [RUN, REFUSED] })],
+  ["a host queue's record is answered with an error", () => ({ redis: erroringKey(healthy(ROUTED), /^bull:pi-jobs@build3:meta$/), queue: queuesWith(["pi-jobs@build3"], ["isPaused", "getJobCounts"]), records: [RUN, REFUSED] })],
+  ["a host queue's schedules are not answered", () => ({ redis: healthy(ROUTED), queue: queuesWith(["pi-jobs@build3"], ["getJobSchedulers"], null), records: [RUN, REFUSED] })],
 ];

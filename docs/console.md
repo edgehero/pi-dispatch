@@ -869,8 +869,11 @@ readers ([Live updates](#live-updates)).
 ### Fleet, host and venue detail
 
 Fleet lists all waiting jobs within the reader's bounds (200 per queue list and 64 queues), grouped by the worker's
-recorded reason. A truncated read says that rows may be missing. Overview's remainder links to this list. The
+recorded reason. A truncated read says that rows may be missing, and a read that left out a queue's list, or could not
+find every queue, says that instead. Overview's remainder links to this list. The
 Delayed panel separates scheduled runs and held jobs from other waits; a missing reason is named rather than guessed.
+A queue Valkey answered with an error has a row of its own in Queues ("Not read: Valkey answered WRONGTYPE."), and a
+schedule list read in part is counted as "at least".
 Held rows show the after time, check answers and limits. Failed jobs show their record's target, reason and next step;
 a record without a reason is distinct from no record. Queue error text remains scrubbed and operator-only. A failed job
 whose work has been done since (see Needs you, below) names the run that did it and offers Remove but no Retry, since
@@ -1040,16 +1043,21 @@ hosts whose rows answered and says so, and what a missing row could change is no
 Spend, the budget split's agreement (never "All hosts agree"), which hosts serve a secret profile (another may), and
 whether a queue a one-queue pause does not know belongs to such a host. Models says the waiting jobs and doctor's
 proposals are not known rather than that there are none. Meanwhile a live page's pill says Not live (its tooltip says
-the console could not read all it needs for the page), also when only a part was not read: the host registry, the
-running jobs or the parked runs on any page, and on each live page whatever a card there says could not be read: on
-the overview the waiting jobs, the failed jobs, the doctor results, the day's runs and a settings overlay nobody could
-read; on Fleet the waiting jobs, the failed jobs, the doctor results and the held jobs; on Set up the doctor results
-and a triggers file nobody could read; on a host's page the waiting jobs and the doctor results, and the run records
-of a host with no row; the run history or its last 24 hours on Runs; a run's record, transcript, inbox or chat, and
+the console could not read all it needs for the page), also when only a part was not read, on the pages that draw
+that part: the host registry on the overview, Fleet, a host's page, Set up and an operator's page of a refused run;
+the running jobs on the overview, Fleet and a host's page; the parked runs on the overview and Parked; and on each
+live page whatever a card there says could not be read: on the overview the waiting jobs, the failed jobs, the doctor
+results, the day's runs and a settings overlay nobody could read; on Fleet the waiting jobs, the failed jobs, the
+doctor results and the held jobs; on both, a list of waiting jobs or a queue's paused flag that was not read, a look
+for queues that did not finish, a queue Valkey answered with an error and schedules read in part; on Set up the doctor
+results and a triggers file nobody could read; on a host's page the waiting jobs and the doctor results, the same of
+its own queue and the shared one, and the run records of a host with no row; the run history or its last 24 hours on Runs; a run's record, transcript, inbox or chat, and
 for a refused run its host's doctor results and the day's runs; the open shells or cleanup notices on Sandboxes, and
 its configuration where a file of it could not be read; the answer rules on Parked where the triggers file could not
 be read, and a question's check that could not be made. A file that was read and does not load is said as that and
-is not a read that failed. A page whose reads were cut short says Not live too. A list that is full is
+is not a read that failed. A page whose reads were cut short says Not live too. A viewer's page is judged by what a
+viewer is drawn: a read that only an operator's cards say (the search for a run's child runs, a refused run's host and
+queue) does not turn its pill. A list that is full is
 not one that could not be read: with more open shells or cleanup notices than the 256 a list holds, or with an entry
 that does not parse, the page says that and stays Live. The pill does not follow what a host published about itself as unreadable, or a host's capacity history,
 which is read when the page loads. A page kept as last seen shows no Parked count until it is read again.
@@ -1060,6 +1068,30 @@ is not known rather than pending or late, that the audit log (or a part of it) c
 holds nothing, and that a canary's trigger is not known when the triggers file could not be read; and a count is "not
 known", never 0, for a settings overlay, a triggers file or a staged-packages manifest that is there and could not be
 read or does not load. Add a trigger says "No forge is configured here." when the `.env` configures none.
+
+A read that answered can still have left something out, and the pages say what (since 2026-11-24, #1037, #1036, #1064
+and #986). Where the waiting jobs are a floor, every page that draws them says why, in one sentence: "Not every queue
+could be found, so jobs waiting in a queue that was not asked may be missing here." when the look for queues did not
+finish or the host registry was not read (a look that failed in an outage is made again 5 seconds later, so this ends
+within a few seconds of Valkey answering again);
+"A list of waiting jobs could not be read: pi-jobs (Valkey answered WRONGTYPE). Jobs waiting there may be missing
+here." when a queue's list was not read; and "Not every waiting job was read, so jobs in line may be missing here."
+when the read stopped at a bound of its own, which is no failed read and leaves the pill Live. The overview's In line,
+its Waitlists and its timeline, a host's jobs, Fleet's Delayed card, a project's "in line (at least)", a trigger's
+jobs in line and the Models page all follow it, and none says that nothing waits. A job whose queue's paused flag
+could not be read is listed under "A free slot or a pause: the queue's paused flag could not be read", with the queue
+and what Valkey answered: it waits, and which of the two it waits for is not known. A schedule list that was read in
+part says "at least N schedules" (or "no schedule was read") and "Not every queue's schedules could be read, so more
+may be registered."; a cron rule whose schedule is not in it has a next fire that is "not known", on Triggers and on
+its own page. A queue Valkey answered with an error is a row of Fleet's Queues card that says so, and is named on the
+overview's queue row, its Hosts card and its host's page. A host whose row was not read is named with its row's key
+and what Valkey answered, and with what that asks: a key that holds another kind of value, or a permission, stays
+until someone puts it right, and a passing state may be gone at the next read. Such a host is drawn as it was last
+seen if this console read it before; one it never read has no row, its own page is headed "Row not read", and Fleet
+and the overview say its own queue was not asked, so a job running there is not listed. A host that the read names
+as none of the rows it missed has gone, and its page says so. A host's page says a running job "may be missing here"
+only where its own row cannot say what runs on it; where the row names jobs that are not listed it counts them, and
+where every one is listed it says nothing.
 
 The pages that read the run history follow the same rule. Runs marks its project counts and settled spend "at least"
 when part of the history could not be read, and says "No run matches." only when this host's run files were read and
@@ -1249,7 +1281,10 @@ Four cards come first, in a row:
   count "2 or more" (or "-" where it found none of that reason), and "longest 40m or more", since the job that has
   waited longest may be one it did not read; the card then says "Not every waiting job was read, so jobs in line may
   be missing here.", the timeline's sentence for the same thing. When such a read found none, the number is a dash
-  beside "jobs waiting: not known", never "nothing is waiting".
+  beside "jobs waiting: not known", never "nothing is waiting". The same holds, each with its own sentence, when a
+  queue's list could not be read (the queue is named, with what Valkey answered) and when not every queue could be
+  found. A job whose queue's paused flag could not be read is counted under "Slot or pause, not known", never under a
+  free slot.
 - **Running**: how many jobs run, in how many of all the hosts' slots, and each host's slots as dots (running, held,
   free) with how many are free, "full", or how many a job that is gone still holds. A host that publishes no slot
   count says "slots not published". With no host in the registry, jobs that run say so ("4 jobs running, slots not
@@ -3272,7 +3307,9 @@ The host policy's `quotaWindows` preference chooses the Models monitoring focus 
 The Subscription quota card shows account and application-bucket observations separately from dollar caps: their freshness, five-hour and seven-day windows, utilization, reset times, extra usage and explicit paid-overage policy. Unknown utilization and resets remain unknown; stale observations do not promise remaining capacity. Retained exhaustion still matters after its observation becomes stale. A resetless exhaustion offers a host trial command only to a writable operator, and a trial does not clear exhaustion or bypass other pickup gates. Jobs using the same connection and application bucket share its quota. Quota observations cannot prove that separately linked connections belong to the same vendor account.
 
 The model tool `dispatch_models` shares the reader but receives only bounded machine facts, not doctor prose,
-commands, paths, diffs or repository-agent definitions. See [Model roles](model-roles.md),
+commands, paths, diffs or repository-agent definitions. Its `waiting` is null when the waiting jobs could not be read
+(`waitingUnread: true`), never an empty list; when the list is a floor, `waitingIncomplete` is true and `waitingMarks`
+says why. See [Model roles](model-roles.md),
 [Model failover](model-failover.md), [Proposals](model-proposals.md) and [Canaries](canary.md).
 
 Random model pools use the existing Model row: Fixed model, Ordered fallback or Random model pool. The pool has no primary or predicted next model. Models shows observed blockers; run details show the actual model and selection reason. Retry keeps the run's choice, while fresh Re-run chooses anew. Subscription-limit replacement follows the [random-pool rules](triggers.md#choosing-randomly-from-a-reviewed-pool).

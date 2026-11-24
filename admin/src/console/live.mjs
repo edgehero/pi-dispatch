@@ -502,7 +502,9 @@ export function makeLiveHub({
           //     mirror alone broken) is not that: reading it every tick sent 2.4 times the commands for as long as it
           //     lasted, and it is read at the page's own pace.
           if (minMs > 0) {
-            if (!dataUnread(data)) { partSince.delete(dk); loaded.set(dk, { at: t, data, viewersOnly }); }
+            // Judged for the widest role watching this load: an operator's page draws cards a viewer's does not, and a
+            // read only those cards say is a part unread for a load an operator's stream shows.
+            if (!dataUnread(data, page, viewersOnly ? "viewer" : "operator")) { partSince.delete(dk); loaded.set(dk, { at: t, data, viewersOnly }); }
             else if (data?.readFailed === true || data?.deadlineSpent === true) partSince.delete(dk);
             else {
               if (!partSince.has(dk)) partSince.set(dk, t);
@@ -580,7 +582,8 @@ export function makeLiveHub({
         view.at = t;
         // Whether this good render stands on a snapshot with a part missing (`dataUnread`): its streams are then told
         // `unread`, never `fresh`, for as long as that holds, so a lasting partial failure says one thing every tick.
-        view.unread = dataUnread(data);
+        // For the role this view is drawn for, as the page the server draws is: a view is one role's.
+        view.unread = dataUnread(data, page, live[0].session.role);
         // A stream may have left during the awaits above; only a view someone still shows is kept.
         if (!live.some((s) => subs.has(s))) continue;
         views.set(vk, view);

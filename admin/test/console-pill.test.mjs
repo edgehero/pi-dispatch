@@ -109,41 +109,13 @@ const LIVE_PAGES = [["overview", ""], ["overview", "rows=host"], ["fleet", ""], 
  * role`. The list only shrinks: the test fails for a line that is not here, and for one that is here and holds.
  */
 const SAYS_UNDER_A_LIVE_PILL = new Map([]);
-const EVERY_PAGES_PARTS = "one of the three parts of a snapshot every page is judged by (issue #962), on a page that draws nothing of that part: goes when those three are held page by page, as the reads beside them are";
-const AN_OPERATORS_CARDS = "a read only an operator's cards are drawn from (the chain, a refused run's two cards), on a viewer's or an agent's page: goes when the rule knows who looks, or when the loader makes no such read for them";
-const NOT_LIVE_AND_SILENT = new Map([
-  ["smembers is not answered | /parked for operator", EVERY_PAGES_PARTS],
-  ["smembers is not answered | /parked for viewer", EVERY_PAGES_PARTS],
-  ["smembers is not answered | /parked for agent", EVERY_PAGES_PARTS],
-  ["hgetall is not answered | /parked for operator", EVERY_PAGES_PARTS],
-  ["hgetall is not answered | /parked for viewer", EVERY_PAGES_PARTS],
-  ...["/setup", "/fleet"].flatMap((page) => ["operator", "viewer"].map((role) => [`zrevrangebyscore is not answered | ${page} for ${role}`, EVERY_PAGES_PARTS])),
-  ["zrevrangebyscore is not answered | /run?id=gh-1 for viewer", AN_OPERATORS_CARDS],
-  // An agent's page draws what a viewer's does, from its own copy of the data, which holds a registry read in part as
-  // read: so no entry for it where the hosts' rows did not answer.
-  ["zrevrangebyscore is not answered | /run?id=gh-1 for agent", AN_OPERATORS_CARDS],
-  ...["smembers", "get", "mget", "zrevrangebyscore"].map((command) => [`${command} is not answered | /run?id=gh-2 for agent`, AN_OPERATORS_CARDS]),
-  ...["getJobCounts", "getJobSchedulers", "isPaused"].map((call) => [`the queue's ${call} is not answered | /run?id=gh-2 for agent`, AN_OPERATORS_CARDS]),
-  ...["/setup", "/parked", "/run?id=gh-2"].map((page) => [`the queue's getActive is not answered | ${page} for agent`, EVERY_PAGES_PARTS]),
-  ["smembers is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
-  ["hgetall is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
-  ["get is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
-  ["mget is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
-  ["zrevrangebyscore is not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
-  ...["getJobCounts", "getJobSchedulers", "isPaused"].map((call) => [`the queue's ${call} is not answered | /run?id=gh-2 for viewer`, AN_OPERATORS_CARDS]),
-  ...["/setup", "/parked", "/run?id=gh-2"].flatMap((page) => ["operator", "viewer"].map((role) => [`the queue's getActive is not answered | ${page} for ${role}`, EVERY_PAGES_PARTS])),
-  ...["/setup", "/fleet"].flatMap((page) => ["operator", "viewer"].map((role) => [`this host's run files cannot be listed | ${page} for ${role}`, EVERY_PAGES_PARTS])),
-  ...["operator", "viewer"].map((role) => [`this host's run files cannot be listed | /host?name=build9 for ${role}`, "a host with no row whose page says no retained run record names it, of run files that could not be listed: goes when that page says its run records could not be read"]),
-  // The same two classes under the states that fail one READ, by its key (issue #988): the registry's set and rows
-  // and the mirror are parts every page is judged by, and a refused run's page marks what only an operator's cards draw.
-  ["the registry's host set: not answered | /setup for agent", EVERY_PAGES_PARTS],
-  ...["operator", "viewer", "agent"].map((role) => [`the registry's host set: not answered | /parked for ${role}`, EVERY_PAGES_PARTS]),
-  ...["operator", "viewer"].map((role) => [`the hosts' rows: not answered | /parked for ${role}`, EVERY_PAGES_PARTS]),
-  ...["the run mirror's index", "the run mirror's records"].flatMap((read) => ["/fleet", "/setup"].flatMap((page) => ["operator", "viewer"].map((role) => [`${read}: not answered | ${page} for ${role}`, EVERY_PAGES_PARTS]))),
-  ...["the run mirror's index", "the run mirror's records"].flatMap((read) => ["viewer", "agent"].map((role) => [`${read}: not answered | /run?id=gh-1 for ${role}`, AN_OPERATORS_CARDS])),
-  ...["the registry's host set", "the doctor index", "the doctor results", "the run mirror's index", "the run mirror's records", "the budget counters"].flatMap((read) => ["viewer", "agent"].map((role) => [`${read}: not answered | /run?id=gh-2 for ${role}`, AN_OPERATORS_CARDS])),
-  ["the hosts' rows: not answered | /run?id=gh-2 for viewer", AN_OPERATORS_CARDS],
-]);
+/**
+ * Empty since the rule holds the three parts of a snapshot page by page and knows who looks (issue #988). It held two
+ * classes, 72 lines: a part of the snapshot every page was judged by, on a page that draws nothing of that part (Parked
+ * over a registry or an active list that was not read; the setup guide and Fleet over the run history); and a read
+ * only an operator's cards are drawn from (the chain, a refused run's two cards), on a viewer's or an agent's page.
+ */
+const NOT_LIVE_AND_SILENT = new Map([]);
 
 test("the pill agrees with the page on the real reader: a page that says could not be read is Not live, and a page that is Not live says what it lacks", { timeout: 240_000 }, async () => {
   const said = [], silent = [];
@@ -171,7 +143,8 @@ test("the words of a failed read and the sentences that are never the pill's are
   // The structural tests above are only as strict as these two lists. A phrase taken off the first, or a sentence put
   // on the second, would let a page say a read failed under a Live pill with every other test green: so each is held
   // by its exact text, and a change to either is a change to this test, which a person reads.
-  assert.deepEqual(UNREAD_WORDS.map((phrase) => phrase.source), ["could not be read", "could not read\\b", "cannot be read", "\\bnot read\\b", "\\bunreadable\\b", "read in part", "did not answer", "\\bincomplete\\b"]);
+  assert.deepEqual(UNREAD_WORDS.map((phrase) => phrase.source), ["could not be read", "could not read\\b", "cannot be read", "\\bnot read\\b", "\\bunreadable\\b", "read in part", "did not answer", "\\bincomplete\\b",
+    "\\bNot every [\\w' ]{1,40}? could be (?:read|found)\\b", "\\bNot read\\b", "\\bnot asked\\b"]);
   assert.deepEqual(NOT_THE_PILLS.map(([sentence]) => sentence.source), [
     "The host's capacity history could not be read\\.",
     "Its list of running jobs could not be read",

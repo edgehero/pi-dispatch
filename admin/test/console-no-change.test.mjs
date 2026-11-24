@@ -15,7 +15,7 @@ import { PAGES, loadPageData, parsePageQuery, renderPage } from "../src/console/
 import { allocationUnread, drawSpend } from "./helpers/spend-goldens.mjs";
 import { TRIGGER_GETS_WORDS as W } from "../src/trigger-gets-view.mjs";
 import { downQueue, downRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
-import { consoleOn, drawn, failing, failingKey, healthy, mirroring, rolesOf, wordsOf, FAR, HOST, RUN, STATES } from "./helpers/real-console.mjs";
+import { consoleOn, drawn, erroringKey, failing, failingKey, healthy, mirroring, queuesWith, rolesOf, wordsOf, FAR, HOST, ROUTED, RUN, STATES } from "./helpers/real-console.mjs";
 
 const INSTRUCTIONS = "Keep the diff small.";
 const TASK = "Sweep the logs.";
@@ -70,8 +70,15 @@ test("a page that could not read the deployment offers no change and says so; on
   assert.ok(seen.unread >= 5 * CHANGE_PAGES.length && seen.read > seen.unread, `both directions are held: ${JSON.stringify(seen)}`);
 });
 
-test("on a healthy deployment, on a healthy empty one and with the run mirror alone failing, an operator is offered every form", async () => {
-  for (const [name, state] of [["every read answers", { redis: healthy(HOST) }], ["a Valkey that holds nothing, and no run", { redis: healthy(), records: [] }], ["the run mirror alone does not answer", MIRROR_ONLY()]]) {
+/**
+ * One queue whose own record holds a string, so Valkey answers its paused flag and its counts with an error (issue
+ * #1064). That is one queue not read: the snapshot answers and names it. It failed the whole read, so every page of
+ * such a deployment said Valkey could not be read and offered no change, for as long as the key stayed.
+ */
+const ONE_QUEUE_ERRORED = () => ({ redis: erroringKey(healthy(ROUTED), /^bull:pi-jobs@build3:meta$/), queue: queuesWith(["pi-jobs@build3"], ["isPaused", "getJobCounts"]) });
+
+test("on a healthy deployment, on a healthy empty one, with the run mirror alone failing and with one queue answered with an error, an operator is offered every form", async () => {
+  for (const [name, state] of [["every read answers", { redis: healthy(HOST) }], ["a Valkey that holds nothing, and no run", { redis: healthy(), records: [] }], ["the run mirror alone does not answer", MIRROR_ONLY()], ["one queue's record holds a string", ONE_QUEUE_ERRORED()]]) {
     for (const [page, qs] of CHANGE_PAGES) {
       const got = await drawn(page, qs, on(state), "operator");
       const where = `${name} | /${page}?${qs}`;
@@ -83,6 +90,9 @@ test("on a healthy deployment, on a healthy empty one and with the run mirror al
   // The mirror state is what it says: the snapshot was read, and the history is the one thing that was not.
   const mirror = await drawn("trigger", "index=0", on(MIRROR_ONLY()), "operator");
   assert.match(mirror.data.snapshot.runMirror, /^unreachable/);
+  // And the errored queue's: the snapshot was read, and names the one queue it left out with what Valkey answered.
+  const errored = await drawn("trigger", "index=0", on(ONE_QUEUE_ERRORED()), "operator");
+  assert.deepEqual([errored.data.readFailed === true, errored.data.snapshot.queueErrors], [false, { "pi-jobs@build3": "WRONGTYPE" }]);
   // A deployment that could not be read: the same pages, no form, in each role's own words.
   for (const [page, qs] of CHANGE_PAGES) {
     const got = await drawn(page, qs, on(DOWN()), "operator");

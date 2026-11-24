@@ -20,6 +20,7 @@ import { fromNewerRelease, readableRecords } from "./newer-release.mjs";
 import { outcomeNote, projectLoadsOf } from "./loaded-words.mjs";
 import { fileCaseOfView, fileWord as fileWordOf } from "./file-case.mjs";
 import { mirrorUnread } from "./mirror-words.mjs";
+import { waitingMarksFloor, waitingMarksOf } from "./waiting-marks.mjs";
 
 const DAY = 86_400_000;
 const instant = (r) => Date.parse(r?.endedAt ?? r?.startedAt ?? "");
@@ -272,6 +273,10 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
   for (const r of day) { const key = outcomeKey(r.outcome, recordReason(r)); if (key) counts[key]++; }
   const worst = [...day].sort((a, b) => (WORST[outcomeKey(b.outcome, recordReason(b))] ?? 0) - (WORST[outcomeKey(a.outcome, recordReason(a))] ?? 0) || instant(b) - instant(a))[0];
   const queued = Array.isArray(snapshot?.waiting?.rows) ? snapshot.waiting.rows.filter((r) => r.project === id) : [];
+  // Whether that count is a floor, and why (issue #1037): the waiting read's own marks. `truncated` alone was looked
+  // at, so over a set of queues that may be short (`queuesShort`) the count was drawn whole; and the page had no word
+  // for the cause, which it now takes from these marks.
+  const inLineMarks = waitingMarksOf(snapshot?.waiting ?? null);
   // One rule says which records are a trigger's (issue #988, `recordMatchesTrigger`), as on `/triggers` and the
   // trigger's own page. This page took a record's row number alone, so the three counted one history differently.
   const triggerCounts = new Map();
@@ -294,7 +299,7 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
     members, memberInput: current.members.some((m) => /^(?:\/|[A-Za-z]:[\\/])/.test(m)) ? "" : current.members.join("\n"),
     historyIncomplete,
     ...(newerSkipped > 0 ? { newerSkipped } : {}),
-    runs24h: { total: day.length, counts, inLine: snapshot?.waiting && !snapshot.waiting.unreachable ? queued.length : null, inLineIncomplete: snapshot?.waiting?.truncated === true, worst: worst ? runView(worst, subscriptions, pricing) : null },
+    runs24h: { total: day.length, counts, inLine: snapshot?.waiting && !snapshot.waiting.unreachable ? queued.length : null, inLineIncomplete: waitingMarksFloor(inLineMarks), ...(inLineMarks === null ? {} : { inLineMarks }), worst: worst ? runView(worst, subscriptions, pricing) : null },
     recent: recorded.slice(0, 5).map((r) => runView(r, subscriptions, pricing)), totalRuns: recorded.length,
     spend: { window, since, envelope, usedMicros, settledMicros, heldMicros: holds.micros, heldKnownMicros: holds.knownMicros, heldIncomplete: holds.incomplete, heldUnread: registryUnreadable, ...(registryPart ? { heldReadInPart: true } : {}), floor: envelope ? false : historyFloor || historyIncomplete, shareMicros: amount(allocation?.state?.allocations?.[id]), problem: allocation?.problem ? envelopeWords(allocation) : allocation?.unreachable ? "The allocation could not be read from Valkey." : null },
     allocation: { window, shareMicros: amount(allocation?.state?.allocations?.[id]), totalMicros: amount(allocation?.totalMicros), floorMicros: amount(allocation?.floors?.[id]), weight: amount(weights[id]), totalWeight: amount(totalWeight), split: allocation?.state ? { id: allocation.state.planId ?? null, writer: allocation.state.writer ?? null, appliedAt: allocation.state.appliedAt ?? null, validUntil: allocation.state.validUntil ?? null } : null, refused: selected.filter((r) => recordReason(r) === "allocation-cap").length, unset: !envelope, problem: allocation?.problem ? envelopeWords(allocation) : allocation?.unreachable ? "The allocation could not be read." : null },

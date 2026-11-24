@@ -49,7 +49,7 @@ import { triggerListOf, TRIGGER_LIST_KINDS } from "../trigger-list.mjs";
 import { loadWatchData, parseWatchQuery, watchPanel, watchBoardPanel } from "./watch.mjs";
 import { readForkPoints } from "../run-fork.mjs";
 import { readTriggerEditor, readTriggersWithInstructions, secretBundlesView, triggerDetailOf, TRANSCRIPT_ID_RE } from "../read-model.mjs";
-import { noChangeText, ageText, beatAgeOf, canAct, changesOffered, hostsUnread, registryReadInPart } from "./panels/common.mjs";
+import { noChangeText, ageText, beatAgeOf, canAct, changesOffered, hostPartCase, hostsUnread } from "./panels/common.mjs";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { BACKEND_NAMES, BACKENDS } from "@edgehero/pi-dispatch/backends";
 import { RECOVERY_CAP } from "@edgehero/pi-dispatch/recovery-queue";
@@ -226,8 +226,12 @@ function hostHeadline(view) {
   const host = view.data?.host ?? view.data?.snapshot?.hostBudgets?.find((h) => h.name === view.query?.name);
   // Issue #844: no row because nothing was read is not a host without one.
   if (!host && hostsUnread(view.data?.snapshot)) return html`Not known: the hosts could not be read, so nothing here says whether ${view.query?.name ?? "this host"} is live.`;
-  // Issue #1062: a host with no row over a registry read in part may be one whose row did not answer in time.
-  if (!host && registryReadInPart(view.data?.snapshot)) return html`Not known: the host registry was read in part, so nothing here says whether ${view.query?.name ?? "this host"} is live.`;
+  // Issue #1062: a host with no row over a registry read in part may be one whose row was not read. Issue #1036: that
+  // read names the hosts it did not read, so the line says which case holds (`hostPartCase`): this host's row, a read
+  // that does not name them all, or neither, and then the host has no row because it has gone (the line below).
+  const part = hostPartCase(view.data?.snapshot, view.query?.name);
+  if (!host && part === "unread") return html`Not known: the row of ${view.query.name} was not read, so nothing here says whether it is live.`;
+  if (!host && part === "unnamed") return html`Not known: the host registry was read in part, so nothing here says whether ${view.query?.name ?? "this host"} is live.`;
   if (!host) return html`No live registry row for ${view.query?.name ?? "this host"}.`;
   const venues = host.backends?.blessed ?? [];
   const jobs = host.jobs;
@@ -1400,6 +1404,10 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   const snapshotReads = async () => {
     await snapshotRead();
     if (name === "host") data.host = data.snapshot?.hostBudgets?.find((host) => host.name === q.name) ?? null;
+    // The host the page is of, for the pill's rule (`dataUnread`), which has the data and no query: a host's page
+    // reads its own queue's waiting jobs and the shared queue's, with or without a registry row, so a mark of another
+    // host's queue is none of its page's. The query's own name, which `parsePageQuery` holds to a worker's name.
+    if (name === "host" && typeof q.name === "string") data.hostName = q.name;
     await together([setupRead, modelsRead, secretsRead, connectionsRead, projectRead, triggerListRead, triggerDetailRead, parkedChecksRead]);
   };
   const recordReads = async () => {
@@ -1433,7 +1441,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // places from it read two keys it was never handed as two reads that failed: an agent's unknown run id answered
   // 503 where an operator's answers 404.
   if (name === "run") data.runPlaces = runPlaces(runPlacesOf(data));
-  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "run" ? { runPlaces: data.runPlaces } : {}), ...(name === "setup" ? { setup: setupFacts(data.setup, { role: "agent" }) } : {}), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}) } : data;
+  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "run" ? { runPlaces: data.runPlaces } : {}), ...(name === "host" && typeof data.hostName === "string" ? { hostName: data.hostName } : {}), ...(name === "setup" ? { setup: setupFacts(data.setup, { role: "agent" }) } : {}), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}) } : data;
 }
 
 // ---- drawing ---------------------------------------------------------------------------------------------------------

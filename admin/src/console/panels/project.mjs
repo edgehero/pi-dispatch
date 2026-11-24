@@ -7,7 +7,7 @@ import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { bundleDeclaredText } from "../../read-model.mjs";
 import { OUTCOME_KEY_WORDS, reasonWords, shortSentence } from "../../words.mjs";
 import { newerSkippedSentence } from "../../newer-release.mjs";
-import { noChangeText, canAct, changesOffered, runLink, timeHtml, usdText, moneyHtml } from "./common.mjs";
+import { noChangeText, canAct, changesOffered, runLink, timeHtml, usdText, moneyHtml, waitingFloor } from "./common.mjs";
 import { LOADED_WORDS } from "../../loaded-words.mjs";
 import { fixButton, loadedFoot, loadedList, stateLine, wordsHtml } from "./loaded-parts.mjs";
 import { actForm } from "./config-ui.mjs";
@@ -21,6 +21,11 @@ const n = (value) => Number.isFinite(value) ? Math.round(value * 100) / 100 : 0;
 const sizeText = (mib) => Number.isFinite(mib) ? mib % 1024 === 0 ? `${mib / 1024} GiB` : `${mib} MiB` : "unknown";
 const money = (v) => usdText(v) === "-" ? "unknown" : moneyHtml(v);
 const unknown = (v) => v === null || v === undefined ? "unknown" : v;
+/**
+ * Why the project's in-line count is a floor, from the marks its view carries (issue #1037, `inLineMarks`: the
+ * waiting read's own), in the words every reader of the waiting set shares; null over a read that is whole.
+ */
+const inLineFloor = (runs) => (runs?.inLineMarks !== null && typeof runs?.inLineMarks === "object" ? waitingFloor({ rows: [], ...runs.inLineMarks }) : null);
 const at = (value) => typeof value === "number" ? value : Date.parse(value ?? "");
 const linkRuns = (id) => `/runs?project=${encodeURIComponent(id)}`;
 const issue = (v) => !data(v) || data(v)?.state === "unreadable" ? card("Project unavailable", note(data(v)?.problem ?? "The project could not be read. Reload to try again.")) : null;
@@ -76,7 +81,7 @@ export function projectRuns(v) {
   const cause = reason.known ? reason.sentence.match(/, and (.+?), so /)?.[1] : null;
   const brief = cause ? shortSentence(cause) : reason.short;
   const short = reason.known ? brief.charAt(0).toLowerCase() + brief.slice(1) : "no reason is published";
-  return card("Runs, last 24 hours", html`<div class="proj-kv"><b>${p.historyIncomplete ? "at least " : ""}${r.total}</b><span>${counts.length ? counts.join(", ") : p.historyIncomplete ? "no run in what could be read" : "no retained runs"}; ${unknown(r.inLine)} in line${r.inLineIncomplete ? " (at least)" : ""}</span></div>${worst && worst.outcome !== "completed" ? html`<p class="proj-state tone-${ui.STATUS[word?.status ?? "attention"].tone}">${ui.icon(ui.STATUS[word?.status ?? "attention"].icon, { size: "sm" })}<span>${runLink(worst.jobId, { pulse: true })} ${word?.word ?? "ended"}${worst.host ? html` on ${worst.host}` : null}: ${short}${short.endsWith("…") ? "" : "."}</span></p>` : null}${p.historyIncomplete ? note("Run counts are a bounded view; the retained history or a fleet mirror could not be read completely.") : null}${newerSkippedSentence(p.newerSkipped) ? note(`${newerSkippedSentence(p.newerSkipped)}: counts and spend leave them out.`) : null}`);
+  return card("Runs, last 24 hours", html`<div class="proj-kv"><b>${p.historyIncomplete ? "at least " : ""}${r.total}</b><span>${counts.length ? counts.join(", ") : p.historyIncomplete ? "no run in what could be read" : "no retained runs"}; ${unknown(r.inLine)} in line${r.inLineIncomplete ? " (at least)" : ""}</span></div>${inLineFloor(r) === null ? null : html`<p class="note">${inLineFloor(r).text}</p>`}${worst && worst.outcome !== "completed" ? html`<p class="proj-state tone-${ui.STATUS[word?.status ?? "attention"].tone}">${ui.icon(ui.STATUS[word?.status ?? "attention"].icon, { size: "sm" })}<span>${runLink(worst.jobId, { pulse: true })} ${word?.word ?? "ended"}${worst.host ? html` on ${worst.host}` : null}: ${short}${short.endsWith("…") ? "" : "."}</span></p>` : null}${p.historyIncomplete ? note("Run counts are a bounded view; the retained history or a fleet mirror could not be read completely.") : null}${newerSkippedSentence(p.newerSkipped) ? note(`${newerSkippedSentence(p.newerSkipped)}: counts and spend leave them out.`) : null}`);
 }
 
 export function projectSize(v) {

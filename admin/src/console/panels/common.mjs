@@ -7,7 +7,10 @@
  * this module are shared between the screens' modules only; `../panels.mjs` does not re-export them.
  */
 import { CHAT_REFUSALS, parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
-import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
+import { DEFER_BUCKETS, DEFER_BUCKET_WORDS, DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
+import { hostKey } from "@edgehero/pi-dispatch/host-registry";
+import { hostQueueName } from "@edgehero/pi-dispatch/queue";
+import { replyErrorWords } from "@edgehero/pi-dispatch/reply-error-class";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { classifiedRows, refusedBeforeSpend } from "../../costs.mjs";
 import { beatAgeOf } from "../../doctor-view.mjs";
@@ -16,11 +19,12 @@ import { resolveWorkerCount, forgeLinkOf, progressStaleFor } from "../../read-mo
 import { parseRunFilter } from "../../run-filter.mjs";
 import { outcomeNote } from "../../loaded-words.mjs";
 // The one vocabulary the panel reads too (issue #710): outcome words and tones, the venue label, the Spend and Held titles.
-import { KILL_SWITCH_UNREAD_TEXT, NO_EXPLANATION, NO_REASON_FAILED, outcomeKey, outcomeWord, queueErrorsOf, reasonWords, recordReason, shortSentence } from "../../words.mjs";
+import { KILL_SWITCH_UNREAD_TEXT, NO_EXPLANATION, NO_REASON_FAILED, listed, outcomeKey, outcomeWord, queueErrorsLine, queueErrorsOf, reasonWords, recordReason, shortSentence } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { fileCaseOfView } from "../../file-case.mjs";
 import { mirrorUnread } from "../../mirror-words.mjs";
+import { SCHEDULES_PART_TEXT } from "../../trigger-list.mjs";
 
 const SEC = 1000;
 const MIN = 60 * SEC;
@@ -162,13 +166,283 @@ export const NO_BEAT_READ = "no host's beat was read";
 export const rowLastSeen = (snapshot, h) => Boolean(snapshot?.queue?.fleetDegraded) && (snapshot?.queue?.registryReadInPart !== true || h?.notRead === true);
 
 /**
- * What a panel says over a registry read in part (issue #1062), where it says "could not be read" of one that did not
- * answer at all: the rows that answered are this read's, and a host whose row did not (`notRead` on its row) is as it
- * was last seen. "Were not read", not "did not answer in time" (issue #1036): a row Valkey answered with an error did
- * answer, and whether the next try reads it depends on the reply's code (`replyErrorClass`), so the sentence promises
- * nothing about waiting.
+ * What a panel says over a registry read in part (issue #1062) that NAMES NO HOST it did not read (a snapshot of an
+ * older shape; the reader names them since issue #1036, and `registryPartText` then says each): the rows that answered
+ * are this read's, a host read before is as it was last seen, and one this console never read has no row at all.
+ * "Were not read", not "did not answer in time": a row Valkey answered with an error did answer. It said "so those
+ * hosts are as they were last seen" of every host not read, which is false of one never read here (issue #1036).
  */
-export const REGISTRY_PART_TEXT = "The host registry was read in part: some hosts' rows were not read, so those hosts are as they were last seen.";
+export const REGISTRY_PART_TEXT = "The host registry was read in part: some hosts' rows were not read. A host read before is as it was last seen, and one never read here has no row.";
+
+/** A reply's code as the snapshot may hold it: one word of letters, digits and `_`, anything else null. */
+const codeOf = (value) => (typeof value === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(value) ? value : null);
+
+/**
+ * What a page says of ONE read of `key` that Valkey answered with `code` (issue #1036), by the code's class and
+ * nothing past it (`replyErrorWords`, the worker's table): what was answered, what that means, and whether waiting
+ * ends it. A key of another type and a permission last until someone puts them right, and the sentence names what;
+ * a passing state may be gone at the next read; of any other code nothing is claimed. So no page promises "the next
+ * refresh tries again" of a row that the next refresh will read exactly as this one did.
+ */
+export function erroredReadSentence(key, code) {
+  const w = replyErrorWords(code);
+  const said = `Valkey answers ${key} with ${code}`;
+  if (w.class === "key" || w.class === "permission") return `${said}: ${w.means}. ${w.waiting}: an operator has to ${w.first} first.`;
+  if (w.class === "passing") return `${said}: ${w.means}. ${w.waiting}.`;
+  return `${said}.`;
+}
+
+/**
+ * The hosts of a registry read in part whose rows were not read (the snapshot's `queue.unreadHosts`, issue #1036), as
+ * a page names them: `[{ name, error, key, kept }]`. `error` is the code Valkey answered the row with, or null for a
+ * row that got no answer; `key` the row's key, which a remedy names; `kept` whether this console read the host before
+ * and still holds that row (`hostBudgets` holds it, marked `notRead`). One that is not kept was NEVER read here: it
+ * has no row on any page, and its own queue, which only its row names, is in no set a read asks.
+ */
+export function unreadHostsOf(snapshot) {
+  if (!registryReadInPart(snapshot)) return [];
+  const kept = new Set((Array.isArray(snapshot.hostBudgets) ? snapshot.hostBudgets : []).filter((h) => h?.notRead === true).map((h) => h.name));
+  return (Array.isArray(snapshot.queue.unreadHosts) ? snapshot.queue.unreadHosts : [])
+    .filter((u) => typeof u?.name === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(u.name))
+    .map((u) => ({ name: u.name, error: codeOf(u.error), key: hostKey(u.name), kept: kept.has(u.name) }));
+}
+
+/** How many more hosts that read did not read than `unreadHostsOf` names (the snapshot's `queue.unreadHostsMore`). */
+const unreadHostsMore = (snapshot) => (Number.isSafeInteger(snapshot?.queue?.unreadHostsMore) && snapshot.queue.unreadHostsMore > 0 ? snapshot.queue.unreadHostsMore : 0);
+
+/**
+ * The sentences for the rows Valkey answered with an error, one per code: every key that got it, then what the code
+ * means and whether waiting ends it (`erroredReadSentence`). Null where no row was answered with one.
+ */
+function unreadHostCodes(unread) {
+  const codes = [...new Set(unread.map((u) => u.error).filter((code) => code !== null))];
+  if (codes.length === 0) return null;
+  return codes.map((code) => erroredReadSentence(listed(unread.filter((u) => u.error === code).map((u) => u.key)), code)).join(" ");
+}
+
+/**
+ * What a panel says over a registry read in part (issues #1062 and #1036): which hosts' rows were not read, what
+ * became of each on this console (one read before is drawn as it was last seen; one never read here has no row), and
+ * for a row Valkey answered with an error, its key, the code and what the code asks. It was one sentence for every
+ * such read, "some hosts' rows were not read, so those hosts are as they were last seen": it named no host, no key and
+ * no code, and it was false of a host this console never read, which is drawn nowhere.
+ */
+export function registryPartText(snapshot) {
+  const unread = unreadHostsOf(snapshot);
+  if (unread.length === 0) return REGISTRY_PART_TEXT;
+  const more = unreadHostsMore(snapshot);
+  const nor = more > 0 ? `, nor ${more === 1 ? "was 1 more host's" : `were ${more} more hosts'`}` : "";
+  const codes = unreadHostCodes(unread);
+  const tail = codes === null ? "" : ` ${codes}`;
+  // One host: "it". A sentence never opens with a host's name, which is written as it is and takes no capital.
+  if (unread.length === 1) return `The host registry was read in part. The row of ${unread[0].name} was not read${nor}: ${unread[0].kept ? "it is as it was last seen" : "this console never read it, so it has no row"}.${tail}`;
+  const kept = unread.filter((u) => u.kept).map((u) => u.name);
+  const never = unread.filter((u) => !u.kept).map((u) => u.name);
+  const became = [
+    ...(kept.length > 0 ? [`${listed(kept)} ${kept.length === 1 ? "is as it was" : "are as they were"} last seen`] : []),
+    ...(never.length > 0 ? [`${listed(never)} ${never.length === 1 ? "was never read here, so it has" : "were never read here, so they have"} no row`] : []),
+  ].join("; ");
+  return `The host registry was read in part. The rows of ${listed(unread.map((u) => u.name))} were not read${nor}: ${became}.${tail}`;
+}
+
+/**
+ * What ONE host's page says where that host's row was not read (`unreadHostsOf` names it), or null for a host that
+ * read did reach or does not name: the row's key and what Valkey answered it with, and whether what is drawn is the
+ * row as last seen or nothing at all.
+ */
+export function unreadHostText(snapshot, name) {
+  const u = unreadHostsOf(snapshot).find((entry) => entry.name === name);
+  if (u === undefined) return null;
+  const answered = u.error === null ? `The row of ${u.name} (${u.key}) was not read this time.` : erroredReadSentence(u.key, u.error);
+  return `${answered} ${u.kept ? "What is drawn here is the row as it was last seen." : `This console never read that row, so nothing here says whether ${u.name} is live, late or gone.`}`;
+}
+
+/**
+ * What a registry read in part says of a host that has NO row here (issue #1036), by what that read names:
+ * "unread", this host's row is one it did not read (`unreadHostText` says its key and what Valkey answered);
+ * "unnamed", the read names no host it did not read, or not every one, so this may be one of them; null, the read
+ * names every host it did not read and this is none of them, so its row was not there to read: the host has gone.
+ * Every such host was "not known" before, also one the registry had answered about in full. Null too where the
+ * registry was not read in part at all.
+ */
+export function hostPartCase(snapshot, name) {
+  if (!registryReadInPart(snapshot)) return null;
+  const unread = unreadHostsOf(snapshot);
+  if (unread.some((u) => u.name === name)) return "unread";
+  return unread.length === 0 || unreadHostsMore(snapshot) > 0 ? "unnamed" : null;
+}
+
+/**
+ * Whether a host's OWN queue may exist that the snapshot's reads did not ask (issues #962 and #1036): the hosts' own
+ * queues are named by their rows, so while the registry was never read only the shared queue is asked, and after a
+ * read in part the queue of a host never read here is in no set (`unreadHostsOf`, a host that is not `kept`; hosts
+ * past the ones the snapshot names count too, since nothing says they are kept). The lists read queue by queue (the
+ * running jobs, the schedules) are floors then, FOR THAT HOST'S QUEUE: every queue that was asked answered or says so
+ * itself.
+ */
+export function hostQueuesUnasked(snapshot) {
+  if (snapshot === null || typeof snapshot !== "object") return false;
+  if (Boolean(snapshot.queue?.fleetDegraded) && snapshot.queue?.registryReadInPart !== true && snapshot.hostsReadAt === null) return true;
+  return unreadHostsOf(snapshot).some((u) => !u.kept) || (registryReadInPart(snapshot) && unreadHostsMore(snapshot) > 0);
+}
+
+/**
+ * Why the lists read queue by queue are floors where the cause is a host's own queue that NO READ ASKED after a
+ * registry read in part (issue #1036: a host whose row was not read and that this console never read before), or
+ * null for any other cause. Every queue that was asked may have answered: "The running jobs could not be read, so
+ * what runs is not known. The next refresh tries again." was false of it three times over, since they were read, what
+ * runs in the queues asked is known, and the next refresh reads a row that Valkey answers with an error as this one
+ * did. What is missing is that one queue, and the sentence says whose.
+ */
+export function unaskedQueuesText(snapshot) {
+  if (!registryReadInPart(snapshot)) return null;
+  const never = unreadHostsOf(snapshot).filter((u) => !u.kept).map((u) => u.name);
+  if (never.length === 0) return unreadHostsMore(snapshot) > 0 ? "A host's own queue may not have been asked: it is named by the host's row, and not every row was read. A job running there is not listed here." : null;
+  return `${never.length === 1 ? `The queue of ${never[0]} was` : `The queues of ${listed(never)} were`} not asked: a host's own queue is named by its row, and this console never read ${never.length === 1 ? "that row" : "those rows"}. A job running there is not listed here.`;
+}
+
+/**
+ * What a host's page lacks of the running jobs where the fleet's active list is not whole (`activeUnreachable`), or
+ * null where nothing of THIS host's is missing (issue #1036). A page draws a running job on a host only where the
+ * host's own row names it (the reader takes a job's host from the ids each host publishes), so what can be missing on
+ * its page is exactly a job the row names that no queue's list held. `{ kind }`:
+ *
+ *   - "unasked": the host has no row and is one this console never read, so its own queue, which only its row names,
+ *     was asked by no read.
+ *   - "unknown": no row, a row as last seen, or a row whose own list is cut or unreadable: the row cannot vouch for
+ *     the page.
+ *   - "missing", with `missing`, how many: a row read this time that names running jobs the page does not draw.
+ *   - null: a row read this time, its list whole, and every job of it drawn. Nothing is missing, whatever queue
+ *     elsewhere was not read or not asked.
+ *
+ * One rule for the host's Jobs card and for the pill there, so the page is Not live exactly where the card says so.
+ */
+export function hostActiveGap(snapshot, name) {
+  if (snapshot === null || typeof snapshot !== "object" || snapshot.activeUnreachable !== true) return null;
+  const h = (Array.isArray(snapshot.hostBudgets) ? snapshot.hostBudgets : []).find((row) => row?.name === name) ?? null;
+  if (h === null && unreadHostsOf(snapshot).some((u) => u.name === name && !u.kept)) return { kind: "unasked" };
+  // A row read this time: one the registry's last read reached (`rowLastSeen` is every row while it could not be
+  // read, and over a read in part a row it did not reach).
+  if (h === null || rowLastSeen(snapshot, h) || h.jobsUnreadable || h.jobsMore) return { kind: "unknown" };
+  const drawn = new Set((Array.isArray(snapshot.active) ? snapshot.active : []).filter((j) => j?.host === name).map((j) => String(j.jobId)));
+  const missing = (Array.isArray(h.jobs) ? h.jobs : []).filter((j) => !j?.o && typeof j?.id === "string" && !drawn.has(j.id)).length;
+  return missing === 0 ? null : { kind: "missing", missing };
+}
+
+/**
+ * The one sentence over queues Valkey answered with an error (issue #1064, `queueErrorsLine`: which queues, what was
+ * answered, that they are in none of the counts, and whether they are paused), or null where every queue was read.
+ * One helper, so the overview's queue row, Fleet, a host and a venue say it in the same words.
+ */
+export function queueErrorsText(snapshot) {
+  const errored = queueErrorsOf(snapshot);
+  return errored.length === 0 ? null : `${queueErrorsLine(errored)}.`;
+}
+
+/**
+ * Of those queues, the ones a job on host `name` can be in: the host's own queue and the shared one (a queue with no
+ * host in its name). What a host's page says of an errored queue, and what the pill follows there: another host's own
+ * queue holds no job of this host, and its page draws no count that queue is missing from.
+ */
+export function hostQueueErrorsOf(snapshot, name) {
+  if (typeof name !== "string" || name === "") return [];
+  return queueErrorsOf(snapshot).filter((e) => hostQueueOf(name)(e.queue));
+}
+
+// ---- the waiting set's short marks (issue #1037) -------------------------------------------------------------------
+
+/** The one sentence for a waiting read cut by a bound of its own: its bound on queues, or a queue's on jobs. */
+export const WAITING_CUT_TEXT = "Not every waiting job was read, so jobs in line may be missing here.";
+
+/** The one sentence for a waiting read whose set of queues may be short (`queuesShort`, issue #963). */
+export const WAITING_QUEUES_SHORT_TEXT = "Not every queue could be found, so jobs waiting in a queue that was not asked may be missing here.";
+
+/** A waiting row whose bucket rests on a paused flag that was not read (`pausedUnknown`, issue #1036): its one line. */
+export const PAUSED_UNKNOWN_TEXT = "Waits for a free slot or on a pause: whether its queue is paused could not be read";
+
+/** The queues of one of the waiting read's coded lists (`listsUnread`, `pausedUnread`), `[{ queue, error }]`. */
+const codedQueues = (list) => (Array.isArray(list) ? list : []).filter((e) => typeof e?.queue === "string" && e.queue !== "").map((e) => ({ queue: e.queue, error: codeOf(e.error) }));
+/** Those queues in a sentence, each with what Valkey answered: "pi-jobs (Valkey answered WRONGTYPE)". */
+const codedNames = (queues) => listed(queues.map((e) => `${e.queue} (${e.error === null ? "no answer" : `Valkey answered ${e.error}`})`));
+
+/**
+ * WHY A WAITING READ'S ROWS ARE A FLOOR (issue #1037), or null over a read that is whole (and over one that was not
+ * made or failed, which a page says in its own sentence). Four causes, each the reader's own mark, and a reader of the
+ * rows that looks at `truncated` alone knew one of them:
+ *
+ *   - `lists`: a queue's list was not read (`listsUnread`, issue #1036: an error reply, or no answer), `[{ queue,
+ *     error }]`. The jobs in that list are in no row. A read that failed.
+ *   - `short`: the set of queues may not be every queue (`queuesShort`, issue #963: the host registry was not read, or
+ *     the keyspace look that finds a stopped host's queue was not whole). A read that failed.
+ *   - `cut`: the read stopped at its bound on queues (`queuesCut` of them not read).
+ *   - `full`: a queue holds more waiting jobs than one read takes.
+ *
+ * `unread` is whether a read FAILED (the first two): the live pill follows that, never a bound, since a list that is
+ * full is read. `text` says each cause that holds, the failed reads first (`failedText` those alone, or null); every
+ * count over such rows is "at least".
+ *
+ * `of` (optional) is a predicate on a queue's name, for a reader of SOME queues' rows (a host's page reads its own
+ * queue's and the shared one's): a list not read, or a queue that is full, counts only where it is one of them. The
+ * bound on queues and a short set are no queue's in particular, so they hold for every reader.
+ */
+export function waitingFloor(w, of = null) {
+  if (w === null || typeof w !== "object" || w.unreachable || !Array.isArray(w.rows)) return null;
+  const mine = (queue) => of === null || of(queue);
+  const lists = codedQueues(w.listsUnread).filter((e) => mine(e.queue));
+  const short = w.queuesShort === true;
+  const cut = Number.isSafeInteger(w.queuesCut) && w.queuesCut > 0 ? w.queuesCut : 0;
+  const perQueue = Array.isArray(w.byQueue) ? w.byQueue.filter((q) => typeof q?.queue === "string") : [];
+  const full = perQueue.some((q) => q.truncated === true && q.listsUnread !== true && mine(q.queue));
+  // Whole for the queues asked about: no list of theirs unread, none of them full, no queue past the bound (which
+  // may be one of them), the set of queues not short; and, for a read that says it is cut and not where (an older
+  // shape with no `byQueue`), not cut at all.
+  if (lists.length === 0 && !short && cut === 0 && !full && !(w.truncated === true && (of === null || perQueue.length === 0))) return null;
+  const failed = [
+    ...(lists.length > 0 ? [`A list of waiting jobs could not be read: ${codedNames(lists)}. Jobs waiting there may be missing here.`] : []),
+    ...(short ? [WAITING_QUEUES_SHORT_TEXT] : []),
+  ];
+  // The bound's own sentence, also for a read that says it is cut and not how (an older shape).
+  const bound = cut > 0 || full || failed.length === 0;
+  return { lists, short, cut, full, unread: failed.length > 0, failedText: failed.length > 0 ? failed.join(" ") : null, text: [...failed, ...(bound ? [WAITING_CUT_TEXT] : [])].join(" ") };
+}
+
+/**
+ * The queues whose paused flag the waiting read did not read (`pausedUnread`, issue #1036), `{ queues, text }`, or
+ * null. Their rows are all there, so nothing is a floor; what is not known is whether a job in the wait list waits
+ * for a free slot or on a pause, and the reader keeps such a row apart (`pausedUnknown`, see `waitBucketOf`).
+ */
+export function waitingPausedUnread(w, of = null) {
+  if (w === null || typeof w !== "object" || w.unreachable) return null;
+  const queues = codedQueues(w.pausedUnread).filter((e) => of === null || of(e.queue));
+  if (queues.length === 0) return null;
+  return { queues, text: `Whether a queue is paused could not be read: ${codedNames(queues)}. A job in its wait list waits for a free slot or on a pause, and which is not known.` };
+}
+
+/**
+ * The reasons a page groups the waiting jobs by: the worker's buckets, and one more, for a row whose bucket rests on a
+ * paused flag that was not read (`pausedUnknown`, issue #1036). The reader keeps such a row in `unknown`, which is
+ * neither `slot` nor `paused`; that bucket's words are "A reason this console does not know", which is false of it
+ * (the job recorded no reason; what is not known is its queue's flag), so a page draws it under its own.
+ */
+export const PAUSED_UNKNOWN_BUCKET = "slot-or-pause";
+export const WAIT_BUCKETS = Object.freeze(DEFER_BUCKETS.flatMap((b) => (b === "paused" ? [b, PAUSED_UNKNOWN_BUCKET] : [b])));
+export const WAIT_BUCKET_WORDS = Object.freeze({ ...DEFER_BUCKET_WORDS, [PAUSED_UNKNOWN_BUCKET]: Object.freeze({ title: "A free slot or a pause: the queue's paused flag could not be read", short: "Slot or pause, not known" }) });
+/** The reason a page draws a waiting row under (`WAIT_BUCKETS`). */
+export const waitBucketOf = (row) => (row?.pausedUnknown === true ? PAUSED_UNKNOWN_BUCKET : Object.hasOwn(DEFER_BUCKET_WORDS, row?.bucket) ? row.bucket : "none");
+
+// ---- the schedules read in part (issue #986) -----------------------------------------------------------------------
+
+/** Whether the snapshot's schedule list is not whole (`schedulersReadInPart`): a host queue's read failed or was not asked. */
+export const schedulesShort = (snapshot) => snapshot?.schedulersReadInPart === true;
+/** The one sentence over such a list (`trigger-list.mjs` holds it, for the Triggers page's own model), handed on. */
+export { SCHEDULES_PART_TEXT };
+/** A count of schedules: "3 schedules", and "at least 3 schedules" over a list read in part. */
+export const schedulesCount = (snapshot, noun = "schedule") => {
+  const n = Array.isArray(snapshot?.schedulers) ? snapshot.schedulers.length : 0;
+  // A floor of none is "none was read", never "at least 0".
+  if (schedulesShort(snapshot)) return n === 0 ? `no ${noun} was read` : `at least ${n} ${n === 1 ? noun : `${noun}s`}`;
+  return `${n} ${n === 1 ? noun : `${noun}s`}`;
+};
 
 /**
  * A read that answered that it could not reach what it reads (`unreachable`, a word or true), which is how the
@@ -194,11 +468,13 @@ const historyPartUnread = (page) => page !== null && typeof page === "object" &&
 const windowUnread = (window) => window === null || window?.partial === true;
 
 /**
- * A host's run records that could not be read: a history that failed (null), or an empty one whose fleet mirror was
- * not read (the reader does not throw in an outage, it answers no runs and a mirror that is neither "ok" nor "off").
- * Neither is a host no record names. The host page's sentence and the pill's mark are this one rule.
+ * A host's run records that could not be read: a history that failed (null), or an empty one read without one of its
+ * sides (`historyPartUnread`: the reader does not throw in an outage, it answers no runs and says which side it lacks,
+ * a fleet mirror that is neither "ok" nor "off", or this host's own run files, `unreachable`). Neither is a host no
+ * record names. The host page's sentence and the pill's mark are this one rule. The run files were not in it (issue
+ * #988): with them not listed the page said "No retained run record names this host." of records nobody read.
  */
-export const hostHistoryUnread = (history) => history === null || (history !== undefined && !history.records?.length && mirrorUnread(history.mirror));
+export const hostHistoryUnread = (history) => history === null || (history !== undefined && !history.records?.length && historyPartUnread(history));
 
 /**
  * Why a run's page cannot tell that its shell is absent from the open shells (issue #988), from what the sandbox
@@ -246,6 +522,17 @@ export const hostLoadsOf = (data) => data?.hostLoads ?? (data?.hostLoadsUnread =
 
 /** A snapshot read with one of `parts` unread (`{ unreachable }`, each part's reader's own answer in an outage). */
 const partUnread = (s, parts) => s !== null && typeof s === "object" && parts.some((part) => unreached(s[part]));
+
+/**
+ * A snapshot whose waiting read holds a mark of a read that FAILED beside one that did not answer at all (issues
+ * #1037 and #1036): a list of a queue not read, a set of queues that may be short, or a queue's paused flag not read,
+ * each of which a card of the page says in words (`waitingFloor`, `waitingPausedUnread`). Never a bound: a list that
+ * is full was read. A snapshot that holds no waiting read made none, which is no mark.
+ */
+const waitingMarked = (s, of = null) => s !== null && typeof s === "object" && s.waiting !== null && typeof s.waiting === "object" && !s.waiting.unreachable && (waitingFloor(s.waiting, of)?.unread === true || waitingPausedUnread(s.waiting, of) !== null);
+
+/** Whether a queue is one a job of host `name` can wait in: its own, or the shared one (no host in its name). */
+export const hostQueueOf = (name) => (queue) => queue === hostQueueName(name) || queue.indexOf("@") < 0;
 
 /**
  * Whether a settings view is of an overlay that was read and is refused (issue #988): it "does not load", which is
@@ -300,7 +587,10 @@ const dayUnread = (s) => s !== null && typeof s === "object" && (s.failures24h =
  *     drawn (the kept workspace the page was opened for; a sandbox being prepared);
  *     the browser terminals where their read failed; and the deployment's configuration where the report could not
  *     read it.
- *   - host: the run records of a host that has no row, the waiting jobs and the doctor results.
+ *   - host: the run records of a host that has no row, the waiting jobs and the doctor results; and, since issues
+ *     #1037 and #1064, the waiting set's marks and an errored queue this host's jobs can be in.
+ *   - overview, fleet, since the same issues and #986: the waiting set's marks (a list or a paused flag not read, a
+ *     set of queues that may be short), a queue Valkey answered with an error, and a schedule list read in part.
  *
  * NOT MARKS, each because it would hold the pill at Not live for good, or is not the console's read: where a run was
  * looked for (`runPlaces`: a finished run's lookup can be "not whole" for ever); what a host published about itself
@@ -309,9 +599,12 @@ const dayUnread = (s) => s !== null && typeof s === "object" && (s.failures24h =
  * says.
  */
 const PAGE_UNREAD = Object.freeze({
-  overview: (d) => partUnread(d.snapshot, ["waiting", "failed", "doctor"]) || overlayUnread(d.snapshot) || dayUnread(d.snapshot),
+  // The other marks of a snapshot that answered (issues #1037, #1064, #986), each said by a card of these two pages:
+  // the waiting set's (`waitingMarked`), a queue Valkey answered with an error (`queueErrors`, in none of the counts),
+  // and a schedule list read in part (`schedulersReadInPart`).
+  overview: (d) => partUnread(d.snapshot, ["waiting", "failed", "doctor"]) || waitingMarked(d.snapshot) || queueErrorsOf(d.snapshot).length > 0 || schedulesShort(d.snapshot) || overlayUnread(d.snapshot) || dayUnread(d.snapshot),
   // The held jobs too: Fleet's own card says "The held jobs could not be read." and its header "held jobs unreadable".
-  fleet: (d) => partUnread(d.snapshot, ["waiting", "failed", "doctor", "held"]),
+  fleet: (d) => partUnread(d.snapshot, ["waiting", "failed", "doctor", "held"]) || waitingMarked(d.snapshot) || queueErrorsOf(d.snapshot).length > 0 || schedulesShort(d.snapshot),
   setup: (d) => partUnread(d.snapshot, ["doctor"]) || Boolean(d.snapshot?.triggers?.unreadable),
   parked: (d) => {
     const answerer = d.answerer;
@@ -325,7 +618,7 @@ const PAGE_UNREAD = Object.freeze({
     return rows.some((row) => row !== null && typeof row === "object" && Object.hasOwn(row, "pendingScan") && parkedVerdictOf(row.pendingScan).says === CHAT_REFUSALS.parkedUnknown);
   },
   runs: (d) => historyPartUnread(d.runsPage) || windowUnread(d.runsWindow),
-  run: (d) => {
+  run: (d, operator) => {
     const record = d.run?.record !== null && typeof d.run?.record === "object" ? d.run.record : null;
     // A run refused before it started (run.mjs `refusedBeforeStart`): nothing ran, so its page draws no transcript,
     // progress, chat or loaded parts, and two cards more, the host with its doctor result and its queue from a
@@ -334,8 +627,14 @@ const PAGE_UNREAD = Object.freeze({
     if (Boolean(d.run?.unreadable) || unreached(d.inbox)) return true;
     // An inbox that was found and is a steer-armed run's: its messages, or whether it takes one now, not read.
     if (d.inbox?.found === true && d.inbox.steer === true && (d.inbox.entries === null || d.inbox.open === null)) return true;
-    if (d.childrenIncomplete === true || shellsShort(d) === "unread") return true;
-    if (refused) return d.snapshot === null || unreached(d.snapshot?.doctor) || windowUnread(d.runsWindow);
+    // Three reads only an operator's cards are drawn from (`RUN_VIEWER_PANELS` holds none of them): the search for
+    // child runs, which the Chain card says was incomplete, and which anyone's banner says only where it counts the
+    // runs queued (`queuedText`: a child found, or a request refused); the open shells behind the Workspace row; and
+    // a refused run's two cards. On a viewer's or an agent's page nothing says them, so they are no mark there.
+    const bannerCounts = (Array.isArray(d.children) && d.children.length > 0) || Number(record?.chainRefused) > 0;
+    if (d.childrenIncomplete === true && (operator || bannerCounts)) return true;
+    if (operator && shellsShort(d) === "unread") return true;
+    if (refused) return operator && (d.snapshot === null || unreached(d.snapshot?.doctor) || windowUnread(d.runsWindow));
     if ([d.transcript, d.chat, d.chatAnswer].some(unreached) || d.chatAnswer?.unread === true || d.chat?.says === CHAT_REFUSALS.parkedUnknown) return true;
     // The progress key is the page's only source of progress while there is no record; with one, the card draws the
     // record's. The hosts' doctor runs are no mark here: the card that holds a run against them says which other
@@ -358,27 +657,115 @@ const PAGE_UNREAD = Object.freeze({
     // The host panel's own rule, which it draws for a host with no row alone: there the run records are all that can
     // say when the host was last seen.
     if ((d.host === null || d.host === undefined) && hostHistoryUnread(d.hostHistory)) return true;
-    return partUnread(d.snapshot, ["waiting", "doctor"]);
+    // The waiting set's marks, which its Jobs card says of the two queues a job of this host can wait in (`hostName`,
+    // the page's own host, which the loader sets: a list of another host's queue that was not read is none of this
+    // page's); and such a queue that Valkey answered with an error (`hostQueueErrorsOf`), which the card of a host
+    // that has a row says. Data that does not name its host is judged by every queue.
+    const name = typeof d.hostName === "string" && d.hostName !== "" ? d.hostName : typeof d.host?.name === "string" ? d.host.name : null;
+    return partUnread(d.snapshot, ["waiting", "doctor"]) || waitingMarked(d.snapshot, name === null ? null : hostQueueOf(name)) || (d.host !== null && d.host !== undefined && hostQueueErrorsOf(d.snapshot, d.host.name).length > 0);
   },
 });
 
 /**
+ * Which of the three parts of a snapshot a live page draws (issue #962's parts, held page by page since issue #988):
+ * the host registry (`queue.fleetDegraded`), the active jobs (`activeUnreachable`) and the parked runs
+ * (`parkedUnreachable`). Every live page was judged by all three, so a page that draws nothing of a part said Not live
+ * for it with no word of what it lacks: Parked over a registry that was not read, the setup guide over an active list
+ * or over the run history, Fleet and a host over the parked runs.
+ *
+ *   - overview: all three (its Hosts and Running cards, its Parked card and the day beside it).
+ *   - fleet, host: the registry and the active jobs. Neither draws a parked run. A host's page lacks a running job
+ *     only where its own row names one that is not drawn, or cannot say (`hostActiveGap`).
+ *   - setup: the registry, which its "Start a worker" step is told from.
+ *   - parked: the parked runs.
+ *   - run: the registry, on the two cards of a run refused before it started, which an operator alone is drawn.
+ *     For these three and a host, a registry read in part is a part unread only where the page draws a row that read
+ *     did not reach (`registryUnreadOn`).
+ *   - runs, sandboxes: none; they read no snapshot.
+ *
+ * The navigation's Parked count is on every live page and is no mark: it is drawn only where it is known and above
+ * zero, here as on the pages that read no snapshot, where it comes from a read with no mark of its own.
+ */
+const PAGE_PARTS = Object.freeze({
+  overview: ["registry", "active", "parked"],
+  fleet: ["registry", "active"],
+  host: ["registry", "active"],
+  setup: ["registry"],
+  parked: ["parked"],
+  run: [],
+  runs: [],
+  sandboxes: [],
+});
+const EVERY_PART = Object.freeze(["registry", "active", "parked"]);
+
+/** A run page's snapshot is a refused run's, and its two cards an operator's: the one place that page draws the hosts. */
+const refusedRunOf = (data) => {
+  const record = data.run?.record !== null && typeof data.run?.record === "object" ? data.run.record : null;
+  return record !== null && record.outcome === "policy" && refusedBeforeSpend(record) ? record : null;
+};
+
+/**
+ * Whether a registry that was not read whole is a part of THIS page unread. One that was not read at all is, on every
+ * page that draws the hosts. One READ IN PART (issue #1062) is where the page draws a row that read did not reach, or
+ * says what it could not tell for want of one:
+ *
+ *   - overview, fleet: always. Their cards list the hosts and say which rows were not read.
+ *   - setup: where no row that was read beats, so its "Start a worker" step says whether a worker runs is not known;
+ *     with one beating the step is done and says nothing of the registry (`firstRunState`'s rule).
+ *   - host: where its row is one that read did not reach, or it has no row and that read did not read it or may
+ *     not have (`hostPartCase`). A host whose row was read is drawn as read now, and one the read names as none of
+ *     the rows it missed has gone: neither page says anything of another host's row.
+ *   - run: where the host a refused run was on has no row that read reached.
+ */
+function registryUnreadOn(page, data, s) {
+  if (!s.queue?.fleetDegraded) return false;
+  if (s.queue.registryReadInPart !== true || page === "overview" || page === "fleet") return true;
+  const rows = Array.isArray(s.hostBudgets) ? s.hostBudgets : [];
+  const reached = (name) => rows.some((h) => h?.name === name && h.notRead !== true);
+  if (page === "setup") return !rows.some((h) => h?.notRead !== true && beatFresh(h));
+  if (page === "host") {
+    // A row that read did not reach is drawn as last seen; with no row, the page says so only where this host's row
+    // is one that read did not read, or may be (`hostPartCase`): a host it names as none of them has gone.
+    const name = typeof data.hostName === "string" && data.hostName !== "" ? data.hostName : typeof data.host?.name === "string" ? data.host.name : null;
+    if (name === null) return true;
+    const row = rows.find((h) => h?.name === name);
+    return row !== undefined ? row.notRead === true : hostPartCase(s, name) !== null;
+  }
+  if (page === "run") return !reached(refusedRunOf(data)?.host);
+  return true;
+}
+
+/**
  * Whether a page's data holds something the console could not read (issues #962 and #988), the one rule of the live
  * pill's Not live for the page the server draws (`shell.mjs`) and for the hub's streams (`live.mjs`). On any page: its
- * primary read failed (`readFailed`); its load's deadline cut a read (`deadlineSpent`); or its snapshot was read with
- * a part missing: the host registry this time (`queue.fleetDegraded`, whether it shows nothing or the rows as last
+ * primary read failed (`readFailed`); or its load's deadline cut a read (`deadlineSpent`). On the pages `PAGE_UNREAD`
+ * names, a read the page makes beside its snapshot failed, so that the pill there is Not live wherever a panel says
+ * "could not be read" of a read the page made. And its snapshot was read with a part missing THAT THE PAGE DRAWS
+ * (`PAGE_PARTS`): the host registry this time (`queue.fleetDegraded`, whether it shows nothing or the rows as last
  * seen, which are not current either), the active jobs (`activeUnreachable`) or the parked runs
- * (`parkedUnreachable`). And on the pages `PAGE_UNREAD` names, a read the page makes beside its snapshot failed, so
- * that the pill there is Not live wherever a panel says "could not be read" of a read the page made. `page` is the
- * page the data is drawn on: the data's own name for it (`data.page`, which `loadPageData` sets), or the page the
- * shell draws, which it names itself. A declaration, so the modules that import each other in a circle can call it.
+ * (`parkedUnreachable`).
+ *
+ * `page` is the page the data is drawn on: the data's own name for it (`data.page`, which `loadPageData` sets), or the
+ * page the shell draws, which it names itself. Data on no page that has a pill is judged by every part, as before.
+ *
+ * `role` is who the page is drawn for. A viewer's and an agent's page draw fewer cards than an operator's from the
+ * same reads (the run page's `RUN_VIEWER_PANELS`), and a read only an operator's card says is no mark on theirs: the
+ * pill said Not live there over a page that said nowhere what it lacks. A caller that does not say who looks (the
+ * hub's keeping rule, which holds one load for every role watching it) is answered as for an operator, the widest.
+ *
+ * A declaration, so the modules that import each other in a circle can call it.
  */
-export function dataUnread(data, page = data?.page) {
+export function dataUnread(data, page = data?.page, role = null) {
   if (data?.readFailed === true || data?.deadlineSpent === true) return true;
-  if (typeof page === "string" && Object.hasOwn(PAGE_UNREAD, page) && data !== null && typeof data === "object" && PAGE_UNREAD[page](data)) return true;
+  const operator = role === null || role === undefined || role === "operator";
+  if (typeof page === "string" && Object.hasOwn(PAGE_UNREAD, page) && data !== null && typeof data === "object" && PAGE_UNREAD[page](data, operator)) return true;
   const s = data?.snapshot;
   if (s === null || typeof s !== "object") return false;
-  return Boolean(s.queue?.fleetDegraded) || s.activeUnreachable === true || Boolean(s.parkedUnreachable);
+  const parts = typeof page !== "string" || !Object.hasOwn(PAGE_PARTS, page) ? EVERY_PART : page === "run" ? (operator && refusedRunOf(data) !== null ? ["registry"] : []) : PAGE_PARTS[page];
+  // The active jobs on a host's page: only where its Jobs card says something of them is missing (`hostActiveGap`).
+  const hostName = page === "host" ? (typeof data.hostName === "string" && data.hostName !== "" ? data.hostName : typeof data.host?.name === "string" ? data.host.name : null) : null;
+  const activeUnread = s.activeUnreachable === true && (hostName === null || hostActiveGap(s, hostName) !== null);
+  return (parts.includes("registry") && registryUnreadOn(page, data, s)) || (parts.includes("active") && activeUnread) || (parts.includes("parked") && Boolean(s.parkedUnreachable));
 }
 
 // ---- action forms (issue #642) ---------------------------------------------------------------------------------------
