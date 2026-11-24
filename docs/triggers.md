@@ -399,7 +399,11 @@ A job that finishes with a policy refusal or a cancellation releases that second
 **new event**, such as removing and adding the label again: it can start a job immediately, without waiting ten
 minutes. This applies to a refusal before the container starts, such as `secret-bundle-trigger-changed`, and to a job
 you cancel after it starts. Wait until the worker records the cancellation; acceptance of the stop request alone
-does not release the window. The new job still passes every permission, configuration and spend check. If the worker
+does not release the window. The new job still passes every permission, configuration and spend check. A refusal
+before the container starts always says why on the item: its own comment, or, where it has none, the same words
+[reasons.md](reasons.md) gives for its reason (issue #969). The label that started the job stays on: once the
+cause is fixed, remove it and add it again to start a new job. On GitHub and Forgejo another label event on the item
+(an unrelated label, a reopen) can also start one, as described under the label matching above. If the worker
 logs `stop_did_not_take`, inspect the runtime before starting more work: cancellation was recorded, but the old
 container's exit could not be confirmed and its existing resource holds remain.
 

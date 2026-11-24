@@ -119,7 +119,9 @@ test("the outer boundary also covers a future pre-pickup policy gate, after its 
 	const h = harness({ deps: { checkSandboxWorkspace: async () => ({ outcome: "policy", reason: "future-policy-gate" }) } });
 	const result = await h.run();
 	assert.equal(result.reason, "future-policy-gate");
-	assert.deepEqual(h.ops, ["record", "release-window"]);
+	// Issue #969: a future gate that forgets its own comment still tells the item, through the refusal net's fixed
+	// fallback (the catalog cannot explain a token it does not know), before the window is released.
+	assert.deepEqual(h.ops, ["record", "comment", "release-window"]);
 });
 
 test("operator and agent cancellation release only after the running attempt finishes cleanup and records", { skip }, async () => {

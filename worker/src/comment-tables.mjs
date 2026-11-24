@@ -341,6 +341,13 @@ export const SIZE_REFUSAL_COMMENTS = Object.freeze({
 /** The comment for a job the operator cancelled before it started, where it would have been held or retried (gate of PR #479). */
 export const CANCELLED_BEFORE_START_COMMENT = "Stopped: the operator cancelled this run before it started. Nothing was spent. Not retried.";
 
+/**
+ * Issue #969: what the refusal net (refusal-net.mjs) posts for a refusal before spend whose reason the reason catalog has
+ * no sentence for. Not expected (the catalog's keys are the record's reasons, both ways), and kept so the net never falls
+ * back to saying nothing, which is the silence it exists to end. The worker log names the token beside it.
+ */
+export const REFUSED_UNEXPLAINED_COMMENT = "Refused: this job was stopped before it started, for a reason this worker has no explanation for yet. No container was started and nothing was spent. Ask the operator to check the worker log. Not run.";
+
 // Issue #649: all approval sentences are fixed; human summaries and reasons stay in the private session/store.
 export const APPROVAL_COMMENTS = {
 	"awaiting-approval": "Approval requested. Reply /approve, /decline followed by an optional reason, or ask a question. Only an authorized reply can continue the saved run.",

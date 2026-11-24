@@ -490,6 +490,16 @@ See [what the cap counts](costs.md#what-the-cap-counts) and [a subscription allo
 
 See [reasons.md](reasons.md#cost-cap) and [what the cap charges](costs.md#what-the-cap-charges).
 
+### Unreleased: refusals before start say why (#969)
+
+Workers now post a comment for every forge job refused before anything was spent whose refusal had no comment of its
+own: the reason's explanation from [reasons.md](reasons.md), word for word. Before this, a refusal at the model
+selection (`auth-mixed-billing`, `model-selection-policy-changed` and others), `settings-overlay-invalid`, the
+subscription admission and the prepare stage (`sha-gone`, the `.pi/` caps, the `skills-dir-*` refusals) posted nothing,
+and a label job's requester waited for a job that would never come. Run records, job data, queue keys and the trigger
+label are unchanged; no migration, backup path or older-state detector is needed. An older worker keeps refusing these
+in silence, so upgrade every worker for the comments to appear. See [when another event starts a job](triggers.md#when-another-event-starts-a-job).
+
 ### 5.4.2
 
 #### Completed label-job receipts (#920)

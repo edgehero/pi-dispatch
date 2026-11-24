@@ -13,7 +13,10 @@
  * WRITTEN HERE, AND SAID SO, for three kinds of reason:
  *   - a reason whose comment carries runtime values (a wait profile, an image ref, a cap's numbers, a proxy name): the
  *     template stays at its call site and this holds a general sentence for the reason;
- *   - a reason that posts no comment (a prepare-stage refusal, a silent one, a failed retry);
+ *   - a reason with no comment of its own at its call site (a prepare-stage refusal, a selection refusal, a failed
+ *     retry). Since issue #969 the refusal net (refusal-net.mjs) POSTS this sentence on a forge job's item when such a
+ *     refusal before spend told it nothing, so every sentence here is held to the comment rules below, and it is still
+ *     what the issue was told, word for word;
  *   - a reason two or more paths share with different comments, where the record cannot say which one ran, so the
  *     general sentence covers them all: `model-not-allowed` (before starting and from the runner), `mcp-config-invalid`
  *     (from the pickup and from the runner), `secret-name-reserved` (for `run.secrets` and for a bundle),
