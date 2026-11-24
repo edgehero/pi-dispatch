@@ -17,7 +17,7 @@
 
 import { explainReason } from "@edgehero/pi-dispatch/reason-catalog";
 import { RECORD_REASON_RE } from "@edgehero/pi-dispatch/record-reason";
-import { REPLY_ERROR_CLASSES, replyErrorClass } from "@edgehero/pi-dispatch/reply-error-class";
+import { REPLY_ERROR_CLASSES, replyErrorClass, replyErrorWords } from "@edgehero/pi-dispatch/reply-error-class";
 
 export { RECORD_REASON_RE };
 
@@ -138,18 +138,18 @@ export function switchListShort(res) {
 
 /**
  * What a sentence may say of ONE read of `key` that Valkey answered with `code` (issue #1036), by the code's class and
- * nothing past it (`replyErrorClass`, the worker's table): `said`, the key and the code; `first`, what has to be put
+ * nothing past it (`replyErrorWords`, the worker's table): `said`, the key and the code; `first`, what has to be put
  * right before anything else, for a class that lasts, else null (a key of another type is removed or repaired; a
- * permission is the Valkey user's ACL, never the key); `again`, whether "try again" is true, which it is of a passing
+ * permission is the Valkey user's ACL, never the key; NOAUTH and WRONGPASS are the user and password this connects
+ * with, never an ACL); `again`, whether "try again" is true, which it is of a passing
  * class alone; `lasting`, the class's own true, false or null; `waiting`, the clause the class allows about waiting, or
  * null. The words every admin surface that names a remedy builds its sentence from (the trigger edit's gate,
  * `dispatch_cancel`'s refusal, the kill switch's short note), so that an ACL user without HGETALL is never told to
  * remove a sound key, and a Valkey that was busy for a moment is never called a cause waiting does not end.
  */
 export function erroredReadWords(key, code) {
-  const cls = replyErrorClass(code);
-  const { lasting, waiting } = REPLY_ERROR_CLASSES[cls];
-  return { class: cls, lasting, waiting, said: `Valkey answers ${key} with ${code}`, first: cls === "key" ? "Remove or repair that key first" : cls === "permission" ? "Fix this Valkey user's ACL first" : null, again: cls === "passing" };
+  const { class: cls, lasting, waiting, first } = replyErrorWords(code);
+  return { class: cls, lasting, waiting, said: `Valkey answers ${key} with ${code}`, first: first === null ? null : `${first.charAt(0).toUpperCase()}${first.slice(1)} first`, again: cls === "passing" };
 }
 
 /**
@@ -275,6 +275,58 @@ function switchShortParts(paused, cause) {
 }
 
 /**
+ * The queues of a part-way pause or resume whose switch Valkey ANSWERED with a refusal or an error (issue #1064), from
+ * one Valkey's answer or from several (the read model's `switchOutcome` shape, `partial.codes`): `[{ queue, code,
+ * class }]`, a key of another type first, then a permission, then any other code, then a passing state, each class in
+ * the answer's own order. A queue name and the reply's code alone (one word of letters, digits and `_`), anything else
+ * left out, so no client's words reach a page, a tool's answer or the audit.
+ */
+export function switchAnsweredCodes(res) {
+  const answered = (Array.isArray(res) ? res : [res]).flatMap((r) => {
+    const codes = r?.partial?.codes;
+    if (codes === null || typeof codes !== "object" || Array.isArray(codes)) return [];
+    return Object.entries(codes).filter(([queue, code]) => queue !== "" && typeof code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(code)).map(([queue, code]) => ({ queue, code, class: replyErrorClass(code) }));
+  });
+  return SHORT_CAUSE_ORDER.flatMap((cls) => answered.filter((a) => a.class === cls));
+}
+
+/**
+ * What a part-way fleet pause or resume says to do about a queue Valkey ANSWERED with a refusal or an error (issue
+ * #1064), by the first such reply's code and nothing past it (`replyErrorWords`). Every part-way switch closed with
+ * "Look at the fleet and try again"; over a queue one of whose keys holds a string, trying again is the same answer
+ * again, on every press. So the sentence names the queue and the code, then what the code supports: for a key of
+ * another type, that a key of that queue has to be removed or repaired, and then that queue switched; for a
+ * permission, the Valkey user's ACL (the user and password for NOAUTH and WRONGPASS); for a passing state, that a
+ * later try may succeed; for any other code, no claim, only to look before trying again. One queue is named and the
+ * rest are counted. `answered` is `switchAnsweredCodes`' list, not empty.
+ */
+export function switchAnsweredThen(paused, answered) {
+  const noun = paused ? "pause" : "resume";
+  const [named] = answered;
+  const w = replyErrorWords(named.code);
+  const said = `Valkey answers the ${noun} of ${named.queue} with ${named.code}`;
+  const tail = answered.length > 1 ? ` (${answered.length - 1} more ${answered.length === 2 ? "queue was" : "queues were"} answered with an error)` : "";
+  if (w.class === "key") return `${said}: a key of that queue holds another kind of value. Trying again does not change that: ${w.first}, then ${noun} that queue${tail}`;
+  if (w.class === "permission") return `${said}: ${w.means}. Trying again does not change that: ${w.first}, then ${noun} the fleet again${tail}`;
+  if (w.class === "passing") return `${said}: ${w.means}. A later try may succeed: ${noun} the fleet again${tail}`;
+  return `${said}. Look at the fleet before trying again${tail}`;
+}
+
+/**
+ * The same for a model (issue #1064): the code and what its class supports, as a sentence, never a queue's name or a
+ * Valkey's address. `code` is the first answered queue's (`switchAnsweredCodes`).
+ */
+export function switchAnsweredSentence(paused, code) {
+  const noun = paused ? "pause" : "resume";
+  const w = replyErrorWords(code);
+  const said = `Valkey answered a queue's ${noun} with ${code}`;
+  if (w.class === "key") return ` ${said}: a key of that queue holds another kind of value. Trying again does not change that: an operator has to ${w.first} first.`;
+  if (w.class === "permission") return ` ${said}: ${w.means}. Trying again does not change that: an operator has to ${w.first} first.`;
+  if (w.class === "passing") return ` ${said}: ${w.means}. A later try may succeed.`;
+  return ` ${said}.`;
+}
+
+/**
  * What a queue whose pause or resume Valkey answered with an error after its script may have run (issue #1014) reads
  * as, read back: "paused" or "running", or "unknown" where Valkey answered that read with an error too (issue #1041).
  * That second error is an answer, so the queue stays one answered with an error, never one not confirmed, which is for a
@@ -303,7 +355,10 @@ export function switchErroredQueue({ queue, reads }) {
 export function queueErrorsOf(read) {
   const map = read?.queueErrors;
   if (map === null || typeof map !== "object" || Array.isArray(map)) return [];
-  return Object.entries(map).filter(([queue, error]) => queue !== "" && typeof error === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(error)).map(([queue, error]) => ({ queue, error }));
+  // `paused` (issue #1064, the read's `queueErrorsPaused`): the queue's paused flag where it WAS read and only its
+  // counts were answered with an error, true or false; absent where the flag was not read.
+  const flags = read?.queueErrorsPaused !== null && typeof read?.queueErrorsPaused === "object" && !Array.isArray(read.queueErrorsPaused) ? read.queueErrorsPaused : {};
+  return Object.entries(map).filter(([queue, error]) => queue !== "" && typeof error === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(error)).map(([queue, error]) => ({ queue, error, ...(Object.hasOwn(flags, queue) && typeof flags[queue] === "boolean" ? { paused: flags[queue] } : {}) }));
 }
 
 /** How many queues `queueErrorsLead` names before it counts the rest (the switch previews' own bound, issue #737). */
@@ -315,10 +370,11 @@ export const QUEUE_ERRORS_NAMED = 20;
  * answered, at most `QUEUE_ERRORS_NAMED` named and then "and N more". What follows is the surface's own: a switch
  * preview says the switch is still sent, a page says the paused state is not known (`queueErrorsLine`). An entry
  * whose `error` is null is a queue whose read got no answer at all, which the status line names beside the others
- * (`readQueueState`'s `unavailableQueues`); `queueErrorsOf` never gives one.
+ * (`readQueueState`'s `unavailableQueues`); `queueErrorsOf` never gives one. A queue whose paused flag WAS read
+ * (`paused`, a boolean) says so in its own parenthesis: the error was its counts' alone, and it is paused or running.
  */
 export function queueErrorsLead(errored) {
-  const named = errored.slice(0, QUEUE_ERRORS_NAMED).map((e) => `${e.queue} (${e.error === null ? "no answer" : `Valkey answered ${e.error}`})`).join(", ");
+  const named = errored.slice(0, QUEUE_ERRORS_NAMED).map((e) => `${e.queue} (${e.error === null ? "no answer" : `Valkey answered ${e.error}${typeof e.paused === "boolean" ? ` for its counts; it is ${e.paused ? "paused" : "running"}` : ""}`})`).join(", ");
   return `Not read, so not in these counts: ${errored.length > QUEUE_ERRORS_NAMED ? `${named}, and ${errored.length - QUEUE_ERRORS_NAMED} more` : named}`;
 }
 
@@ -328,7 +384,13 @@ export function queueErrorsLead(errored) {
  * not read them: the cause is a key Valkey answers with an error, which stays until it is repaired.
  */
 export function queueErrorsLine(errored) {
-  return `${queueErrorsLead(errored)}; whether ${errored.length === 1 ? "it is" : "they are"} paused is not known`;
+  // "Whether it is paused is not known" only of a queue whose paused flag was not read (issue #1064). It was said of
+  // every queue left out, also of one whose flag was read and whose counts alone were answered with an error; that
+  // queue is said as it reads, in the lead, and the sentence closes on the others, or on nothing when there is none.
+  const unknown = errored.filter((e) => typeof e.paused !== "boolean").length;
+  if (unknown === 0) return queueErrorsLead(errored);
+  if (unknown === errored.length) return `${queueErrorsLead(errored)}; whether ${errored.length === 1 ? "it is" : "they are"} paused is not known`;
+  return `${queueErrorsLead(errored)}; whether the ${unknown === 1 ? "other is" : "others are"} paused is not known`;
 }
 
 /** Names in a sentence: "a", "a and b", "a, b and c". The order is the caller's. */

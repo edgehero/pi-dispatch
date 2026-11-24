@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { test } from "node:test";
 import { Command, Redis } from "ioredis";
 import { freezingProxy } from "./helpers/freezing-proxy.mjs";
-import { JudgedConnector, REPLY_CODES_BY_CLASS, REPLY_ERROR_CLASSES, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, passwordDeclinedOf, replyErrorClass, replyErrorCode, useValkeyContext } from "../src/connection.mjs";
+import { JudgedConnector, REPLY_CODES_BY_CLASS, REPLY_CODES_OF_CREDENTIALS, REPLY_ERROR_CLASSES, replyErrorWords, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, passwordDeclinedOf, replyErrorClass, replyErrorCode, useValkeyContext } from "../src/connection.mjs";
 
 // Issue #464, gate round 1 (measured on Fedora 44): WHATWG URL keeps an IPv6 literal's brackets in `hostname`, and the
 // queue client then looked up the name "[::1]", which never resolves, so a `redis://[::1]:port` VALKEY_URL never
@@ -865,6 +865,28 @@ test("docs/service.md's table of what an error reply's code means names the clas
 	assert.deepEqual([REPLY_ERROR_CLASSES.key.lasting, REPLY_ERROR_CLASSES.permission.lasting, REPLY_ERROR_CLASSES.passing.lasting, REPLY_ERROR_CLASSES.other.lasting], [true, true, false, null]);
 	assert.deepEqual(rows.map((row) => /[Tt]ry again/.test(row.split("|")[4])), [false, false, true, false]);
 	assert.match(rows[1].split("|")[4], /never remove it/);
+});
+
+// Issue #1036: NOAUTH and WRONGPASS were told "fix this Valkey user's ACL", their class's remedy. Their remedy is the
+// user and password the process connects with: an ACL rule is no part of signing in.
+test("replyErrorWords: each code's class and that class's words, and for NOAUTH and WRONGPASS the user and password, never an ACL (#1036)", () => {
+	// What a sentence that named the key says first, by class: the remedy in few words, or none.
+	assert.deepEqual(Object.fromEntries(Object.entries(REPLY_ERROR_CLASSES).map(([name, c]) => [name, c.first])), { key: "remove or repair that key", permission: "fix this Valkey user's ACL", passing: null, other: null });
+	assert.deepEqual(replyErrorWords("WRONGTYPE"), { class: "key", ...REPLY_ERROR_CLASSES.key });
+	assert.deepEqual(replyErrorWords("NOPERM"), { class: "permission", ...REPLY_ERROR_CLASSES.permission });
+	assert.deepEqual(replyErrorWords("BUSY"), { class: "passing", ...REPLY_ERROR_CLASSES.passing });
+	for (const code of ["ERR", "READONLY", "", null, undefined, 7, "toString"]) assert.deepEqual(replyErrorWords(code), { class: "other", lasting: null, means: null, remedy: null, first: null, waiting: null }, String(code));
+	// The two of the permission class with words of their own: still lasting, still never the key, and no ACL.
+	assert.deepEqual(REPLY_CODES_OF_CREDENTIALS, ["NOAUTH", "WRONGPASS"]);
+	assert.deepEqual(replyErrorWords("NOAUTH"), { class: "permission", lasting: true, means: "this connection has not signed in to Valkey", remedy: "put right the user and password this process connects to Valkey with", first: "fix the Valkey user and password", waiting: "Waiting does not change that" });
+	assert.deepEqual(replyErrorWords("WRONGPASS"), { class: "permission", lasting: true, means: "Valkey did not take the user and password this connects with", remedy: "put right the user and password this process connects to Valkey with", first: "fix the Valkey user and password", waiting: "Waiting does not change that" });
+	for (const code of REPLY_CODES_OF_CREDENTIALS) {
+		assert.equal(replyErrorClass(code), "permission", code);
+		const w = replyErrorWords(code);
+		assert.doesNotMatch(`${w.means} ${w.remedy} ${w.first}`, /ACL|remove|repair/, code);
+	}
+	// The table itself is not changed by asking.
+	assert.equal(REPLY_ERROR_CLASSES.permission.first, "fix this Valkey user's ACL");
 });
 
 // Issue #1036: every error reply was worded as a key of the wrong type.

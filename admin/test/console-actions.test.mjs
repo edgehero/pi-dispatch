@@ -26,8 +26,8 @@ import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { CONFIRM_SLOT_ID, doneBannerHtml, PARTIAL_NOTE } from "../src/console/confirm-view.mjs";
 import { html } from "../src/console/html.mjs";
-import { fieldNamed, QUEUE_ERRORS_NAMED, queueErrorsLead, queueErrorsLine, switchShortCause, switchShortNote, switchShortThen, UNNAMED_FIELD } from "../src/words.mjs";
-import { answeredWith, discoveryRedis, keyedRedis, noAnswer, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
+import { fieldNamed, QUEUE_ERRORS_NAMED, queueErrorsLead, queueErrorsLine, queueErrorsOf, switchShortCause, switchShortNote, switchShortThen, UNNAMED_FIELD } from "../src/words.mjs";
+import { answeredWith, discoveryRedis, keyedRedis, noAnswer, quietQueue, registryKeys } from "./helpers/fleet-reader-fakes.mjs";
 import { FLASH_MAX_BYTES, makeSessionStore } from "../src/console/sessions.mjs";
 import { makeLoginLimiter } from "../src/console/guards.mjs";
 import { readJobsData } from "../src/console/job-data.mjs";
@@ -1319,14 +1319,14 @@ test("a refusal that can follow a write never says nothing was changed: the kill
   answer = { results: [{ shown: "redis://a/0", res: { ok: true, queues: ["pi-jobs"] } }, { shown: "redis://b/0", res: { unreachable: "down", partial: { done: ["pi-jobs@m1"], failed: "pi-jobs@m2" } } }] };
   const part = await c.both("fleet-pause", {});
   assert.equal(part.confirm.status, 409);
-  assert.equal(part.confirm.json().error, "the kill switch did not reach every queue: redis://a/0 done; redis://b/0 stopped after pi-jobs@m1, failed at pi-jobs@m2. Look at the fleet and try again");
+  assert.equal(part.confirm.json().error, "done on redis://a/0; stopped after pi-jobs@m1, failed at pi-jobs@m2 on redis://b/0. The kill switch did not reach every queue. Look at the fleet and try again");
   mayHave(part.confirm.json().html);
   // One Valkey took the pause and the other never answered: part of the fleet IS paused, with no loop
   // stopped part-way to say so, so the Valkey that answered ok alone makes it partial.
   answer = { results: [{ shown: "redis://a/0", res: { ok: true, queues: ["pi-jobs"] } }, { shown: "redis://b/0", res: { unreachable: "down" } }] };
   const half = (await c.both("fleet-pause", {})).confirm;
   assert.equal(half.status, 409);
-  assert.equal(half.json().error, "the kill switch did not reach every queue: redis://a/0 done; redis://b/0 unreachable. Look at the fleet and try again");
+  assert.equal(half.json().error, "done on redis://a/0; could not reach redis://b/0. The kill switch did not reach every queue. Look at the fleet and try again");
   mayHave(half.json().html);
   // A loop that failed at its first queue: that queue's state is unknown (the error came back, not the state).
   answer = { results: [{ shown: "redis://a/0", res: { unreachable: "down", partial: { done: [], failed: "pi-jobs" } } }] };
@@ -1388,35 +1388,35 @@ test("a confirm whose write was sent and not answered names what is known and wh
   // A pause: one queue answered, one was sent and not answered, one was refused before it was sent.
   answer = { results: [{ shown: "redis://a/0", res: { unreachable: "Command timed out", partial: { done: ["pi-jobs"], failed: "pi-jobs@m1", error: "Command timed out", unconfirmed: ["pi-jobs@m1"], refused: ["pi-jobs@m2"], notTried: [] }, incomplete: "the scan for the deployment's queues did not finish" } }] };
   const paused = (await c.both("fleet-pause", {})).confirm;
-  assert.equal(paused.json().error, "the kill switch did not reach every queue, a pause was sent that may or may not have been made, and the list of queues may be short: redis://a/0 not confirmed for pi-jobs@m1 (the pause may or may not have been made); not paused: pi-jobs@m2; paused: pi-jobs. Other queues may exist and were not paused: pause the fleet again once Valkey answers");
+  assert.equal(paused.json().error, "the list of queues may be short: not confirmed for pi-jobs@m1 (the pause may or may not have been made); not paused: pi-jobs@m2; paused: pi-jobs on redis://a/0. The kill switch did not reach every queue: a pause was sent that may or may not have been made. Other queues may exist and were not paused: pause the fleet again once Valkey answers");
   mayHave(paused);
   assert.ok(!paused.json().error.includes("Command timed out"), "queue names only, never a client's words");
-  // The audit row keeps the start of the sentence, which is why a switch that may or may not have been made and the list
-  // that may be short (issue #964), and then the queues not known, come first.
+  // The audit row keeps the start of the sentence, which is why the list that may be short (issue #964) and then the
+  // queues, those not known first, come first (issue #1064): each list with what it means, and the Valkey after them.
   const row = c.audit.rows.at(-1);
-  assert.deepEqual([row.outcome, paused.json().error.startsWith(row.reason), row.reason.includes("a pause was sent that may or may not have been made"), row.reason.includes("may be short"), row.reason.includes("not confirmed for pi-jobs@m1")], ["failed", true, true, true, true], row.reason);
+  assert.deepEqual([row.outcome, paused.json().error.startsWith(row.reason), row.reason.includes("not confirmed for pi-jobs@m1 (the pause may or may not have been made)"), row.reason.includes("may be short"), row.reason.includes("not paused: pi-jobs@m2; paused: pi-jobs on redis://a/0")], ["failed", true, true, true, true], row.reason);
   // Issue #964: over a set that may be short with nothing sent and unanswered, the sentence does not say a pause may or
   // may not have been made.
   answer = { results: [{ shown: "redis://a/0", res: { unreachable: "refused", partial: { done: ["pi-jobs"], failed: "pi-jobs@m2", error: "refused", unconfirmed: [], refused: ["pi-jobs@m2"], notTried: [] }, blind: "registry down" } }] };
-  assert.equal((await c.both("fleet-pause", {})).confirm.json().error, "the kill switch did not reach every queue, and the list of queues may be short: redis://a/0 not paused: pi-jobs@m2; paused: pi-jobs. Other queues may exist and were not paused: pause the fleet again once Valkey answers");
+  assert.equal((await c.both("fleet-pause", {})).confirm.json().error, "the list of queues may be short: not paused: pi-jobs@m2; paused: pi-jobs on redis://a/0. The kill switch did not reach every queue. Other queues may exist and were not paused: pause the fleet again once Valkey answers");
   // A resume stops at the first lost answer: nothing known resumed, one not known, the rest not tried.
   answer = { results: [{ shown: "redis://a/0", res: { unreachable: "Command timed out", partial: { done: [], failed: "pi-jobs", error: "Command timed out", unconfirmed: ["pi-jobs"], refused: [], notTried: ["pi-jobs@m1", "pi-jobs@m2"] } } }] };
   const resumed = (await c.both("fleet-resume", {})).confirm;
-  assert.equal(resumed.json().error, "the kill switch did not reach every queue: redis://a/0 not confirmed for pi-jobs (the resume may or may not have been made); not tried: pi-jobs@m1, pi-jobs@m2; resumed: none. Look at the fleet and try again");
+  assert.equal(resumed.json().error, "not confirmed for pi-jobs (the resume may or may not have been made); not tried: pi-jobs@m1, pi-jobs@m2; resumed: none on redis://a/0. The kill switch did not reach every queue: a resume was sent that may or may not have been made. Look at the fleet and try again");
   mayHave(resumed);
   // Every queue refused before anything was sent: nothing changed, and the bar says so.
   answer = { results: [{ shown: "redis://a/0", res: { unreachable: "down", partial: { done: [], failed: "pi-jobs", error: "down", unconfirmed: [], refused: ["pi-jobs"], notTried: [] } } }] };
   const untouched = (await c.both("fleet-pause", {})).confirm.json();
-  assert.equal(untouched.error, "the kill switch did not reach every queue: redis://a/0 not paused: pi-jobs; paused: none. Look at the fleet and try again");
+  assert.equal(untouched.error, "not paused: pi-jobs; paused: none on redis://a/0. The kill switch did not reach every queue. Look at the fleet and try again");
   assert.ok(untouched.html.includes("The change did not go through") && untouched.html.includes(" Nothing was changed.</p>"), untouched.html);
   // Issue #1014: a queue Valkey answered with an error after the script may have run is said as it reads now, never
   // as not paused, and the bar says part of the fleet may have changed. An entry that is not a queue name and one of
   // the two words is left out, so a client's words never reach the sentence or the audit row.
   answer = { results: [{ shown: "redis://a/0", res: { unreachable: "WRONGTYPE Operation against a key holding the wrong kind of value script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57.", partial: { done: [], failed: "pi-jobs", error: "WRONGTYPE", unconfirmed: [], refused: [], notTried: [], errored: [{ queue: "pi-jobs", reads: "paused" }, { queue: "pi-jobs@m1", reads: "WRONGTYPE script" }] } } }] };
   const answered = (await c.both("fleet-pause", {})).confirm;
-  assert.equal(answered.json().error, "the kill switch did not reach every queue, Valkey answered a pause with an error: redis://a/0 answered with an error for pi-jobs (reads paused now); confirmed paused: none. Look at the fleet and try again", "beside a queue that reads paused, the known ones are said as confirmed");
+  assert.equal(answered.json().error, "answered with an error for pi-jobs (reads paused now); confirmed paused: none on redis://a/0. The kill switch did not reach every queue: Valkey answered a pause with an error. Look at the fleet and try again", "beside a queue that reads paused, the known ones are said as confirmed");
   mayHave(answered);
-  assert.ok(c.audit.rows.at(-1).reason.startsWith("the kill switch did not reach every queue, Valkey answered a pause with an error: redis://a/0 answered with an error for pi-jobs (reads paused now)"), c.audit.rows.at(-1).reason);
+  assert.ok(c.audit.rows.at(-1).reason.startsWith("answered with an error for pi-jobs (reads paused now); confirmed paused: none on redis://a/0"), c.audit.rows.at(-1).reason);
   // One queue: the reader's own sentence, kept partial.
   queueAnswer = { invalid: RM.queueSwitchErrored("pi-jobs@m1", true, "paused"), partial: true };
   const one = (await c.both("queue-pause", { queue: "pi-jobs@m1" })).confirm;
@@ -2514,7 +2514,7 @@ test("fleet-pause and fleet-resume: the kill switch's decision refuses a resume 
   refuseResume = false;
   const partial = await c.both("fleet-resume", {});
   assert.equal(partial.confirm.status, 409);
-  assert.match(partial.confirm.json().error, /did not reach every queue: redis:\/\/h\/0 stopped after pi-jobs, failed at pi-jobs@m/);
+  assert.match(partial.confirm.json().error, /^stopped after pi-jobs, failed at pi-jobs@m on redis:\/\/h\/0\. The kill switch did not reach every queue\./);
   assert.deepEqual(calls, ["pause", "resume"]);
   assert.equal(c.audit.rows.at(-1).outcome, "failed");
 });
@@ -2717,6 +2717,121 @@ test("a fleet whose every read queue is paused beside one Valkey answered with a
   } finally {
     await reader.dispose();
   }
+});
+
+// Issue #1064: "whether it is paused is not known" was said of every queue left out for an error reply, also of one
+// whose paused flag WAS read and whose counts alone were answered with an error (a wait list holding a string, say).
+// Through the real reader and the real status read, over queues whose counts read is answered with an error.
+test("a queue whose paused flag was read and whose counts alone Valkey answers with an error is said as it reads, paused or running, and only a queue whose flag was not read as not known (#1064)", async () => {
+  const { paths } = deployment();
+  const reply = (message) => () => Promise.reject(Object.assign(new Error(message), { name: "ReplyError" }));
+  const make = quietQueue();
+  // hostb and hostd: the flag is read (paused, running) and the counts are answered with an error. hostc: the flag is.
+  const makeQueueFn = (c, opts) => {
+    const q = make(c, opts);
+    if (q.name === "pi-jobs@hostb") return { ...q, async isPaused() { return true; }, getJobCounts: reply("ERR Error running script, on @user_script:12.") };
+    if (q.name === "pi-jobs@hostd") return { ...q, async isPaused() { return false; }, getJobCounts: reply("WRONGTYPE Operation against a key holding the wrong kind of value") };
+    if (q.name === "pi-jobs@hostc") return { ...q, isPaused: reply("WRONGTYPE Operation against a key holding the wrong kind of value") };
+    return { ...q, async isPaused() { return true; } };
+  };
+  const hosts = ["hostb", "hostc", "hostd"];
+  const seams = { makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => keyedRedis(registryKeys(Object.fromEntries(hosts.map((h) => [h, { routes: "true", beatAt: String(T0) }])))) };
+  const reader = RM.createFleetReader({ valkeyUrl: "redis://unused", logsDir: paths.logsDir, triggersPath: paths.triggersPath }, { ...seams, nowFn: () => T0, readOnly: true });
+  try {
+    const s = await reader.snapshot({ switchQueues: true });
+    assert.deepEqual([s.queueErrors, s.queueErrorsPaused], [{ "pi-jobs@hostb": "ERR", "pi-jobs@hostc": "WRONGTYPE", "pi-jobs@hostd": "WRONGTYPE" }, { "pi-jobs@hostb": true, "pi-jobs@hostd": false }]);
+    const LINE = "Not read, so not in these counts: pi-jobs@hostb (Valkey answered ERR for its counts; it is paused), pi-jobs@hostc (Valkey answered WRONGTYPE), pi-jobs@hostd (Valkey answered WRONGTYPE for its counts; it is running); whether the other is paused is not known";
+    assert.equal(queueErrorsLine(queueErrorsOf(s)), LINE);
+    // The page's bar and the status line say the same sentence, off the snapshot and off the status read.
+    const { fleetBar } = await import("../src/console/panels/fleet.mjs");
+    assert.ok(String(fleetBar({ data: { snapshot: s }, session: { role: "operator" } })).includes(LINE), String(fleetBar({ data: { snapshot: s }, session: { role: "operator" } })));
+    const state = await RM.readQueueState({ url: "redis://unused", ...seams });
+    assert.deepEqual([state.queueErrors, state.queueErrorsPaused, state.pausedState], [s.queueErrors, s.queueErrorsPaused, false]);
+    const { renderStatus } = await import("../src/render.mjs");
+    assert.ok(renderStatus(state).includes(`\n  ${LINE}\n`), renderStatus(state));
+    // The one-queue switch refuses by what is missing: the counts of a queue whose flag was read, the queue itself
+    // where it was not.
+    const c = await start({ paths, a: { fleet: { snapshot: (opts) => reader.snapshot(opts), pauseQueue: async () => ({ ok: true }) }, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
+    const counts = await c.act("queue-resume", { queue: "pi-jobs@hostb" });
+    assert.deepEqual([counts.status, counts.json().error], [400, "the counts of pi-jobs@hostb could not be read: Valkey answered that read with an error (ERR). It is paused, and what the switch would change there is not known here; nothing was changed"]);
+    const running = await c.act("queue-pause", { queue: "pi-jobs@hostd" });
+    assert.equal(running.json().error, "the counts of pi-jobs@hostd could not be read: Valkey answered that read with an error (WRONGTYPE). It is running, and what the switch would change there is not known here; nothing was changed");
+    const flag = await c.act("queue-resume", { queue: "pi-jobs@hostc" });
+    assert.equal(flag.json().error, "pi-jobs@hostc could not be read: Valkey answered its read with an error (WRONGTYPE), so whether it is paused is not known here; nothing was changed");
+  } finally {
+    await reader.dispose();
+  }
+  // Each form of the sentence: every flag read (no closing clause), none read (as it was), and one or several not.
+  const of = (map, flags) => queueErrorsLine(queueErrorsOf({ queueErrors: map, queueErrorsPaused: flags }));
+  assert.equal(of({ a: "ERR" }, { a: false }), "Not read, so not in these counts: a (Valkey answered ERR for its counts; it is running)");
+  assert.equal(of({ a: "WRONGTYPE" }, {}), "Not read, so not in these counts: a (Valkey answered WRONGTYPE); whether it is paused is not known");
+  assert.equal(of({ a: "WRONGTYPE", b: "ERR" }, undefined), "Not read, so not in these counts: a (Valkey answered WRONGTYPE), b (Valkey answered ERR); whether they are paused is not known");
+  assert.equal(of({ a: "WRONGTYPE", b: "ERR", c: "ERR" }, { c: true }), "Not read, so not in these counts: a (Valkey answered WRONGTYPE), b (Valkey answered ERR), c (Valkey answered ERR for its counts; it is paused); whether the others are paused is not known");
+  // A flag that is no boolean, or of a queue that is not in `queueErrors`, is no flag.
+  assert.deepEqual(queueErrorsOf({ queueErrors: { a: "ERR" }, queueErrorsPaused: { a: "yes", z: true } }), [{ queue: "a", error: "ERR" }]);
+});
+
+// Issue #1064: a fleet resume stopped at the first queue Valkey answered with an error, on every press, and every
+// queue after it in the walk stayed paused: with the shared queue at fault (the first of every walk) it resumed
+// nothing. The page then said "Look at the fleet and try again", which repeats the same stop, and its audit row was
+// cut before it said which queues had been resumed. Through the real reader's walk, with the queue at fault first, in
+// the middle and last, and with the longest name a host can have.
+test("a fleet resume reaches every queue Valkey answers for, wherever the one it answers with an error stands: the confirm names it and the queues resumed, says what to put right and never to try again, and its audit row holds both lists (#1064)", async () => {
+  const wrongtype = (tail = "") => Object.assign(new Error(`WRONGTYPE Operation against a key holding the wrong kind of value${tail}`), { name: "ReplyError" });
+  const url = "redis://127.0.0.1:6483/8";
+  const long = `hostb${"x".repeat(59)}`;
+  assert.equal(long.length, 64, "the longest name a worker can have");
+  const over = async (hosts, kinds) => {
+    const { paths } = deployment(url);
+    const sent = [];
+    const make = quietQueue();
+    const fleet = RM.createFleetReader(paths, {
+      makeQueueFn: (conn, opts) => {
+        const q = make(conn, opts);
+        const kind = kinds[q.name] ?? "ok";
+        return {
+          ...q,
+          isPaused: async () => { if (kind === "errored") throw wrongtype(); return true; },
+          resume: () => { sent.push(q.name); return kind === "errored" ? Promise.reject(wrongtype(" script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57.")) : kind === "silent" ? new Promise(() => {}) : Promise.resolve(); },
+        };
+      },
+      parseConnectionFn: () => ({}),
+      redisFn: () => keyedRedis(registryKeys(Object.fromEntries(hosts.map((h) => [h, { routes: "true", beatAt: String(Date.now()) }])))),
+      readOnly: true,
+      switchStepTimeoutMs: 80,
+      closeTimeoutMs: 30,
+    });
+    try {
+      const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: [paths.valkeyUrl], disagreement: null, context: null }) } });
+      const res = (await c.both("fleet-resume", {})).confirm;
+      assert.equal(res.status, 409, res.text);
+      const row = c.audit.rows.at(-1);
+      assert.deepEqual([row.outcome, row.reason], ["failed", [...res.json().error].slice(0, 200).join("")]);
+      return { said: res.json().error, sent, reason: row.reason };
+    } finally {
+      await fleet.dispose();
+    }
+  };
+  for (const hosts of [["hosta", "hostb", "hostc"], ["hosta", long, "hostc"]]) {
+    const names = ["pi-jobs", ...hosts.map((h) => `pi-jobs@${h}`)];
+    for (const [where, bad] of [["first", names[0]], ["middle", names[2]], ["last", names[3]]]) {
+      const { said, sent, reason } = await over(hosts, { [bad]: "errored" });
+      const resumed = names.filter((n) => n !== bad);
+      assert.equal(said, `answered with an error for ${bad} (its state could not be read, so it may have partly applied); confirmed resumed: ${resumed.join(", ")} on ${url}. The kill switch did not reach every queue: Valkey answered a resume with an error. Valkey answers the resume of ${bad} with WRONGTYPE: a key of that queue holds another kind of value. Trying again does not change that: remove or repair that key, then resume that queue`, where);
+      assert.deepEqual(sent, names, `${where}: every queue was sent its resume, the ones after ${bad} too`);
+      assert.ok(!said.includes("not tried") && !said.includes("try again"), said);
+      // The row holds the queue at fault with what is known of it, and the queues resumed from the first of them on;
+      // with ordinary names, every one of them.
+      assert.ok(reason.startsWith(`answered with an error for ${bad} (its state could not be read, so it may have partly applied); confirmed resumed: ${resumed[0]}`), `${where}: ${reason}`);
+      if (!hosts.includes(long)) assert.ok(reason.includes(`confirmed resumed: ${resumed.join(", ")} on `), `${where}: ${reason}`);
+    }
+  }
+  // What still stops a resume is a queue that got no answer: the ones after it are not tried, and the row holds the
+  // three lists, the longest host name among them.
+  const lost = await over(["hosta", long, "hostc"], { [`pi-jobs@${long}`]: "silent" });
+  assert.equal(lost.said, `not confirmed for pi-jobs@${long} (the resume may or may not have been made); not tried: pi-jobs@hostc; resumed: pi-jobs, pi-jobs@hosta on ${url}. The kill switch did not reach every queue: a resume was sent that may or may not have been made. Look at the fleet and try again`);
+  assert.deepEqual(lost.sent, ["pi-jobs", "pi-jobs@hosta", `pi-jobs@${long}`]);
+  assert.ok(lost.reason.includes(`not confirmed for pi-jobs@${long} (the resume may or may not have been made); not tried: pi-jobs@hostc; resumed: pi-jobs, pi-jobs@hosta`), lost.reason);
 });
 
 // Issue #737: the switch's queues as one preview read them can be short: a keyspace scan that did not finish
@@ -3490,7 +3605,7 @@ test("the kill switch on a Valkey that stops answering: fleet-pause, fleet-resum
     const paused = await clocked(c.confirm("fleet-pause", ticket));
     assert.equal(paused.res.status, 409, paused.res.text);
     assert.ok(paused.ms < FROZEN_STEP_MS + 2_000, `${paused.ms} ms: at the bound, not at wake`);
-    assert.equal(paused.res.json().error, `the kill switch did not reach every queue, a pause was sent that may or may not have been made, and the list of queues may be short: ${paths.valkeyUrl} not confirmed for pi-jobs, pi-jobs@beta (the pause may or may not have been made); paused: none. Other queues may exist and were not paused: pause the fleet again once Valkey answers`);
+    assert.equal(paused.res.json().error, `the list of queues may be short: not confirmed for pi-jobs, pi-jobs@beta (the pause may or may not have been made); paused: none on ${paths.valkeyUrl}. The kill switch did not reach every queue: a pause was sent that may or may not have been made. Other queues may exist and were not paused: pause the fleet again once Valkey answers`);
     assert.ok(paused.res.json().html.includes("The change did not finish") && !/nothing was changed/i.test(paused.res.json().html), paused.res.json().html);
     assert.deepEqual([await shared.isPaused(), await beta.isPaused()], [false, false], "nothing has reached Valkey yet");
     proxy.thaw();
@@ -3503,7 +3618,7 @@ test("the kill switch on a Valkey that stops answering: fleet-pause, fleet-resum
     const resumed = await clocked(c.confirm("fleet-resume", ticket));
     assert.equal(resumed.res.status, 409, resumed.res.text);
     assert.ok(resumed.ms < 2 * FROZEN_STEP_MS + 2_000, `${resumed.ms} ms`);
-    assert.equal(resumed.res.json().error, `the kill switch did not reach every queue, a resume was sent that may or may not have been made, and the list of queues may be short: ${paths.valkeyUrl} not confirmed for pi-jobs (the resume may or may not have been made); not tried: pi-jobs@beta; resumed: none. Other queues may exist and were not resumed: resume the fleet again once Valkey answers`);
+    assert.equal(resumed.res.json().error, `the list of queues may be short: not confirmed for pi-jobs (the resume may or may not have been made); not tried: pi-jobs@beta; resumed: none on ${paths.valkeyUrl}. The kill switch did not reach every queue: a resume was sent that may or may not have been made. Other queues may exist and were not resumed: resume the fleet again once Valkey answers`);
     assert.ok(!/nothing was changed/i.test(resumed.res.json().html));
     proxy.thaw();
     await until(async () => !(await shared.isPaused()));
@@ -3592,7 +3707,7 @@ test("a console started on a Valkey that does not answer: its pause says first t
     const paused = await clocked(c.confirm("fleet-pause", preview.json().ticket));
     assert.equal(paused.res.status, 409, paused.res.text);
     assert.ok(paused.ms < FROZEN_STEP_MS + 2_000, `${paused.ms} ms: at the bound, not at wake`);
-    assert.equal(paused.res.json().error, `the kill switch did not reach every queue, a pause was sent that may or may not have been made, and the list of queues may be short: ${paths.valkeyUrl} not confirmed for pi-jobs, pi-jobs@hosta (the pause may or may not have been made); paused: none. Other queues may exist and were not paused: pause the fleet again once Valkey answers`);
+    assert.equal(paused.res.json().error, `the list of queues may be short: not confirmed for pi-jobs, pi-jobs@hosta (the pause may or may not have been made); paused: none on ${paths.valkeyUrl}. The kill switch did not reach every queue: a pause was sent that may or may not have been made. Other queues may exist and were not paused: pause the fleet again once Valkey answers`);
     assert.ok(!paused.res.json().error.includes("hostb"), "a queue nothing could name is not named");
     proxy.thaw();
     // Once Valkey answers, the next press: the scan names all three, and the answer is the flat success. Whether the first
@@ -3632,7 +3747,7 @@ test("a part-way fleet pause over a set that may be short keeps both leading cla
       const res = (await c.both("fleet-pause", {})).confirm;
       assert.equal(res.status, 409, res.text);
       const said = res.json().error;
-      assert.equal(said, `the kill switch did not reach every queue, a pause was sent that may or may not have been made, and the list of queues may be short: ${url} not confirmed for pi-jobs, pi-jobs@hosta, pi-jobs@hostb (the pause may or may not have been made); paused: none. Other queues may exist and were not paused: pause the fleet again once Valkey answers`);
+      assert.equal(said, `the list of queues may be short: not confirmed for pi-jobs, pi-jobs@hosta, pi-jobs@hostb (the pause may or may not have been made); paused: none on ${url}. The kill switch did not reach every queue: a pause was sent that may or may not have been made. Other queues may exist and were not paused: pause the fleet again once Valkey answers`);
       assert.ok([...said].length > 200, "the sentence is longer than the row keeps");
       const row = c.audit.rows.at(-1);
       assert.deepEqual([row.outcome, row.reason], ["failed", [...said].slice(0, 200).join("")]);
@@ -3673,13 +3788,15 @@ test("a part-way fleet pause over a set that may be short with a queue Valkey an
       const res = (await c.both("fleet-pause", {})).confirm;
       assert.equal(res.status, 409, res.text);
       const said = res.json().error;
-      assert.equal(said, `the kill switch did not reach every queue, a pause was sent that may or may not have been made, Valkey answered a pause with an error, and the list of queues may be short: ${url} not confirmed for pi-jobs (the pause may or may not have been made); answered with an error for pi-jobs@hosta (reads paused now); confirmed paused: pi-jobs@hostb. Other queues may exist and were not paused: pause the fleet again once Valkey answers`);
+      assert.equal(said, `the list of queues may be short: not confirmed for pi-jobs (the pause may or may not have been made); answered with an error for pi-jobs@hosta (reads paused now); confirmed paused: pi-jobs@hostb on ${url}. The kill switch did not reach every queue: a pause was sent that may or may not have been made, and Valkey answered a pause with an error. Other queues may exist and were not paused: pause the fleet again once Valkey answers. Valkey answers the pause of pi-jobs@hosta with WRONGTYPE: a key of that queue holds another kind of value. Trying again does not change that: remove or repair that key, then pause that queue`);
       // The bar shows the whole sentence, and offers Look again over a switch that may have changed part of the fleet.
       assert.ok(res.json().html.includes("Valkey answered a pause with an error") && res.json().html.includes("may be short"), res.json().html);
       assert.ok([...said].length > 200, "the sentence is longer than the row keeps");
       const row = c.audit.rows.at(-1);
       assert.deepEqual([row.outcome, row.reason], ["failed", [...said].slice(0, 200).join("")]);
-      assert.ok(row.reason.includes("may or may not") && row.reason.includes("answered a pause with an error") && row.reason.includes("may be short"), row.reason);
+      // Issue #1064: the row keeps the lists themselves, each queue with what is known of it, after the one clause no
+      // list can say (the list may be short); the Valkey's address comes after them, however long it is.
+      assert.ok(row.reason.startsWith("the list of queues may be short: not confirmed for pi-jobs (the pause may or may not have been made); answered with an error for pi-jobs@hosta (reads paused now); confirmed paused: pi-jobs@hostb on "), row.reason);
     } finally {
       await fleet.dispose();
     }
@@ -3712,11 +3829,16 @@ test("a part-way fleet pause with a queue Valkey answered with an error, over a 
       const res = (await c.both("fleet-pause", {})).confirm;
       assert.equal(res.status, 409, res.text);
       const said = res.json().error;
-      assert.equal(said, `the kill switch did not reach every queue, Valkey answered a pause with an error: ${url} answered with an error for pi-jobs@hostb (reads paused now); confirmed paused: pi-jobs. Look at the fleet and try again`);
+      assert.equal(said, `answered with an error for pi-jobs@hostb (reads paused now); confirmed paused: pi-jobs on ${url}. The kill switch did not reach every queue: Valkey answered a pause with an error. Valkey answers the pause of pi-jobs@hostb with WRONGTYPE: a key of that queue holds another kind of value. Trying again does not change that: remove or repair that key, then pause that queue`);
+      // Issue #1064: what to do is the reply's code's class's. "Look at the fleet and try again" stood here, over a key
+      // of another type, which answers the same on every press.
+      assert.ok(!said.includes("try again"), said);
       const row = c.audit.rows.at(-1);
       assert.deepEqual([row.outcome, row.reason], ["failed", [...said].slice(0, 200).join("")]);
-      assert.ok(row.reason.includes("answered a pause with an error"), row.reason);
-      if (url.length > 100) assert.ok([...said].length > 200 && !row.reason.includes("answered with an error for"), "the long address takes the queue's own words out of the row, and the lead keeps the fact");
+      // Issue #1064: the row leads with the queues, whatever the Valkey's address: which was answered with an error and
+      // what it reads, and which are confirmed paused. A long address took both out of the row.
+      assert.ok(row.reason.startsWith("answered with an error for pi-jobs@hostb (reads paused now); confirmed paused: pi-jobs on "), row.reason);
+      if (url.length > 100) assert.ok([...said].length > 200, "the sentence is longer than the row keeps");
     } finally {
       await fleet.dispose();
     }
@@ -3749,12 +3871,12 @@ test("a part-way fleet pause whose read back Valkey answered with an error too s
       const res = (await c.both("fleet-pause", {})).confirm;
       assert.equal(res.status, 409, res.text);
       const said = res.json().error;
-      assert.equal(said, `the kill switch did not reach every queue, Valkey answered a pause with an error: ${url} answered with an error for pi-jobs@hostb (its state could not be read, so it may have partly applied); confirmed paused: pi-jobs. Look at the fleet and try again`);
+      assert.equal(said, `answered with an error for pi-jobs@hostb (its state could not be read, so it may have partly applied); confirmed paused: pi-jobs on ${url}. The kill switch did not reach every queue: Valkey answered a pause with an error. Valkey answers the pause of pi-jobs@hostb with WRONGTYPE: a key of that queue holds another kind of value. Trying again does not change that: remove or repair that key, then pause that queue`);
       assert.ok(!said.includes("not confirmed"), "a read back Valkey answered is not a lost answer");
       assert.ok(res.json().html.includes("may have been done"), res.json().html);
       const row = c.audit.rows.at(-1);
       assert.deepEqual([row.outcome, row.reason], ["failed", [...said].slice(0, 200).join("")]);
-      assert.ok(row.reason.startsWith("the kill switch did not reach every queue, Valkey answered a pause with an error: "), row.reason);
+      assert.ok(row.reason.startsWith("answered with an error for pi-jobs@hostb (its state could not be read, so it may have partly applied); confirmed paused: pi-jobs on "), row.reason);
     } finally {
       await fleet.dispose();
     }
@@ -5869,7 +5991,7 @@ test("a fleet pause or resume over a list that may be short says why in its bann
     ["one host's row holds another kind of value", { rows: { "host:h:hostw": answeredWith("WRONGTYPE") } }, "the list of queues may be short: Valkey answers host:h:hostw with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:h:hostw with WRONGTYPE), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short-key", "key"],
     ["this Valkey user may not look for queues", { scan: answeredWith("NOPERM") }, "the list of queues may be short: Valkey answers the look for queues with NOPERM. Waiting does not change that: fix this Valkey user's ACL, then pause again; other queues may exist and were not paused", null, "queues-may-be-short-permission", "permission"],
     ["the look for queues got no answer", { scan: noAnswer }, "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers", null, "queues-may-be-short", undefined],
-    ["a row answered with an error and the look for queues unanswered", { rows: { "host:h:hostw": answeredWith("NOAUTH") }, scan: noAnswer }, "the list of queues may be short: Valkey answers host:h:hostw with NOAUTH. Waiting does not change that: fix this Valkey user's ACL. Another read got no answer: pause the fleet again once Valkey answers and that is put right; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:h:hostw with NOAUTH), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short-permission", "permission"],
+    ["a row answered with an error and the look for queues unanswered", { rows: { "host:h:hostw": answeredWith("NOAUTH") }, scan: noAnswer }, "the list of queues may be short: Valkey answers host:h:hostw with NOAUTH. Waiting does not change that: fix the Valkey user and password. Another read got no answer: pause the fleet again once Valkey answers and that is put right; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:h:hostw with NOAUTH), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short-permission", "permission"],
   ];
   try {
     for (const [what, reads, note, registryLine, word, lasting] of CASES) {
@@ -5887,7 +6009,7 @@ test("a fleet pause or resume over a list that may be short says why in its bann
       assert.equal(resumed.res.confirm.json().change.summary, `Resumed the fleet, but ${resumeNote}`, what);
       assert.deepEqual(resumed.rows, [["write", "ok", null], ["write", "ok", kept(resumeNote)]], what);
       // What to put right is inside what the row keeps, whatever follows it.
-      if (lasting !== undefined) assert.match(kept(resumeNote), /Waiting does not change that: (?:remove or repair that key|fix this Valkey user's ACL)[,.]/, what);
+      if (lasting !== undefined) assert.match(kept(resumeNote), /Waiting does not change that: (?:remove or repair that key|fix this Valkey user's ACL|fix the Valkey user and password)[,.]/, what);
       assert.equal(resumed.res.preview.summary.find((line) => line.startsWith("The host registry")) ?? null, registryLine, what);
       // An agent's session: a closed word in its row, by the class where the cause stays, and the class in its answer.
       const byAgent = await rowsOf(async () => c.confirm("fleet-pause", (await c.act("fleet-pause", {}, agent)).json().ticket, agent));
@@ -5923,13 +6045,13 @@ test("a part-way fleet pause over a list that is short for a cause that stays sa
   };
   try {
     const lasting = await said({ index: answeredWith("WRONGTYPE") });
-    assert.ok(lasting.startsWith("the kill switch did not reach every queue, a pause was sent that may or may not have been made, and the list of queues may be short for a cause waiting does not end: "), lasting);
+    assert.ok(lasting.startsWith("the list of queues may be short for a cause waiting does not end: not confirmed for "), lasting);
     assert.ok(lasting.endsWith(". Other queues may exist and were not paused: Valkey answers host:live with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again"), lasting);
     assert.doesNotMatch(lasting, /once Valkey answers|refus/i);
     assert.equal(c.audit.rows.at(-1).reason, [...lasting].slice(0, 200).join(""), "the row keeps the start of the sentence");
     assert.ok(c.audit.rows.at(-1).reason.includes("for a cause waiting does not end"));
     const passing = await said({ index: answeredWith("LOADING") });
-    assert.ok(passing.startsWith("the kill switch did not reach every queue, a pause was sent that may or may not have been made, and the list of queues may be short: "), passing);
+    assert.ok(passing.startsWith("the list of queues may be short: not confirmed for "), passing);
     assert.ok(passing.endsWith(". Other queues may exist and were not paused: Valkey answers host:live with LOADING. A later read may succeed: pause the fleet again"), passing);
     const waits = await said({ index: noAnswer });
     assert.ok(waits.endsWith(". Other queues may exist and were not paused: pause the fleet again once Valkey answers"), waits);

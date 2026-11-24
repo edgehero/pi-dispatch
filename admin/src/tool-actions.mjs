@@ -7,14 +7,14 @@ import * as rm from "./read-model.mjs";
 import * as plans from "./write-plans.mjs";
 import { agentReadProjection } from "./agent-read.mjs";
 import { actionNamed, agentShortWord } from "./console/actions.mjs";
-import { switchShortCauseSentence } from "./words.mjs";
+import { switchAnsweredSentence, switchShortCauseSentence } from "./words.mjs";
 import { authorizeTransition } from "./action-policy.mjs";
 import { agentActor, panelAudit, auditedWrite, AUDIT_REFUSAL } from "./audited-write.mjs";
 import { readJobsData } from "./console/job-data.mjs";
 import { allocRedis, allocNow, envelopeProblem } from "./insights-assembly.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
 import { builtinModel } from "@edgehero/pi-dispatch/model-catalog";
-import { hostKey } from "@edgehero/pi-dispatch/host-registry";
+import { HOST_SET, hostKey } from "@edgehero/pi-dispatch/host-registry";
 
 export const TOOL_ACTIONS = Object.freeze({
   dispatch_set: "setting-set", dispatch_trigger_add: "trigger-add", dispatch_trigger_edit: "trigger-edit", dispatch_trigger_delete: "trigger-delete", dispatch_trigger_fire: "trigger-fire",
@@ -33,25 +33,50 @@ export const TOOL_ACTIONS = Object.freeze({
 const NOT_RUNNING_STATES = Object.freeze(["waiting", "delayed", "prioritized", "waiting-children", "completed", "failed"]);
 
 /**
- * `dispatch_cancel`'s action for a job the running list could not vouch for (issue #1036), by the job's own state in
- * the queue that holds it (`jobStatus`, the by-id lookup over the registry's queues and the ones that exist): running
+ * `dispatch_cancel`'s action for a job that is in neither list the snapshot hands it, by the job's own state in the
+ * queue that holds it (`jobStatus`, the by-id lookup over the registry's queues and the ones that exist): running
  * is `cancel-active`, any state that is not running is `cancel-queued`, whose planner judges the job again and refuses
- * one that ended. A job no queue that was read holds, or one whose state could not be read, may be running on a queue
- * that was not asked, so that is refused, in words that say why: over a host
- * row Valkey answered with an error, the host, the key and the code, and what the code's class says to do first
- * (`erroredReadWords`), never "try again" for a cause that lasts; over anything else, the sentence as it was.
+ * one that ended. ALWAYS looked up, not only while the running list is not whole (issue #1036): the snapshot lists a
+ * bounded number of running jobs per queue (one, for this tool's reader), so the second job running on a queue was in
+ * no list, was planned as a queued job, and was refused by that planner for running.
+ *
+ * A job no queue that was read holds, or one whose state could not be read: while the running list is whole
+ * (`activeUnreachable` not true) it is not running anywhere, and the queued job's planner says what it is, as before.
+ * While the list is NOT whole it may be running on a queue that was not asked, so that is refused, in words that say
+ * why. Over the registry's index answered with an error (`fleetError`), `host:live` and the code; over a host row
+ * answered with one, the host, its key and the code; and for either what the code's class says to do first
+ * (`erroredReadWords`), never "try again" for a cause that lasts. The index was said as "could not be read, try
+ * again" with no key and no code, also while `host:live` held a string. Over anything else, the sentence as it was.
  */
 async function cancelActionById(fleet, jobId, snapshot) {
   const status = typeof fleet?.jobStatus === "function" ? await fleet.jobStatus(jobId, { tellAbsent: false }).catch(() => null) : null;
   if (status?.found === true && status.state === "active") return "cancel-active";
   if (status?.found === true && NOT_RUNNING_STATES.includes(status.state)) return "cancel-queued";
+  if (snapshot?.activeUnreachable !== true) return "cancel-queued";
+  const close = (w) => (w.first !== null ? `${w.first}; nothing was changed` : `Nothing was changed${w.again ? "; try again" : ""}`);
+  if (rm.replyCodeOf(snapshot?.queue?.fleetError) !== null) {
+    const index = rm.erroredReadWords(HOST_SET, snapshot.queue.fleetError);
+    throw publicToolRefusal(`whether this job is running is not known: no queue that was read says, and the hosts' queues were not asked, since ${index.said}. ${close(index)}`);
+  }
   const unread = (Array.isArray(snapshot?.queue?.unreadHosts) ? snapshot.queue.unreadHosts : []).filter((u) => typeof u?.name === "string" && rm.replyCodeOf(u?.error) !== null);
   // The row that most needs a hand first: a key of another type, then a permission, then any other code.
   const words = unread.map((u) => ({ name: u.name, ...rm.erroredReadWords(hostKey(u.name), u.error) }));
   const named = ["key", "permission", "other", "passing"].flatMap((cls) => words.filter((w) => w.class === cls))[0];
   if (!named) throw publicToolRefusal("the running jobs could not be read, so whether this job is running is not known; nothing was changed, try again");
-  throw publicToolRefusal(`whether this job is running is not known: no queue that was read says, and the queue of host ${named.name} was not asked, since ${named.said}. ${named.first !== null ? `${named.first}; nothing was changed` : `Nothing was changed${named.again ? "; try again" : ""}`}`);
+  throw publicToolRefusal(`whether this job is running is not known: no queue that was read says, and the queue of host ${named.name} was not asked, since ${named.said}. ${close(named)}`);
 }
+
+/**
+ * THE FLEET READER'S METHODS A TOOL'S ACTION IS HANDED (issue #1036): every one that `toolActionRequest` and the
+ * console's actions ask their fleet for, by name, and no other. The adapter below hands on exactly these, so a method
+ * a planner asks for and this list lacks is simply not there, and the planner takes the branch it has for a reader
+ * that cannot answer: `dispatch_cancel`'s lookup by id found no `jobStatus`, so over a host row Valkey answered with
+ * an error every cancel of a job that was not seen running was refused, the fix for that never having run in the
+ * registered tool; and a bulk retry found no `supersededOf`, so it retried, and paid for, the failed jobs whose work
+ * a later run had already done, which the console leaves out. A test holds this list equal to what the two files ask
+ * for (`ctx.a.fleet.<method>` there, `fleet.<method>` here).
+ */
+export const TOOL_FLEET_METHODS = Object.freeze(["snapshot", "pause", "resume", "cancelActive", "pauseQueue", "jobStatus", "supersededOf"]);
 
 /** The tool's vocabulary is translated once; all validation and writes belong to the action. */
 export async function toolActionRequest(name, params = {}, { fleet } = {}) {
@@ -78,9 +103,8 @@ export async function toolActionRequest(name, params = {}, { fleet } = {}) {
       // cancel does (issue #1036): one found in a queue that WAS read is running or waiting there whatever another
       // host's row says. Until this, one host row Valkey answers with an error refused every such cancel for as long
       // as the row stayed: this tool's reader is new on every call, so that host never has a last row and its queue
-      // is never asked.
-      else if (snapshot.activeUnreachable === true) action = await cancelActionById(fleet, params.jobId, snapshot);
-      else action = "cancel-queued";
+      // is never asked. Looked up over a whole list too, which names a bounded number of running jobs per queue.
+      else action = await cancelActionById(fleet, params.jobId, snapshot);
     }
   }
   delete body.all; delete body.allHeld;
@@ -127,17 +151,32 @@ export function toolWriteResult(result, { action, out } = {}) {
  * that can follow a switch the script already made (`errored`, issue #1014), and that the list of queues may be short
  * when it may. "Once Valkey answers" only where a switch was sent and not answered (`sent`): a queue a Valkey that
  * answers refused, or answered with an error, is a matter of looking at the fleet. Never the console's own sentence,
- * which names queues and a Valkey's address.
+ * which names a Valkey's address; the queues are named since issue #1064 (`lists`).
  *
  * `cause` (issue #1035, `switchShortCause`): where the list is short because Valkey answered a read with an error, a
  * sentence says which key and with what code, and what that code's class supports: what to put right first for a key
  * of another type or a permission, which waiting does not change; that a later read may succeed for a passing state;
  * nothing more for any other code. A cause that only waits adds nothing: the closing words already say what waits.
+ *
+ * `answeredCode` (issue #1064): the code of the reply where Valkey answered a queue's switch with a refusal or an
+ * error (the first by class, `switchAnsweredCodes`). A sentence says the code and what its class supports
+ * (`switchAnsweredSentence`), and where that class lasts the closing words no longer say to try the switch again,
+ * which is the same answer again until the queue's key or the Valkey user is put right.
+ *
+ * `lists` (issue #1064): WHICH QUEUES, as the page and the CLI say it ("answered with an error for ...; not tried:
+ * ...; confirmed resumed: ..."), one entry per Valkey (the action's `queueLists`), in a sentence of its own after the
+ * first. A model was told only that some queues may be switched and others not, and could not say which to a person
+ * who asked. Queue names and the console's closed words; an entry with any other character in it is left out, and a
+ * Valkey's address is never part of one.
  */
-export function switchPartialRefusal(paused, short, sent, errored = false, cause = null) {
+export function switchPartialRefusal(paused, short, sent, errored = false, cause = null, answeredCode = null, lists = []) {
   const verb = paused ? "paused" : "resumed";
   const noun = paused ? "pause" : "resume";
-  return `The fleet ${noun} did not reach every queue, so some queues may be ${verb} and others not${errored ? `, and Valkey answered a ${noun} with an error, which can come after the queue was ${verb}` : ""}${short ? `, and the list of queues may be short, so other queues may exist and were not ${verb}` : ""}.${short ? switchShortCauseSentence(paused, cause) : ""} ${sent ? `An operator can look at the fleet in the console and ${noun} it again once Valkey answers.` : `An operator can look at the fleet in the console before trying the ${noun} again.`}`;
+  const answered = rm.replyCodeOf(answeredCode) !== null ? rm.erroredReadWords("", answeredCode) : null;
+  const closing = sent ? `An operator can look at the fleet in the console and ${noun} it again once Valkey answers.` : answered?.lasting === true ? `An operator can look at the fleet in the console; the ${noun} is worth trying again only once that is put right.` : `An operator can look at the fleet in the console before trying the ${noun} again.`;
+  const named = (Array.isArray(lists) ? lists : []).filter((entry) => typeof entry === "string" && /^[A-Za-z0-9 ._:@,;()-]{1,4000}$/.test(entry));
+  const byQueue = named.length > 0 ? ` By queue: ${named.join("; and on another Valkey: ")}.` : "";
+  return `The fleet ${noun} did not reach every queue, so some queues may be ${verb} and others not${errored ? `, and Valkey answered a ${noun} with an error, which can come after the queue was ${verb}` : ""}${short ? `, and the list of queues may be short, so other queues may exist and were not ${verb}` : ""}.${byQueue}${short ? switchShortCauseSentence(paused, cause) : ""}${answered !== null ? switchAnsweredSentence(paused, answeredCode) : ""} ${closing}`;
 }
 
 /** The grant is captured at extension registration, never reconstructed from deployment configuration. */
@@ -160,7 +199,7 @@ export async function executeToolAction(name, params, rawCtx, { paths, env, gran
   let ownedFleet;
   // Explicit enumerable methods survive the action's origin wrapper. A Proxy with only get would lose
   // pauseQueue/resumeQueue when that wrapper copies its fleet adapter, despite reads working normally.
-  const fleet = injectedFleet ?? Object.fromEntries(["snapshot", "pause", "resume", "cancelActive", "pauseQueue"].map((method) => [method, (...args) => {
+  const fleet = injectedFleet ?? Object.fromEntries(TOOL_FLEET_METHODS.map((method) => [method, (...args) => {
     // Issue #964: the kill switch's plan (the deployment's Valkey, and both on a disagreement, as the preview names them) and
     // this host's own queue from the deployment's `.env` (`deploymentOwnQueues`, which index.ts hands in), so a pause
     // reaches that queue on the Valkey its worker drains and on no other.
@@ -244,7 +283,7 @@ export async function executeToolAction(name, params, rawCtx, { paths, env, gran
     const result = action.bulk ? await action.apply(out, ctx) : await auditedWrite({ audit, actor, kind: action.kind, target: fresh.target, beforeDigest: fresh.beforeDigest, afterDigest: fresh.afterDigest, reserve: fresh.reserve?.dollarsMicros ?? null, failure, note }, () => action.apply(out, ctx));
     if (bulkWarning) result.warning = "tracking-incomplete";
     if (result?.invalid === AUDIT_REFUSAL) throw publicToolRefusal(AUDIT_REFUSAL);
-    if (result?.partial === true && (action.name === "fleet-pause" || action.name === "fleet-resume")) throw publicToolRefusal(switchPartialRefusal(action.name === "fleet-pause", result.queuesMayBeShort === true, result.sentUnconfirmed === true, result.answeredWithError === true, result.shortCause ?? null));
+    if (result?.partial === true && (action.name === "fleet-pause" || action.name === "fleet-resume")) throw publicToolRefusal(switchPartialRefusal(action.name === "fleet-pause", result.queuesMayBeShort === true, result.sentUnconfirmed === true, result.answeredWithError === true, result.shortCause ?? null, result.answeredCode ?? null, result.queueLists ?? []));
     if (!result?.ok && !(action.name === "priorities-set" && result?.outcome === "refused")) throw new Error(result?.invalid ?? result?.refused ?? "the action could not be applied");
     return toolWriteResult(result, { action: action.name, out: fresh });
   } finally {

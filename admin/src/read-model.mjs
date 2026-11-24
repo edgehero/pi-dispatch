@@ -78,7 +78,7 @@ import { JOB_FIELD, META_FIELD, QUEUE_KEY, SCHEDULER_ID_MAX, SCHEDULER_ID_RE, SC
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
-import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, passwordDeclinedOf, refusedDatabaseOf, replyErrorCode, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_COMMAND_TIMEOUT_MS, VALKEY_CONTEXT_KEYS, replyErrorClass, REPLY_CODES_BY_CLASS } from "@edgehero/pi-dispatch/connection";
+import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, passwordDeclinedOf, refusedDatabaseOf, replyErrorCode, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_COMMAND_TIMEOUT_MS, VALKEY_CONTEXT_KEYS, replyErrorClass, REPLY_CODES_BY_CLASS, REPLY_CODES_OF_CREDENTIALS } from "@edgehero/pi-dispatch/connection";
 import { pointerState } from "./deployment-pointer.mjs";
 import { HOST_SET, UNREAD_HOSTS_MAX, hostErrorsShown, hostKey, readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { readDoctorResults } from "@edgehero/pi-dispatch/doctor-results";
@@ -385,6 +385,10 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
       const code = replyErrorCode(pausedRead[i].error) ?? replyErrorCode(countsRead[i].error);
       return code === null ? [] : [[name, code]];
     }));
+    // `queueErrorsPaused` (issue #1064, present only when not empty): of the queues in `queueErrors`, those whose
+    // paused flag WAS read, with the flag. Only their counts were answered with an error, and a line that names
+    // them says paused or running, where it said of every such queue that this is not known.
+    const queueErrorsPaused = Object.fromEntries(names.flatMap((name, i) => (Object.hasOwn(queueErrors, name) && pausedRead[i].error === undefined && typeof pausedRead[i].value === "boolean" ? [[name, pausedRead[i].value]] : [])));
     const readAt = names.flatMap((_, i) => (failedAt(i) ? [] : [i]));
     const pausedStates = readAt.map((i) => pausedRead[i].value);
     const pausedState = unavailableQueues.length === 0 && pausedStates.every(Boolean);
@@ -418,7 +422,7 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
       // `queues` (issue #1064): how many queues were asked, the snapshot's `queue.queues`, so a line that leaves some
       // out can tell "some were not read" from "none was".
       pausedState, ...(pausedPartial && { pausedPartial }), counts, queues: names.length, workers: resolved.count, workerNames: resolved.names, cronNext,
-      ...(unavailableQueues.length > 0 ? { partial: true, unavailableQueues, ...(Object.keys(queueErrors).length > 0 ? { queueErrors } : {}) } : {}),
+      ...(unavailableQueues.length > 0 ? { partial: true, unavailableQueues, ...(Object.keys(queueErrors).length > 0 ? { queueErrors } : {}), ...(Object.keys(queueErrorsPaused).length > 0 ? { queueErrorsPaused } : {}) } : {}),
       // `hostErrors` names at most `UNREAD_HOSTS_MAX` hosts, `hostErrorsMore` counting the rest (`hostErrorsShown`).
       ...(blind || incomplete ? { queuesMayBeShort: true } : {}), ...(blindPartial === true ? { registryReadInPart: true } : {}), ...hostErrorsShown(hostErrors),
     };
@@ -464,6 +468,8 @@ const SWITCH_LATE = Symbol("late");
  *   "unconfirmed"  it was sent and not answered (the client's `valkeyMayStillRun`), or the queue was not connected
  *                  within `ms` (`late`: it may still be sent when the connection comes up). The queue may or may not
  *                  have changed, now or when Valkey wakes.
+ * `code` (issue #1064) is the code of Valkey's error reply where the step ended on one ("refused" before the script,
+ * "errored" after it), so an answer can say what that code's class says to do; absent where nothing was answered.
  * Never throws.
  */
 async function switchStep(q, paused, ms) {
@@ -483,7 +489,9 @@ async function switchStep(q, paused, ms) {
     if (got === SWITCH_LATE) return { state: "unconfirmed", late: true, error: `no answer within ${ms / 1000} seconds` };
     const error = got.err?.message ?? String(got.err);
     if (got.err?.valkeyMayStillRun === true) return { state: "unconfirmed", error };
-    if (got.err?.name !== "ReplyError" || refusedBeforeScript(got.err)) return { state: "refused", error };
+    const code = replyErrorCode(got.err);
+    const answered = code === null ? {} : { code };
+    if (got.err?.name !== "ReplyError" || refusedBeforeScript(got.err)) return { state: "refused", error, ...answered };
     // The CLI's rule (`switchQueue`, issue #1007): an error reply to the read is Valkey answering it, null here; any other
     // failure (a lost connection, the client's own bound) is no answer, as the step's end is. Read as one, the queue was
     // said only "not confirmed", which drops the error the switch was answered with (issue #1041).
@@ -494,7 +502,7 @@ async function switchStep(q, paused, ms) {
       late,
     ]);
     if (reads === SWITCH_LATE) return { state: "unconfirmed", error };
-    return { state: "errored", error, reads: reads === null ? "unknown" : reads ? "paused" : "running" };
+    return { state: "errored", error, reads: reads === null ? "unknown" : reads ? "paused" : "running", ...answered };
   } finally {
     clearTimeout(timer);
   }
@@ -503,9 +511,18 @@ async function switchStep(q, paused, ms) {
 /**
  * Flip `names` (issue #842), each through `queueOf(name)`, into `steps` (name to `switchStep`'s answer). A PAUSE goes
  * to every queue at once: each queue has a connection of its own, and the kill switch must not wait for one queue's
- * bound before it tries the next. A RESUME goes one queue after another and STOPS at the first that did not answer, the
- * rest left out of `steps` (not tried): a resume that lands unobserved when Valkey wakes starts spending, so no more
- * are sent than the one already lost. `late(q, name)` is told of a queue that was not connected within the step.
+ * bound before it tries the next. A RESUME goes one queue after another and STOPS at the first that GOT NO ANSWER
+ * ("unconfirmed"), the rest left out of `steps` (not tried): a resume that lands unobserved when Valkey wakes starts
+ * spending, so no more are sent than the one already lost. `late(q, name)` is told of a queue that was not connected
+ * within the step.
+ *
+ * A RESUME GOES ON PAST A QUEUE VALKEY ANSWERED (issue #1064): one it refused, one whose resume it answered with an
+ * error, and one whose resume was never sent. That answer is observed, nothing is in doubt, and the next queue's
+ * resume is as safe to send as the first was. It stopped there too (issue #1014), so one queue whose meta key holds
+ * a string left every queue after it in the walk paused, on every press: `pi-jobs@hostb` errored and `pi-jobs@hostc`
+ * was never tried, and with the shared queue errored (the first of every walk) a fleet resume resumed nothing at
+ * all, while a pause reached every other queue and each queue could be resumed by itself. The errored queue is in
+ * the outcome with what it reads now, as before.
  */
 async function flipQueues({ paused, names, queueOf, stepMs, steps = new Map(), late = () => {} }) {
   const one = async (name) => {
@@ -525,8 +542,7 @@ async function flipQueues({ paused, names, queueOf, stepMs, steps = new Map(), l
   else {
     for (const name of names) {
       await one(name);
-      // An error reply stops a resume too (issue #1014): the queue may already be running again.
-      if (steps.get(name)?.state !== "done") break;
+      if (steps.get(name)?.state === "unconfirmed") break;
     }
   }
   return steps;
@@ -540,8 +556,11 @@ async function flipQueues({ paused, names, queueOf, stepMs, steps = new Map(), l
  * `notTried` those a resume never reached, and `errored` (issue #1014, present only when not empty) each queue whose
  * pause or resume Valkey answered with an error after its script may have run, `{ queue, reads }` with `reads`
  * "paused" or "running" as read back, or "unknown" where Valkey answered that read with an error too (issue #1041): such
- * a queue may be switched, or partly. `blind` (the registry could not be read)
- * and `incomplete` (the keyspace scan did not finish) ride both shapes: the set of queues itself may be short.
+ * a queue may be switched, or partly. `codes` (issue #1064, present only when not empty): `{ <queue>: <code> }`, the
+ * code of Valkey's error reply for each queue whose pause or resume ended on one, refused or errored, so the answer
+ * can say what that code's class says to do, where "try again" is the same answer again. `blind` (the registry could
+ * not be read) and `incomplete` (the keyspace scan did not finish) ride both shapes: the set of queues itself may be
+ * short.
  */
 function switchOutcome({ paused, names, steps, blind = null, incomplete = null, shortCause = null }) {
   const of = (state) => names.filter((n) => steps.get(n)?.state === state);
@@ -552,7 +571,8 @@ function switchOutcome({ paused, names, steps, blind = null, incomplete = null, 
   const failed = names.find((n) => steps.get(n)?.state !== "done");
   const error = steps.get(failed)?.error ?? "not tried";
   const errored = names.filter((n) => steps.get(n)?.state === "errored").map((queue) => ({ queue, reads: steps.get(queue).reads }));
-  return { unreachable: error, partial: { done, failed, error, unconfirmed: of("unconfirmed"), refused: of("refused"), notTried: names.filter((n) => !steps.has(n)), ...(errored.length > 0 ? { errored } : {}) }, ...short };
+  const codes = Object.fromEntries(names.flatMap((n) => (replyCodeOf(steps.get(n)?.code) === null ? [] : [[n, steps.get(n).code]])));
+  return { unreachable: error, partial: { done, failed, error, unconfirmed: of("unconfirmed"), refused: of("refused"), notTried: names.filter((n) => !steps.has(n)), ...(errored.length > 0 ? { errored } : {}), ...(Object.keys(codes).length > 0 ? { codes } : {}) }, ...short };
 }
 
 /**
@@ -766,9 +786,11 @@ export function replyCodeOf(value) {
 /**
  * What an error reply's code means, in one sentence for a text that cannot ask the table case by case (a tool's
  * description, which a model reads before it sees any code). Built from the worker's own lists
- * (`REPLY_CODES_BY_CLASS`), so a code that joins a class there is named here with it.
+ * (`REPLY_CODES_BY_CLASS`), so a code that joins a class there is named here with it. The permission class in two
+ * parts (`REPLY_CODES_OF_CREDENTIALS`): a permission the Valkey user lacks is its ACL's, while NOAUTH and WRONGPASS
+ * are the user and password the deployment connects with, where the one clause said an ACL of all three.
  */
-export const REPLY_CODE_MEANING = `What a code means: ${REPLY_CODES_BY_CLASS.key.join(", ")}, the key holds another kind of value and has to be removed or repaired; ${REPLY_CODES_BY_CLASS.permission.join(", ")}, this deployment's Valkey user lacks a permission (its ACL) and no key is at fault; ${REPLY_CODES_BY_CLASS.passing.join(", ")}, Valkey could not serve the read then and a later call may read it; any other code says no more than itself. Only the first two last until someone puts them right.`;
+export const REPLY_CODE_MEANING = `What a code means: ${REPLY_CODES_BY_CLASS.key.join(", ")}, the key holds another kind of value and has to be removed or repaired; ${REPLY_CODES_BY_CLASS.permission.filter((code) => !REPLY_CODES_OF_CREDENTIALS.includes(code)).join(", ")}, this deployment's Valkey user lacks a permission (its ACL) and no key is at fault; ${REPLY_CODES_OF_CREDENTIALS.join(", ")}, Valkey did not take the user and password this deployment connects with, and no key is at fault; ${REPLY_CODES_BY_CLASS.passing.join(", ")}, Valkey could not serve the read then and a later call may read it; any other code says no more than itself. Only the first three last until someone puts them right.`;
 
 // The words for one read Valkey answered with an error are the words module's (`erroredReadWords`), handed on here
 // for the callers that import this module.
@@ -5867,6 +5889,9 @@ export function createFleetReader(
       // `{ <queue>: <code> }`, the name and shape `pi-dispatch status` prints (`{}` when none).
       const erroredCode = (i) => pausedRead[i]?.[ERRORED_READ] ?? countsRead[i]?.[ERRORED_READ] ?? null;
       const queueErrors = Object.fromEntries(queues.flatMap((q, i) => (erroredCode(i) === null ? [] : [[q?.name ?? "-", erroredCode(i)]])));
+      // Of those, the queues whose paused flag WAS read, with the flag (`queueErrorsPaused`, present only when not
+      // empty): the error was their counts' alone, so a surface says paused or running of them, never "not known".
+      const queueErrorsPaused = Object.fromEntries(queues.flatMap((q, i) => (erroredCode(i) !== null && typeof pausedRead[i] === "boolean" ? [[q?.name ?? "-", pausedRead[i]]] : [])));
       const readAt = queues.flatMap((_, i) => (erroredCode(i) === null ? [i] : []));
       const pausedStates = readAt.map((i) => pausedRead[i]);
       const countsPer = readAt.map((i) => countsRead[i]);
@@ -6088,6 +6113,7 @@ export function createFleetReader(
         // Issue #1064: the queues Valkey answered with an error, left out of `queueCounts` and of `queue.counts`
         // (`queue.queues` still counts them), `{ <queue>: <code> }`, on every read, `{}` when none.
         queueErrors,
+        ...(Object.keys(queueErrorsPaused).length > 0 ? { queueErrorsPaused } : {}),
         // Issue #641: each queue's own counts beside the summed ones, so a surface can say which host's queue is deep.
         queueCounts: readAt.map((qi, i) => ({ queue: queues[qi]?.name ?? "-", paused: Boolean(pausedStates[i]), counts: Object.fromEntries(Object.entries(countsPer[i] ?? {}).map(([k, v]) => [k, Number(v ?? 0)])) })),
         // Issue #596, phase 3: each live host's budget and use, as the registry publishes them (integers as text, `off`,

@@ -1333,7 +1333,8 @@ test("the tools that hand on an error reply's code say what a code means by its 
   for (const name of ["dispatch_status", "dispatch_hosts", "dispatch_failed", "dispatch_waiting"]) assert.ok(t[name].description.includes(REPLY_CODE_MEANING), name);
   // The sentence names every code the table names, each under its own class, and claims a remedy for the lasting two alone.
   for (const [cls, codes] of Object.entries(REPLY_CODES_BY_CLASS)) for (const code of codes) assert.ok(REPLY_CODE_MEANING.includes(code) && replyErrorClass(code) === cls, code);
-  assert.match(REPLY_CODE_MEANING, /WRONGTYPE, the key holds another kind of value and has to be removed or repaired; NOPERM, NOAUTH, WRONGPASS, this deployment's Valkey user lacks a permission \(its ACL\) and no key is at fault; BUSY, LOADING, TRYAGAIN, CLUSTERDOWN, MASTERDOWN, Valkey could not serve the read then and a later call may read it; any other code says no more than itself/);
+  // NOAUTH and WRONGPASS in a clause of their own: what is put right is the user and password, never an ACL.
+  assert.match(REPLY_CODE_MEANING, /WRONGTYPE, the key holds another kind of value and has to be removed or repaired; NOPERM, this deployment's Valkey user lacks a permission \(its ACL\) and no key is at fault; NOAUTH, WRONGPASS, Valkey did not take the user and password this deployment connects with, and no key is at fault; BUSY, LOADING, TRYAGAIN, CLUSTERDOWN, MASTERDOWN, Valkey could not serve the read then and a later call may read it; any other code says no more than itself\. Only the first three last until someone puts them right\./);
   for (const [name, tool] of Object.entries(t)) assert.doesNotMatch(tool.description, /row did not answer|its key has to be repaired|waiting does not read it/, name);
   // A registry read in part: the row was not read, whatever the reason, and the workers counted are the rows that were.
   assert.match(t.dispatch_status.description, /the schedulers of a host whose row was not read may be missing from the list/);
@@ -1476,4 +1477,161 @@ test("a fleet whose every read queue is paused beside one whose meta key holds a
     await r.hdel("bull:pi-jobs:meta", "paused").catch(() => {});
     r.disconnect();
   }
+});
+
+/**
+ * A fleet of this file's own on database 9 for `fn({ r, tag, direct, workers })`: `r` a raw client, `direct(name)` a real
+ * BullMQ queue (closed after), `workers` a list of BullMQ workers to end (each closed after, with its jobs let go by
+ * `release`). Every key that was not there before is taken away again, and every member this added to the registry's
+ * index and to nothing else.
+ */
+async function withLiveFleet(fn) {
+  const fx = deployment({ valkey: LIVE });
+  const { default: IORedis } = await import("ioredis");
+  const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
+  const tag = `${process.pid}${Date.now().toString(36)}`;
+  const found = new Set(await everyKey(r));
+  const index = (await r.type(HOST_SET)) === "set" ? await r.smembers(HOST_SET) : [];
+  const opened = [];
+  const workers = [];
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const direct = (name) => { const q = makeQueue(parseConnection(LIVE), { name }); opened.push(q); return q; };
+  try {
+    return await fn({ r, tag, direct, workers, held });
+  } finally {
+    release();
+    for (const w of workers) await w.close(true).catch(() => {});
+    for (const q of opened) await q.close().catch(() => {});
+    // The index as it was: a test may have made it a string, and its own members go with the keys below.
+    if ((await r.type(HOST_SET).catch(() => "none")) !== "set") await r.del(HOST_SET).catch(() => {});
+    const made = (await everyKey(r).catch(() => [])).filter((k) => !found.has(k));
+    if (made.length > 0) await r.del(...made).catch(() => {});
+    const now = await r.smembers(HOST_SET).catch(() => []);
+    const extra = now.filter((m) => !index.includes(m));
+    if (extra.length > 0) await r.srem(HOST_SET, ...extra).catch(() => {});
+    const lost = index.filter((m) => !now.includes(m));
+    if (lost.length > 0) await r.sadd(HOST_SET, ...lost).catch(() => {});
+    r.disconnect();
+    fx.restore();
+  }
+}
+
+// Issue #1036: `dispatch_cancel` as the extension registers it, where the tool builds its own reader and hands its
+// action an adapter over it. The adapter handed on five of the reader's methods and `jobStatus` was not one, so the
+// lookup by id never ran: over a host row that holds a string, every job that was not seen running was refused, a
+// waiting job in a queue that WAS read among them. The test of that lookup handed the request a whole reader.
+test("dispatch_cancel as the extension registers it looks a job up by its id: over a host row that holds a string a waiting job is cancelled as queued and a running one as running, one found nowhere is refused with the key and the code, and over the index as a string the same; the second job running on one queue is cancelled as running (#1036)", { timeout: 180_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  const { Worker } = await import("bullmq");
+  await withLiveFleet(async ({ r, tag, direct, workers, held }) => {
+    const [hosta, hostb, hostw] = ["a", "b", "w"].map((h) => `c1036${h}${tag}`);
+    const id = (what) => `c1036-${what}-${tag}`;
+    const data = { kind: "github", repo: "acme/web", target: { type: "issue", number: 7 } };
+    const [shared, qa, qb, qw] = ["pi-jobs", `pi-jobs@${hosta}`, `pi-jobs@${hostb}`, `pi-jobs@${hostw}`].map(direct);
+    const row = (h) => r.hset(hostKey(h), { name: h, routes: "true", beatAt: String(Date.now()), jobs: "[]" });
+    await r.sadd(HOST_SET, hosta, hostb, hostw);
+    for (const h of [hosta, hostb, hostw]) await row(h);
+    // One job running on hostw's queue and two on hosta's, each held by a real BullMQ worker; then one waiting behind
+    // the running one on hostw's, one on hostb's (nobody drains it) and one on the shared queue.
+    await qw.add("github", data, { jobId: id("run-w") });
+    await qa.add("github", data, { jobId: id("run-a") });
+    await qa.add("github", data, { jobId: id("run-a2") });
+    workers.push(new Worker(qw.name, () => held, { connection: parseConnection(LIVE), concurrency: 1 }));
+    workers.push(new Worker(qa.name, () => held, { connection: parseConnection(LIVE), concurrency: 2 }));
+    const end = Date.now() + 15_000;
+    while (((await qw.getJobCounts("active")).active !== 1 || (await qa.getJobCounts("active")).active !== 2) && Date.now() < end) await settle(50);
+    assert.deepEqual([(await qw.getJobCounts("active")).active, (await qa.getJobCounts("active")).active], [1, 2], "the workers hold their jobs");
+    await qw.add("github", data, { jobId: id("wait-w") });
+    await qb.add("github", data, { jobId: id("wait-b") });
+    for (const what of ["wait-shared", "wait-shared2"]) await shared.add("github", data, { jobId: id(what) });
+    const stateOf = async (q, what) => (await q.getJob(id(what)))?.getState() ?? "gone";
+    const cancel = async (what) => {
+      // A worker's acknowledgement, as a worker that owns the job writes it, so a cancel of a running job answers at
+      // once: what is under test is which cancel the tool plans, and the request key shows it was the running one.
+      await r.set(`cancel:ack:${id(what)}`, hostw, "PX", 60_000);
+      const out = await tool("dispatch_cancel", { jobId: id(what) });
+      await r.del(`cancel:ack:${id(what)}`);
+      return out?.threw !== undefined ? { threw: out.threw } : JSON.parse(out.content[0].text);
+    };
+    const asked = async (what) => r.get(`cancel:req:${id(what)}`);
+
+    // hostw's row holds a string: the registry is read in part, and the running jobs are not known whole.
+    await r.del(hostKey(hostw));
+    await r.set(hostKey(hostw), "not a hash");
+    const status = JSON.parse((await tool("dispatch_status", {})).content[0].text);
+    assert.deepEqual([status.queue.registryReadInPart, status.queue.hostErrors], [true, { [hostw]: "WRONGTYPE" }]);
+    for (const [what, q] of [["wait-shared", shared], ["wait-b", qb], ["wait-w", qw]]) {
+      const out = await cancel(what);
+      assert.deepEqual([out.applied, out.action, await stateOf(q, what), await asked(what)], [true, "cancel-queued", "gone", null], `${what}: ${JSON.stringify(out)}`);
+    }
+    const running = await cancel("run-w");
+    assert.deepEqual([running.applied, running.action, await asked("run-w"), await stateOf(qw, "run-w")], [true, "cancel-active", "operator-cancel", "active"], JSON.stringify(running));
+    assert.equal((await cancel("nope-job")).threw, `whether this job is running is not known: no queue that was read says, and the queue of host ${hostw} was not asked, since Valkey answers host:h:${hostw} with WRONGTYPE. Remove or repair that key first; nothing was changed`);
+
+    // The index itself a string: the job in the shared queue is found all the same, and one found nowhere is refused
+    // with `host:live` and the code, never "try again".
+    await r.del(hostKey(hostw));
+    await row(hostw);
+    const members = await r.smembers(HOST_SET);
+    await r.del(HOST_SET);
+    await r.set(HOST_SET, "not a set");
+    try {
+      const queued = await cancel("wait-shared2");
+      assert.deepEqual([queued.applied, queued.action, await stateOf(shared, "wait-shared2")], [true, "cancel-queued", "gone"], JSON.stringify(queued));
+      assert.equal((await cancel("nope-job")).threw, "whether this job is running is not known: no queue that was read says, and the hosts' queues were not asked, since Valkey answers host:live with WRONGTYPE. Remove or repair that key first; nothing was changed");
+    } finally {
+      await r.del(HOST_SET);
+      await r.sadd(HOST_SET, ...members);
+    }
+
+    // The registry whole again: the running list is whole, and names one running job a queue. Both of hosta's are
+    // cancelled as running, the one the list does not name too, which was planned as queued and refused.
+    const whole = JSON.parse((await tool("dispatch_status", {})).content[0].text);
+    assert.equal(Object.hasOwn(whole.queue, "registryReadInPart"), false);
+    for (const what of ["run-a", "run-a2"]) {
+      const out = await cancel(what);
+      assert.deepEqual([out.applied, out.action, await asked(what)], [true, "cancel-active", "operator-cancel"], `${what}: ${JSON.stringify(out)}`);
+    }
+  });
+});
+
+// Issue #1064: a fleet resume stopped at the first queue Valkey answered with an error and left every queue after it
+// in the walk paused, on every press: the shared queue comes first in every walk, so with its meta key a string a
+// resume resumed nothing. The live test above has that queue last. Real queues, each paused for real, with the queue
+// at fault first, in the middle and last, through the tool and the command as the extension registers them.
+test("dispatch_resume and /dispatch resume reach every queue Valkey answers for, with the queue whose meta key holds a string first, in the middle or last in the walk, name the queues, and say what to put right (#1064)", { timeout: 180_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+  await withLiveFleet(async ({ r, tag, direct }) => {
+    const hosts = ["a", "b", "c"].map((h) => `r1064${h}${tag}`);
+    const names = ["pi-jobs", ...hosts.map((h) => `pi-jobs@${h}`)];
+    const queues = names.map(direct);
+    await r.sadd(HOST_SET, ...hosts);
+    for (const h of hosts) await r.hset(hostKey(h), { name: h, routes: "true", beatAt: String(Date.now()), jobs: "[]" });
+    const meta = (name) => `bull:${name}:meta`;
+    // A queue's paused flag as Valkey holds it: 1 or 0, 0 too for a meta hash that held nothing else and went with the
+    // flag, and the key's type where it is no hash.
+    const pausedFlags = async (list) => Promise.all(list.map(async (name) => {
+      const type = await r.type(meta(name));
+      return type === "hash" ? r.hexists(meta(name), "paused") : type === "none" ? 0 : type;
+    }));
+    for (const [where, bad] of [["first", names[0]], ["middle", names[2]], ["last", names[3]]]) {
+      const good = names.filter((n) => n !== bad);
+      // The whole fleet paused for real, then one queue's meta key made a string.
+      const arrange = async () => {
+        if ((await r.type(meta(bad))) === "string") await r.del(meta(bad));
+        for (const q of queues) await q.pause();
+        assert.deepEqual(await pausedFlags(names), [1, 1, 1, 1], `${where}: every queue is paused`);
+        await r.del(meta(bad));
+        await r.set(meta(bad), "not a hash");
+      };
+      await arrange();
+      const out = await tool("dispatch_resume", {});
+      assert.deepEqual(await pausedFlags(good), [0, 0, 0], `${where}: the tool resumed every other queue (${String(out?.threw).slice(0, 200)})`);
+      assert.equal(out?.threw, `The fleet resume did not reach every queue, so some queues may be resumed and others not, and Valkey answered a resume with an error, which can come after the queue was resumed. By queue: answered with an error for ${bad} (its state could not be read, so it may have partly applied); confirmed resumed: ${good.join(", ")}. Valkey answered a queue's resume with WRONGTYPE: a key of that queue holds another kind of value. Trying again does not change that: an operator has to remove or repair that key first. An operator can look at the fleet in the console; the resume is worth trying again only once that is put right.`, where);
+      await arrange();
+      const said = (await command("resume")).join("\n");
+      assert.deepEqual(await pausedFlags(good), [0, 0, 0], `${where}: the command resumed every other queue (${said})`);
+      assert.ok(said.includes(`ANSWERED WITH AN ERROR for ${bad} (its state could not be read, so it may have partly applied); known switched: ${good.join(", ")}`) && !said.includes("not tried"), `${where}: ${said}`);
+      await r.del(meta(bad));
+    }
+  });
 });

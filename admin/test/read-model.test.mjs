@@ -2964,12 +2964,54 @@ test("a pause or resume Valkey answers with an error after its script may have r
     refused: ["pi-jobs@mini2"],
     notTried: [],
     errored: [{ queue: "pi-jobs@mini1", reads: "paused" }, { queue: "pi-jobs@mini4", reads: "running" }],
+    // Issue #1064: the code of each reply a queue's switch ended on, refused or errored; none for a lost answer.
+    codes: { "pi-jobs@mini1": "WRONGTYPE", "pi-jobs@mini2": "NOPERM", "pi-jobs@mini4": "READONLY" },
   });
   assert.deepEqual(read.sort(), ["pi-jobs@mini1", "pi-jobs@mini3", "pi-jobs@mini4"], "only an error reply that may follow the script is read back; a refusal before it is not, and a refusal's code raised inside the script is");
-  // A resume stops at a queue answered with an error too: it may already be running again.
+  // Issue #1064: a resume goes on past a queue Valkey ANSWERED, an error after the script or a refusal before it, and
+  // each is in the outcome for itself. It stopped at the first, so the shared queue answered with an error (the first
+  // of every walk) left every host's queue untried.
   plan["pi-jobs"] = [() => Promise.reject(replyError(WRONGTYPE_IN_SCRIPT)), false];
   const resumed = await orHung(setQueuePaused({ url: "redis://x", paused: false, makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1", "mini2"]), stepTimeoutMs: 80 }));
-  assert.deepEqual({ ...resumed.partial, error: null }, { done: [], failed: "pi-jobs", error: null, unconfirmed: [], refused: [], notTried: ["pi-jobs@mini1", "pi-jobs@mini2"], errored: [{ queue: "pi-jobs", reads: "running" }] });
+  assert.deepEqual({ ...resumed.partial, error: null }, { done: [], failed: "pi-jobs", error: null, unconfirmed: [], refused: ["pi-jobs@mini2"], notTried: [], errored: [{ queue: "pi-jobs", reads: "running" }, { queue: "pi-jobs@mini1", reads: "paused" }], codes: { "pi-jobs": "WRONGTYPE", "pi-jobs@mini1": "WRONGTYPE", "pi-jobs@mini2": "NOPERM" } });
+});
+
+// Issue #1064: one queue Valkey answers with an error (its meta key holding a string) stopped a fleet resume there,
+// on every press, and every queue after it in the walk stayed paused. Through the real walk, with that queue first, in
+// the middle and last.
+test("a resume reaches every queue Valkey answers for, wherever the one it answers with an error stands in the walk, and still stops at the first that got no answer (#1064)", async () => {
+  const names = ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2", "pi-jobs@mini3"];
+  const over = async (kinds) => {
+    const sent = [];
+    const makeQueueFn = (_c, opts) => {
+      const name = opts?.name ?? "pi-jobs";
+      const act = () => {
+        sent.push(name);
+        if (kinds[name] === "errored") return Promise.reject(replyError(WRONGTYPE_IN_SCRIPT));
+        if (kinds[name] === "refused") return Promise.reject(replyError(NOPERM_EVALSHA));
+        if (kinds[name] === "threw") return Promise.reject(new Error("Connection is closed."));
+        if (kinds[name] === "silent") return neverSettles();
+        return Promise.resolve();
+      };
+      return { name, pause: act, resume: act, isPaused: () => Promise.reject(replyError("WRONGTYPE Operation against a key holding the wrong kind of value")), async close() {}, disconnect() {} };
+    };
+    const res = await orHung(setQueuePaused({ url: "redis://x", paused: false, makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1", "mini2", "mini3"]), stepTimeoutMs: 80 }));
+    assert.notEqual(res, "hung");
+    return { sent, partial: res.partial };
+  };
+  for (const bad of names) {
+    const { sent, partial } = await over({ [bad]: "errored" });
+    assert.deepEqual(sent, names, `${bad}: every queue was sent its resume, in the walk's order`);
+    assert.deepEqual([partial.done, partial.errored, partial.notTried, partial.failed, partial.codes], [names.filter((n) => n !== bad), [{ queue: bad, reads: "unknown" }], [], bad, { [bad]: "WRONGTYPE" }], bad);
+  }
+  // A refusal before the script, and a resume that failed before it was sent, are passed the same way.
+  const mixed = await over({ "pi-jobs": "refused", "pi-jobs@mini1": "threw", "pi-jobs@mini2": "errored" });
+  assert.deepEqual(mixed.sent, names);
+  assert.deepEqual([mixed.partial.done, mixed.partial.refused, mixed.partial.notTried, mixed.partial.codes], [["pi-jobs@mini3"], ["pi-jobs", "pi-jobs@mini1"], [], { "pi-jobs": "NOPERM", "pi-jobs@mini2": "WRONGTYPE" }]);
+  // What stops the walk is a resume that got no answer: none is sent after it, since it may land when Valkey wakes.
+  const lost = await over({ "pi-jobs": "errored", "pi-jobs@mini1": "silent" });
+  assert.deepEqual(lost.sent, ["pi-jobs", "pi-jobs@mini1"]);
+  assert.deepEqual([lost.partial.done, lost.partial.unconfirmed, lost.partial.notTried], [[], ["pi-jobs@mini1"], ["pi-jobs@mini2", "pi-jobs@mini3"]]);
 });
 
 // Issue #1041: a read back Valkey answers with an error is Valkey answering, so the queue stays one answered with an error,
@@ -2998,6 +3040,7 @@ test("a pause whose read back Valkey answers with an error too stays answered wi
     refused: [],
     notTried: [],
     errored: [{ queue: "pi-jobs@mini1", reads: "unknown" }, { queue: "pi-jobs@mini3", reads: "unknown" }],
+    codes: { "pi-jobs@mini1": "WRONGTYPE", "pi-jobs@mini3": "WRONGTYPE" },
   }, "an error reply to the read, or an answer that is not a yes or no, is an answer; a lost connection or no reply is not");
 });
 

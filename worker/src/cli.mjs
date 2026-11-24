@@ -10,7 +10,7 @@ import { gitDirty, localRepoProblem } from "./git-dirty.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 import { modelIdProblem, providerIdProblem } from "./model-ref.mjs";
 import { refusedBeforeScript } from "./bullmq-internals.mjs";
-import { REPLY_ERROR_CLASSES, replyErrorClass } from "./reply-error-class.mjs";
+import { REPLY_ERROR_CLASSES, replyErrorClass, replyErrorWords } from "./reply-error-class.mjs";
 import { cliDeploymentEnv, deploymentServiceEnv } from "./service-env.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
 
@@ -712,12 +712,12 @@ function shortParts(again, rest, cause, thenAgain = again) {
 	const Again = `${again.charAt(0).toUpperCase()}${again.slice(1)}`;
 	const named = Array.isArray(cause?.errors) && cause.errors.length > 0 ? cause.errors[0] : null;
 	if (named === null) return { named: false, why: "the host registry or the look for queues could not be read whole", advice: `${Again} once Valkey answers`, rest, tail: "" };
-	const cls = replyErrorClass(named.code);
+	// The code's own words (`replyErrorWords`): NOAUTH and WRONGPASS are put right in the user and password this
+	// connects with, where their class says an ACL.
+	const { class: cls, waiting, first: remedy } = replyErrorWords(named.code);
 	const said = `Valkey answers ${named.key ?? "the look for queues"} with ${named.code}`;
-	const { waiting } = REPLY_ERROR_CLASSES[cls];
 	const others = cause.errors.length - 1 + (Number.isSafeInteger(cause.more) && cause.more > 0 ? cause.more : 0);
 	const tail = others > 0 ? ` (${others} more ${others === 1 ? "read was" : "reads were"} answered with an error)` : "";
-	const remedy = cls === "key" ? "remove or repair that key" : cls === "permission" ? "fix this Valkey user's ACL" : null;
 	if (remedy !== null) return { named: true, why: said, advice: cause.waits === true ? `${waiting}: ${remedy}. Another read got no answer: ${again} once Valkey answers and that is put right` : `${waiting}: ${remedy}, then ${thenAgain}`, rest, tail };
 	if (cause.waits === true) return { named: true, why: `${said}, and another read got no answer`, advice: `${Again} once Valkey answers`, rest, tail };
 	if (cls === "passing") return { named: true, why: said, advice: `${waiting}: ${again}`, rest, tail };
@@ -1026,13 +1026,16 @@ const NO_ANSWER = Symbol("no answer");
  *                  at all (no reply in time, or a connection that failed), never where Valkey answered it with an
  *                  error, which is Valkey answering.
  *   "not-sent"     the queue's connection did not come up within `ms`, or failed first: the write never left.
+ * `code` (issue #1064) is the code of Valkey's reply on "refused" and "errored" (`codeOf`, the client module's
+ * `replyErrorCode`): the report says the code and what its class says, never the reply's own text, which past the code
+ * names a script by its digest and line.
  * The write is started only once the queue's client is ready, which is what makes "sent" knowable: BullMQ writes it in
  * the same turn then (its client promise has settled, and nothing between the call and ioredis' socket write waits on
  * I/O), while a write started earlier would wait inside BullMQ for a connection that may come up after this command
  * said it was never sent. A failure after the start is read as sent, the safe direction: "not sent" is a promise that
  * nothing will change.
  */
-async function switchQueue(q, cmd, ms, seconds) {
+async function switchQueue(q, cmd, ms, seconds, codeOf = () => null) {
 	let timer;
 	const late = new Promise((resolve) => { timer = setTimeout(resolve, ms, NO_ANSWER); });
 	try {
@@ -1043,10 +1046,11 @@ async function switchQueue(q, cmd, ms, seconds) {
 		if (answer === true) return { state: "confirmed" };
 		if (answer === NO_ANSWER) return { state: "unconfirmed", why: `no answer within ${seconds} seconds` };
 		const why = answer.error?.message ?? String(answer.error);
-		if (refusedBeforeScript(answer.error)) return { state: "refused", why };
+		const code = codeOf(answer.error);
+		if (refusedBeforeScript(answer.error)) return { state: "refused", why, code };
 		if (answer.error?.name !== "ReplyError") return { state: "unconfirmed", why };
 		const reads = await Promise.race([Promise.resolve().then(() => q.isPaused()).then((paused) => (typeof paused === "boolean" ? paused : null), (error) => (error?.name === "ReplyError" ? null : NO_ANSWER)), late]);
-		return { state: "errored", why, reads: reads === NO_ANSWER ? null : reads, ...(reads === NO_ANSWER ? { readUnanswered: true } : {}) };
+		return { state: "errored", why, code, reads: reads === NO_ANSWER ? null : reads, ...(reads === NO_ANSWER ? { readUnanswered: true } : {}) };
 	} finally {
 		clearTimeout(timer);
 	}
@@ -1056,18 +1060,43 @@ async function switchQueue(q, cmd, ms, seconds) {
  * Pause or resume every queue (issue #1007), one `switchQueue` step each, in `queues`' order. `left()` is what is left
  * of the deadline as each step starts. A PAUSE goes to every queue at once, as the console's does (`flipQueues`, issue
  * #842): each queue has a connection of its own, and the kill switch must not wait out one queue before it tries the
- * next. A RESUME goes one queue after another and stops at the first that is not confirmed, the rest not sent: a resume
- * that lands unobserved when Valkey answers starts jobs, so none is sent after one already in doubt.
+ * next. A RESUME goes one queue after another and stops at the first that GOT NO ANSWER, the rest not sent: a resume
+ * that lands unobserved when Valkey answers starts jobs, so none is sent after one already in doubt (`resumeStopsAt`).
+ *
+ * A RESUME GOES ON PAST A QUEUE VALKEY ANSWERED (issue #1064): one it refused, and one whose resume it answered with
+ * an error and then answered the read back of. That answer is observed and nothing is in doubt. It stopped there too,
+ * so one queue whose meta key holds a string left every queue after it paused, on every run, and with the shared
+ * queue's key at fault (the first of every walk) `resume` resumed nothing at all, while `pause` reached every other
+ * queue. The console's switch walks the same way (`flipQueues`).
  */
 async function switchQueues(queues, cmd, left, seconds) {
-	if (cmd === "pause") return Promise.all(queues.map((q) => switchQueue(q, cmd, left(), seconds)));
+	const { replyErrorCode } = await import("./connection.mjs");
+	if (cmd === "pause") return Promise.all(queues.map((q) => switchQueue(q, cmd, left(), seconds, replyErrorCode)));
 	const steps = [];
-	const after = { refused: "not tried after a queue whose resume Valkey refused", errored: "not tried after a queue whose resume Valkey answered with an error" };
 	for (const q of queues) {
-		const doubt = steps.find((step) => step.state !== "confirmed");
-		steps.push(doubt ? { state: "not-sent", skipped: true, why: after[doubt.state] ?? "not tried after a queue whose resume is not confirmed: a resume that lands later starts jobs" } : await switchQueue(q, cmd, left(), seconds));
+		const stop = steps.find(resumeStopsAt);
+		steps.push(stop ? { state: "not-sent", skipped: true, why: stop.state === "not-sent" ? "not tried after a queue whose connection did not come up" : "not tried after a queue whose resume is not confirmed: a resume that lands later starts jobs" } : await switchQueue(q, cmd, left(), seconds, replyErrorCode));
 	}
 	return steps;
+}
+
+/**
+ * Whether a resume's walk ends at this step (issue #1064): a write that was sent and not answered, an error reply whose
+ * read back got no answer (Valkey stopped answering in between), or a queue whose connection did not come up, which is
+ * where the deadline was spent or the Valkey is not there. Never a refusal or an error reply that was read back:
+ * those are Valkey answering.
+ */
+const resumeStopsAt = (step) => step.state === "unconfirmed" || step.state === "not-sent" || (step.state === "errored" && step.readUnanswered === true);
+
+/**
+ * What the report says of the reply a queue's pause or resume ended on (issue #1064): its code and what the code's
+ * class says (`replyErrorWords`), a key of the queue for a key of another type, since the queue's own keys are the
+ * ones its script touches. The reply's text was printed whole, with the digest of BullMQ's script and the line it
+ * failed on, which names nothing a person can act on.
+ */
+function switchReplyWords(code) {
+	const w = replyErrorWords(code);
+	return `${code}${w.class === "key" ? ": a key of that queue holds another kind of value" : w.means !== null ? `: ${w.means}` : ""}`;
 }
 
 /**
@@ -1081,11 +1110,13 @@ async function switchQueues(queues, cmd, left, seconds) {
 function switchReport({ cmd, shown, names, steps, blind = null, registryShort = null, incomplete = false, ownNote = "", shortCause = null }) {
 	const done = `${cmd}d`;
 	const lines = names.map((name, i) => {
-		const { state, why, reads } = steps[i];
+		const { state, why, reads, code } = steps[i];
+		// The reply's code and its class's words where the step carries a code, else the step's own words.
+		const said = typeof code === "string" ? switchReplyWords(code) : why;
 		if (state === "confirmed") return `${name}: ${done}`;
 		if (state === "unconfirmed") return `${name}: sent, not confirmed (${why}); it may still be ${done} when Valkey answers`;
-		if (state === "refused") return `${name}: refused by Valkey, unchanged (${why})`;
-		if (state === "errored") return `${name}: Valkey answered with an error (${why}); ${reads === null ? "it may have partly applied" : `it reads ${reads ? "paused" : "running"} now${reads === (cmd === "pause") ? "" : `, and part of the ${cmd} may have applied`}`}`;
+		if (state === "refused") return `${name}: refused by Valkey, unchanged (${said})`;
+		if (state === "errored") return `${name}: Valkey answered with an error (${said}); ${reads === null ? "it may have partly applied" : `it reads ${reads ? "paused" : "running"} now${reads === (cmd === "pause") ? "" : `, and part of the ${cmd} may have applied`}`}`;
 		return `${name}: not sent (${why})`;
 	});
 	// A write that Valkey answered with an error may have applied, so it counts as sent here, as one never answered does.
@@ -1098,7 +1129,11 @@ function switchReport({ cmd, shown, names, steps, blind = null, registryShort = 
 	const pending = steps.some((step) => step.state === "unconfirmed" || (step.state === "errored" && step.readUnanswered === true));
 	const waiting = pending || steps.some((step) => step.state === "not-sent" && !step.skipped && !step.answered);
 	const failedOn = steps.some((step) => step.state === "refused" || step.state === "errored" || (step.state === "not-sent" && step.answered === true));
-	lines.push(`run pi-dispatch status ${waiting ? "once Valkey answers " : ""}to see each queue, then pi-dispatch ${cmd} again${!waiting && failedOn ? " once what Valkey refused or failed on is put right" : ""}${cmd === "resume" && pending ? "; a resume not confirmed may start jobs when it lands" : ""}`);
+	// Every reply of a passing class (a Valkey that was busy or loading just then) leaves nothing to put right: a later
+	// run may go through as it is (issue #1064).
+	const codes = steps.filter((step) => step.state === "refused" || step.state === "errored").map((step) => step.code);
+	const passing = codes.length > 0 && codes.every((code) => typeof code === "string" && replyErrorClass(code) === "passing") && !steps.some((step) => step.state === "not-sent" && step.answered === true);
+	lines.push(`run pi-dispatch status ${waiting ? "once Valkey answers " : ""}to see each queue, then pi-dispatch ${cmd} again${!waiting && failedOn ? (passing ? ": a later run may go through" : " once what Valkey refused or failed on is put right") : ""}${cmd === "resume" && pending ? "; a resume not confirmed may start jobs when it lands" : ""}`);
 	const unread = `${blind ? ` [registry unreadable: ${blind}]` : ""}${registryShort ? ` [registry incomplete: ${registryShort}]` : ""}${incomplete ? " [queue scan incomplete]" : ""}`;
 	return `could not ${cmd} the whole deployment at ${shown}${unread}${ownNote}\n  ${lines.join("\n  ")}`;
 }

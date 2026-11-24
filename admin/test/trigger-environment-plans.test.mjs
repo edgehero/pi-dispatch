@@ -2423,7 +2423,7 @@ test("an unreadable registry refuses, since unknown is not every host", async ()
   // The index itself answered with an error (it said "try again" for every one): the same classes, of `host:live`.
   const indexAnswers = (message) => ({ ...client, smembers: () => reply(message) });
   assert.deepEqual(await gateOver(indexAnswers("WRONGTYPE Operation against a key holding the wrong kind of value")), ["The live hosts could not be read: Valkey answers host:live with WRONGTYPE. Remove or repair that key first. Nothing was written.", 409]);
-  assert.deepEqual(await gateOver(indexAnswers("NOAUTH Authentication required.")), ["The live hosts could not be read: Valkey answers host:live with NOAUTH. Fix this Valkey user's ACL first. Nothing was written.", 409]);
+  assert.deepEqual(await gateOver(indexAnswers("NOAUTH Authentication required.")), ["The live hosts could not be read: Valkey answers host:live with NOAUTH. Fix the Valkey user and password first. Nothing was written.", 409]);
   assert.deepEqual(await gateOver(indexAnswers("LOADING Valkey is loading the dataset in memory")), ["The live hosts could not be read: Valkey answers host:live with LOADING. Nothing was written; try again.", 503]);
   // An audit row keeps 200 code points of a refusal, and the sentence this replaced had 339: its remedy was what the
   // row lost. With the longest name a worker can have and the longest code, each refusal fits whole.

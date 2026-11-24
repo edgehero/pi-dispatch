@@ -2018,13 +2018,26 @@ test("without a snapshot Fleet and the overview's Hosts card offer Pause and Res
   };
   try {
     assert.deepEqual(await forms({}), [false, false, "The fleet is running", ["fleet-pause"], ["fleet-pause"]], "the control: a whole read of a running fleet offers Pause alone");
-    assert.deepEqual(await forms({ rows: { "host:h:hostw": answeredWith("WRONGTYPE") } }), [true, true, "The fleet is running", ["fleet-resume", "fleet-pause"], ["fleet-pause", "fleet-resume"]], "a registry read in part: hostw's queue may exist and be paused");
-    assert.deepEqual(await forms({ index: noAnswer }), [true, false, "The fleet is running", ["fleet-resume", "fleet-pause"], ["fleet-pause", "fleet-resume"]], "a registry not read at all");
+    // Issue #1064: the heading claims a state of the whole fleet only over a whole read. It said "The fleet is running"
+    // over a registry it had not read whole, where a host's own queue may exist that nobody read.
+    const RUNNING_PART = "No queue that was read is paused: the host registry was not read whole";
+    assert.deepEqual(await forms({ rows: { "host:h:hostw": answeredWith("WRONGTYPE") } }), [true, true, RUNNING_PART, ["fleet-resume", "fleet-pause"], ["fleet-pause", "fleet-resume"]], "a registry read in part: hostw's queue may exist and be paused");
+    assert.deepEqual(await forms({ index: noAnswer }), [true, false, RUNNING_PART, ["fleet-resume", "fleet-pause"], ["fleet-pause", "fleet-resume"]], "a registry not read at all");
     // Every queue that was read is paused: Resume alone over a whole read, and Pause as well over a registry read in
     // part, for the host's queue the read did not ask.
     allPaused = true;
     assert.deepEqual(await forms({}), [false, false, "The fleet is paused", ["fleet-resume"], ["fleet-resume"]]);
-    assert.deepEqual(await forms({ rows: { "host:h:hostw": answeredWith("WRONGTYPE") } }), [true, true, "The fleet is paused", ["fleet-resume", "fleet-pause"], ["fleet-pause", "fleet-resume"]]);
+    assert.deepEqual(await forms({ rows: { "host:h:hostw": answeredWith("WRONGTYPE") } }), [true, true, "Every queue that was read is paused: the host registry was not read whole", ["fleet-resume", "fleet-pause"], ["fleet-pause", "fleet-resume"]]);
+    assert.deepEqual(await forms({ index: noAnswer }), [true, false, "Every queue that was read is paused: the host registry was not read whole", ["fleet-resume", "fleet-pause"], ["fleet-pause", "fleet-resume"]]);
+    // The bar is drawn for attention over such a read, as over a queue left out, and for an agent's copy too, whose
+    // word for the registry is the closed one.
+    how = { index: noAnswer };
+    const blind = await reader.snapshot();
+    assert.ok(String(fleetBar(panelView(blind))).startsWith('<div class="card card--ring tone-attention"><div class="fl-bar"><div class="fl-bar__row"><span class="tile tone-attention">'), String(fleetBar(panelView(blind))).split("<h2>")[0]);
+    how = {};
+    assert.ok(String(fleetBar(panelView(await reader.snapshot()))).startsWith('<div class="card"><div class="fl-bar"><div class="fl-bar__row"><span class="tile tone-attention">'), "a whole read of a paused fleet keeps its own bar");
+    const { agentReadProjection } = await import("../src/agent-read.mjs");
+    assert.match(String(fleetBar(panelView(agentReadProjection(blind), { role: "agent" }))), /<h2>Every queue that was read is paused: the host registry was not read whole<\/h2>/);
   } finally {
     how = {};
     await reader.dispose();

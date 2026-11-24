@@ -555,7 +555,7 @@ const SHORT_STATES = [
   ["a row answered with WRONGTYPE", { rows: { "host:h:hostw": answered("WRONGTYPE") } }, { waits: false, errors: [{ key: "host:h:hostw", code: "WRONGTYPE", class: "key" }], more: 0, lasting: "key" },
     "the list of queues may be short: Valkey answers host:h:hostw with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused"],
   ["a row answered with NOAUTH and another not read in time", { rows: { "host:h:hostw": answered("NOAUTH"), "host:h:hosta": silent } }, { waits: true, errors: [{ key: "host:h:hostw", code: "NOAUTH", class: "permission" }], more: 0, lasting: "permission" },
-    "the list of queues may be short: Valkey answers host:h:hostw with NOAUTH. Waiting does not change that: fix this Valkey user's ACL. Another read got no answer: pause the fleet again once Valkey answers and that is put right; other queues may exist and were not paused"],
+    "the list of queues may be short: Valkey answers host:h:hostw with NOAUTH. Waiting does not change that: fix the Valkey user and password. Another read got no answer: pause the fleet again once Valkey answers and that is put right; other queues may exist and were not paused"],
   ["the look for queues answered with NOPERM", { scan: answered("NOPERM") }, { waits: false, errors: [{ key: null, code: "NOPERM", class: "permission" }], more: 0, lasting: "permission" },
     "the list of queues may be short: Valkey answers the look for queues with NOPERM. Waiting does not change that: fix this Valkey user's ACL, then pause again; other queues may exist and were not paused"],
   ["the look for queues got no answer", { scan: dropped }, { waits: true, errors: [], more: 0, lasting: null },
@@ -619,9 +619,46 @@ test("the short list's cause takes keys and codes alone, orders them by class, c
   assert.match(switchShortNote(true, many), / \(26 more reads were answered with an error\)$/);
 });
 
+// Issue #1064: a part-way switch closed "Look at the fleet and try again" whatever Valkey had answered a queue with.
+test("what a part-way switch says of a queue Valkey answered is its reply's code's class's: the queues by class, one named and the rest counted, and to try again only where that may help (issue #1064)", async () => {
+  const { switchAnsweredCodes, switchAnsweredThen, switchAnsweredSentence } = await import("../src/words.mjs");
+  // Off each Valkey's answer (`partial.codes`), a key of another type first, then a permission, any other code, a
+  // passing state, each class in the answer's own order; anything that is no queue name with a code is left out.
+  const answers = [
+    { partial: { codes: { "pi-jobs": "BUSY", "pi-jobs@hosta": "ERR", "pi-jobs@hostb": "WRONGTYPE" } } },
+    { partial: { codes: { "pi-jobs@hostc": "NOPERM", "pi-jobs@hostd": "WRONGTYPE", "": "WRONGTYPE", "pi-jobs@odd": "two words", "pi-jobs@num": 7 } } },
+    { ok: true, queues: ["pi-jobs"] },
+    { partial: { codes: ["WRONGTYPE"] } },
+    null,
+  ];
+  const answered = switchAnsweredCodes(answers);
+  assert.deepEqual(answered, [
+    { queue: "pi-jobs@hostb", code: "WRONGTYPE", class: "key" }, { queue: "pi-jobs@hostd", code: "WRONGTYPE", class: "key" },
+    { queue: "pi-jobs@hostc", code: "NOPERM", class: "permission" }, { queue: "pi-jobs@hosta", code: "ERR", class: "other" }, { queue: "pi-jobs", code: "BUSY", class: "passing" },
+  ]);
+  assert.deepEqual(switchAnsweredCodes({ partial: { codes: { "pi-jobs": "NOAUTH" } } }), [{ queue: "pi-jobs", code: "NOAUTH", class: "permission" }], "one answer as well as several");
+  assert.deepEqual([switchAnsweredCodes({ ok: true }), switchAnsweredCodes([]), switchAnsweredCodes(undefined)], [[], [], []]);
+  // The sentence: the first queue named with its code, then what the code's class supports, then the count of the rest.
+  assert.equal(switchAnsweredThen(false, answered), "Valkey answers the resume of pi-jobs@hostb with WRONGTYPE: a key of that queue holds another kind of value. Trying again does not change that: remove or repair that key, then resume that queue (4 more queues were answered with an error)");
+  const one = (code) => [{ queue: "pi-jobs@hostb", code }];
+  assert.equal(switchAnsweredThen(true, one("WRONGTYPE")), "Valkey answers the pause of pi-jobs@hostb with WRONGTYPE: a key of that queue holds another kind of value. Trying again does not change that: remove or repair that key, then pause that queue");
+  assert.equal(switchAnsweredThen(false, one("NOPERM")), "Valkey answers the resume of pi-jobs@hostb with NOPERM: the Valkey user this connects as may not run the command or read the key. Trying again does not change that: fix this Valkey user's ACL, then resume the fleet again");
+  assert.equal(switchAnsweredThen(false, one("WRONGPASS")), "Valkey answers the resume of pi-jobs@hostb with WRONGPASS: Valkey did not take the user and password this connects with. Trying again does not change that: fix the Valkey user and password, then resume the fleet again");
+  assert.equal(switchAnsweredThen(false, one("LOADING")), "Valkey answers the resume of pi-jobs@hostb with LOADING: Valkey could not serve the command just then. A later try may succeed: resume the fleet again");
+  assert.equal(switchAnsweredThen(false, one("READONLY")), "Valkey answers the resume of pi-jobs@hostb with READONLY. Look at the fleet before trying again");
+  assert.equal(switchAnsweredThen(false, [...one("READONLY"), { queue: "pi-jobs", code: "ERR" }]), "Valkey answers the resume of pi-jobs@hostb with READONLY. Look at the fleet before trying again (1 more queue was answered with an error)");
+  // Only a passing state says a later try may help, and no sentence for a cause that lasts says to try again.
+  for (const code of ["WRONGTYPE", "NOPERM", "NOAUTH", "WRONGPASS"]) assert.doesNotMatch(switchAnsweredThen(false, one(code)).replace("Trying again does not change that", ""), /try again|may succeed/i, code);
+  // For a model: the code and its class's words, no queue's name.
+  assert.equal(switchAnsweredSentence(false, "WRONGTYPE"), " Valkey answered a queue's resume with WRONGTYPE: a key of that queue holds another kind of value. Trying again does not change that: an operator has to remove or repair that key first.");
+  assert.equal(switchAnsweredSentence(true, "BUSY"), " Valkey answered a queue's pause with BUSY: Valkey could not serve the command just then. A later try may succeed.");
+  assert.equal(switchAnsweredSentence(true, "OOM"), " Valkey answered a queue's pause with OOM.");
+});
+
 test("the short note keeps what to put right inside an audit row's 200 code points, with the longest host name (issue #1035)", () => {
   const longest = `host:h:${"h".repeat(64)}`;
-  for (const [code, remedy] of [["WRONGTYPE", "remove or repair that key"], ["WRONGPASS", "fix this Valkey user's ACL"]]) {
+  // Issue #1036: NOAUTH and WRONGPASS are put right in the user and password, the longest remedy of the three.
+  for (const [code, remedy] of [["WRONGTYPE", "remove or repair that key"], ["NOPERM", "fix this Valkey user's ACL"], ["WRONGPASS", "fix the Valkey user and password"]]) {
     for (const paused of [true, false]) {
       const note = switchShortNote(paused, switchShortCause({ blind: "x", shortCause: { waits: false, errors: [{ key: longest, code }] } }));
       const kept = [...note].slice(0, 200).join("");
