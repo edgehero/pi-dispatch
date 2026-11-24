@@ -147,6 +147,7 @@ test("the words of a failed read and the sentences that are never the pill's are
     "\\bNot every [\\w' ]{1,40}? could be (?:read|found)\\b", "\\bNot read\\b", "\\bnot asked\\b"]);
   assert.deepEqual(NOT_THE_PILLS.map(([sentence]) => sentence.source), [
     "The host's capacity history could not be read\\.",
+    "logs dir unreadable \\([A-Z_-]+\\)",
     "Its list of running jobs could not be read",
     "The runtime's CPU reserve could not be read\\.",
     "The \\d+ files? this run kept could not be read here\\.",
@@ -163,7 +164,7 @@ test("the words of a failed read and the sentences that are never the pill's are
     "Result unreadable|CPU budget unreadable|running jobs unreadable",
     "The registered shell list is incomplete: at least \\d+ more(?: and \\d+ unreadable registrations?)?\\.",
   ]);
-  assert.equal(NOT_THE_PILLS.length, 16);
+  assert.equal(NOT_THE_PILLS.length, 17);
   for (const [sentence, why] of NOT_THE_PILLS) assert.ok(sentence.global && typeof why === "string" && why.length > 20, `${sentence.source}: every entry says why`);
   // Each phrase is seen where a page says it, and a sentence on the second list is not.
   assert.equal(saysUnread("Held jobs 2 cron schedules; held jobs unreadable"), true);
