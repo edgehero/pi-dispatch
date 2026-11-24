@@ -971,6 +971,8 @@ test("the read tools write nothing to Valkey: no key appears, goes or changes, e
     try {
       const waits = JSON.parse((await tool("dispatch_waits", {})).content[0].text);
       assert.deepEqual([waits.complete, waits.jobs.map((j) => j.jobId).sort()], [true, [...holds].sort()], "the four holds, and the list is whole");
+      // Issue #1037: each with its target and wait, as the description says, and without the label.
+      assert.deepEqual(waits.jobs.map((j) => [Object.keys(j).sort().join(","), j.target, j.waitedMs >= 60_000]), holds.map(() => ["checks,jobId,target,waitedMs", "acme/web#7", true]));
       assert.equal(await r.scard("wait:held"), 2000, "and nothing was removed");
       // One member more is past what a read looks at: the list then says it is not whole, and still removes nothing.
       await r.sadd("wait:held", `gone1036-${tag}-past`);

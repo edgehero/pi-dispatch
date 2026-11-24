@@ -234,8 +234,9 @@ held · 4 waiting · h view
   ↓ 1 more
 ```
 
-Three rows and a count of the rest, always. (The `dispatch_waits` tool lists the same rows as data, with
-the job ids.) The index behind them can hold entries whose hold is gone. The panel and `/dispatch status` remove
+Three rows and a count of the rest, always. (The `dispatch_waits` tool lists the same rows as data: each job's
+id, its target, how long it has waited and how many checks it has had. It leaves out the label, which is your own
+words and is not given to a model.) The index behind them can hold entries whose hold is gone. The panel and `/dispatch status` remove
 those as they read, and nothing else does; the tool and the web console write nothing, skip them, and still list the
 real holds, looking at up to 2,000 entries. Past that the tool says its list is not `complete`.
 

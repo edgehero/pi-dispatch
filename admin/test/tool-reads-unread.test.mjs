@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { keyedRedis, quietQueue, registryKeys } from "./helpers/fleet-reader-fakes.mjs";
 import { WAITING_QUEUES_MAX, createFleetReader, readHeldJobs } from "../src/read-model.mjs";
-import { readOperationalTool, readHeldForAgent, waitingForAgent } from "../src/tool-reads.mjs";
+import { readOperationalTool, readHeldForAgent, heldForAgent } from "../src/tool-reads.mjs";
 import { toolActionRequest } from "../src/tool-actions.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { HELD_SET, jobKey } from "@edgehero/pi-dispatch/wait-state";
@@ -184,10 +184,15 @@ test("dispatch_waits is complete only when no held job is past the listing (`mor
     }
     return readHeldJobs({ url: "redis://unused", redisFn: () => keyedRedis(keys), now: () => AT });
   };
-  const few = waitingForAgent(await held(3));
+  const few = heldForAgent(await held(3));
   assert.deepEqual([few.more, few.complete, few.jobs.length], [0, true, 3]);
-  const many = waitingForAgent(await held(25));
+  // Issue #1037: a held row's own keys, longest wait first; none of the waiting rows' keys, which a held row never has.
+  assert.deepEqual(few.jobs[0], { jobId: "h2", target: "acme/web", waitedMs: 3 * MIN, checks: 1 });
+  const many = heldForAgent(await held(25));
   assert.deepEqual([many.more, many.complete, many.jobs.length], [5, false, 20]);
+  // An index with members the read did not look at is not whole either, and a read that failed lists nothing.
+  assert.equal(heldForAgent({ rows: [], more: 0, truncated: true }).complete, false);
+  assert.deepEqual(heldForAgent({ unreachable: "timed out reaching the queue" }), { unavailable: true, more: null, complete: false, jobs: null });
 });
 
 // --- dispatch_failed --------------------------------------------------------------------------------------------------

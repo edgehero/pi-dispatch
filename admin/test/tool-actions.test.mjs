@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { executeToolAction, switchPartialRefusal, toolActionRequest, TOOL_FLEET_METHODS } from "../src/tool-actions.mjs";
 import { modelToolRefusal } from "../src/tool-refusals.mjs";
-import { failedForAgent, waitingForAgent, readOperationalTool } from "../src/tool-reads.mjs";
+import { failedForAgent, heldForAgent, readOperationalTool } from "../src/tool-reads.mjs";
 import { createFleetReader, readHeldJobs } from "../src/read-model.mjs";
 import { answeredWith, discoveryRedis, keyedRedis, noAnswer, quietQueue, registryKeys } from "./helpers/fleet-reader-fakes.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
@@ -110,8 +110,10 @@ test("operational projections keep actual machine facts and exclude hostile pros
   assert.equal(failedForAgent({ rows: [{ jobId: "r1", queue: "pi-jobs", supersededBy: hostile }] }).jobs[0].supersededBy, null, "only a run id's shape");
   const waiting = await tool("waiting");
   assert.deepEqual([waiting.jobs[0].jobId, waiting.jobs[0].due, waiting.jobs[0].holder, waiting.jobs[0].reason], ["q1", NOW, "r1", "scope-folder"]);
-  const held = waitingForAgent(await readHeldJobs({ url: "redis://unused", now: () => NOW, redisFn: () => keyedRedis({ [HELD_SET]: ["w1"], [heldJobKey("w1")]: { since: String(NOW - 60_000), checks: "1", target: "acme/web", label: hostile } }) }));
-  assert.equal(held.jobs[0].jobId, "w1");
+  const held = heldForAgent(await readHeldJobs({ url: "redis://unused", now: () => NOW, redisFn: () => keyedRedis({ [HELD_SET]: ["w1"], [heldJobKey("w1")]: { since: String(NOW - 60_000), checks: "1", target: "acme/web#7", label: hostile } }) }));
+  // Issue #1037: the three facts the tool's description promises, and never the label, the operator's own words.
+  assert.deepEqual(held.jobs[0], { jobId: "w1", target: "acme/web#7", waitedMs: 60_000, checks: 1 });
+  assert.equal(heldForAgent({ rows: [{ jobId: "w1", target: hostile, waitedMs: 1, checks: 0 }], more: 0, truncated: false }).jobs[0].target, null, "a target that is no id is not handed as text");
   const hosts = await tool("hosts");
   assert.equal(hosts.hosts[0].capacity.budgetMemMiB, 8192);
   assert.deepEqual([hosts.hosts[0].jobs[0].orphan, hosts.hosts[0].jobs[0].backend], [true, "local"]);
