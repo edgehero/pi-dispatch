@@ -23,9 +23,12 @@ import {
 	MODEL_NOT_ALLOWED,
 	MODEL_POLICY_UNENFORCEABLE,
 	providerAuthRefused,
+	providerStopRefused,
+	PROVIDER_STOP_REFUSAL,
 	STOP_REASONS,
 	TOKEN_BUDGET,
 } from "../src/outcome.mjs";
+import { ADAPTER_MESSAGE, EXPLANATION, HOSTILE_EXPLANATION, PI_AI_FALLBACK } from "./fixtures/anthropic-refusal.mjs";
 import { attachTurnBudget } from "../src/turn-budget.mjs";
 import { agentEnd, assistantError, assistantText, promptTurn, retryTurn } from "./helpers/pi-retry-events.mjs";
 
@@ -328,6 +331,118 @@ test("only an error stopReason can be a refusal, and budget aborts still win ove
 	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal, command: { failed: true }, isRetryable }).reason, "command-error");
 	// classifyThrow is unchanged: a thrown 401 string is not the stopReason channel.
 	assert.equal(classifyThrow(new Error("401 invalid x-api-key")).code, EXIT_INFRA);
+});
+
+// --- issue #950: a provider's explicit refusal of the request is policy, not infra ---
+
+// The two shapes as the pinned readers leave them: pi-ai's anthropic-messages adapter (rawStopReason, its message being
+// the explanation or its own fallback sentence) and the subscription adapter (no rawStopReason, its fixed prefix). The
+// loopback in pinned-api.test.mjs and the adapter tests in worker/test/community-auth-adapters.test.mjs drive the real
+// readers to these shapes; here the rule is held to them on its own.
+const piAiRefusal = (errorMessage) => ({ role: "assistant", api: "anthropic-messages", provider: "anthropic", stopReason: "error", rawStopReason: "refusal", errorMessage });
+const adapterRefusal = (errorMessage) => ({ role: "assistant", api: "anthropic-messages", provider: "anthropic", stopReason: "error", errorMessage });
+const STOP_REFUSED = { code: EXIT_POLICY, reason: "provider-stop-refusal" };
+
+test("a provider's explicit refusal stop exits 2 as provider-stop-refusal, with no message (#950)", () => {
+	assert.equal(PROVIDER_STOP_REFUSAL, "provider-stop-refusal");
+	const refusals = [
+		piAiRefusal(PI_AI_FALLBACK),
+		piAiRefusal(EXPLANATION),
+		// The explanation is the model's prose: a credential refusal's shape or one of pi's retry words in it changes
+		// nothing, and with this rule checked first it is never named provider-auth-refused.
+		piAiRefusal(HOSTILE_EXPLANATION),
+		piAiRefusal("401 Unauthorized: the request was refused"),
+		piAiRefusal("UnrecognizedClientException: refused"),
+		// pi-ai keeps rawStopReason when the stream breaks after the refusal and its catch rewrites the message, so the
+		// refusal the provider already sent still decides (a named residual: the subscription adapter stays infra there).
+		piAiRefusal("Anthropic stream ended before message_stop"),
+		piAiRefusal("Connection error."),
+		piAiRefusal(undefined),
+		adapterRefusal(ADAPTER_MESSAGE.plain),
+		adapterRefusal(ADAPTER_MESSAGE.explained),
+		adapterRefusal(ADAPTER_MESSAGE.hostile),
+	];
+	for (const terminal of refusals) {
+		assert.equal(providerStopRefused(terminal), true, JSON.stringify(terminal));
+		// deepEqual, so a `message` that carried the explanation onto the exit line fails here.
+		for (const isRetryable of [NOT_TRANSIENT, TRANSIENT, null]) {
+			assert.deepEqual(classifyStopReason(terminal, isRetryable), STOP_REFUSED, JSON.stringify(terminal));
+		}
+	}
+});
+
+test("only a proved refusal shape is a refusal: near misses, other providers and prose stay retryable infra (#950)", () => {
+	const notRefusals = [
+		// The adapter's prefix, but not closed on the right, or not at position 0, or not its spelling.
+		adapterRefusal("Provider stop reason: refusals"),
+		adapterRefusal("Provider stop reason: refusal_detected"),
+		adapterRefusal("Provider stop reason: refusal - a plain hyphen is not the adapter's"),
+		adapterRefusal("Provider stop reason: refusal\u2014no spaces"),
+		adapterRefusal(" Provider stop reason: refusal"),
+		adapterRefusal("500 Provider stop reason: refusal"),
+		adapterRefusal("provider stop reason: refusal"),
+		adapterRefusal("Provider stop reason: error"),
+		adapterRefusal("Provider stop reason: sensitive"),
+		adapterRefusal('upstream said "Provider stop reason: refusal"'),
+		// pi-ai's words with no structured field are prose, whatever they say.
+		adapterRefusal(PI_AI_FALLBACK),
+		adapterRefusal("refusal"),
+		// The adapter's prefix on a message that has a rawStopReason of something else: pi-ai's, so its text is prose.
+		{ ...adapterRefusal(ADAPTER_MESSAGE.plain), rawStopReason: "end_turn" },
+		{ ...adapterRefusal(ADAPTER_MESSAGE.plain), rawStopReason: null },
+		// The same stops from another provider on the same api: a gateway's or another vendor's `refusal` may relay a
+		// sampled content stop of a model that is not Anthropic's, so it is not proved and stays infra.
+		{ ...piAiRefusal(PI_AI_FALLBACK), provider: "vercel-ai-gateway" },
+		{ ...piAiRefusal(PI_AI_FALLBACK), provider: "openrouter" },
+		{ ...adapterRefusal(ADAPTER_MESSAGE.plain), provider: "fireworks" },
+		{ ...adapterRefusal(ADAPTER_MESSAGE.plain), provider: "my-anthropic-proxy" },
+		{ ...piAiRefusal(PI_AI_FALLBACK), provider: undefined },
+		// The same stops off the one admitted api, or with no api at all.
+		{ ...piAiRefusal(PI_AI_FALLBACK), api: "bedrock-converse-stream" },
+		{ ...piAiRefusal("Provider finish_reason: content_filter"), api: "openai-completions" },
+		{ ...adapterRefusal(ADAPTER_MESSAGE.plain), api: "pi-messages" },
+		{ ...adapterRefusal(ADAPTER_MESSAGE.plain), api: undefined },
+		// Content stops on the admitted api that are not the refusal: named residuals.
+		{ ...piAiRefusal("Provider stopped with: sensitive"), rawStopReason: "sensitive" },
+		{ ...piAiRefusal("Provider finish_reason: content_filter"), rawStopReason: "content_filter" },
+		{ ...piAiRefusal("Provider stopped with: SAFETY"), rawStopReason: "SAFETY" },
+		{ ...piAiRefusal("refused"), rawStopReason: "Refusal" },
+		// Genuine transient failures on the same api.
+		{ ...adapterRefusal('429 {"type":"error","error":{"type":"rate_limit_error","message":"refusal of service"}}') },
+		{ ...adapterRefusal('529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}') },
+		adapterRefusal("Connection error."),
+	];
+	for (const terminal of notRefusals) {
+		assert.equal(providerStopRefused(terminal), false, JSON.stringify(terminal));
+		assert.deepEqual(classifyStopReason(terminal, NOT_TRANSIENT), { code: EXIT_INFRA, reason: "error", message: terminal.errorMessage }, JSON.stringify(terminal));
+	}
+	// Junk never throws, and a terminal that is not an error keeps its own verdict even with a refusal stop reason on it.
+	for (const value of [null, undefined, 0, "refusal", [], {}, { stopReason: "error" }, { stopReason: "error", api: "anthropic-messages" }]) {
+		assert.equal(providerStopRefused(value), false, String(value));
+	}
+	assert.deepEqual(classifyStopReason({ ...piAiRefusal("x"), stopReason: "stop" }), { code: EXIT_COMPLETED, reason: "stop" });
+	assert.deepEqual(classifyStopReason({ ...piAiRefusal("x"), stopReason: "aborted" }), { code: EXIT_POLICY, reason: "aborted" });
+	assert.equal(classifyStopReason({ ...piAiRefusal("x"), stopReason: "length" }).reason, "length");
+	// A credential refusal on the same api is still the credential row: the refusal rule claims only its own shapes.
+	const credential = adapterRefusal('401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}');
+	assert.equal(classifyStopReason(credential, NOT_TRANSIENT).reason, "provider-auth-refused");
+});
+
+test("every stop decideExit ranks above the terminal message still wins over a refusal (#950)", () => {
+	const refusal = adapterRefusal(ADAPTER_MESSAGE.explained);
+	const rejected = { code: EXIT_POLICY, reason: "retry-unresumable", message: "x" };
+	assert.equal(decideExit({ budgetAborted: true, budgetTurns: 3, tokenAborted: false, terminal: refusal }).reason, "turn_budget");
+	for (const stop of [TOKEN_BUDGET, COST_CAP, MODEL_NOT_ALLOWED]) {
+		assert.equal(decideExit({ budgetAborted: false, meterStop: stop, tokenAborted: false, terminal: refusal }).reason, stop);
+	}
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: true, terminal: refusal }).reason, TOKEN_BUDGET);
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, activityStop: "idle", terminal: refusal }).reason, "idle");
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, activityStop: "stalled", terminal: refusal }).reason, "stalled");
+	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal, rejected }), rejected);
+	// Nothing above it fired: the refusal is the verdict, also for a handler-driven command turn; a thrown handler wins.
+	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal }), STOP_REFUSED);
+	assert.deepEqual(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal, command: { failed: false } }), STOP_REFUSED);
+	assert.equal(decideExit({ budgetAborted: false, tokenAborted: false, terminal: refusal, command: { failed: true } }).reason, "command-error");
 });
 
 // --- issue #451: the Google, Vertex and Bedrock refusal shapes, from the M0-d measurements ---

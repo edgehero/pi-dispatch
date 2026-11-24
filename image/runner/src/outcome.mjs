@@ -9,7 +9,7 @@ export const EXIT_INFRA = 1; // retryable: provider 5xx/429, network, our own bu
 export const QUESTION_GROUP_REFUSED = "question-group-refused";
 export const QUESTION_GROUP_UNANSWERED = "question-group-unanswered";
 export const ANSWER_DRAFT_REFUSED = "answer-draft-refused";
-export const EXIT_POLICY = 2; // not retried: turn budget, cap, config error, provider refused the credential
+export const EXIT_POLICY = 2; // not retried: turn budget, cap, config error, provider refused the credential or the request
 
 /**
  * The policy-stop reasons the meter and the pre-spend policy check name (issues #501, #502). Exported literals,
@@ -39,6 +39,14 @@ export const MODEL_POLICY_UNENFORCEABLE = "model-policy-unenforceable";
  */
 export const AWAITING_INPUT = "awaiting-input";
 export const AWAITING_APPROVAL = "awaiting-approval";
+/**
+ * A provider's explicit refusal stop (issue #950): the model answered and declined to go on, and the provider marked the
+ * reply's stop reason as a refusal. The same request is likely to meet the same refusal, and a queue retry would repeat
+ * the whole paid run before it, so it is a policy stop with a name of its own. Before it the refusal fell to the generic
+ * `error` arm below and the queue retried it as infrastructure. Exported for the reason the policy literals are: the
+ * worker's closed RUNNER_POLICY_REASONS reads this source for it.
+ */
+export const PROVIDER_STOP_REFUSAL = "provider-stop-refusal";
 
 /**
  * Which rule of the cost guard refused the call that stopped a `cost-cap` job (issue #507), as the exit line's `why`:
@@ -388,6 +396,58 @@ export function providerAuthRefused(terminal, isRetryable) {
 }
 
 /**
+ * The one provider and api whose refusal shapes are proved against the pinned artifacts: Anthropic's own, through pi-ai
+ * or the Claude subscription adapter, which registers as provider `anthropic` on this api and nothing else
+ * (community-auth-adapter.mjs). The provider is gated as well as the api because pi-ai 1.6.0 also speaks
+ * anthropic-messages to gateways and other vendors (vercel-ai-gateway, openrouter and fireworks among them), whose
+ * `refusal` may relay another model's sampled content stop. Those, and every other adapter's content stop (`sensitive`
+ * on this api, openai-completions' `content_filter`, Google's SAFETY family, Bedrock's guardrail stops), stay `1` as
+ * named residuals of INT-RUNNER-EXIT-CODE-PROTOCOL until each is proved on its own. The provider is a name, not an
+ * address: an operator who points `anthropic` at a proxy of their own (a models.json baseUrl) vouches for what it
+ * relays, and its `refusal` is read as Anthropic's, which is also a named residual.
+ */
+const REFUSAL_PROVIDER = "anthropic";
+const REFUSAL_API = "anthropic-messages";
+
+/**
+ * The approved Claude subscription adapter's own wording (pi-anthropic-oauth 0.3.6 and 0.3.11, src/stream.ts
+ * applyMessageDelta): every stop reason it does not map becomes "error", with the provider's raw reason kept in this
+ * fixed prefix, followed by a space, U+2014, a space and Anthropic's explanation when there is one. That adapter sets
+ * no rawStopReason, so this prefix is all the runner has. Anchored and closed on both sides, so "refusals",
+ * "refusal_x", a leading status or a message that only quotes the words stays infra. The dash is written as an escape.
+ */
+const ADAPTER_REFUSAL = /^Provider stop reason: refusal(?: \u2014 |$)/;
+
+/**
+ * True when a terminal assistant message is a provider's explicit refusal of the request (issue #950). Never throws.
+ *
+ * Two shapes, both only on Anthropic's provider and api, and both read from what the adapter itself sets, never from
+ * prose:
+ * - pi-ai's anthropic-messages adapter keeps the raw stop reason in `rawStopReason` (anthropic-messages.js, set on
+ *   `message_delta` before mapStopReason) and maps a refusal to `stopReason: "error"` with Anthropic's explanation, or a
+ *   fixed fallback sentence, as `errorMessage`. The explanation is the model's own text, so it is never read here:
+ *   `rawStopReason` alone decides, and a message that carries one is judged by it whatever its text says.
+ * - the subscription adapter's fixed prefix above, read only when `rawStopReason` is absent. pi-ai's own adapter could
+ *   carry that text only if the server's own error event said it word for word (anthropic-messages.js passes an SSE
+ *   error's data through as the message), which Anthropic's API, answering errors in JSON, does not.
+ *
+ * Unlike the credential rule, it does not ask pi-ai's retry predicate. That predicate reads the message text, and a
+ * refusal's text is the model's explanation, which can hold "timeout" or "rate limit" and so make a determinate refusal
+ * read as transient. The provider answered, so the predicate's question, whether the exchange failed on the way, does
+ * not arise.
+ *
+ * Rejected: patching the subscription adapter to set rawStopReason. That changes the adapted bytes every deployment
+ * has staged and pinned (community-auth-output-pins.mjs), and a copy staged before the change would still send only
+ * the prefix, so the prefix has to be read either way.
+ */
+export function providerStopRefused(terminal) {
+	if (terminal === null || typeof terminal !== "object") return false;
+	if (terminal.stopReason !== "error" || terminal.provider !== REFUSAL_PROVIDER || terminal.api !== REFUSAL_API) return false;
+	if (terminal.rawStopReason !== undefined) return terminal.rawStopReason === "refusal";
+	return typeof terminal.errorMessage === "string" && ADAPTER_REFUSAL.test(terminal.errorMessage);
+}
+
+/**
  * Find pi-ai's `isRetryableAssistantError` in the SAME copy the runner already dispatches through.
  *
  * The usage meter has already probed and accepted that copy (the nested one pi mutates; see
@@ -487,6 +547,14 @@ export function classifyStopReason(terminal, isRetryable = null) {
 			return { code: EXIT_POLICY, reason: "aborted" };
 
 		case "error":
+			// A provider's explicit refusal of the request (issue #950) is checked FIRST, before the credential shapes:
+			// pi-ai puts the model's own explanation in errorMessage, and an explanation that happens to begin "403 "
+			// would otherwise be named a credential refusal. No `message`: the explanation is the provider's prose about
+			// the job's content, so it stays off the exit line and out of the job log, and the reason alone says what
+			// happened.
+			if (providerStopRefused(terminal)) {
+				return { code: EXIT_POLICY, reason: PROVIDER_STOP_REFUSAL };
+			}
 			// A provider that refused the credential refuses it again on every retry: the
 			// worker hands the container the same key each attempt, so retrying pays for a container to
 			// rediscover a determinate refusal (issue #437, CONST-RETRY-INFRA-ONLY). It rides the EXISTING

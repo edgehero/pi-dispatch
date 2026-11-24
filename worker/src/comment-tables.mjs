@@ -58,6 +58,9 @@ export const TERMINAL_COMMENTS = {
 	// Issue #437. Names the cause but never the provider's own message, which may echo a key fragment. "Or
 	// access" because a 403 is as often a key that works but may not use this model or route as a bad key.
 	"provider-auth-refused": "Stopped: the AI provider refused this worker's credentials or access (an authentication or permission error). The operator needs to check the provider key and what it is allowed to use. Not retried.",
+	// Issue #950. Names the refusal and never its explanation: that is the provider's prose about what the job was asked,
+	// which the runner keeps off the exit line, and the comment's reader may be anyone who can read the issue.
+	"provider-stop-refusal": "Stopped: the AI model refused to continue this request, and its provider ended the reply with a refusal. The same request is likely to be refused again. Partial work may exist. Not retried.",
 	// Issues #501, #502. The two stops name the policy, never the amount or the model: both are operator
 	// configuration, and the comment's reader may be an issue author who can act on neither.
 	"cost-cap": "Stopped: the next AI call could have taken this run past its cost limit, so it was not made. Partial work may exist. Not retried.",

@@ -5,7 +5,7 @@ import { parseTriggersDocument } from "../src/triggers.mjs";
 import { ANSWER_CLASSIFICATIONS, validateAnswerRules, validateStandingAnswers, answerStandingSource, answerConfigDigest, makeAnswerDraftStore } from "../src/answerer.mjs";
 import { consoleDraftOf, answerTrailComment } from "../src/console-answer.mjs";
 import { enqueueAnswerDraftJob, enqueueForgeJob } from "../src/queue.mjs";
-import { readAnswerPending, stageAnswerDraft } from "../src/answerer-runtime.mjs";
+import { makeAnswerDraftRuntime, readAnswerPending, stageAnswerDraft } from "../src/answerer-runtime.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { mkdirSync, writeFileSync, symlinkSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -91,4 +91,17 @@ test("console provenance is all-or-none and the queue preserves only validated d
 	await enqueueForgeJob(queue, "github", job); assert.deepEqual(added[0].console, meta);
 	assert.ok(answerTrailComment("rob", "npm test", "draft-1").includes("Drafted in run draft-1."));
 	assert.ok(!answerTrailComment("rob", "npm test", "bad @mention").includes("Drafted"));
+});
+
+test("a draft job the provider refused is a failed draft, not a cap refusal (issue #950)", async () => {
+	// The draft's pass reason is read off the stop's token by pattern; a provider's refusal names no cap or budget, so it must
+	// not read as one, while a real cap stop still does.
+	const updates = [];
+	const runtime = makeAnswerDraftRuntime({ store: { update: async (runId, fields) => updates.push([runId, fields]) } });
+	for (const reason of ["provider-stop-refusal", "cost-cap", "token_budget"]) await runtime.refused({ answerDraft: { runId: `draft-${reason}` } }, { outcome: "policy", reason });
+	assert.deepEqual(updates, [
+		["draft-provider-stop-refusal", { status: "failed", passReason: "failed" }],
+		["draft-cost-cap", { status: "failed", passReason: "cap-refused" }],
+		["draft-token_budget", { status: "failed", passReason: "cap-refused" }],
+	]);
 });

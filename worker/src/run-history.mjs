@@ -240,7 +240,12 @@ export const STEER_RUNNER_REASONS = Object.freeze(["steer-inbox-missing", "steer
  * limit or the command the job waited on, not a budget.
  */
 export const ACTIVITY_RUNNER_REASONS = Object.freeze(["idle", "stalled"]);
-export const RUNNER_POLICY_REASONS = new Set(["secret-files-unusable", "provider-auth-refused", "cost-cap", "model-not-allowed", "subscription-allowance", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...EXCLUDE_RUNNER_REASONS, ...ANSWER_DRAFT_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, ...ACTIVITY_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
+/**
+ * `provider-stop-refusal` (issue #950) is the runner's exit-2 stop of a run whose provider ended the reply with an explicit
+ * refusal (image/runner/src/outcome.mjs providerStopRefused). It is named in the set itself, beside `provider-auth-refused`,
+ * because the operator's fix is the request or the model, not a budget, and a retry would likely meet the same refusal.
+ */
+export const RUNNER_POLICY_REASONS = new Set(["secret-files-unusable", "provider-auth-refused", "provider-stop-refusal", "cost-cap", "model-not-allowed", "subscription-allowance", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...EXCLUDE_RUNNER_REASONS, ...ANSWER_DRAFT_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, ...ACTIVITY_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
 
 /**
  * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so
