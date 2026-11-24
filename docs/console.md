@@ -2786,14 +2786,19 @@ effect of a change on queued jobs. A viewer sees these facts but no write contro
 Instructions are escaped for operators.
 Runs are matched by what the row says, so where the triggers file could not be read, or has no such row, the page says nothing of
 its runs or its jobs in line. Where the file gives the row but does not load, it says it could not match runs to this row.
-When Valkey could not be read, the page is drawn from the triggers file and offers no change: no Edit, Delete or Fire now, and
-no form on [what its jobs get](#what-a-triggers-jobs-get). It says "Valkey could not be read, so this page offers no change. The
-triggers file can still be changed by hand. Reload to try again." An operator still reads the instructions and the task, which the
+When the page could not read the deployment, it is drawn from the triggers file and offers no change: no Edit, Delete or Fire
+now, and no form on [what its jobs get](#what-a-triggers-jobs-get). The page cannot show what a change would meet (the hosts that
+read the file, what runs, what waits), so it offers none. It says why in the words of the cause: "Valkey could not be read, so this
+page offers no change. The triggers file can still be changed by hand. Reload to try again."; "Valkey answered this page's read
+with an error, so ..." where it did; and "This page could not read the deployment in time, so it offers no change. ..." where
+Valkey answered too late for the page. The rule is the page's alone: the console's routes answer as before, and the file can
+still be changed by hand. An operator still reads the instructions and the task, which the
 page takes from the file, and the image, extensions and MCP rows say the hosts could not be read rather than that no host says.
 Add a trigger, Triggers (which then has no Add a trigger button), [a project's page](#one-project) and Models follow the same
-rule, as Configuration and Secrets do by showing their files read-only. Pause and Resume on Fleet and the overview are the one
-exception: the kill switch is never withheld for this. When only the run history could not be read every form is offered, since
-no change is judged by it; a trigger's counts are then "at least", and its page says the run history could not be read rather
+rule, as Configuration and Secrets do by showing their files read-only; so do the standing answer form on Parked and the
+envelope and priorities forms of the budget split. Pause and Resume on Fleet and the overview are the one exception: the kill
+switch is never withheld for this, and the event check on Triggers, which only reads, stays too. When only the run history could
+not be read every form is offered, since the page still shows the hosts, what runs and what waits; a trigger's counts are then "at least", and its page says the run history could not be read rather
 than that no runs were found.
 A row is found by its place in the file, as a change finds it, so an entry the file holds but no trigger can use reads "The file's
 entry at this row is not a usable trigger" with no other row's facts or Delete in its place, and the lists link past it.

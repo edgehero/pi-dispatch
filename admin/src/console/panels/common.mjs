@@ -433,15 +433,41 @@ export const deploymentUnread = (view) => view?.data?.readFailed === true && (vi
 /**
  * Whether a page offers a change to the deployment's files (issue #988): an operator on a console that takes changes
  * (`canAct`), on a page that read the deployment. A page that could not read it offers no change: its forms were
- * drawn from the files alone, and what a change is judged against (the hosts that would take it, the queues, the runs
- * that hold money) was not read. Configuration and Secrets drew none in that state; a trigger's page, Add a trigger,
- * a project and Models did. The page says so once (`noChangeText`), and the file can still be changed by hand.
+ * drawn from the files alone, and it cannot show what a change would meet (the hosts that read the file, what runs,
+ * what waits). Configuration and Secrets drew none in that state; a trigger's page, Add a trigger, a project and
+ * Models did. The page says so (`noChangeText`), and the file can still be changed by hand. The rule is the page's
+ * alone: the routes answer as they did, and most of their previews need no Valkey at all.
  *
  * NEVER the kill switch. Pausing and resuming the fleet are what an operator reaches for when the deployment cannot
  * be read, so their forms ask `canAct` and nothing else: this rule is for a change to a file, not for an act on the
  * queues.
  */
 export const changesOffered = (view) => canAct(view) && !deploymentUnread(view);
+
+/**
+ * Why a page could not read the deployment (issue #988), so a sentence can be true of the cause: "late", the page's
+ * deadline cut the read, of a Valkey that may well be answering; "error", Valkey answered the read with an error;
+ * "silent", nothing answered (stopped, killed, refused, not reached). Null for a page that read it. The loader says
+ * the first two (`snapshotFailure`), and what is left is the third.
+ */
+export const deploymentUnreadWhy = (view) => (!deploymentUnread(view) ? null : view.data.snapshotFailure === "late" ? "late" : view.data.snapshotFailure === "error" ? "error" : "silent");
+
+/** The start of a sentence for each cause. "Valkey could not be read" was said of a Valkey that answered late. */
+export const DEPLOYMENT_UNREAD_WORDS = Object.freeze({
+  silent: "Valkey could not be read",
+  error: "Valkey answered this page's read with an error",
+  late: "This page could not read the deployment in time",
+});
+
+/**
+ * Said on a page whose forms are left out because it could not read the deployment (`changesOffered`), where each
+ * form or group of forms would be: why, in the words of the cause, and the file those forms write, which can still be
+ * changed by hand.
+ */
+export function noChangeText(view, file = "triggers file") {
+  const why = deploymentUnreadWhy(view) ?? "silent";
+  return `${DEPLOYMENT_UNREAD_WORDS[why]}, so ${why === "late" ? "it" : "this page"} offers no change. The ${file} can still be changed by hand. Reload to try again.`;
+}
 
 /** The sentence that sends an operator to /setup's doctor on this console's own host (issue #849). */
 export const DOCTOR_FROM_SETUP = "here in the browser, without its container probes; the command below also runs those.";

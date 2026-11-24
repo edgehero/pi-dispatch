@@ -142,11 +142,6 @@ export const facts = (pairs) => ui.facts(pairs);
 /** Above a card drawn from the files alone (issue #844): what it shows, and why it offers no change. */
 export const FILES_ONLY_TEXT = "Valkey could not be read, so this shows what the file holds and offers no change. Reload to try again.";
 /**
- * Said once on a page whose forms are left out because the deployment could not be read (issue #988,
- * `changesOffered`), naming the file those forms write.
- */
-export const noChangeText = (file = "triggers file") => `Valkey could not be read, so this page offers no change. The ${file} can still be changed by hand. Reload to try again.`;
-/**
  * The snapshot a file-backed card draws from where the snapshot itself failed (issue #844): the reader's `fileViews`
  * under the snapshot's own keys, or null where there is none (they are only read when the snapshot failed). Nothing
  * in it came from Valkey.

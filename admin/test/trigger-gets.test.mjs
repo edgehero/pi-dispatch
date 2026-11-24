@@ -507,7 +507,7 @@ test("with Valkey down, the real reader's page says what is unread: the file was
   assert.ok(!textOf(page).includes("The triggers file could not be read"));
   assert.ok(!textOf(page).includes("This row does not exist"));
   // A page that could not read the deployment offers no change (issue #988): it drew the form the file gave, and
-  // what an edit is judged against had not been read.
+  // could not show what the change would meet.
   assert.ok(!panelOf(page, "p-trigger-gets").includes('name="pageDigest"') && !/<form\b/.test(panelOf(page, "p-trigger-gets")), "no form over a deployment that was not read");
   assert.equal(textOf(page).split("Valkey could not be read, so this page offers no change. The triggers file can still be changed by hand. Reload to try again.").length - 1, 2, "said by the card and in place of Edit");
   assert.ok(textOf(panelOf(page, "p-trigger-change")).includes(W.othersUnread));

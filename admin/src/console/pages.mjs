@@ -49,8 +49,7 @@ import { triggerListOf, TRIGGER_LIST_KINDS } from "../trigger-list.mjs";
 import { loadWatchData, parseWatchQuery, watchPanel, watchBoardPanel } from "./watch.mjs";
 import { readForkPoints } from "../run-fork.mjs";
 import { readTriggerEditor, readTriggersWithInstructions, secretBundlesView, triggerDetailOf, TRANSCRIPT_ID_RE } from "../read-model.mjs";
-import { ageText, beatAgeOf, canAct, changesOffered, hostsUnread, registryReadInPart } from "./panels/common.mjs";
-import { noChangeText } from "./panels/config-ui.mjs";
+import { noChangeText, ageText, beatAgeOf, canAct, changesOffered, hostsUnread, registryReadInPart } from "./panels/common.mjs";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { BACKEND_NAMES, BACKENDS } from "@edgehero/pi-dispatch/backends";
 import { RECOVERY_CAP } from "@edgehero/pi-dispatch/recovery-queue";
@@ -1035,8 +1034,10 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
         data.snapshot = null;
         // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
         data.readFailed = true;
-        // Issue #988: the read did not fail, the page's deadline cut it (or had passed before it could be made).
+        // Issue #988: the read did not fail, the page's deadline cut it (or had passed before it could be made); or
+        // Valkey answered it, with an error. Either way a page's sentence must not say Valkey could not be read.
         if (err instanceof PageDeadlinePassed) data.snapshotFailure = "late";
+        else if (repliedWithError(err)) data.snapshotFailure = "error";
         // Issue #844: what the deployment's files hold needs no Valkey, so a page still draws it rather than an empty
         // list. Absent where the reader has none or it throws: a panel then says the fact could not be read.
         try { if (typeof deps.fleet?.fileViews === "function") data.files = deps.fleet.fileViews() ?? null; } catch { data.files = null; }
@@ -1324,7 +1325,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   };
   const refusedSnapshotRead = async () => {
     if (name === "run" && data.run?.record && refusedBeforeStart(data.run.record)) {
-      try { data.snapshot = await asked(() => deps.fleet.snapshot()); } catch (err) { data.snapshot = null; if (err instanceof PageDeadlinePassed) data.snapshotFailure = "late"; }
+      try { data.snapshot = await asked(() => deps.fleet.snapshot()); } catch (err) { data.snapshot = null; if (err instanceof PageDeadlinePassed) data.snapshotFailure = "late"; else if (repliedWithError(err)) data.snapshotFailure = "error"; }
     }
   };
   const refusedWindowRead = async () => {
@@ -1522,6 +1523,13 @@ function oneReading(fs, path) {
   };
 }
 
+/**
+ * Whether a read failed because Valkey ANSWERED it, with an error (a key of another type, a command it refuses, no
+ * permission): the client's own error for a reply, or a message that starts with the reply's code. Not a Valkey that
+ * did not answer, and not a deadline.
+ */
+const repliedWithError = (err) => err?.name === "ReplyError" || /^(?:WRONGTYPE|ERR|NOAUTH|NOPERM|LOADING|MISCONF|READONLY|BUSY|OOM)\b/.test(String(err?.message ?? ""));
+
 function runPlacesOf(data) {
   const run = data?.readFailed === true && !data?.run?.record ? { unreadable: RUN_RECORD_UNREAD } : data?.run;
   return { run, lookup: data?.chat, transcript: data?.transcript, progress: data?.progress };
@@ -1575,7 +1583,7 @@ export async function renderPage(name, ctx) {
   if (name === "run" && extra !== null) sections.set("p-transcript", html`${sections.get("p-transcript")}${extra}`);
   const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : name === "zero-touch" ? zeroTouchLayout(role, zeroTouchStateOf(viewOf(name, ctx))) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
   const headline = headlineOf(name, ctx);
-  const triggerListOptions = name === "triggers" ? { description: canAct(viewOf(name, ctx)) && !changesOffered(viewOf(name, ctx)) ? `${triggersDescription(viewOf(name, ctx))} ${noChangeText()}` : triggersDescription(viewOf(name, ctx)), end: changesOffered(viewOf(name, ctx)) ? html`<a class="btn btn--primary" href="${PAGES["trigger-add"].path}">Add a trigger</a>` : null } : name === "trigger-check" ? { description: "Describe a hypothetical event. Nothing is sent or spent.", end: html`<a class="btn" href="${PAGES.triggers.path}">Back to Triggers</a>` } : null;
+  const triggerListOptions = name === "triggers" ? { description: canAct(viewOf(name, ctx)) && !changesOffered(viewOf(name, ctx)) ? `${triggersDescription(viewOf(name, ctx))} ${noChangeText(viewOf(name, ctx))}` : triggersDescription(viewOf(name, ctx)), end: changesOffered(viewOf(name, ctx)) ? html`<a class="btn btn--primary" href="${PAGES["trigger-add"].path}">Add a trigger</a>` : null } : name === "trigger-check" ? { description: "Describe a hypothetical event. Nothing is sent or spent.", end: html`<a class="btn" href="${PAGES.triggers.path}">Back to Triggers</a>` } : null;
   const configOptions = name === "connections" ? { description: connectionsDescription() } : name === "updates" ? { description: updatesDescription() } : name === "devices" ? { description: DEVICES_WORDS.description } : name === "project" ? { title: projectTitle(ctx?.data?.projectView), description: projectDescription(ctx?.data?.projectView), end: html`<a class="btn" href="${`/runs?project=${encodeURIComponent(ctx?.query?.id ?? "")}`}">Open in Runs</a>` } : null;
   const titleOptions = configOptions ?? triggerListOptions ?? (name === "setup" ? { description: SETUP_DESCRIPTION } : name === "models" ? { description: "Which model each role runs, its fallbacks and cooldowns. Every role change is reviewed; this page starts no run." } : name === "sandboxes" ? { description: ctx?.query?.gatewaySelect ? "Choose an already-open shell on the workspace host. No sandbox starts here." : "A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.", end: ctx?.query?.gatewaySelect || !ctx?.data?.sandboxes ? null : html`<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>` } : name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: ctx?.data?.triggerDetail?.trigger?.runKind === "local" && localEventFilterValue(ctx.data.triggerDetail.trigger) === null ? null : html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.runKind === "local" ? localEventFilterValue(ctx.data.triggerDetail.trigger) : ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
   // Issue #882: the run's short link beside its id, from its record or, for a running job, its live facts; none for a

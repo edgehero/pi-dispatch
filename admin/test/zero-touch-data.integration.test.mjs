@@ -45,6 +45,8 @@ test("the page service repairs confirmed configuration writes only through confi
 });
 
 test("the grouping configuration is said in the word of its file's case: absent configures none, and a file nobody could read is not one that does not load", { skip: base ? false : "VALKEY_TEST_URL not set" }, async () => {
+  // Database 14 is not this test's own: other suites use it too. This test only READS it (the service's read of an
+  // empty Zero touch store) and leaves it as it found it; should it ever write, it writes under a key prefix of its own.
   const url = new URL(base); url.pathname = "/14";
   const words = async (state) => {
     const root = tempDir("zero-touch-words-");
