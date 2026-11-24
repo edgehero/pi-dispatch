@@ -126,6 +126,22 @@ best-effort; an unavailable forge or a process exit can lose it. Missing receipt
 remain unknown. The worker neither reconstructs them from agent reports nor repeats a paid job to obtain one.
 See [the exact protocol](../specs/interfaces.md#int-forge-terminal-receipt) and [upgrade notes](upgrading.md#completed-label-job-receipts-920).
 
+### Ended receipts
+
+A label job that ends without completing gets a receipt of its own, with a `pi-dispatch-ended:v1` marker, posted
+after the comment that says why. The marker names the same `gh-poll-e<ID>` job, how it ended and, where
+[reasons.md](reasons.md) explains it, the reason:
+
+- `end=refused`: refused before anything was spent, for example `reason=auth-mixed-billing`;
+- `end=stopped`: stopped after the job had reserved money, for example `reason=cost-cap` or `reason=max-minutes`;
+- `end=failed`: failed for good, after the queue's last retry, for example `reason=container-infra-exit`.
+
+So a tool watching the item can tell a stop from a completion, and look the reason up to decide whether asking again
+can help, without reading the sentence. The receipt also says that the label that started the job stays on, and that
+removing it and adding it again asks again. An operator can retry a failed job under the same id, so the newest
+receipt for a job is its end. The same limits apply as for completion receipts: polled label jobs only, no recoveries
+or replicas, best-effort posting, and a check of who posted it. See [the exact protocol](../specs/interfaces.md#int-forge-ended-receipt).
+
 ## When a delivery fails
 
 GitHub sends each delivery once. It does not send it again on its own, whatever the receiver answered, and it marks a

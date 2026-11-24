@@ -708,6 +708,16 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   completion emits none. A successful final retry of the original job remains eligible.
   Delivery is best-effort: a missing receipt remains unknown and never starts a paid retry.
 
+- **Ended label-job receipt (AMENDED 2026-11-24, #971)**: the same original, non-replica GitHub polling label job that
+  ended WITHOUT completing (a returned refusal before spend, a paid stop, or the queue's final failure) shall get the
+  fixed receipt in `INT-FORGE-ENDED-RECEIPT` after the queue's terminal transition and after the comment that says
+  why. Its marker names the job, how it ended (`refused`, `stopped`, `failed`) and the reason token where the reason
+  catalog explains it, so a consumer can bind the end to its request without parsing a sentence. Its sentence says the
+  label that started the job stays on and how to ask again (#969). An attempt the queue retries, a recovery, a park
+  and a returned failure whose run goes on emit none. A failed job an operator retries may end again with a later
+  receipt; the newest one is its end. It is not the completion or failure comment the Acceptance counts. Delivery is
+  best-effort, as for the completion receipt.
+
 - **AMENDED 2026-11-24 (#969, the refusal net)**: a forge-backed job refused before spend (a returned `policy`
   outcome with `budgetReserved: false`) whose attempt posted no comment gets one: the reason catalog's sentence for its
   reason (`INT-REASON-CATALOG`), posted once by the pickup after the refusal is recorded (`worker/src/refusal-net.mjs`).
@@ -10453,3 +10463,4 @@ instead of drifting.
 | 2026-11-20 (explicit auxiliary routes) | `REQ-SUBSCRIPTION-AUTHENTICATION` and `REQ-MODEL-POLICY` AMENDED: ordinary flows can explicitly authorize finite auxiliary subscription/API calls with a positive shared cap; all declared routes must pass free admission. UNCHANGED, checked: automatic root billing fallback is forbidden, hard cost enforcement, host credential custody and internal classifier role restrictions. |
 | 2026-11-20 (append snapshots) | `REQ-GLOBAL-PI-OVERLAY` and `REQ-OPERATOR-CONSOLE-SCREENS` AMENDED: stable append text, optional source hashes with unknown distinct from absent, and doctor observations without prompt text. External auxiliary-call composition is not inferred. Budget, role, output and owner authority are UNCHANGED, checked. |
 | 2026-11-24 (#969) | **`REQ-JOB-STATUS-COMMENTS` AMENDED**: the refusal net. A forge job refused before spend whose attempt posted no comment gets the reason catalog's sentence for its reason, once, from the pickup, so the pickup's model selection, `settings-overlay-invalid`, the subscription admission and the prepare stage (OQ-023) no longer refuse in silence; an unexplained token posts a fixed fallback; five reasons stay silent by decision (`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`). UNCHANGED, checked: `REQ-LOCAL-JOB-VISIBILITY` (local jobs keep their log line), the Acceptance's one completion or failure comment (the net posts only where nothing was posted), the answer-draft exception and the trigger label, which stays on. |
+| 2026-11-24 (#971) | **`REQ-JOB-STATUS-COMMENTS` AMENDED**: an original polling label job that ended without completing (refused before spend, stopped, or failed for good) gets the fixed ended receipt after the queue's terminal transition and after the comment that says why, naming the job, its end and a catalog reason, and saying the label stays on and how to ask again. UNCHANGED, checked: the completion receipt, the Acceptance (the receipt is not the completion or failure comment it counts), the refusal net, and `REQ-LOCAL-JOB-VISIBILITY`. |

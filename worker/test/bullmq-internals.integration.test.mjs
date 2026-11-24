@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { terminalReceipt } from "../src/terminal-receipt.mjs";
+import { endedReceipt, terminalReceipt } from "../src/terminal-receipt.mjs";
 
 /**
  * Real-Valkey check of the BullMQ leaf (issue #761) against the pinned BullMQ: every key, field, flag, score and id the
@@ -122,6 +122,37 @@ test("terminal label receipt sees persisted completed state and finishedOn after
 		assert.equal(receipts[0].state, "completed");
 		assert.ok(Number.isSafeInteger(receipts[0].finishedOn) && receipts[0].finishedOn > 0);
 		assert.match(receipts[0].receipt, /^<!-- pi-dispatch-terminal:v1 job=gh-poll-e1234 -->\n/);
+	} finally {
+		await w.teardown();
+	}
+});
+
+// Issue #971: the failed listener's ended receipt reads the same `finishedOn`, which BullMQ stamps on the final failure
+// only: a retried attempt has none and gets no receipt, the final one has it and does.
+test("ended label receipt: a retried attempt has no finishedOn and no receipt, the final failure has both", { skip }, async () => {
+	const w = await world();
+	try {
+		const q = w.queue();
+		let attempts = 0;
+		const seen = [];
+		const done = new Promise((resolve, reject) => {
+			const worker = w.worker(q.name, async () => {
+				attempts++;
+				throw Object.assign(new Error("infrastructure failure"), { reason: "container-infra-exit" });
+			});
+			worker.on("error", reject);
+			worker.on("failed", (job, err) => {
+				seen.push({ finishedOn: job.finishedOn ?? null, receipt: endedReceipt({ job, error: err }) });
+				if (seen.length === 2) void job.getState().then((state) => { seen.push(state); resolve(); }, reject);
+			});
+		});
+		await q.add("github", { kind: "github", repo: "o/r", target: { type: "issue", number: 12 }, trigger: { event: "issues", action: "labeled", deliveryId: "poll-e1234", matched: { type: "label" } } }, { jobId: "gh-poll-e1234", attempts: 2 });
+		await done;
+		assert.equal(attempts, 2);
+		assert.deepEqual(seen[0], { finishedOn: null, receipt: null });
+		assert.ok(Number.isSafeInteger(seen[1].finishedOn) && seen[1].finishedOn > 0);
+		assert.match(seen[1].receipt, /^<!-- pi-dispatch-ended:v1 job=gh-poll-e1234 end=failed reason=container-infra-exit -->\n/);
+		assert.equal(seen[2], "failed");
 	} finally {
 		await w.teardown();
 	}

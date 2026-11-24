@@ -14380,6 +14380,52 @@ as scheduling evidence. It is never task acceptance or an authority grant. Older
 The existing job and worker share a forge App identity: the marker is not cryptographic proof against a job that
 deliberately posts the same body. Its consumers retain their independent verification and authority checks.
 
+## INT-FORGE-ENDED-RECEIPT
+
+**worker → GitHub issue or pull-request comment (issue #971).** The receipt for a label job that ended WITHOUT
+completing. The entire version-1 body, with no trailing newline, is:
+
+```text
+<!-- pi-dispatch-ended:v1 job=gh-poll-e<ID> end=<END> reason=<REASON> -->
+pi-dispatch ended this job without completing it. The label that started it stays on this item: to ask again, remove the label and add it again. This receipt records how the job ended only; it does not explain or verify anything.
+```
+
+- `<ID>` and the binding are exactly `INT-FORGE-TERMINAL-RECEIPT`'s: an original GitHub polling label delivery
+  `poll-e<ID>` whose queue job id is `forgeDeliveryJobId("github", trigger.deliveryId)`, the same labeled issue or pull
+  request route and target, a positive safe integer `finishedOn`, no `recoveryOf`, `recovery`, `replica` or
+  `replicas`, never an answer draft, and the same phrase collision guard. One function holds that binding for both
+  receipts (`worker/src/terminal-receipt.mjs`).
+- `<END>` is one of three words:
+  - `refused`: the completed event's returned result is `outcome: "policy"` with `budgetReserved: false`, a refusal
+    before spend;
+  - `stopped`: the same with `budgetReserved: true`, a paid stop (`cost-cap`, `max-minutes`, a cancel mid-run);
+  - `failed`: the failed event's terminal branch (`finishedOn` set), for an attempt the queue will not retry.
+
+  The word names the reservation exactly as the run record's `budgetReserved` does, so a refusal whose refund failed
+  reads `stopped`. A result whose reservation is neither `true` nor `false` (a lost-lock replay of a record a newer
+  worker wrote) gets no receipt.
+- ` reason=<REASON>` is present only when the record's reason token (`recordReasonOf`: a returned result's token, or
+  `worker-error` for an error that carries none) is a key of the reason catalog (`INT-REASON-CATALOG`); otherwise the
+  field and its leading space are left out. A consumer looks a written reason up in `docs/reasons.md` and never meets
+  one that page does not name.
+- No receipt for: a completion (that is `INT-FORGE-TERMINAL-RECEIPT`'s), a park (`awaiting-input`,
+  `awaiting-approval`), a returned failure (`recovery-enqueued`, whose run goes on), an attempt the queue retries, a
+  stall the failed listener hands to a recovery, a terminal failure another host settled (`settledElsewhere`), and every
+  job the binding refuses (a webhook GUID delivery, a replica, a recovery, a duplicate notice).
+
+It is posted once, best-effort, through the existing comment adapter, AFTER the comment that says why the job ended:
+the processor awaits a refusal's or a stop's comment (or the refusal net's) before it returns, and the failed listener
+chains the receipt after the failure comment. It is never retried and never changes the outcome. No new credential,
+permission, queue field, run-record field or store is introduced; the body is under 512 ASCII bytes and holds no input
+text, model text, path, host or provider message.
+
+**Supersession.** A failed job can be retried by an operator under the same id, after which it may end again with a
+later receipt (an ended one or a completion). The newest receipt for a job id, by its comment's creation time, is that
+job's end. Consumers verify the configured worker identity, exact target, request identity and an unedited comment
+exactly as for `INT-FORGE-TERMINAL-RECEIPT`, and the same shared App identity limit applies: the marker is not proof
+against a job that deliberately posts the same body. It is evidence of how a job ended, never task acceptance or
+authority, and older jobs remain without it.
+
 ## INT-FORGE-STATUS-COMMENT-EDIT
 
 **worker → forge.** The one forge comment the worker posts and then EDITS (issue #644, `REQ-RUN-PROGRESS`,
@@ -16402,3 +16448,4 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-20 (explicit auxiliary routes) | `INT-TRIGGERS-FILE-CONTRACT` AMENDED with the finite hand-authored auxiliary grant and trigger/job version 9/11 propagation. `INT-CONTAINER-JOB-INPUTS` uses its existing finite allowlist and shared cap for the admitted union. UNCHANGED, checked: subscription snapshot shape, runner wire capabilities, run-record shape and credential stores. |
 | 2026-11-20 (append snapshots) | `INT-RUNNER-EXIT-CODE-PROTOCOL` and `INT-RUN-HISTORY-FILE-CONTRACT` AMENDED: optional two-source `promptAdditions`, full and compact retention, minimal omission, closed hash validation and secret checks. Hashes are a fourth explicitly forgeable shaped residual, not prompt attestation. `INT-DOCTOR-RESULTS-KEY`, record versions, signing, monetary fields and numeric exit meanings UNCHANGED, checked; the doctor observation uses existing publication rules. |
 | 2026-11-24 (#969) | **`INT-REASON-CATALOG` AMENDED**: a sentence the catalog writes for a reason with no comment at its call site is now also a forge comment, posted by the refusal net (`REQ-JOB-STATUS-COMMENTS`, `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`) when a refusal before spend told its item nothing, so it stays word for word what the issue was told. No sentence changed. UNCHANGED, checked: `INT-FORGE-TERMINAL-RECEIPT` (its body and eligibility), `INT-ON-FAILURE-HOOK-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT` (no record field or reason added) and the job data (no field added). |
+| 2026-11-24 (#971) | Added **`INT-FORGE-ENDED-RECEIPT`**: a fixed two-line comment for an original GitHub polling label job that ended without completing, posted after the queue's terminal transition and after the comment that says why. Its marker carries the job id, the end class (refused, stopped or failed, by the reservation) and the reason token when the reason catalog explains it; the newest receipt for a job id is its end. **`INT-FORGE-TERMINAL-RECEIPT` UNCHANGED, checked**: its body and eligibility are byte-identical, and both now read one binding function. UNCHANGED, checked: `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-REASON-CATALOG`, `INT-ON-FAILURE-HOOK-CONTRACT`, job data and queue keys. |

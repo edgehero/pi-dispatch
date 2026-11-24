@@ -490,6 +490,14 @@ See [what the cap counts](costs.md#what-the-cap-counts) and [a subscription allo
 
 See [reasons.md](reasons.md#cost-cap) and [what the cap charges](costs.md#what-the-cap-charges).
 
+### Unreleased: ended receipts for label jobs (#971)
+
+Workers now post a fixed receipt, marked `pi-dispatch-ended:v1`, on a polled GitHub label job that was refused, stopped
+or failed for good, after the comment that says why. It names the job, how it ended and the reason. Run records, job
+data, queue keys and the completion receipt are unchanged; no migration, backup path or older-state detector is
+needed. Older workers post none, so upgrade every worker. Jobs that ended before the upgrade get no receipt and are not
+backfilled. See [ended receipts](github.md#ended-receipts).
+
 ### Unreleased: refusals before start say why (#969)
 
 Workers now post a comment for every forge job refused before anything was spent whose refusal had no comment of its
