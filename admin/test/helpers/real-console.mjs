@@ -48,7 +48,11 @@ export function deployment(records = [], { logs = "folder", files = {}, triggers
     if (state === "invalid") writeFileSync(path, "{ not json");
     if (state === "unreadable") chmodSync(path, 0o000);
   }
-  return { dir, paths, env: { PI_WORKER_NAME: "build3" } };
+  // `PI_LOGS_DIR` names this folder's run history to every read that takes the deployment's env (the host page's
+  // capacity read, `readCapacity` through `deploymentFacts`): without it that read fell back to the logs folder under
+  // HOME, so a test read whatever the machine running it holds there, and drew "this host's own runs are not read"
+  // where HOME has none (a CI runner).
+  return { dir, paths, env: { PI_WORKER_NAME: "build3", PI_LOGS_DIR: paths.logsDir } };
 }
 
 /**
@@ -123,6 +127,7 @@ export const UNREAD_WORDS = [/could not be read/, /could not read\b/, /cannot be
  */
 export const NOT_THE_PILLS = [
   [/The host's capacity history could not be read\./g, "read once when the page is drawn and never by the stream, as its card says"],
+  [/logs dir unreadable \([A-Z_-]+\)/g, "the capacity report's own note on this host's run files, read with that card once when the page is drawn"],
   [/Its list of running jobs could not be read/g, "what a host published about itself, which no read of the console's changes"],
   [/The runtime's CPU reserve could not be read\./g, "what a host published about itself"],
   [/The \d+ files? this run kept could not be read here\./g, "another host's files, which this host's store cannot read"],
