@@ -43,7 +43,9 @@ chat | budget | insights | console | triggers | settings | set | unset | priorit
 
 When Valkey answers one queue's read with an error (its `bull:<queue>:meta` key holding a string, say), `/dispatch status` and the
 panel read every other queue and say so under the counts: "Not read, so not in these counts: pi-jobs@hostb (Valkey answered
-WRONGTYPE); whether it is paused is not known". Neither calls the deployment paused while a queue is left out: where every queue
+WRONGTYPE); whether it is paused is not known". That last part is said only of a queue whose paused state was not read: where it
+was read and only the queue's counts were answered with an error, the line says the queue as it reads ("pi-jobs@hostb (Valkey
+answered ERR for its counts; it is paused)"). Neither calls the deployment paused while a queue is left out: where every queue
 that was read is paused they say partly paused, where none is, running, and where no queue was read, not known (the panel's header:
 NOT READ). What to do about such a queue depends on the code ([what an error reply's code means](service.md#what-an-error-replys-code-means)):
 a key of another type has to be removed or repaired, a missing permission is the Valkey user's ACL, and a busy or loading Valkey

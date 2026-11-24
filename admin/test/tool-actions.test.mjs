@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { executeToolAction, switchPartialRefusal, toolActionRequest } from "../src/tool-actions.mjs";
+import { executeToolAction, switchPartialRefusal, toolActionRequest, TOOL_FLEET_METHODS } from "../src/tool-actions.mjs";
 import { modelToolRefusal } from "../src/tool-refusals.mjs";
 import { failedForAgent, waitingForAgent, readOperationalTool } from "../src/tool-reads.mjs";
 import { createFleetReader, readHeldJobs } from "../src/read-model.mjs";
@@ -169,7 +169,7 @@ test("a tool's write that throws is audited as one closed word: action-unconfirm
 
 // Issue #964: over a REAL fleet reader whose host registry does not answer (its SMEMBERS rejects), so the reader itself
 // marks the set of queues it switched as one that may be short.
-test("dispatch_pause over a set of queues that may be short answers queuesMayBeShort with an audit row of its own, and a part-way one a fixed refusal naming no queue (#964)", async () => {
+test("dispatch_pause over a set of queues that may be short answers queuesMayBeShort with an audit row of its own, and a part-way one a refusal that names the queues and no Valkey (#964, #1064)", async () => {
   const f = fixture();
   let answer = () => Promise.resolve();
   const make = quietQueue();
@@ -186,9 +186,11 @@ test("dispatch_pause over a set of queues that may be short answers queuesMayBeS
     // is unref'd, so this test holds the event loop open while it runs out.
     answer = () => new Promise(() => {});
     keep = setInterval(() => {}, 20);
-    const sentence = "The fleet pause did not reach every queue, so some queues may be paused and others not, and the list of queues may be short, so other queues may exist and were not paused. An operator can look at the fleet in the console and pause it again once Valkey answers.";
-    await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => modelToolRefusal(e) === sentence && e.message === sentence);
-    assert.equal(switchPartialRefusal(true, true, true), sentence);
+    // The queues by name since issue #1064, as the page and the CLI say them, and no Valkey's address.
+    const sentence = "The fleet pause did not reach every queue, so some queues may be paused and others not, and the list of queues may be short, so other queues may exist and were not paused. By queue: not confirmed for pi-jobs (the pause may or may not have been made); paused: none. An operator can look at the fleet in the console and pause it again once Valkey answers.";
+    await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => (assert.equal(modelToolRefusal(e), sentence), e.message === sentence));
+    assert.equal(switchPartialRefusal(true, true, true, false, null, null, ["not confirmed for pi-jobs (the pause may or may not have been made); paused: none"]), sentence);
+    assert.equal(switchPartialRefusal(true, true, true), "The fleet pause did not reach every queue, so some queues may be paused and others not, and the list of queues may be short, so other queues may exist and were not paused. An operator can look at the fleet in the console and pause it again once Valkey answers.", "with no list handed on, the sentence as it was");
     assert.deepEqual(rows().slice(3), [["write", "ok", null], ["write", "failed", "action-unconfirmed"]]);
   } finally {
     clearInterval(keep);
@@ -241,7 +243,9 @@ test("dispatch_pause and dispatch_resume over a list that may be short answer th
       // holds the event loop open while it runs out.
       flip = (name) => (name === "pi-jobs" ? new Promise(() => {}) : Promise.resolve());
       keep = setInterval(() => {}, 20);
-      const sentence = `The fleet pause did not reach every queue, so some queues may be paused and others not, and the list of queues may be short, so other queues may exist and were not paused.${added} An operator can look at the fleet in the console and pause it again once Valkey answers.`;
+      // The queues by name (issue #1064): the shared queue's pause got no answer, and each host's queue the registry's
+      // read named took its pause (none over an index not read, one where the other's row was not read, else both).
+      const sentence = `The fleet pause did not reach every queue, so some queues may be paused and others not, and the list of queues may be short, so other queues may exist and were not paused. By queue: not confirmed for pi-jobs (the pause may or may not have been made); paused: ${reads.index ? "none" : reads.rows ? "pi-jobs@hosta" : "pi-jobs@hosta, pi-jobs@hostw"}.${added} An operator can look at the fleet in the console and pause it again once Valkey answers.`;
       await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => (assert.equal(modelToolRefusal(e), sentence, what), true));
       assert.doesNotMatch(added, /refus/i);
     } finally {
@@ -312,9 +316,13 @@ test("dispatch_pause refused by a Valkey that answers, over a whole set, points 
   const rm = await import("../src/read-model.mjs");
   const options = { ...f.options, fleet: reader, readModel: { ...rm, killSwitchPlan: () => ({ urls: [f.paths.valkeyUrl], disagreement: null, context: null }) } };
   try {
-    const sentence = "The fleet pause did not reach every queue, so some queues may be paused and others not. An operator can look at the fleet in the console before trying the pause again.";
-    await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => modelToolRefusal(e) === sentence);
-    assert.equal(switchPartialRefusal(true, false, false), sentence);
+    const sentence = "The fleet pause did not reach every queue, so some queues may be paused and others not. By queue: not paused: pi-jobs@hostb; paused: pi-jobs. An operator can look at the fleet in the console before trying the pause again.";
+    await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => (assert.equal(modelToolRefusal(e), sentence), true));
+    assert.equal(switchPartialRefusal(true, false, false, false, null, null, ["not paused: pi-jobs@hostb; paused: pi-jobs"]), sentence);
+    assert.equal(switchPartialRefusal(true, false, false), "The fleet pause did not reach every queue, so some queues may be paused and others not. An operator can look at the fleet in the console before trying the pause again.");
+    // One entry per Valkey, and an entry with anything but a queue name and the console's closed words is left out.
+    assert.equal(switchPartialRefusal(false, false, false, false, null, null, ["not tried: pi-jobs@hostb; resumed: pi-jobs", "resumed: pi-jobs"]), "The fleet resume did not reach every queue, so some queues may be resumed and others not. By queue: not tried: pi-jobs@hostb; resumed: pi-jobs; and on another Valkey: resumed: pi-jobs. An operator can look at the fleet in the console before trying the resume again.");
+    assert.equal(switchPartialRefusal(true, false, false, false, null, null, ["paused: <b>pi-jobs</b>", "redis://10.0.0.7:6379/0 paused: pi-jobs", 7]), switchPartialRefusal(true, false, false));
     assert.equal(switchPartialRefusal(false, true, false), "The fleet resume did not reach every queue, so some queues may be resumed and others not, and the list of queues may be short, so other queues may exist and were not resumed. An operator can look at the fleet in the console before trying the resume again.");
   } finally {
     await reader.dispose();
@@ -323,7 +331,7 @@ test("dispatch_pause refused by a Valkey that answers, over a whole set, points 
 
 // Issues #964 and #1014 together, over a REAL fleet reader: the registry does not answer and Valkey answers a queue's pause
 // with an error after its script paused it. The model is told both, in fixed words that name no queue.
-test("dispatch_pause answered with an error over a set that may be short tells a model both, naming no queue (#964, #1014)", async () => {
+test("dispatch_pause answered with an error over a set that may be short tells a model both, with the queues by name and no Valkey's address (#964, #1014, #1064)", async () => {
   const f = fixture();
   const make = quietQueue();
   const inScript = () => Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57."), { name: "ReplyError" });
@@ -331,9 +339,22 @@ test("dispatch_pause answered with an error over a set that may be short tells a
   const rm = await import("../src/read-model.mjs");
   const options = { ...f.options, fleet: reader, readModel: { ...rm, killSwitchPlan: () => ({ urls: [f.paths.valkeyUrl], disagreement: null, context: null }) } };
   try {
-    const sentence = "The fleet pause did not reach every queue, so some queues may be paused and others not, and Valkey answered a pause with an error, which can come after the queue was paused, and the list of queues may be short, so other queues may exist and were not paused. An operator can look at the fleet in the console before trying the pause again.";
-    await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => modelToolRefusal(e) === sentence);
-    assert.equal(switchPartialRefusal(true, true, false, true), sentence);
+    // Issue #1064: the reply's code and what its class supports, and no word of trying the pause again while the
+    // cause lasts. It closed "before trying the pause again", which is the same answer again over a key of another type.
+    const sentence = "The fleet pause did not reach every queue, so some queues may be paused and others not, and Valkey answered a pause with an error, which can come after the queue was paused, and the list of queues may be short, so other queues may exist and were not paused. By queue: answered with an error for pi-jobs (reads paused now); confirmed paused: none. Valkey answered a queue's pause with WRONGTYPE: a key of that queue holds another kind of value. Trying again does not change that: an operator has to remove or repair that key first. An operator can look at the fleet in the console; the pause is worth trying again only once that is put right.";
+    await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => modelToolRefusal(e) === sentence || assert.fail(modelToolRefusal(e)));
+    assert.equal(switchPartialRefusal(true, true, false, true, null, "WRONGTYPE", ["answered with an error for pi-jobs (reads paused now); confirmed paused: none"]), sentence);
+    // By the code's class: a permission, the credentials, a passing state, any other code.
+    const lead = "The fleet resume did not reach every queue, so some queues may be resumed and others not.";
+    assert.equal(switchPartialRefusal(false, false, false, false, null, "NOPERM"), `${lead} Valkey answered a queue's resume with NOPERM: the Valkey user this connects as may not run the command or read the key. Trying again does not change that: an operator has to fix this Valkey user's ACL first. An operator can look at the fleet in the console; the resume is worth trying again only once that is put right.`);
+    assert.equal(switchPartialRefusal(false, false, false, false, null, "NOAUTH"), `${lead} Valkey answered a queue's resume with NOAUTH: this connection has not signed in to Valkey. Trying again does not change that: an operator has to fix the Valkey user and password first. An operator can look at the fleet in the console; the resume is worth trying again only once that is put right.`);
+    assert.equal(switchPartialRefusal(false, false, false, false, null, "BUSY"), `${lead} Valkey answered a queue's resume with BUSY: Valkey could not serve the command just then. A later try may succeed. An operator can look at the fleet in the console before trying the resume again.`);
+    assert.equal(switchPartialRefusal(false, false, false, false, null, "READONLY"), `${lead} Valkey answered a queue's resume with READONLY. An operator can look at the fleet in the console before trying the resume again.`);
+    // A switch that was sent and not answered still waits on Valkey, whatever another queue was answered.
+    assert.match(switchPartialRefusal(false, false, true, true, null, "WRONGTYPE"), /remove or repair that key first\. An operator can look at the fleet in the console and resume it again once Valkey answers\.$/);
+    // With no code handed on, and for anything that is no code, the sentence as it was.
+    assert.equal(switchPartialRefusal(true, true, false, true), "The fleet pause did not reach every queue, so some queues may be paused and others not, and Valkey answered a pause with an error, which can come after the queue was paused, and the list of queues may be short, so other queues may exist and were not paused. An operator can look at the fleet in the console before trying the pause again.");
+    assert.equal(switchPartialRefusal(true, true, false, true, null, "two words"), switchPartialRefusal(true, true, false, true));
     assert.equal(switchPartialRefusal(false, false, true, true), "The fleet resume did not reach every queue, so some queues may be resumed and others not, and Valkey answered a resume with an error, which can come after the queue was resumed. An operator can look at the fleet in the console and resume it again once Valkey answers.");
     assert.deepEqual(f.rows.slice(-2).map((r) => [r.action, r.outcome, r.reason ?? null]), [["write", "ok", null], ["write", "failed", "action-unconfirmed"]]);
   } finally {
@@ -343,7 +364,7 @@ test("dispatch_pause answered with an error over a set that may be short tells a
 
 // Issue #1041: a read back Valkey answers with an error too keeps the queue answered with an error, so a model is told
 // the same fixed clause, where it was told only that some queues may be paused and others not.
-test("dispatch_pause whose read back Valkey answered with an error too tells a model that Valkey answered with an error, naming no queue (#1041)", async () => {
+test("dispatch_pause whose read back Valkey answered with an error too tells a model that Valkey answered with an error, the queue by name (#1041, #1064)", async () => {
   const f = fixture();
   const make = quietQueue();
   const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
@@ -351,10 +372,93 @@ test("dispatch_pause whose read back Valkey answered with an error too tells a m
   const rm = await import("../src/read-model.mjs");
   const options = { ...f.options, fleet: reader, readModel: { ...rm, killSwitchPlan: () => ({ urls: [f.paths.valkeyUrl], disagreement: null, context: null }) } };
   try {
-    await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => modelToolRefusal(e) === switchPartialRefusal(true, false, false, true));
+    await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => modelToolRefusal(e) === switchPartialRefusal(true, false, false, true, null, "WRONGTYPE", ["answered with an error for pi-jobs (its state could not be read, so it may have partly applied); confirmed paused: none"]) || assert.fail(modelToolRefusal(e)));
   } finally {
     await reader.dispose();
   }
+});
+
+// Issue #1064: a fleet resume stopped at the first queue Valkey answered with an error and left every queue after it
+// paused, on every call. Through the tool's own reader (no fleet handed in: the adapter and the reader it builds, over
+// seams that dial nothing) and the reader's real walk, with that queue first, in the middle and last.
+test("dispatch_resume through the tool's own reader reaches every queue Valkey answers for, wherever the one it answers with an error stands, and tells a model which queues, the code and what to put right, never to try again (#1064)", async () => {
+  const rm = await import("../src/read-model.mjs");
+  const names = ["pi-jobs", "pi-jobs@hosta", "pi-jobs@hostb", "pi-jobs@hostc"];
+  const wrongtype = (tail = "") => Object.assign(new Error(`WRONGTYPE Operation against a key holding the wrong kind of value${tail}`), { name: "ReplyError" });
+  for (const [where, bad] of [["first", names[0]], ["middle", names[2]], ["last", names[3]]]) {
+    const f = fixture();
+    const sent = [];
+    const make = quietQueue();
+    const seams = {
+      makeQueueFn: (c, o) => {
+        const q = make(c, o);
+        return { ...q, isPaused: async () => { if (q.name === bad) throw wrongtype(); return true; }, resume: async () => { sent.push(q.name); if (q.name === bad) throw wrongtype(" script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57."); } };
+      },
+      parseConnectionFn: () => ({}),
+      redisFn: () => keyedRedis(registryKeys(Object.fromEntries(["hosta", "hostb", "hostc"].map((h) => [h, { routes: "true", beatAt: String(NOW) }])))),
+      switchStepTimeoutMs: 80,
+      closeTimeoutMs: 30,
+    };
+    const { fleet: _handedIn, ...options } = f.options;
+    const readModel = { ...rm, createFleetReader: (paths, opts) => rm.createFleetReader(paths, { ...opts, ...seams }), killSwitchPlan: () => ({ urls: [f.paths.valkeyUrl], disagreement: null, context: null }) };
+    let said = null;
+    await assert.rejects(executeToolAction("dispatch_resume", {}, { hasUI: true, ui: { confirm: async () => true } }, { ...options, readModel }), (e) => { said = modelToolRefusal(e); return true; });
+    assert.equal(said, `The fleet resume did not reach every queue, so some queues may be resumed and others not, and Valkey answered a resume with an error, which can come after the queue was resumed. By queue: answered with an error for ${bad} (its state could not be read, so it may have partly applied); confirmed resumed: ${names.filter((n) => n !== bad).join(", ")}. Valkey answered a queue's resume with WRONGTYPE: a key of that queue holds another kind of value. Trying again does not change that: an operator has to remove or repair that key first. An operator can look at the fleet in the console; the resume is worth trying again only once that is put right.`, where);
+    assert.deepEqual(sent, names, `${where}: every queue was sent its resume, the ones after ${bad} too`);
+    assert.ok(!said.includes("redis://") && !said.includes("not tried"), "the queues by name, and no Valkey's address");
+  }
+});
+
+// Issue #1036: the adapter handed its action five of the reader's methods, and a planner that asked for a sixth found
+// none and took the branch it has for a reader that cannot answer. `dispatch_cancel`'s lookup by id never ran in the
+// registered tool, while its test handed the request a whole reader and never met the adapter.
+test("the fleet a tool's action is handed has exactly the methods the tool's request and the console's actions ask their fleet for, and each reaches the reader the tool builds (#1036)", async () => {
+  const asked = new Set();
+  for (const m of readFileSync(new URL("../src/console/actions.mjs", import.meta.url), "utf8").matchAll(/\bctx\??\.a\??\.fleet\??\.([A-Za-z]+)/g)) asked.add(m[1]);
+  for (const m of readFileSync(new URL("../src/tool-actions.mjs", import.meta.url), "utf8").matchAll(/(?<![\w.`])fleet\??\.([A-Za-z]+)/g)) asked.add(m[1]);
+  // The adapter's own, which ends the reader it built.
+  asked.delete("dispose");
+  assert.deepEqual([...asked].sort(), [...TOOL_FLEET_METHODS].sort(), "a method a planner asks its fleet for joins TOOL_FLEET_METHODS, and one nothing asks for leaves it");
+  assert.ok(TOOL_FLEET_METHODS.includes("jobStatus") && TOOL_FLEET_METHODS.includes("supersededOf"));
+  // The adapter as the tool builds it, with no fleet handed in: an action sees those methods and no other, and each
+  // call goes to the reader.
+  const f = fixture();
+  const rm = await import("../src/read-model.mjs");
+  const called = [];
+  const reader = new Proxy({}, { get: (_t, method) => (typeof method !== "string" || method === "then" ? undefined : async () => { called.push(method); return method === "supersededOf" ? new Map() : {}; }) });
+  let handed = null;
+  const action = { name: "setting-set", kind: "setting-set", fields: ["key", "value"], preview: async (_body, ctx) => { handed = Object.keys(ctx.a.fleet).sort(); for (const method of TOOL_FLEET_METHODS) await ctx.a.fleet[method]({}); return { unchanged: true }; } };
+  const { fleet: _handedIn, ...options } = f.options;
+  assert.deepEqual(await executeToolAction("dispatch_set", { key: "dailyCap", value: "5" }, { hasUI: false }, { ...options, readModel: { ...rm, createFleetReader: () => reader }, actionLookup: () => action }), { applied: false, unchanged: true });
+  assert.deepEqual(handed, [...TOOL_FLEET_METHODS, "dispose"].sort());
+  assert.deepEqual(called, [...TOOL_FLEET_METHODS, "dispose"], "each in turn, then the reader is ended");
+});
+
+// Issue #1036: `dispatch_cancel` through the tool's own adapter (no fleet handed in), over a reader whose running list
+// is not whole. The lookup by id decides: with `jobStatus` not handed on, each of these was refused.
+test("dispatch_cancel through the tool's own adapter looks the job up by its id: found running it is cancelled as running, and found nowhere it is refused with the row's key and code (#1036)", async () => {
+  const rm = await import("../src/read-model.mjs");
+  const run = async (jobId, status) => {
+    const f = fixture();
+    const cancelled = [];
+    const reader = {
+      snapshot: async () => ({ active: [], held: { rows: [] }, activeUnreachable: true, queue: { fleetError: null, unreadHosts: [{ name: "hostw", error: "WRONGTYPE" }] } }),
+      jobStatus: async (id, opts) => ({ ...status, asked: [id, opts] }),
+      cancelActive: async ({ jobId: id }) => { cancelled.push(id); return { ack: "hostw" }; },
+      dispose: async () => {},
+    };
+    const { fleet: _handedIn, ...options } = f.options;
+    try {
+      const out = await executeToolAction("dispatch_cancel", { jobId }, { hasUI: true, ui: { confirm: async () => true } }, { ...options, readModel: { ...rm, createFleetReader: () => reader } });
+      return { out, cancelled };
+    } catch (e) {
+      return { refused: modelToolRefusal(e) ?? e.message, cancelled };
+    }
+  };
+  const running = await run("gh-run-w", { found: true, state: "active" });
+  assert.deepEqual([running.out?.applied, running.out?.action, running.cancelled], [true, "cancel-active", ["gh-run-w"]], JSON.stringify(running));
+  const nowhere = await run("gh-nope", { found: null, state: null });
+  assert.deepEqual([nowhere.refused, nowhere.cancelled], ["whether this job is running is not known: no queue that was read says, and the queue of host hostw was not asked, since Valkey answers host:h:hostw with WRONGTYPE. Remove or repair that key first; nothing was changed", []]);
 });
 
 test("bulk and cancellation selectors refuse ambiguous or ignored arguments", async () => {

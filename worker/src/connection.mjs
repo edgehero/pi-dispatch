@@ -48,10 +48,10 @@ export function replyErrorCode(error) {
 	return /^([A-Z][A-Z0-9_]{0,31})(?=\s|$)/.exec(String(error.message ?? ""))?.[1] ?? "error";
 }
 
-// What a reply's code says of its cause (issue #1036): `replyErrorClass` and its table, the one thing every sentence
-// built on a code asks. Kept in a leaf of its own (reply-error-class.mjs), so the words modules take it without this
+// What a reply's code says of its cause (issue #1036): `replyErrorWords`, over `replyErrorClass` and its table, the
+// one thing every sentence built on a code asks. Kept in a leaf of its own (reply-error-class.mjs), so the words modules take it without this
 // client, and handed on here beside `replyErrorCode`.
-export { REPLY_CODES_BY_CLASS, REPLY_ERROR_CLASSES, replyErrorClass } from "./reply-error-class.mjs";
+export { REPLY_CODES_BY_CLASS, REPLY_CODES_OF_CREDENTIALS, REPLY_ERROR_CLASSES, replyErrorClass, replyErrorWords } from "./reply-error-class.mjs";
 
 /**
  * WHERE the scrub runs (PR #475's review, round 2 corrected the first version of this comment, which claimed the emit

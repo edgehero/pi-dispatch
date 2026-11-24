@@ -14,8 +14,9 @@
  *   key         WRONGTYPE. The key holds another kind of value. Lasting: waiting does not change it. The remedy names
  *               the key: remove or repair it.
  *   permission  NOPERM, NOAUTH, WRONGPASS. The Valkey user this process connects as may not run the command or read
- *               the key, or is not signed in. Lasting. The remedy is that user's ACL or the credentials, never the
- *               key, which may be perfectly sound.
+ *               the key, or is not signed in. Lasting. The remedy is never the key, which may be perfectly sound:
+ *               for NOPERM it is that user's ACL, and for NOAUTH and WRONGPASS the user and password this process
+ *               connects with (`replyErrorWords`, which gives each code its own words).
  *   passing     BUSY, LOADING, TRYAGAIN, CLUSTERDOWN, MASTERDOWN. Valkey could not serve the command just then (a
  *               script running past its threshold, a dataset still loading, a cluster moving a slot or without its
  *               primary). Waiting may end it, so "try again" is true here and nowhere else, and there is nothing to
@@ -26,14 +27,27 @@
  *               failover this client cannot see.
  *
  * `lasting` is true, false, or null where nothing is known. `means` is what a sentence may say of the cause, `remedy`
- * what it may tell a person to do (a caller that knows the key names it), and `waiting` the clause it may add about
- * waiting; each is null where the class supports no such claim.
+ * what it may tell a person to do (a caller that knows the key names it), `first` the same in the few words a
+ * sentence that has already named the key says before anything else ("remove or repair that key"), and `waiting` the
+ * clause it may add about waiting; each is null where the class supports no such claim. A sentence asks
+ * `replyErrorWords(code)`, never this table by its class alone: two codes of one class have words of their own.
  */
 export const REPLY_ERROR_CLASSES = Object.freeze({
-	key: Object.freeze({ lasting: true, means: "the key holds another kind of value", remedy: "remove or repair the key", waiting: "Waiting does not change that" }),
-	permission: Object.freeze({ lasting: true, means: "the Valkey user this connects as may not run the command or read the key", remedy: "give that Valkey user the permission in its ACL, or connect as a user that has it", waiting: "Waiting does not change that" }),
-	passing: Object.freeze({ lasting: false, means: "Valkey could not serve the command just then", remedy: "try again", waiting: "A later read may succeed" }),
-	other: Object.freeze({ lasting: null, means: null, remedy: null, waiting: null }),
+	key: Object.freeze({ lasting: true, means: "the key holds another kind of value", remedy: "remove or repair the key", first: "remove or repair that key", waiting: "Waiting does not change that" }),
+	permission: Object.freeze({ lasting: true, means: "the Valkey user this connects as may not run the command or read the key", remedy: "give that Valkey user the permission in its ACL, or connect as a user that has it", first: "fix this Valkey user's ACL", waiting: "Waiting does not change that" }),
+	passing: Object.freeze({ lasting: false, means: "Valkey could not serve the command just then", remedy: "try again", first: null, waiting: "A later read may succeed" }),
+	other: Object.freeze({ lasting: null, means: null, remedy: null, first: null, waiting: null }),
+});
+
+/**
+ * The two codes of the permission class whose remedy is no ACL rule (issue #1036). NOAUTH: this connection has not
+ * signed in. WRONGPASS: Valkey did not take the user and password it signed in with. Both last, and neither is the
+ * key's fault, as their class says; but what a person puts right is the user and password this process connects
+ * with, and the class's words sent them to the user's ACL, where nothing is wrong.
+ */
+const REPLY_CODE_OWN_WORDS = Object.freeze({
+	NOAUTH: Object.freeze({ means: "this connection has not signed in to Valkey", remedy: "put right the user and password this process connects to Valkey with", first: "fix the Valkey user and password" }),
+	WRONGPASS: Object.freeze({ means: "Valkey did not take the user and password this connects with", remedy: "put right the user and password this process connects to Valkey with", first: "fix the Valkey user and password" }),
 });
 
 const REPLY_CODE_CLASS = Object.freeze({ WRONGTYPE: "key", NOPERM: "permission", NOAUTH: "permission", WRONGPASS: "permission", BUSY: "passing", LOADING: "passing", TRYAGAIN: "passing", CLUSTERDOWN: "passing", MASTERDOWN: "passing" });
@@ -45,6 +59,18 @@ const REPLY_CODE_CLASS = Object.freeze({ WRONGTYPE: "key", NOPERM: "permission",
 export function replyErrorClass(code) {
 	return typeof code === "string" && Object.hasOwn(REPLY_CODE_CLASS, code) ? REPLY_CODE_CLASS[code] : "other";
 }
+
+/**
+ * What a sentence may say of ONE reply's code: its class (`class`) and that class's words (`REPLY_ERROR_CLASSES`),
+ * with the code's own in their place where it has them (`REPLY_CODE_OWN_WORDS`). The one thing a sentence asks.
+ */
+export function replyErrorWords(code) {
+	const cls = replyErrorClass(code);
+	return { class: cls, ...REPLY_ERROR_CLASSES[cls], ...(typeof code === "string" && Object.hasOwn(REPLY_CODE_OWN_WORDS, code) ? REPLY_CODE_OWN_WORDS[code] : {}) };
+}
+
+/** The codes that have words of their own within their class (the user and password, where the class says an ACL). */
+export const REPLY_CODES_OF_CREDENTIALS = Object.freeze(Object.keys(REPLY_CODE_OWN_WORDS));
 
 /** The codes the table names, by class, for a text that lists them (a tool's description, the docs' own test). */
 export const REPLY_CODES_BY_CLASS = Object.freeze(Object.fromEntries(Object.keys(REPLY_ERROR_CLASSES).map((name) => [name, Object.freeze(Object.keys(REPLY_CODE_CLASS).filter((code) => REPLY_CODE_CLASS[code] === name))])));

@@ -864,6 +864,7 @@ async function silentSwitch(cmd, { queues = { "pi-jobs": "ok" }, deadlineMs = 30
 						if (kind === "silent write") return never();
 						if (kind === "slow ok") return new Promise((resolve) => setTimeout(resolve, 50));
 						if (kind === "valkey error") return Promise.reject(reply(NOPERM_EVALSHA));
+						if (kind === "valkey busy") return Promise.reject(reply(BUSY_SCRIPT));
 						if (kind === "lost after send") return Promise.reject(new Error("Connection is closed."));
 						if (kind.startsWith("script error")) return Promise.reject(reply(WRONGTYPE_IN_SCRIPT));
 						return Promise.resolve();
@@ -891,6 +892,11 @@ const PAUSE_NEXT = "  run pi-dispatch status once Valkey answers to see each que
 // names the script, and what the script wrote before it stays written.
 const NOPERM_EVALSHA = "NOPERM User op has no permissions to run the 'evalsha' command";
 const WRONGTYPE_IN_SCRIPT = "WRONGTYPE Operation against a key holding the wrong kind of value script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57.";
+const BUSY_SCRIPT = "BUSY Valkey is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.";
+// What the report says of each reply (issue #1064): the code and its class's words, never the reply's own text.
+const NOPERM_SAID = "NOPERM: the Valkey user this connects as may not run the command or read the key";
+const WRONGTYPE_SAID = "WRONGTYPE: a key of that queue holds another kind of value";
+const BUSY_SAID = "BUSY: Valkey could not serve the command just then";
 
 test("a refusal counts as before the script only in the codes Valkey gives before running one, and never when the message names the script (issue #1007)", () => {
 	const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
@@ -922,7 +928,7 @@ test("pause ends at its deadline and says of each queue whether it was paused, s
 	const failed = await silentSwitch("pause", { queues: { "pi-jobs": "valkey error", "pi-jobs@mini2": "refused connection", "pi-jobs@mini3": "lost after send" } });
 	assert.equal(failed.code, 1);
 	assert.equal(failed.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379\n"
-		+ `  pi-jobs: refused by Valkey, unchanged (${NOPERM_EVALSHA})\n`
+		+ `  pi-jobs: refused by Valkey, unchanged (${NOPERM_SAID})\n`
 		+ "  pi-jobs@mini2: not sent (connect ECONNREFUSED 127.0.0.1:6379)\n"
 		+ "  pi-jobs@mini3: sent, not confirmed (Connection is closed.); it may still be paused when Valkey answers\n" + PAUSE_NEXT);
 	// A Valkey that answers nothing: the deadline is spent before any queue is built, nothing was sent, and the list
@@ -943,24 +949,35 @@ test("pause ends at its deadline and says of each queue whether it was paused, s
 	const inScript = await silentSwitch("pause", { queues: { "pi-jobs": "script error, paused", "pi-jobs@mini2": "script error, running", "pi-jobs@mini3": "script error, unread" } });
 	assert.equal(inScript.code, 1);
 	assert.equal(inScript.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379\n"
-		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_IN_SCRIPT}); it reads paused now\n`
-		+ `  pi-jobs@mini2: Valkey answered with an error (${WRONGTYPE_IN_SCRIPT}); it reads running now, and part of the pause may have applied\n`
-		+ `  pi-jobs@mini3: Valkey answered with an error (${WRONGTYPE_IN_SCRIPT}); it may have partly applied\n` + PAUSE_NEXT);
+		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_SAID}); it reads paused now\n`
+		+ `  pi-jobs@mini2: Valkey answered with an error (${WRONGTYPE_SAID}); it reads running now, and part of the pause may have applied\n`
+		+ `  pi-jobs@mini3: Valkey answered with an error (${WRONGTYPE_SAID}); it may have partly applied\n` + PAUSE_NEXT);
+	// The reply's own text names BullMQ's script by its digest and the line it failed on: none of it is printed.
+	assert.doesNotMatch(inScript.err, /user_script|b4514f4b|Operation against/);
 	// A read back that did not answer waits on Valkey; one that Valkey answered with an error (the meta key holding a
 	// string, say) is Valkey answering, so the next step is putting its cause right.
 	const unread = await silentSwitch("pause", { queues: { "pi-jobs": "script error, unread" } });
 	assert.equal(unread.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379\n"
-		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_IN_SCRIPT}); it may have partly applied\n` + PAUSE_NEXT);
+		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_SAID}); it may have partly applied\n` + PAUSE_NEXT);
 	const readRefused = await silentSwitch("pause", { queues: { "pi-jobs": "script error, read refused" } });
 	assert.equal(readRefused.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379\n"
-		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_IN_SCRIPT}); it may have partly applied\n`
+		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_SAID}); it may have partly applied\n`
 		+ "  run pi-dispatch status to see each queue, then pi-dispatch pause again once what Valkey refused or failed on is put right\n");
 	// A refusal before the script changed nothing, and the next step is not waiting on Valkey.
 	const refused = await silentSwitch("pause", { queues: { "pi-jobs": "valkey error" } });
 	assert.equal(refused.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379\n"
-		+ `  pi-jobs: refused by Valkey, unchanged (${NOPERM_EVALSHA})\n`
+		+ `  pi-jobs: refused by Valkey, unchanged (${NOPERM_SAID})\n`
 		+ "  nothing changed\n"
 		+ "  run pi-dispatch status to see each queue, then pi-dispatch pause again once what Valkey refused or failed on is put right\n");
+	// A Valkey that was busy just then refused before the script too, and leaves nothing to put right (issue #1064).
+	const busy = await silentSwitch("pause", { queues: { "pi-jobs": "valkey busy", "pi-jobs@mini2": "ok" } });
+	assert.equal(busy.err, "error: could not pause the whole deployment at redis://127.0.0.1:6379\n"
+		+ `  pi-jobs: refused by Valkey, unchanged (${BUSY_SAID})\n`
+		+ "  pi-jobs@mini2: paused\n"
+		+ "  run pi-dispatch status to see each queue, then pi-dispatch pause again: a later run may go through\n");
+	// Beside a reply that lasts, the line says to put that right, as before.
+	const busyAndKey = await silentSwitch("pause", { queues: { "pi-jobs": "valkey busy", "pi-jobs@mini2": "script error, read refused" } });
+	assert.match(busyAndKey.err, /then pi-dispatch pause again once what Valkey refused or failed on is put right\n$/);
 	// A write sent and not answered is enough to fail: the queue may or may not be paused.
 	const doubt = await silentSwitch("pause", { queues: { "pi-jobs": "ok", "pi-jobs@mini2": "silent write" } });
 	assert.equal(doubt.code, 1);
@@ -970,7 +987,7 @@ test("pause ends at its deadline and says of each queue whether it was paused, s
 	assert.deepEqual([whole.code, whole.out, whole.err], [0, "paused: worker will stop taking new jobs (jobs still enqueue) [3 queues]\n", ""]);
 });
 
-test("resume ends at its deadline, sends no resume after one that is not confirmed, and says of each queue what it is (issue #1007)", { timeout: 15_000 }, async () => {
+test("resume ends at its deadline, sends no resume after one that got no answer, goes on past a queue Valkey answered, and says of each queue what it is (issues #1007, #1064)", { timeout: 15_000 }, async () => {
 	const stuck = await silentSwitch("resume", { queues: { "pi-jobs": "ok", "pi-jobs@mini2": "silent write", "pi-jobs@mini3": "ok" } });
 	assert.ok(stuck.ms < 500, `took ${Math.round(stuck.ms)} ms`);
 	assert.equal(stuck.code, 1);
@@ -982,15 +999,62 @@ test("resume ends at its deadline, sends no resume after one that is not confirm
 	assert.deepEqual(stuck.wrote, ["pi-jobs", "pi-jobs@mini2"], "one after another, and none after the one in doubt");
 	const left = stuck.asked[0]?.deadlineAt - stuck.asked[0]?.calledAt;
 	assert.ok(left > 0 && left <= 300, "the refusal check's PING is held to the same deadline");
-	// An error inside the script stops the resume as a doubt does, and the queue is said as Valkey holds it.
-	const errored = await silentSwitch("resume", { queues: { "pi-jobs": "script error, running", "pi-jobs@mini2": "ok" } });
-	assert.equal(errored.err, "error: could not resume the whole deployment at redis://127.0.0.1:6379\n"
-		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_IN_SCRIPT}); it reads running now\n`
-		+ "  pi-jobs@mini2: not sent (not tried after a queue whose resume Valkey answered with an error)\n"
-		+ "  run pi-dispatch status to see each queue, then pi-dispatch resume again once what Valkey refused or failed on is put right\n");
-	assert.deepEqual(errored.wrote, ["pi-jobs"]);
+	// Issue #1064: a queue Valkey ANSWERED with an error does not stop the walk, wherever it stands in it. Valkey is
+	// answering, so every queue after it is resumed and said so, and the one that failed is named with the reply's code
+	// and what its class says. It stopped there: the queues after it stayed paused, and with the shared queue (the
+	// first of every walk) at fault a resume resumed nothing.
+	const NEXT_PUT_RIGHT = "  run pi-dispatch status to see each queue, then pi-dispatch resume again once what Valkey refused or failed on is put right\n";
+	const ERRORED = `Valkey answered with an error (${WRONGTYPE_SAID}); it may have partly applied`;
+	const walk = { first: ["pi-jobs", "pi-jobs@mini2", "pi-jobs@mini3"], middle: ["pi-jobs@mini2", "pi-jobs", "pi-jobs@mini3"], last: ["pi-jobs@mini3", "pi-jobs", "pi-jobs@mini2"] };
+	for (const [where, [bad, ...good]] of Object.entries(walk)) {
+		const errored = await silentSwitch("resume", { queues: Object.fromEntries(["pi-jobs", "pi-jobs@mini2", "pi-jobs@mini3"].map((name) => [name, name === bad ? "script error, read refused" : "ok"])) });
+		assert.equal(errored.code, 1, where);
+		assert.equal(errored.err, "error: could not resume the whole deployment at redis://127.0.0.1:6379\n"
+			+ ["pi-jobs", "pi-jobs@mini2", "pi-jobs@mini3"].map((name) => `  ${name}: ${name === bad ? ERRORED : "resumed"}\n`).join("") + NEXT_PUT_RIGHT, where);
+		assert.deepEqual(errored.wrote, ["pi-jobs", "pi-jobs@mini2", "pi-jobs@mini3"], `${where}: every queue was sent its resume, in the walk's order`);
+		assert.ok(good.every((name) => errored.err.includes(`  ${name}: resumed\n`)), where);
+		assert.doesNotMatch(errored.err, /not tried|not sent|user_script|b4514f4b/, where);
+	}
+	// Read back as running, the queue is said as Valkey holds it, and the walk goes on the same.
+	const running = await silentSwitch("resume", { queues: { "pi-jobs": "script error, running", "pi-jobs@mini2": "ok" } });
+	assert.equal(running.err, "error: could not resume the whole deployment at redis://127.0.0.1:6379\n"
+		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_SAID}); it reads running now\n`
+		+ "  pi-jobs@mini2: resumed\n" + NEXT_PUT_RIGHT);
+	assert.deepEqual(running.wrote, ["pi-jobs", "pi-jobs@mini2"]);
+	// A refusal before the script is an answer too: the queue did not change, and the next one is resumed.
 	const refused = await silentSwitch("resume", { queues: { "pi-jobs": "valkey error", "pi-jobs@mini2": "ok" } });
-	assert.match(refused.err, /\n {2}pi-jobs@mini2: not sent \(not tried after a queue whose resume Valkey refused\)\n {2}nothing changed\n/);
+	assert.equal(refused.err, "error: could not resume the whole deployment at redis://127.0.0.1:6379\n"
+		+ `  pi-jobs: refused by Valkey, unchanged (${NOPERM_SAID})\n`
+		+ "  pi-jobs@mini2: resumed\n" + NEXT_PUT_RIGHT);
+	assert.deepEqual(refused.wrote, ["pi-jobs", "pi-jobs@mini2"]);
+	// Every queue refused: nothing changed, and each is said for itself, none as "not tried".
+	const allRefused = await silentSwitch("resume", { queues: { "pi-jobs": "valkey error", "pi-jobs@mini2": "valkey error" } });
+	assert.equal(allRefused.err, "error: could not resume the whole deployment at redis://127.0.0.1:6379\n"
+		+ `  pi-jobs: refused by Valkey, unchanged (${NOPERM_SAID})\n`
+		+ `  pi-jobs@mini2: refused by Valkey, unchanged (${NOPERM_SAID})\n`
+		+ "  nothing changed\n" + NEXT_PUT_RIGHT);
+	// A Valkey that was busy just then: nothing to put right, a later run may go through.
+	const busy = await silentSwitch("resume", { queues: { "pi-jobs": "valkey busy", "pi-jobs@mini2": "ok" } });
+	assert.equal(busy.err, "error: could not resume the whole deployment at redis://127.0.0.1:6379\n"
+		+ `  pi-jobs: refused by Valkey, unchanged (${BUSY_SAID})\n`
+		+ "  pi-jobs@mini2: resumed\n"
+		+ "  run pi-dispatch status to see each queue, then pi-dispatch resume again: a later run may go through\n");
+	// What still stops the walk is no answer. An error reply whose read back got no answer: Valkey stopped answering in
+	// between, so the next resume could land unobserved.
+	const silentAfter = await silentSwitch("resume", { queues: { "pi-jobs": "script error, unread", "pi-jobs@mini2": "ok" } });
+	assert.equal(silentAfter.err, "error: could not resume the whole deployment at redis://127.0.0.1:6379\n"
+		+ `  pi-jobs: Valkey answered with an error (${WRONGTYPE_SAID}); it may have partly applied\n`
+		+ "  pi-jobs@mini2: not sent (not tried after a queue whose resume is not confirmed: a resume that lands later starts jobs)\n"
+		+ "  run pi-dispatch status once Valkey answers to see each queue, then pi-dispatch resume again; a resume not confirmed may start jobs when it lands\n");
+	assert.deepEqual(silentAfter.wrote, ["pi-jobs"]);
+	// And a queue whose connection did not come up: the Valkey is not there for it, and no resume is sent after it.
+	const noConnection = await silentSwitch("resume", { queues: { "pi-jobs": "refused connection", "pi-jobs@mini2": "ok" } });
+	assert.equal(noConnection.err, "error: could not resume the whole deployment at redis://127.0.0.1:6379\n"
+		+ "  pi-jobs: not sent (connect ECONNREFUSED 127.0.0.1:6379)\n"
+		+ "  pi-jobs@mini2: not sent (not tried after a queue whose connection did not come up)\n"
+		+ "  nothing changed\n"
+		+ "  run pi-dispatch status once Valkey answers to see each queue, then pi-dispatch resume again\n");
+	assert.deepEqual(noConnection.wrote, []);
 	const whole = await silentSwitch("resume", { queues: { "pi-jobs": "ok", "pi-jobs@mini2": "ok", "pi-jobs@mini3": "ok" } });
 	assert.deepEqual([whole.code, whole.out, whole.err], [0, "resumed [3 queues]\n", ""]);
 	assert.deepEqual(whole.wrote, ["pi-jobs", "pi-jobs@mini2", "pi-jobs@mini3"]);
@@ -1064,17 +1128,79 @@ test("pause and resume against a real Valkey whose script fails after it switche
 		await direct.set(`bull:${prefix}pi-jobs:events`, "not a stream");
 		const paused = await run("pause");
 		assert.equal(paused.code, 1);
-		assert.match(paused.err, /\n {2}pi-jobs: Valkey answered with an error \(WRONGTYPE [^\n]*user_script[^\n]*\); it reads paused now\n/, paused.err);
-		assert.doesNotMatch(paused.err, /nothing changed|refused by Valkey/);
+		assert.match(paused.err, /\n {2}pi-jobs: Valkey answered with an error \(WRONGTYPE: a key of that queue holds another kind of value\); it reads paused now\n/, paused.err);
+		// The code and its class's words alone (issue #1064): Valkey's reply names BullMQ's script by digest and line.
+		assert.doesNotMatch(paused.err, /nothing changed|refused by Valkey|user_script|script: [0-9a-f]{8}/);
 		assert.equal(await direct.hexists(meta, "paused"), 1, "paused, as said");
 		const resumed = await run("resume");
 		assert.equal(resumed.code, 1);
-		assert.match(resumed.err, /\n {2}pi-jobs: Valkey answered with an error \(WRONGTYPE [^\n]*\); it reads running now\n/, resumed.err);
+		assert.match(resumed.err, /\n {2}pi-jobs: Valkey answered with an error \(WRONGTYPE: a key of that queue holds another kind of value\); it reads running now\n/, resumed.err);
+		assert.doesNotMatch(resumed.err, /user_script|script: [0-9a-f]{8}/);
 		assert.equal(await direct.hexists(meta, "paused"), 0, "running again, as said: the dangerous direction");
 	} finally {
 		let cursor = "0";
 		do {
 			const [next, keys] = await direct.scan(cursor, "MATCH", `bull:${prefix}*`, "COUNT", 500);
+			cursor = String(next);
+			if (keys.length > 0) await direct.del(...keys);
+		} while (cursor !== "0");
+		direct.disconnect();
+	}
+});
+
+// Issue #1064: a resume stopped at the first queue Valkey answered with an error and left every later queue paused,
+// on every run. Real BullMQ queues on a real Valkey, each under this test's own prefix, with a discovery that names the
+// three of them (a `bull:pi-jobs@<host>:meta` key planted for a real scan to find would be a queue to every other
+// test's discovery on this Valkey).
+test("a resume against a real Valkey goes on past a queue whose meta key holds a string, first, in the middle or last in its walk, and resumes every other queue (issue #1064, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 60_000 }, async () => {
+	const { makeQueue } = await import("../src/queue.mjs");
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const url = process.env.VALKEY_TEST_URL;
+	const names = ["pi-jobs", "pi-jobs@hostb", "pi-jobs@hostc"];
+	const direct = makeRedisClient(url);
+	direct.on("error", () => {});
+	const stamp = `pd1064-${process.pid}-${Date.now()}`;
+	const run = async (cmd, prefix) => {
+		const errs = [];
+		let out = "";
+		const origErr = process.stderr.write.bind(process.stderr);
+		process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+		try {
+			const code = await main([cmd, "--valkey-url", url], { VALKEY_URL: url }, {
+				cwd: tempDir("pd-1064-walk-"), valkeyRefusal: async () => null, write: (text) => { out += text; },
+				controlClients: {
+					// The discovery's two reads, answered whole: no host is live, and the scan names the two hosts' queues.
+					makeRedisClient: () => ({ on() {}, disconnect() {}, async smembers() { return []; }, async scan() { return ["0", names.slice(1).map((n) => `bull:${n}:meta`)]; } }),
+					makeQueue: (connection, { name }) => makeQueue(connection, { name: `${prefix}${name}` }),
+				},
+			});
+			return { code, out, err: errs.join("") };
+		} finally {
+			process.stderr.write = origErr;
+		}
+	};
+	try {
+		for (const [where, bad] of [["first", names[0]], ["middle", names[1]], ["last", names[2]]]) {
+			const prefix = `${stamp}-${where}-`;
+			const meta = (name) => `bull:${prefix}${name}:meta`;
+			// The whole fleet paused for real, then one queue's meta key made a string.
+			const paused = await run("pause", prefix);
+			assert.deepEqual([paused.code, paused.err], [0, ""], where);
+			for (const name of names) assert.equal(await direct.hexists(meta(name), "paused"), 1, `${where}: ${name} is paused`);
+			await direct.set(meta(bad), "not a hash");
+			const resumed = await run("resume", prefix);
+			assert.equal(resumed.code, 1, where);
+			assert.equal(resumed.err, `error: could not resume the whole deployment at ${url}\n`
+				+ names.map((name) => `  ${name}: ${name === bad ? "Valkey answered with an error (WRONGTYPE: a key of that queue holds another kind of value); it may have partly applied" : "resumed"}\n`).join("")
+				+ "  run pi-dispatch status to see each queue, then pi-dispatch resume again once what Valkey refused or failed on is put right\n", where);
+			// Resumed for real, the queues after the one at fault among them.
+			for (const name of names.filter((n) => n !== bad)) assert.equal(await direct.hexists(meta(name), "paused"), 0, `${where}: ${name} runs again`);
+			assert.equal(await direct.type(meta(bad)), "string", "and the key at fault is left as it was");
+		}
+	} finally {
+		let cursor = "0";
+		do {
+			const [next, keys] = await direct.scan(cursor, "MATCH", `bull:${stamp}*`, "COUNT", 500);
 			cursor = String(next);
 			if (keys.length > 0) await direct.del(...keys);
 		} while (cursor !== "0");
@@ -1486,7 +1612,11 @@ test("pause, resume, status and status --target over a list that is short becaus
 		["no answer", { index: noAnswer }, { waits: true, errors: [], more: 0, lasting: null },
 			"the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers"],
 		["an error reply and a read with no answer", { rows: { "host:h:hostw": answeredWith("NOAUTH") }, scan: noAnswer }, { waits: true, errors: [{ key: "host:h:hostw", code: "NOAUTH", class: "permission" }], more: 0, lasting: "permission" },
-			"the list of queues may be short: Valkey answers host:h:hostw with NOAUTH. Waiting does not change that: fix this Valkey user's ACL. Another read got no answer: pause the fleet again once Valkey answers and that is put right; other queues may exist and were not paused"],
+			"the list of queues may be short: Valkey answers host:h:hostw with NOAUTH. Waiting does not change that: fix the Valkey user and password. Another read got no answer: pause the fleet again once Valkey answers and that is put right; other queues may exist and were not paused"],
+		// Issue #1036: NOAUTH and WRONGPASS are of the permission class and are put right in the user and password this
+		// connects with, never in an ACL, where nothing is wrong.
+		["a password Valkey did not take", { index: answeredWith("WRONGPASS") }, { waits: false, errors: [{ key: "host:live", code: "WRONGPASS", class: "permission" }], more: 0, lasting: "permission" },
+			"the list of queues may be short: Valkey answers host:live with WRONGPASS. Waiting does not change that: fix the Valkey user and password, then pause again; other queues may exist and were not paused"],
 	];
 	for (const [what, reads, cause, note] of CASES) {
 		const probe = () => shortProbe(reads);

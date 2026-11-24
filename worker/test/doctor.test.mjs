@@ -6337,6 +6337,50 @@ test("what doctor says of a row answered with an error is the code's class's: a 
 	assert.doesNotMatch(`${busy.fix} ${other.fix}`, /remove or repair/);
 	const key = await rowOver("WRONGTYPE Operation against a key holding the wrong kind of value");
 	assert.deepEqual([key.label, key.fix], [`${said} (WRONGTYPE): that key is not a host's row`, "remove or repair the key host:h:hostw; until then that host is in none of the fleet's checks, and every read of the fleet says it is not whole"]);
+	// NOAUTH and WRONGPASS are of the permission class, and what is put right is the user and password this connects
+	// with: an ACL rule for HGETALL is no part of it.
+	const pass = await rowOver("WRONGPASS invalid username-password pair or user is disabled.");
+	assert.deepEqual([pass.label, pass.fix], [`${said} (WRONGPASS): Valkey did not take the user and password this connects with`, "put right the user and password this process connects to Valkey with. The key itself is not at fault; until then that host is in none of the fleet's checks, and every read of the fleet says it is not whole"]);
+	const auth = await rowOver("NOAUTH Authentication required.");
+	assert.equal(auth.label, `${said} (NOAUTH): this connection has not signed in to Valkey`);
+	assert.doesNotMatch(`${pass.fix} ${auth.fix}`, /ACL|HGETALL|remove or repair/);
+});
+
+// Issue #1036: over the INDEX answered with an error (`host:live` holding a string) doctor printed a pass mark with the
+// reply's own text, "Fleet: could not read the host registry (WRONGTYPE Operation against a key holding the wrong kind
+// of value)", while no reader of the fleet could read the registry until someone put that key right.
+test("the registry's index answered with an error is a warning that names host:live, says what the code's class says and what to do, as a row gets; a read that got no answer keeps its line (#1036)", async () => {
+	const { readLiveHosts } = await import("../src/host-registry.mjs");
+	// The real read over a client whose SMEMBERS of the index is answered with each kind of reply.
+	const indexOver = async (message) => {
+		const client = { smembers: () => Promise.reject(Object.assign(new Error(message), { name: "ReplyError" })), hgetall: async () => ({}) };
+		const checks = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, fleetSeams([], { readHosts: () => readLiveHosts(client, { prune: false }) }));
+		const lines = checks.filter((c) => /^Fleet: .*host registry/.test(c.label));
+		assert.equal(lines.length, 1, JSON.stringify(lines.map((c) => c.label)));
+		assert.ok(!JSON.stringify(checks).includes("Operation against") && !checks.some((c) => /could not read the host registry \(/.test(c.label)), "the reply's code alone, and no pass mark over it");
+		return lines[0];
+	};
+	const said = "Fleet: Valkey answered the read of the host registry's index host:live with an error";
+	const left = "no host is in the fleet's checks, and every read of the fleet says the registry could not be read";
+	const key = await indexOver("WRONGTYPE Operation against a key holding the wrong kind of value");
+	assert.deepEqual([key.ok, key.warn, key.label, key.fix], [false, true, `${said} (WRONGTYPE): that key is not the registry's index`, `remove or repair the key host:live: once it is gone each live worker adds itself again at its next beat; until then ${left}`]);
+	const perm = await indexOver("NOPERM this user has no permissions to run the 'smembers' command");
+	assert.deepEqual([perm.ok, perm.warn, perm.label, perm.fix], [false, true, `${said} (NOPERM): the Valkey user this connects as may not run the command or read the key`, `give that Valkey user the permission in its ACL, or connect as a user that has it: it needs SMEMBERS on host:live. The key itself is not at fault; until then ${left}`]);
+	const auth = await indexOver("NOAUTH Authentication required.");
+	assert.deepEqual([auth.warn, auth.label, auth.fix], [true, `${said} (NOAUTH): this connection has not signed in to Valkey`, `put right the user and password this process connects to Valkey with. The key itself is not at fault; until then ${left}`]);
+	const busy = await indexOver("LOADING Valkey is loading the dataset in memory");
+	assert.deepEqual([busy.warn, busy.label, busy.fix], [true, `${said} (LOADING): Valkey could not serve the command just then`, `run doctor again: a later read may succeed, and nothing has to be repaired. In this run ${left}`]);
+	const other = await indexOver("ERR something this table does not name");
+	assert.deepEqual([other.warn, other.label, other.fix], [true, `${said} (ERR); what that says of the index is not known here`, `see what Valkey answers for SMEMBERS host:live; until it reads, ${left}`]);
+	assert.doesNotMatch(`${perm.fix} ${auth.fix} ${busy.fix} ${other.fix}`, /remove or repair/);
+	// No answer at all (a connection that failed) has no code: the line as it was, a fact and no fault of this host.
+	const silent = { smembers: () => Promise.reject(new Error("Connection is closed.")), hgetall: async () => ({}) };
+	const checks = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, fleetSeams([], { readHosts: () => readLiveHosts(silent, { prune: false }) }));
+	const line = checks.find((c) => /could not read the host registry/.test(c.label));
+	assert.deepEqual([line.ok, line.warn, line.label], [true, undefined, "Fleet: could not read the host registry (Connection is closed.)"]);
+	// A code a seam hands in that is no code is no code either.
+	const odd = await collectChecks({ VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1" }, fleetSeams([], { readHosts: async () => ({ unreachable: "down", error: "two words" }) }));
+	assert.equal(odd.find((c) => /host registry/.test(c.label)).label, "Fleet: could not read the host registry (down)");
 });
 
 test("doctor names at most twenty rows answered with an error and counts the rest in one line (#1036)", async () => {

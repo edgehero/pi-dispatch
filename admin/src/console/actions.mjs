@@ -71,7 +71,7 @@ import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { PAUSE_WINDOW_FIELDS, heldPauseWindows, parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
 import { AGENT_REFUSED, AGENT_UNCONFIRMED, auditedWrite } from "../audited-write.mjs";
 import { pauseWindowsNewerRefusal } from "../newer-release.mjs";
-import { erroredReadWords, fieldNamed, NO_EXPLANATION, queueErrorsLead, queueErrorsOf, SWITCH_ERRORED_READS, switchErroredQueue, switchShortCause, switchShortNote, switchShortThen, UNNAMED_FIELD } from "../words.mjs";
+import { erroredReadWords, fieldNamed, NO_EXPLANATION, queueErrorsLead, queueErrorsOf, SWITCH_ERRORED_READS, switchAnsweredCodes, switchAnsweredThen, switchErroredQueue, switchShortCause, switchShortNote, switchShortThen, UNNAMED_FIELD } from "../words.mjs";
 import { HOST_SET, hostKey } from "@edgehero/pi-dispatch/host-registry";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
 import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, REFUSAL_STATES, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
@@ -1813,9 +1813,13 @@ export const SWITCH_ERRORED_LINE = (errored) => `${queueErrorsLead(errored)}; th
 /**
  * A one-queue switch's refusal for its own queue when Valkey answered that queue's read with an error (issue #1053):
  * whether it is paused is not known, so the preview cannot say what the switch would change, and names it, where it
- * once refused for the whole fleet as a Valkey that could not be reached.
+ * once refused for the whole fleet as a Valkey that could not be reached. `paused` (issue #1064): the queue's paused
+ * flag where it WAS read and its counts alone were answered with an error; the refusal then says the queue as it
+ * reads, and that its counts are what is missing, never that its paused state is not known.
  */
-export const queueErroredRefusal = (queue, error) => `${queue} could not be read: Valkey answered its read with an error (${error}), so whether it is paused is not known here; nothing was changed`;
+export const queueErroredRefusal = (queue, error, paused) => (typeof paused === "boolean"
+  ? `the counts of ${queue} could not be read: Valkey answered that read with an error (${error}). It is ${paused ? "paused" : "running"}, and what the switch would change there is not known here; nothing was changed`
+  : `${queue} could not be read: Valkey answered its read with an error (${error}), so whether it is paused is not known here; nothing was changed`);
 
 /**
  * A fleet resume's waiting line when the snapshot was not read (issue #737): the bound fired (`snapshotOf`'s
@@ -1948,7 +1952,8 @@ function fleetSwitch({ name, kind, paused }) {
         ok: r.res?.ok === true,
         ...(Array.isArray(r.res?.queues) ? { queues: names(r.res.queues) } : {}),
         // Issue #842: which queues are KNOWN switched (`done`) and which are not: `unconfirmed` (sent and not
-        // answered), `refused` (did not change), `notTried` (a resume stops at the first lost answer). A result
+        // answered), `refused` (did not change), `notTried` (a resume stops at the first lost answer, and at no other
+        // queue: issue #1064). A result
         // without those lists is a loop that stopped at `failed`, as before. Issue #1014: `errored`, each queue Valkey
         // answered with an error after its script may have run, with what it reads now ("paused" or "running", or
         // "unknown" where Valkey answered the read back with an error too, issue #1041).
@@ -1973,21 +1978,29 @@ function fleetSwitch({ name, kind, paused }) {
       // was refused before anything was sent does not. Issue #1014: a queue Valkey answered with an error after its script
       // may have run counts too, since that error can follow a switch that happened.
       const partial = results.some((r) => r.ok || (r.partial && (!r.partial.unconfirmed || r.partial.done.length + r.partial.unconfirmed.length + r.partial.errored.length > 0)));
-      // Issue #964: a set that may be short is said FIRST, beside a switch that was sent and may or may not have been made,
-      // where it was a parenthesis at the end that a long Valkey address or list of queues pushed out of the audit row's
-      // 200 code points and a person read past: "pi-jobs" alone, with two more queues that were never sent a pause. Both
-      // clauses lead, so the row keeps both however long the Valkey's address or the list of queues; what to do closes the
-      // sentence. One that is not short keeps its sentence. A queue Valkey answered with an error (issue #1014, which the
-      // per-Valkey words name with what it reads now) leads beside them for the same reason, and leads a sentence that is
-      // not short too, before the Valkey's address, which the row's cut would otherwise take it with. And where the
-      // list is short for a cause that waiting does not end (issue #1035), the lead says that much too, so the row
-      // keeps it; which key, with what code, and what to put right close the sentence (`switchShortThen`).
+      // WHAT EACH QUEUE IS LEADS THE SENTENCE (issue #1064): the queues not known switched, each list with its own
+      // words, then the queues confirmed (`switchPartialWords`), then the Valkey they are on; after them that the
+      // switch did not reach every queue, and last what to do. An audit row keeps 200 code points of a reason, and the
+      // sentence opened with its clauses and the Valkey's address, so with one queue answered with an error the row
+      // ended before it said which queues had been switched and which had not. The clauses it led with since issues
+      // #842 and #1014 (a switch sent that may or may not have been made; Valkey answered one with an error) are what
+      // those lists say of the queues themselves, so they follow. One clause still leads, issue #964's: that the
+      // list of queues may be short, with "for a cause waiting does not end" where that holds (issue #1035), since
+      // no list names a queue the switch never found.
       const sent = results.some((r) => Array.isArray(r.partial?.unconfirmed) && r.partial.unconfirmed.length > 0);
       const errored = results.some((r) => Array.isArray(r.partial?.errored) && r.partial.errored.length > 0);
       const noun = paused ? "pause" : "resume";
-      const lead = !short ? `the kill switch did not reach every queue${errored ? `, Valkey answered a ${noun} with an error` : ""}` : `the kill switch did not reach every queue, ${sent ? `a ${noun} was sent that may or may not have been made, ` : ""}${errored ? `Valkey answered a ${noun} with an error, ` : ""}and the list of queues may be short${cause?.lasting ? " for a cause waiting does not end" : ""}`;
-      const then = short ? switchShortThen(paused, cause) : "Look at the fleet and try again";
-      return { invalid: `${lead}: ${results.map((r) => `${r.valkey} ${r.ok ? "done" : r.partial ? switchPartialWords(r.partial, paused) : "unreachable"}`).join("; ") || "no Valkey answered"}. ${then}`, ...(partial ? { partial: true } : {}), ...(short ? { queuesMayBeShort: true, ...(cause?.lasting ? { queuesShortLasting: cause.lasting } : {}), shortCause: cause } : {}), ...(sent ? { sentUnconfirmed: true } : {}), ...(errored ? { answeredWithError: true } : {}) };
+      // Issue #1064: the queues Valkey ANSWERED with a refusal or an error, each with its reply's code. What to do about
+      // them is that code's class's (`switchAnsweredThen`): "try again" was said here of a queue whose key holds a
+      // string, which answers the same on every press.
+      const answered = switchAnsweredCodes((res?.results ?? []).map((r) => r.res));
+      const head = short ? `the list of queues may be short${cause?.lasting ? " for a cause waiting does not end" : ""}: ` : "";
+      const lists = results.map((r) => (r.ok ? `done on ${r.valkey}` : r.partial ? `${switchPartialWords(r.partial, paused)} on ${r.valkey}` : `could not reach ${r.valkey}`)).join("; ") || "no Valkey answered";
+      const clauses = [...(sent ? [`a ${noun} was sent that may or may not have been made`] : []), ...(errored ? [`Valkey answered a ${noun} with an error`] : [])];
+      const then = [...(short ? [switchShortThen(paused, cause)] : []), ...(answered.length > 0 ? [switchAnsweredThen(paused, answered)] : [])].join(". ") || "Look at the fleet and try again";
+      // `queueLists`: each Valkey's lists without its address, for a tool's refusal, which names queues and no Valkey.
+      const queueLists = results.filter((r) => r.partial).map((r) => switchPartialWords(r.partial, paused));
+      return { invalid: `${head}${lists}. The kill switch did not reach every queue${clauses.length > 0 ? `: ${clauses.join(", and ")}` : ""}. ${then}`, ...(partial ? { partial: true } : {}), ...(short ? { queuesMayBeShort: true, ...(cause?.lasting ? { queuesShortLasting: cause.lasting } : {}), shortCause: cause } : {}), ...(sent ? { sentUnconfirmed: true } : {}), ...(errored ? { answeredWithError: true } : {}), ...(answered.length > 0 ? { answeredCode: answered[0].code } : {}), ...(queueLists.length > 0 ? { queueLists } : {}) };
     },
   };
 }
@@ -2047,7 +2060,7 @@ function queueSwitch({ name, kind, paused }) {
       const row = rows.find((q) => q?.queue === queue);
       // Issue #1053: this queue's own read answered with an error. Another queue's is no reason to refuse this one.
       const errored = queueErrorsOf(s.snapshot).find((e) => e.queue === queue);
-      if (!row && errored) return { refusal: queueErroredRefusal(queue, errored.error) };
+      if (!row && errored) return { refusal: queueErroredRefusal(queue, errored.error, errored.paused) };
       // A read that was short (`switchShortOf`) cannot say a queue it did not read does not exist: it says why instead.
       if (!row && switchShortOf(s.snapshot).length > 0) return { refusal: queueUnreadRefusal(queue) };
       // Issue #964: this host's own queue before its worker made it: the switch names it and no queue of it exists yet.

@@ -3584,7 +3584,28 @@ export async function collectChecks(shellVars, seams) {
 		if (envelopeHere.parseError === null && appliedSplit === null) checks.push(...fleetEnvelopeChecks(envelopeHere.envelope ? envelopeDigest(envelopeHere.envelope) : NO_ENVELOPE_FINGERPRINT, peers));
 	} else if (fleet.unreachable) {
 		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
-		checks.push({ ok: true, label: `Fleet: could not read the host registry (${printable(fleet.unreachable)})` });
+		// Issue #1036: an index Valkey ANSWERED with an error (`error`, the reply's code: `host:live` holding a string,
+		// an ACL that denies SMEMBERS) is a warning that names the key and says what the code's class says to do, as a
+		// row answered with an error gets below. It was a pass mark with the reply's own text in it, over a registry no
+		// reader of the fleet can read until someone puts that key right. A read that got no answer has no code and
+		// keeps its line: the Valkey checks above have already said what is wrong with reaching it.
+		const code = typeof fleet.error === "string" && /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(fleet.error) ? fleet.error : null;
+		if (code === null) checks.push({ ok: true, label: `Fleet: could not read the host registry (${printable(fleet.unreachable)})` });
+		else {
+			const { replyErrorWords } = await import("./connection.mjs");
+			const { class: cls, means, remedy } = replyErrorWords(code);
+			const said = `Fleet: Valkey answered the read of the host registry's index ${HOST_SET} with an error (${printable(code)})`;
+			const leftOut = "no host is in the fleet's checks, and every read of the fleet says the registry could not be read";
+			checks.push({
+				ok: false,
+				warn: true,
+				label: cls === "key" ? `${said}: that key is not the registry's index` : means !== null ? `${said}: ${means}` : `${said}; what that says of the index is not known here`,
+				fix: cls === "key" ? `${remedy} ${HOST_SET}: once it is gone each live worker adds itself again at its next beat; until then ${leftOut}`
+					: cls === "permission" ? `${remedy}${code === "NOPERM" ? `: it needs SMEMBERS on ${HOST_SET}` : ""}. The key itself is not at fault; until then ${leftOut}`
+					: cls === "passing" ? `run doctor again: a later read may succeed, and nothing has to be repaired. In this run ${leftOut}`
+					: `see what Valkey answers for SMEMBERS ${HOST_SET}; until it reads, ${leftOut}`,
+			});
+		}
 	}
 	// Issue #1062: a registry read in part. The hosts whose rows were not read in time are in none of the fleet's checks,
 	// which is said, as a registry that could not be read at all is.
@@ -3595,20 +3616,21 @@ export async function collectChecks(shellVars, seams) {
 	// HGETALL answers NOPERM for sound rows, and a busy Valkey answers BUSY and reads them a moment later. At most
 	// `UNREAD_HOSTS_MAX` rows are named, the rest counted, so the index cannot make this list as long as it likes.
 	if (!fleet.unreachable) {
-		const { replyErrorClass, REPLY_ERROR_CLASSES } = await import("./connection.mjs");
+		const { replyErrorWords } = await import("./connection.mjs");
 		const { hostErrors: erroredRows = {}, hostErrorsMore = 0 } = hostErrorsShown(fleet.hostErrors);
 		const leftOut = "that host is in none of the fleet's checks, and every read of the fleet says it is not whole";
 		for (const [name, code] of Object.entries(erroredRows)) {
 			const key = printable(hostKey(name));
-			const cls = replyErrorClass(code);
-			const { means, remedy } = REPLY_ERROR_CLASSES[cls];
+			// The code's own words where it has them: NOAUTH and WRONGPASS are put right in the user and password this
+			// connects with, and an ACL rule for HGETALL is no part of that.
+			const { class: cls, means, remedy } = replyErrorWords(code);
 			const said = `Fleet: ${HOST_SET} lists ${printable(name)}, and Valkey answered the read of its row with an error (${printable(code)})`;
 			checks.push({
 				ok: false,
 				warn: true,
 				label: cls === "key" ? `${said}: that key is not a host's row` : means !== null ? `${said}: ${means}` : `${said}; what that says of the row is not known here`,
 				fix: cls === "key" ? `${remedy} ${key}; until then ${leftOut}`
-					: cls === "permission" ? `${remedy}: it needs HGETALL on ${key}. The key itself is not at fault; until then ${leftOut}`
+					: cls === "permission" ? `${remedy}${code === "NOPERM" ? `: it needs HGETALL on ${key}` : ""}. The key itself is not at fault; until then ${leftOut}`
 					: cls === "passing" ? `run doctor again: a later read may succeed, and nothing has to be repaired. In this run ${leftOut}`
 					: `see what Valkey answers for HGETALL ${key}; until it reads, ${leftOut}`,
 			});

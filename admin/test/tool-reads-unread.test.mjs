@@ -341,6 +341,55 @@ test("dispatch_cancel over a host row Valkey answers with an error: a job found 
   try {
     await assert.rejects(() => toolActionRequest("dispatch_cancel", { jobId: "gh-nowhere" }, { fleet: both }), /the queue of host hostw was not asked, since Valkey answers host:h:hostw with WRONGTYPE\. Remove or repair that key first; nothing was changed$/);
   } finally { await both.dispose(); }
+  // NOAUTH and WRONGPASS are put right in the user and password this connects with, never in an ACL.
+  assert.equal(await refusal(reply("NOAUTH Authentication required.")), "whether this job is running is not known: no queue that was read says, and the queue of host hostw was not asked, since Valkey answers host:h:hostw with NOAUTH. Fix the Valkey user and password first; nothing was changed");
+});
+
+// Issue #1036: over the registry's INDEX answered with an error the refusal said "the running jobs could not be read
+// ...; nothing was changed, try again", with no key and no code, also while `host:live` held a string, which Valkey
+// answers the same on every call.
+test("dispatch_cancel over the registry's index answered with an error: a job found in a queue that was read is still cancelled as what it is, and one found nowhere is refused with host:live, the code and what its class says to do (#1036)", async () => {
+  const keys = { ...registryKeys({ mini1: row({ routes: "true" }) }), ...metas("pi-jobs@mini1") };
+  const reply = (message) => () => Promise.reject(Object.assign(new Error(message), { name: "ReplyError" }));
+  const jobs = { "pi-jobs": { "gh-queued": "waiting" }, "pi-jobs@mini1": { "gh-running": "active" } };
+  const cancel = async (jobId, how) => {
+    const fleet = readerOver(keys, { redis: (r) => ({ ...r, smembers: (key) => (key === "host:live" ? how() : r.smembers(key)) }), jobs });
+    try { return await toolActionRequest("dispatch_cancel", { jobId }, { fleet }); } finally { await fleet.dispose(); }
+  };
+  const refusal = async (how) => { try { await cancel("gh-nowhere", how); return null; } catch (e) { return e.message; } };
+  const wrongtype = reply("WRONGTYPE Operation against a key holding the wrong kind of value");
+  // The shared queue is asked whatever the index says, and the scan names the host's: both jobs are found.
+  assert.equal((await cancel("gh-queued", wrongtype)).action, "cancel-queued");
+  assert.equal((await cancel("gh-running", wrongtype)).action, "cancel-active");
+  const lead = "whether this job is running is not known: no queue that was read says, and the hosts' queues were not asked, since Valkey answers host:live with";
+  assert.equal(await refusal(wrongtype), `${lead} WRONGTYPE. Remove or repair that key first; nothing was changed`);
+  assert.equal(await refusal(reply("NOPERM this user has no permissions to run the 'smembers' command")), `${lead} NOPERM. Fix this Valkey user's ACL first; nothing was changed`);
+  assert.equal(await refusal(reply("WRONGPASS invalid username-password pair or user is disabled.")), `${lead} WRONGPASS. Fix the Valkey user and password first; nothing was changed`);
+  assert.equal(await refusal(reply("LOADING Valkey is loading the dataset in memory")), `${lead} LOADING. Nothing was changed; try again`);
+  assert.equal(await refusal(reply("ERR something else")), `${lead} ERR. Nothing was changed`);
+  // An index that got no answer has no code: the sentence as it was, where trying again is true.
+  assert.equal(await refusal(() => Promise.reject(new Error("ETIMEDOUT"))), "the running jobs could not be read, so whether this job is running is not known; nothing was changed, try again");
+});
+
+// Issue #1036: the snapshot names a bounded number of running jobs per queue (one, for the tool's reader), so the
+// second job running on a queue was in no list, was planned as a queued job, and was refused by that planner.
+test("dispatch_cancel looks a job up by its id over a whole running list too: one running that the list does not name is cancelled as running, and one no queue holds goes to the queued job's planner as before (#1036)", async () => {
+  const keys = { ...registryKeys({ mini1: row({ routes: "true" }) }), ...metas("pi-jobs@mini1") };
+  const jobs = { "pi-jobs@mini1": { "gh-second": "active", "gh-waiting": "waiting" } };
+  const over = () => readerOver(keys, { jobs });
+  const cancel = async (jobId) => {
+    const fleet = over();
+    try { return await toolActionRequest("dispatch_cancel", { jobId }, { fleet }); } finally { await fleet.dispose(); }
+  };
+  const fleet = over();
+  const snap = await fleet.snapshot({ waiting: true });
+  await fleet.dispose();
+  assert.deepEqual([snap.activeUnreachable, snap.active], [false, []], "the running list is whole, and names neither job");
+  assert.equal((await cancel("gh-second")).action, "cancel-active");
+  assert.equal((await cancel("gh-waiting")).action, "cancel-queued");
+  assert.equal((await cancel("gh-nowhere")).action, "cancel-queued", "over a whole list a job no queue holds is not running: the planner says what it is");
+  // A reader that cannot look a job up (none of the tool's own) plans as before.
+  assert.equal((await toolActionRequest("dispatch_cancel", { jobId: "gh-second" }, { fleet: { snapshot: async () => ({ active: [], held: { rows: [] } }) } })).action, "cancel-queued");
 });
 
 test("dispatch_failed over a failed set that could not be read: jobs null and unavailable", async () => {

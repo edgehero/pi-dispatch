@@ -178,14 +178,23 @@ export const fleetBar = (v) => {
   // With the registry never read only the shared queue was counted (the hosts' own queues are named by the registry),
   // so each number is a floor (issue #962).
   const count = (key) => (hostsUnread(s) && Number.isFinite(sum(key)) ? `at least ${sum(key)}` : sum(key));
+  // The heading claims a state of the whole fleet only where the whole fleet was read (issue #1064). Over a queue
+  // Valkey answered with an error it says so since that issue; over a host registry that was not read whole
+  // (`queue.fleetDegraded`: not read at all, or read in part) it said "The fleet is running", or "is paused", of the
+  // queues it happened to know, while a host's own queue may exist that nobody read. Both are said the same way now:
+  // what the queues that were read say, and what was not read.
+  const registryShort = Boolean(s.queue?.fleetDegraded);
+  const notRead = [...(errored.length > 0 ? [`${errored.length} of ${total} not read`] : []), ...(registryShort ? ["the host registry was not read whole"] : [])].join(", and ");
   const title = !queues.length
     ? "Queue state not read"
     : partial
       ? `Part paused: ${paused.length} of ${total} queues are paused${errored.length > 0 ? `, ${errored.length} not read` : ""}`
       : allPaused
-        ? "The fleet is paused"
-        : errored.length > 0
-          ? `No queue that was read is paused: ${errored.length} of ${total} not read`
+        ? registryShort
+          ? `Every queue that was read is paused: ${notRead}`
+          : "The fleet is paused"
+        : notRead !== ""
+          ? `No queue that was read is paused: ${notRead}`
           : "The fleet is running";
   const resume = () => act(v, "fleet-resume", "Resume the fleet", [], { small: false });
   const pause = () => act(v, "fleet-pause", "Pause the fleet", [], { small: false });
@@ -199,8 +208,8 @@ export const fleetBar = (v) => {
       ? "unreadable"
       : list(s.held.rows).length + Number(s.held.more ?? 0);
   return ui.card({
-    ring: partial || errored.length > 0 ? "attention" : null,
-    body: html`<div class="fl-bar"><div class="fl-bar__row">${ui.tile(partial || allPaused || errored.length > 0 ? "attention" : "ok", { icon: partial || allPaused ? "pause" : "fleet" })}<div class="fl-bar__t"><h2>${title}</h2><p class="muted">${online.atLeast && online.online === 0 ? NO_BEAT_READ : `${online.atLeast ? `at least ${online.online}` : online.online ?? "unknown"} ${online.online === 1 ? "host beats" : "hosts beat"}`}, ${plural(running.length, "queue")} ${running.length === 1 ? "accepts" : "accept"} jobs. ${v.role === "operator" ? html`Valkey <span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "Valkey answers."}</p>${partial ? html`<p class="muted">Starts nothing new: ${paused.map((q) => q.queue).join(", ")}.${running.length > 0 ? ` Keeps starting jobs: ${running.map((q) => q.queue).join(", ")}.` : ""}</p>` : null}${errored.length > 0 ? html`<p class="muted">${queueErrorsLine(errored)}.</p>` : null}</div><div class="fl-bar__stats">${statistic(count("waiting"), "waiting")}${
+    ring: partial || errored.length > 0 || registryShort ? "attention" : null,
+    body: html`<div class="fl-bar"><div class="fl-bar__row">${ui.tile(partial || allPaused || errored.length > 0 || registryShort ? "attention" : "ok", { icon: partial || allPaused ? "pause" : "fleet" })}<div class="fl-bar__t"><h2>${title}</h2><p class="muted">${online.atLeast && online.online === 0 ? NO_BEAT_READ : `${online.atLeast ? `at least ${online.online}` : online.online ?? "unknown"} ${online.online === 1 ? "host beats" : "hosts beat"}`}, ${plural(running.length, "queue")} ${running.length === 1 ? "accepts" : "accept"} jobs. ${v.role === "operator" ? html`Valkey <span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "Valkey answers."}</p>${partial ? html`<p class="muted">Starts nothing new: ${paused.map((q) => q.queue).join(", ")}.${running.length > 0 ? ` Keeps starting jobs: ${running.map((q) => q.queue).join(", ")}.` : ""}</p>` : null}${errored.length > 0 ? html`<p class="muted">${queueErrorsLine(errored)}.</p>` : null}</div><div class="fl-bar__stats">${statistic(count("waiting"), "waiting")}${
       partial
         ? statistic(
             paused.reduce(

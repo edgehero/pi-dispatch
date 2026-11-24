@@ -46,7 +46,8 @@ From any terminal:
   fleet again once Valkey answers". A read Valkey answered with an error does not wait on anything: the line names the key
   (`host:live`, a host's row, or the look for queues) and the reply's code, and says what the code supports
   ([what an error reply's code means](#what-an-error-replys-code-means)): "Valkey answers host:h:hostw with WRONGTYPE. Waiting
-  does not change that: remove or repair that key, then pause again", "fix this Valkey user's ACL" for a permission, "A
+  does not change that: remove or repair that key, then pause again", "fix this Valkey user's ACL" for a permission
+  ("fix the Valkey user and password" for `NOAUTH` and `WRONGPASS`), "A
   later read may succeed" for a Valkey that was busy or loading, and no claim for any other code. Both are said when one
   read was answered with an error and another got no answer. A host row Valkey answered with an error (its key is not a hash) is one of
   those rows, and the first line's words name it with what Valkey answered: `[registry incomplete: 1 of 3 host rows not read, of which
@@ -60,12 +61,18 @@ From any terminal:
   stopped answering applied once it was back, after the command had given up. Any other error can come after the queue
   already switched (the queue's events stream holding the wrong type of value, say), so the command reads the queue back
   and says whether it is paused or running now, or that it may have partly applied when that read does not tell.
+  Of an error from Valkey the line gives the reply's code and what it means, never the reply's own text:
+  "pi-jobs@hostb: Valkey answered with an error (WRONGTYPE: a key of that queue holds another kind of value); it may
+  have partly applied".
   "nothing changed" is said only when no write was sent or every one was refused before it ran. A pause goes to every
-  queue at once; a resume goes one queue after another and sends none after one that is not confirmed, since a resume
-  that lands later starts jobs. When the host registry or the look for queues could not be read whole too, the report's first
+  queue at once; a resume goes one queue after another. It goes on past a queue Valkey refused or answered with an
+  error, so one queue whose key holds the wrong type of value leaves no other queue paused, wherever it stands; it sends
+  none after a queue that got no answer or whose connection did not come up, since a resume that lands later starts
+  jobs. When the host registry or the look for queues could not be read whole too, the report's first
   line names it and the report says the list of queues may be short. Then run `pi-dispatch status` (once Valkey
   answers, when it did not) to see each queue, put right what Valkey refused or failed on, and run the same command
-  again: pausing a paused queue or resuming a running one is harmless.
+  again: pausing a paused queue or resuming a running one is harmless. Where Valkey was only busy or loading, nothing
+  has to be put right and the line says a later run may go through.
 - `pi-dispatch service restart --drain` restarts the worker without stopping a job halfway. It pauses the queues this host's worker takes
   jobs from: the shared one and, when `PI_WORKER_NAME` is set, the host's own (`pi-jobs@<name>`, where its cron, chained and manual runs and
   the forge deliveries [routed to it](multi-host.md#a-forge-delivery-that-needs-one-particular-machine) wait). It waits until none of them has
@@ -136,12 +143,14 @@ a code says only what that code supports:
 | Code | What it means | Does waiting end it | What to do |
 |---|---|---|---|
 | `WRONGTYPE` | The key holds another kind of value (a host's row or a queue's `meta` key that is not a hash, say). | No | Remove or repair the key that is named. |
-| `NOPERM`, `NOAUTH`, `WRONGPASS` | The Valkey user this process connects as may not run the command or read the key, or is not signed in. | No | Give that user the permission in its ACL, or connect as one that has it. The key itself is not at fault: never remove it for this. |
+| `NOPERM`, `NOAUTH`, `WRONGPASS` | The Valkey user this process connects as may not run the command or read the key, or is not signed in. | No | For `NOPERM`, give that user the permission in its ACL, or connect as one that has it. For `NOAUTH` and `WRONGPASS`, put right the user and password this process connects with: no ACL rule is at fault. The key itself is not at fault either: never remove it for this. |
 | `BUSY`, `LOADING`, `TRYAGAIN`, `CLUSTERDOWN`, `MASTERDOWN` | Valkey could not serve the command just then: a script still running, a dataset still loading, a cluster moving a slot or without its primary. | It may | Try again. Nothing has to be repaired. |
 | any other code | Only that Valkey answered with it. | Not known | Nothing is claimed; look at what Valkey answers for that key. |
 
 `pi-dispatch doctor` prints one warning per host row answered with an error, worded by this table, for at most 20 rows, and
-one more line that counts the rest. A trigger edit that needs every host read refuses by the same table: it names the key
+one more line that counts the rest. When the registry's own index (`host:live`) is answered with an error, doctor prints
+one warning for it the same way, with what to do: for a key of the wrong type, remove or repair `host:live`, and each live
+worker adds itself again at its next beat. A trigger edit that needs every host read refuses by the same table: it names the key
 and the code, says what to put right first for the first two rows of the table, and says to try again only for the third.
 
 `waitingDetails.rows` explains a bounded sample of delayed entries. A row contains `jobId`, `queue`, `dueAt`,
