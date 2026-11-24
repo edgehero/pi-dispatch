@@ -74,3 +74,49 @@ test("pending fix survives a lost completion write, stays partial and repairs on
 		assert.equal((await store.read(generic.fix.id)).state, "applied");
 	} finally { const keys = await redis.keys(`${prefix}*`); if (keys.length) await redis.del(...keys); await redis.quit(); }
 });
+
+test("the repair never loses a change that was made: a pending row its file or trigger shows is committed, whatever other row carries the same bytes (#987)", { skip }, async () => {
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const redis = makeRedisClient(url);
+	const file = "/approved/settings.json", x35 = "settings that read 35", x40 = "settings that read 40";
+	const entry = { on: { type: "label", any: ["fix"] }, run: { kind: "github", flow: "fix", instructions: "Use pnpm." } };
+	const undo = { index: 0, before: null, after: "Use pnpm.", triggerDigest: hash(JSON.stringify(entry)) };
+	// Each history: its rows in time order (`made` is a change whose completion was written, `cut` one that was made and
+	// whose completion was lost, so its row is pending), what the file or the trigger reads now, and what every row must
+	// read after a repair. In each a change that was MADE shares its bytes with another row, and none may be lost.
+	const config = (runId, bytes) => ({ value: { kind: "config", runId, scopeId, reason: "secret-unresolved" }, proof: { file, afterDigest: hash(bytes) } });
+	const instruction = (runId) => ({ value: { kind: "instructions", runId, scopeId, reason: "secret-unresolved" }, proof: undo });
+	const histories = [
+		["35, 40, then 35 again with the third's completion lost", [["made", config("r1", x35)], ["made", config("r1", x40)], ["cut", config("r1", x35)]], { file: x35 }, ["applied", "applied", "applied"]],
+		["the same, and then 40 and 35 once more", [["made", config("r1", x35)], ["made", config("r1", x40)], ["cut", config("r1", x35)], ["made", config("r1", x40)], ["made", config("r1", x35)]], { file: x35 }, ["applied", "applied", "applied", "applied", "applied"]],
+		["made with its completion lost, put back by hand, made again", [["cut", config("r1", x35)], ["made", config("r1", x35)]], { file: x35 }, ["applied", "applied"]],
+		["another refusal's fix writing the same value, its completion lost", [["made", config("r1", x35)], ["cut", config("r2", x35)]], { file: x35 }, ["applied", "applied"]],
+		["an instruction saved again after an Undo whose mark was lost, its completion lost", [["made", instruction("q1")], ["cut", instruction("q1")]], { trigger: entry }, ["applied", "applied"]],
+		["two changes of one millisecond with the same bytes, one completion lost", [["made", config("r1", x35)], ["cut-same-time", config("r1", x35)]], { file: x35 }, ["applied", "applied"]],
+		// What the file does not show stays pending, as before: nothing is replayed and nothing is refused by guess.
+		["a change whose completion was lost and whose file reads otherwise now", [["cut", config("r1", x35)]], { file: x40 }, ["pending"]],
+	];
+	try {
+		for (const [what, rows, reads, expected] of histories) {
+			const prefix = `test-fixes-${randomBytes(8).toString("hex")}:`;
+			let t = nowMs;
+			const store = makeZeroTouchFixStore({ redis, prefix, now: () => t });
+			const staged = [];
+			try {
+				for (const [how, { value, proof }] of rows) {
+					if (how !== "cut-same-time") t += 60_000;
+					const row = await store.stage(value, { privateUndo: proof, identity: `ticket-${staged.length}` });
+					assert.ok(row.ok, what);
+					if (how === "made") assert.equal(await store.commit(row.fix.id), true, what);
+					staged.push(row.fix.id);
+				}
+				t += 60_000;
+				await store.repair({ readFile: async path => path === file && reads.file !== undefined ? reads.file : null, readTrigger: async () => reads.trigger });
+				assert.deepEqual(await Promise.all(staged.map(async id => (await store.read(id)).state)), expected, what);
+				const snapshot = await store.publicSnapshot();
+				const open = expected.filter(state => state === "pending").length;
+				assert.deepEqual([snapshot.fixes.length, snapshot.pendingCount, snapshot.partial], [expected.length - open, open, open > 0], what);
+			} finally { const keys = await redis.keys(`${prefix}*`); if (keys.length) await redis.del(...keys); }
+		}
+	} finally { await redis.quit(); }
+});

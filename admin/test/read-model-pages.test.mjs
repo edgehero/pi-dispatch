@@ -3000,6 +3000,108 @@ test("the fleet reader says of a sandbox request that was not confirmed whether 
     assert.equal(await (await t.queue.getJob("j1"))[method]({}), method === "update" ? "updated" : "removed");
     assert.equal(t.wrote, true, `a job's ${method}`);
   }
+  // A job out of a LIST is tracked as one handed back alone, and a job's own `queue` is the tracked queue: each was a
+  // way to a write that nothing counted.
+  const listed = () => ({ ...whole(), getJobs: async () => [job(), job()] });
+  const inList = queueWriteTracking(listed());
+  const jobs = await inList.queue.getJobs(["waiting"]);
+  assert.deepEqual([jobs.length, await jobs[1].getState(), inList.wrote], [2, "waiting", false]);
+  assert.equal(await jobs[1].remove(), "removed");
+  assert.equal(inList.wrote, true, "a job out of a list");
+  const byQueue = queueWriteTracking(whole());
+  const handed = await byQueue.queue.getJob("j1");
+  assert.equal(handed.queue, byQueue.queue, "a job's queue is the tracked one");
+  assert.equal(byQueue.wrote, false);
+  assert.equal(await handed.queue.remove("j1"), 1);
+  assert.equal(byQueue.wrote, true, "a job's own queue");
+});
+
+test("a tracked queue counts AT ITS CLIENT what any object asks of Valkey under its run: a job out of a list, a job's own queue, the connection itself; its lookups and another tracker's commands do not count (#987, VALKEY_TEST_URL)", { skip: live, timeout: 30_000 }, async () => {
+  const { makeQueue } = await import("@edgehero/pi-dispatch/queue");
+  const { parseConnection } = await import("@edgehero/pi-dispatch/connection");
+  const { queueWriteTracking } = await import("../src/read-model.mjs");
+  const name = `pd987q-${process.pid}-${Date.now()}`;
+  const queue = makeQueue(parseConnection(URL_), { name });
+  queue.on("error", () => {});
+  const key = `bull:${name}:pd987-own`;
+  const fleets = [];
+  try {
+    for (const id of ["j1", "j2", "j3", "j4"]) await queue.add("n", { id }, { jobId: id });
+    // The rule no object path walks around, and FIRST, on a client no tracker has met: the connection the queue holds,
+    // which no proxy of this tracker stands before. Its client is the one every path ends in, and `run` itself sees to
+    // it that commands are counted there, whether or not the helper ever asks the tracked queue for its client.
+    const direct = queueWriteTracking(queue);
+    await direct.run(async () => {
+      await (await direct.queue.connection.client).set(key, "1", "PX", 60_000);
+    });
+    assert.deepEqual([direct.wrote, await (await queue.client).get(key)], [true, "1"], "the connection itself");
+    // Lookups alone count nothing: on the queue, on a job, on a job out of a list, and a read through the client.
+    const looked = queueWriteTracking(queue);
+    await looked.run(async () => {
+      const one = await looked.queue.getJob("j1");
+      const all = await looked.queue.getJobs(["waiting"]);
+      assert.deepEqual([await one.getState(), all.length, await all[0].getState(), (await looked.queue.getJobCounts("waiting")).waiting], ["waiting", 4, "waiting", 4]);
+      assert.equal(await (await looked.queue.client).exists(key), 1);
+    });
+    assert.equal(looked.wrote, false, "only looked up");
+    // A job out of a list, removed: it was removed with nothing counted.
+    const listed = queueWriteTracking(queue);
+    await listed.run(async () => {
+      const jobs = await listed.queue.getJobs(["waiting"]);
+      await jobs.find((j) => j.id === "j1").remove();
+    });
+    assert.deepEqual([listed.wrote, await queue.getJob("j1")], [true, undefined], "a job out of a list");
+    // A job's own queue, asked to remove: the same.
+    const owned = queueWriteTracking(queue);
+    await owned.run(async () => {
+      const job = await owned.queue.getJob("j2");
+      await job.queue.remove("j2");
+    });
+    assert.deepEqual([owned.wrote, await queue.getJob("j2")], [true, undefined], "a job's own queue");
+    // A job this tracker did not hand out: the queue it was given, asked directly. Its remove is counted at the client
+    // too, and so is its lookup, which the tracker cannot know for one: fail closed.
+    const raw = queueWriteTracking(queue);
+    await raw.run(async () => {
+      await (await queue.getJob("j3")).remove();
+    });
+    assert.deepEqual([raw.wrote, await queue.getJob("j3")], [true, undefined], "a job of the queue itself");
+    const rawLookup = queueWriteTracking(queue);
+    await rawLookup.run(() => queue.getJob("j4"));
+    assert.equal(rawLookup.wrote, true, "a lookup this tracker did not make is not known to be one");
+    // Two trackers on one queue, at once: each counts what was asked under its own run, and a command asked under none
+    // is nobody's.
+    const reader = queueWriteTracking(queue);
+    const writer = queueWriteTracking(queue);
+    await Promise.all([
+      reader.run(async () => {
+        for (let i = 0; i < 5; i += 1) await reader.queue.getJob("j4");
+      }),
+      writer.run(async () => {
+        await writer.queue.add("n", { id: "j5" }, { jobId: "j5" });
+      }),
+      queue.add("n", { id: "j6" }, { jobId: "j6" }),
+    ]);
+    assert.deepEqual([reader.wrote, writer.wrote], [false, true]);
+    // The fleet reader calls its helper UNDER the tracker: a helper that reaches Valkey by a path no proxy stands
+    // before is still answered for, and one that only looked up is not.
+    const { mk } = switchQueues();
+    const unknown = { id: "x", state: "unknown" };
+    const prepare = (helper) => {
+      fleets.push(endingReader(mk, [{ name: "hostb", routes: true }], { makeSandboxPrepareQueueFn: () => queue, enqueueSandboxPreparationFn: helper }));
+      return fleets.at(-1).sandboxPrepare({ host: "hostb" });
+    };
+    assert.deepEqual(await prepare(async (q) => { await (await q.connection.client).set(key, "2", "PX", 60_000); return unknown; }), { ...unknown, asked: true });
+    assert.deepEqual(await prepare(async (q) => { await q.getJob("j4"); return unknown; }), { ...unknown, asked: false });
+  } finally {
+    try {
+      await (await queue.client).del(key);
+      await queue.obliterate({ force: true });
+    } finally {
+      // Each reader closes the queues it holds, this one among them.
+      for (const fleet of fleets) await fleet.dispose();
+      await queue.close();
+    }
+  }
 });
 
 test("createFleetReader builds every queue it holds on the console's bounded connection: the shared one, a host's, a sandbox request's (#842)", async () => {

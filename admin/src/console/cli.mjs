@@ -705,6 +705,18 @@ async function run(argv, io) {
   }
 }
 
+/**
+ * The zero touch service's log as one console line per event (issue #987): the event's name and, where the service
+ * gave one, its cause. Every event read "Zero touch accounting needs repair" and no more, so the log could not tell
+ * a Valkey that did not answer from a fault of the code, for a failure the operator is told nothing else about.
+ * Names only: the service words a cause without values (`causeOf`), and it is kept to one bounded plain line here.
+ */
+export const zeroTouchLog = (log) => (event, detail) => {
+  const name = typeof event === "string" && /^[a-z_]{1,60}$/.test(event) ? event : "event";
+  const cause = typeof detail?.cause === "string" && detail.cause !== "" ? `: ${detail.cause.replace(/[^\x20-\x7e]+/g, " ").slice(0, 220)}` : "";
+  log(`console: Zero touch accounting needs repair (${name}${cause})`);
+};
+
 /** Startup refusals in order (tokens file, an operator, the lock, the bind), then serve until stopped. */
 async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
   const readTokens = () => m.tokens.readTokensFile({ path: config.tokensPath, fs, uid });
@@ -807,7 +819,7 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       timers: io.timers,
       log,
     });
-    const zeroTouch = m.zeroTouchData?.makeZeroTouchService({ paths: side.paths, env: side.env, fs, now, log: () => log("console: Zero touch accounting needs repair") });
+    const zeroTouch = m.zeroTouchData?.makeZeroTouchService({ paths: side.paths, env: side.env, fs, now, log: zeroTouchLog(log) });
     // The console's hosts file, always a path: the read side's environment takes PI_SANDBOX_HOSTS_FILE from this shell
     // only, so a value set only in the deployment .env reaches the service through the console's configuration.
     const sandboxes = m.sandboxData?.makeSandboxService({ paths: side.paths, env: { ...side.env, PI_SANDBOX_HOSTS_FILE: config.sandboxHostsFile }, deploymentDir: config.dir, fleet, fs, now });

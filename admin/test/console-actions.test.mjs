@@ -35,7 +35,8 @@ import { fleetActive, fleetFailed, fleetHeld, fleetQueues, configTriggers, parke
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as RM from "../src/read-model.mjs";
 import * as WP from "../src/write-plans.mjs";
-import { FIX_STAGE_IN_PART, FIX_STAGE_UNCONFIRMED, UNDO_UNMARKED, makeZeroTouchService } from "../src/zero-touch-data.mjs";
+import { FIX_STAGE_IN_PART, FIX_STAGE_UNCONFIRMED, UNDO_UNMARKED, causeOf, makeZeroTouchService } from "../src/zero-touch-data.mjs";
+import { zeroTouchLog } from "../src/console/cli.mjs";
 import { UNDO_ALREADY_WRITTEN } from "../src/zero-touch-actions.mjs";
 import { makeAnswererService } from "../src/answerer-data.mjs";
 import { makeQuestionGroupStore } from "@edgehero/pi-dispatch/question-groups";
@@ -4581,7 +4582,9 @@ test("a fix's accounting that the store asked for and Valkey did not answer is n
       const again = await c.act("zero-touch-undo", { fixId: saved.json().fixId });
       assert.deepEqual([again.status, again.json().error], [400, plan.landed ? "This instruction fix has expired or cannot be undone here." : UNDO_ALREADY_WRITTEN], what);
     }
-    assert.equal(UNDO_UNMARKED, "The instruction was put back as it was before this fix, but the fix could not be marked undone: Zero touch still shows it as applied until its row expires. Do not undo it again.");
+    // "may still show": a mark whose write was sent and not answered lands when Valkey wakes, and the page then reads
+    // Reverted. It said "still shows", as certain, of what the first case of this loop shows is not.
+    assert.equal(UNDO_UNMARKED, "The instruction was put back as it was before this fix, but the fix could not be marked undone: Zero touch may still show it as applied until its row expires. Do not undo it again.");
     assert.ok([...UNDO_UNMARKED].length <= 200, "an audit row keeps the whole sentence");
     assert.equal(UNDO_ALREADY_WRITTEN, "This trigger's instructions are already what Undo would write: the instruction of this fix is not in them. Nothing was changed.");
   } finally { await f.done(); }
@@ -4607,7 +4610,7 @@ test("what tracks a configuration fix never takes the place of the change's own 
         return name === "get" ? (...args) => (silent && String(args[0]).startsWith("zero-touch:fixes:meta:") ? Promise.reject(new Error("fix-store-timeout")) : value.apply(target, args)) : value.bind(target);
       } });
     };
-    const service = makeZeroTouchService({ paths, now, redisFn, log: (event) => logged.push(event) });
+    const service = makeZeroTouchService({ paths, now, redisFn, log: (event, detail) => logged.push([event, detail]) });
     const c = await start({ paths, a: { zeroTouch: service } });
     const states = async () => {
       const ids = await f.redis.zrange("zero-touch:fixes:index", 0, -1);
@@ -4631,7 +4634,9 @@ test("what tracks a configuration fix never takes the place of the change's own 
     assert.equal(JSON.parse(read(paths.settingsFile)).maxTurns, 31, "the file is as the other writer left it");
     assert.deepEqual(await intents(), [[], false], "the touch intent was taken back though the row's refusal was not written");
     assert.deepEqual(await states(), ["pending"], "the staged row could not be refused: it stays pending");
-    assert.deepEqual(logged, ["zero_touch_fix_reject_pending"], "and that is logged, never answered");
+    // Logged with its cause, never answered: the operator is told nothing else of a row that stays pending, and the
+    // line said "{}" of an outage and of a fault of the code alike.
+    assert.deepEqual(logged, [["zero_touch_fix_reject_pending", { cause: "Error: fix-store-timeout" }]]);
     // At the service, with the row's refusal answered or not: what the change answered or threw is what comes back.
     let ticket = 0;
     const tracked = (apply) => service.trackConfiguration({ ticketDigest: createHash("sha256").update(`t${(ticket += 1)}`).digest("hex"), afterDigest: "c".repeat(64), target: paths.settingsFile, payload: { touchContext: { runId: "gh-refusal", scopeId: "a".repeat(64), project: "web", reason: "secret-unresolved", groupId: null, triggerIndex: 0 } } }, apply).then((value) => ({ value }), (error) => ({ error }));
@@ -4651,6 +4656,224 @@ test("what tracks a configuration fix never takes the place of the change's own 
     // where it was not answered, and pending where the change may have been made (never refused: the file decides).
     assert.deepEqual((await states()).sort(), ["pending", "pending", "pending", "pending", "pending", "pending", "pending", "refused", "refused"]);
   } finally { await f.done(); }
+});
+
+test("what the tracking of a fix could not take back is logged with its cause, a row still open is reported only by a repair that ran to its end, and the instruction path takes its accounting back (#987)", live, async () => {
+  const f = await freshValkey();
+  try {
+    const { paths } = deployment(URL13);
+    let t = T0;
+    const now = () => t;
+    const record = buildRecord({ job: { id: "gh-refusal", data: { kind: "github", repo: "acme/web", target: { type: "issue", number: 42 }, trigger: { matched: { index: 0, type: "label" } } } }, result: { outcome: "policy", reason: "secret-unresolved" }, startedAt: new Date(T0 - 2000).toISOString(), endedAt: new Date(T0 - 1000).toISOString() });
+    record.touchScopeId = "a".repeat(64);
+    makeRecordWriter({ logsDir: paths.logsDir })(record);
+    // The real stores over a real Valkey, with four seams on the client: a fix row's read that rejects with `failing`,
+    // its proof's read that rejects while `noProof` is set, the touch intent's HDEL that rejects while `noAbort` is set,
+    // and `atStage`, called when a stage's transaction opens.
+    let failing = null;
+    let noProof = false;
+    let noAbort = false;
+    let atStage = null;
+    const logged = [];
+    const redisFn = (url, options) => {
+      const real = makeRedisClient(url, options);
+      return new Proxy(real, { get(target, name) {
+        const value = Reflect.get(target, name);
+        if (typeof value !== "function") return value;
+        if (name === "get") return (...args) => (failing !== null && String(args[0]).startsWith("zero-touch:fixes:meta:") ? Promise.reject(failing) : noProof && String(args[0]).startsWith("zero-touch:fixes:private:") ? Promise.reject(new Error("fix-store-timeout")) : value.apply(target, args));
+        if (name === "hdel") return (...args) => (noAbort ? Promise.reject(new Error("Command timed out")) : value.apply(target, args));
+        if (name === "multi") return (...args) => { atStage?.(); return value.apply(target, args); };
+        return value.bind(target);
+      } });
+    };
+    const service = makeZeroTouchService({ paths, now, redisFn, triggerBindingFn: async ({ jobId, index }) => ({ ok: true, runId: jobId, index, triggerDigest: sha256(JSON.stringify(JSON.parse(read(paths.triggersPath)).triggers[index])) }), log: (event, detail) => logged.push([event, detail]) });
+    const c = await start({ paths, a: { zeroTouch: service } });
+    const states = async () => {
+      const ids = await f.redis.zrange("zero-touch:fixes:index", 0, -1);
+      return (await Promise.all(ids.map(async (id) => JSON.parse(await f.redis.get(`zero-touch:fixes:meta:${id}`)).state))).sort();
+    };
+    const intents = async () => [existsSync(join(paths.logsDir, "touch-outbox")) ? readdirSync(join(paths.logsDir, "touch-outbox")) : [], (await makeTouchStore({ redis: f.redis, now }).read()).coverage.reasons.includes("touch-actions-unresolved")];
+    const settings = (maxTurns) => writeFileSync(paths.settingsFile, `${JSON.stringify({ maxTurns, maxCostUsd: "2" }, null, 2)}\n`);
+    const change = { key: "maxTurns", value: "35", becauseRun: "gh-refusal" };
+
+    // The first attempt: the file changes between the preview and the confirm, the change is refused, and the refusal
+    // of its staged row gets no answer. The row stays pending.
+    const p = await c.act("setting-set", change);
+    assert.equal(p.status, 200, p.text);
+    settings(31);
+    failing = new Error("fix-store-timeout");
+    const refused = await c.confirm("setting-set", p.json().ticket);
+    failing = null;
+    assert.equal(refused.status, 409, refused.text);
+    assert.deepEqual(await states(), ["pending"]);
+    // The page says what is so of it: its file does not show it, so no reload settles it. It said "Reload to retry".
+    let page = await service.read({ days: 30 });
+    assert.deepEqual([page.fixesPartial, page.fixesOpen, page.fixesOpenDays, page.fixes.length], [true, 1, 30, 0]);
+    assert.deepEqual(logged.splice(0), [["zero_touch_fix_reject_pending", { cause: "Error: fix-store-timeout" }]]);
+    // Only a repair that ran to its end says so. One that failed has looked at nothing, a reload does retry it, and
+    // the page keeps "Reload to retry": the same row was reported as one no reload settles.
+    noProof = true;
+    page = await service.read({ days: 30 });
+    noProof = false;
+    assert.deepEqual([page.fixesPartial, page.fixesOpen], [true, 0]);
+    assert.deepEqual(logged.splice(0), [["zero_touch_fix_repair_pending", { cause: "Error: fix-store-timeout" }]]);
+
+    // What the tracking cannot take back is logged with WHY. A fault of the code on a Valkey that answers is told from
+    // an outage by its name, and its message, which is nobody's fixed sentence, stays out of the log; the line said the
+    // same of both and of nothing.
+    t += 60_000;
+    const q = await c.act("setting-set", { ...change, value: "36" });
+    settings(32);
+    failing = new TypeError("fix.undo is not iterable");
+    assert.equal((await c.confirm("setting-set", q.json().ticket)).status, 409);
+    failing = null;
+    assert.deepEqual(logged.splice(0), [["zero_touch_fix_reject_pending", { cause: "TypeError" }]]);
+    // The touch intent's abort that Valkey does not take: the touch store ANSWERS an error and never throws, so
+    // nothing was logged at all. The change's answer is its own all the same, and the row was refused.
+    t += 60_000;
+    const r = await c.act("setting-set", { ...change, value: "37" });
+    settings(33);
+    noAbort = true;
+    const unaborted = await c.confirm("setting-set", r.json().ticket);
+    noAbort = false;
+    assert.equal(unaborted.status, 409, unaborted.text);
+    assert.match(unaborted.json().error, /changed/);
+    assert.deepEqual(logged.splice(0), [["zero_touch_touch_abort_pending", { cause: "touch-index-unavailable" }]]);
+    // The intent's file is gone whatever the store answered; its entry in Valkey is what could not be taken back, and
+    // the touch coverage reads unresolved for it, which is what the log line is for.
+    assert.deepEqual(await intents(), [[], true]);
+    assert.equal(await f.redis.hlen("touch:pending"), 1);
+    assert.deepEqual(await states(), ["pending", "pending", "refused"]);
+
+    // The INSTRUCTION path takes its accounting back too when its file refuses the change after the stage. Refused:
+    // another write holds the triggers file's lock when this one comes to it.
+    const sentence = { runId: "gh-refusal", index: 0, sentence: "Use pnpm for all test commands." };
+    let before = await states();
+    const i = await c.act("zero-touch-instruction", sentence);
+    assert.equal(i.status, 200, i.text);
+    atStage = () => {
+      atStage = null;
+      writeFileSync(`${paths.triggersPath}.lock`, "");
+    };
+    const locked = await c.confirm("zero-touch-instruction", i.json().ticket);
+    rmSync(`${paths.triggersPath}.lock`, { force: true });
+    assert.equal(atStage, null, "the stage was reached");
+    assert.equal(locked.status, 409, locked.text);
+    assert.match(locked.json().error, /locked/);
+    assert.equal(JSON.parse(read(paths.triggersPath)).triggers[0].run.instructions, undefined, "the file was not written");
+    // Its row is refused and its touch intent gone: left as they were, the row read pending and the intent's file was
+    // begun again by every read of the page.
+    assert.deepEqual(await states(), [...before, "refused"].sort());
+    assert.deepEqual([(await intents())[0], await f.redis.hlen("touch:pending")], [[], 1], "no intent of this confirm is left");
+    // Thrown: the trigger is edited by someone else between the confirm's own look at it and its write. The write
+    // throws, the confirm says the change could not be made, which is so, and both are taken back all the same. This
+    // one left the row pending and the intent behind.
+    before = await states();
+    const j = await c.act("zero-touch-instruction", sentence);
+    assert.equal(j.status, 200, j.text);
+    atStage = () => {
+      atStage = null;
+      const doc = JSON.parse(read(paths.triggersPath));
+      doc.triggers[0].run = { ...doc.triggers[0].run, instructions: "Somebody else's sentence." };
+      writeFileSync(paths.triggersPath, `${JSON.stringify(doc, null, 2)}\n`);
+    };
+    const edited = await c.confirm("zero-touch-instruction", j.json().ticket);
+    assert.equal(atStage, null, "the stage was reached");
+    assert.equal(edited.status, 500, edited.text);
+    assert.match(edited.json().error, /could not be made; nothing was changed/);
+    assert.equal(JSON.parse(read(paths.triggersPath)).triggers[0].run.instructions, "Somebody else's sentence.", "the other edit stands");
+    assert.deepEqual(await states(), [...before, "refused"].sort());
+    assert.deepEqual([(await intents())[0], await f.redis.hlen("touch:pending")], [[], 1], "no intent of this confirm is left");
+    assert.deepEqual(logged, []);
+  } finally { await f.done(); }
+});
+
+test("a change made three times whose third completion was lost reads as three fixes: 35, 40 and 35 again, with why the completion was lost in the log (#987)", live, async () => {
+  const f = await freshValkey();
+  try {
+    const { paths } = deployment(URL13);
+    let t = T0;
+    const now = () => t;
+    const record = buildRecord({ job: { id: "gh-refusal", data: { kind: "github", repo: "acme/web", target: { type: "issue", number: 42 }, trigger: { matched: { index: 0, type: "label" } } } }, result: { outcome: "policy", reason: "secret-unresolved" }, startedAt: new Date(T0 - 2000).toISOString(), endedAt: new Date(T0 - 1000).toISOString() });
+    record.touchScopeId = "a".repeat(64);
+    makeRecordWriter({ logsDir: paths.logsDir })(record);
+    // The real stores over a real Valkey, on a client whose reads of a fix's row get no answer while `silent` is set:
+    // that is where a completion begins.
+    let silent = false;
+    const logged = [];
+    const redisFn = (url, options) => {
+      const real = makeRedisClient(url, options);
+      return new Proxy(real, { get(target, name) {
+        const value = Reflect.get(target, name);
+        if (typeof value !== "function") return value;
+        return name === "get" ? (...args) => (silent && String(args[0]).startsWith("zero-touch:fixes:meta:") ? Promise.reject(new Error("fix-store-timeout")) : value.apply(target, args)) : value.bind(target);
+      } });
+    };
+    const service = makeZeroTouchService({ paths, now, redisFn, log: (event, detail) => logged.push([event, detail]) });
+    const c = await start({ paths, a: { zeroTouch: service } });
+    const states = async () => {
+      const ids = await f.redis.zrange("zero-touch:fixes:index", 0, -1);
+      return Promise.all(ids.map(async (id) => JSON.parse(await f.redis.get(`zero-touch:fixes:meta:${id}`)).state));
+    };
+    const set = (value) => c.both("setting-set", { key: "maxTurns", value, becauseRun: "gh-refusal" });
+    assert.equal((await set("35")).confirm.status, 200);
+    t += 60_000;
+    assert.equal((await set("40")).confirm.status, 200);
+    t += 60_000;
+    // Back to 35, with Valkey silent where the completion begins: the change is made and says its accounting is pending.
+    const p = await c.act("setting-set", { key: "maxTurns", value: "35", becauseRun: "gh-refusal" });
+    assert.equal(p.status, 200, p.text);
+    silent = true;
+    const third = await c.confirm("setting-set", p.json().ticket);
+    silent = false;
+    assert.deepEqual([third.status, third.json().warning], [200, "tracking-incomplete"], third.text);
+    assert.equal(JSON.parse(read(paths.settingsFile)).maxTurns, 35);
+    assert.deepEqual(await states(), ["applied", "applied", "pending"]);
+    // Why it is pending is in the log: this line carried no cause.
+    assert.deepEqual(logged.splice(0), [["zero_touch_fix_pending", { cause: "Error: fix-store-timeout" }]]);
+    // The page's repair finds the file showing the change and completes it: three fixes. An earlier fix with the same
+    // bytes held this one pending for good, a made change the history never listed, while the change could not be made
+    // again either ("the file already says this").
+    t += 60_000;
+    const page = await service.read({ days: 30 });
+    assert.deepEqual(await states(), ["applied", "applied", "applied"]);
+    assert.deepEqual([page.fixes.length, page.fixesPartial, page.fixesOpen], [3, false, 0]);
+    assert.deepEqual(logged, []);
+  } finally { await f.done(); }
+});
+
+test("a zero touch log line carries its event and its cause in names, never a value: an error's message only when it is one of this project's own fixed sentences (#987)", () => {
+  // The cause: an error's name and its code always, and the mark this project set on it.
+  assert.equal(causeOf(Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1"), { code: "ECONNREFUSED" })), "Error ECONNREFUSED");
+  assert.equal(causeOf(new TypeError("fix.undo is not iterable")), "TypeError");
+  assert.equal(causeOf(Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true })), "Error ETIMEDOUT (may still run)");
+  assert.equal(causeOf(Object.assign(new Error("Valkey did not connect within 6 seconds"), { valkeyNotSent: true })), "Error (not sent)");
+  // Its message only when it is one of this project's own fixed sentences: the stores' timer words, and the fix
+  // store's word for a transaction Valkey answered with an error.
+  for (const sentence of ["fix-store-timeout", "question-store-timeout", "answer-store-timeout", "fix metadata unavailable"]) assert.equal(causeOf(new Error(sentence)), `Error: ${sentence}`);
+  // Any other message can quote what was stored, so it is left out whole: it reached the console's line as it was.
+  assert.equal(causeOf(new Error('{"token":"ghp_0123456789abcdef"}')), "Error");
+  assert.equal(causeOf(Object.assign(new Error("ERR value 'a private sentence' is not an integer or out of range"), { name: "ReplyError" })), "ReplyError");
+  assert.equal(causeOf(new Error("fix-store-timeout while reading a private sentence")), "Error");
+  let unparsed;
+  try { JSON.parse('{"instructions":"a private sentence"'); } catch (err) { unparsed = err; }
+  assert.equal(causeOf(unparsed), "SyntaxError");
+  // What is no error at all, and a name or a code that is not one.
+  assert.deepEqual([causeOf("nope"), causeOf(null), causeOf(undefined), causeOf(Object.assign(new Error("fix-store-timeout"), { name: "not a name!", code: "lower" }))], ["Error", "Error", "Error", "Error: fix-store-timeout"]);
+  // The console's line: the event, and its cause where one was given. It read "Zero touch accounting needs repair" for
+  // every event and nothing else.
+  const lines = [];
+  const log = zeroTouchLog((line) => lines.push(line));
+  log("zero_touch_fix_reject_pending", { cause: "TypeError" });
+  log("touch_record_pending", {});
+  log("not an event name!", { cause: "x\ny" });
+  log("zero_touch_fix_pending", { cause: 7 });
+  assert.deepEqual(lines, [
+    "console: Zero touch accounting needs repair (zero_touch_fix_reject_pending: TypeError)",
+    "console: Zero touch accounting needs repair (touch_record_pending)",
+    "console: Zero touch accounting needs repair (event: x y)",
+    "console: Zero touch accounting needs repair (zero_touch_fix_pending)",
+  ]);
 });
 
 test("a fix's stage that Valkey answered with one command's error says its row may be there in part, never that nothing was changed (#987)", live, async () => {

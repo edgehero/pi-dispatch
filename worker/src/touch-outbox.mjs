@@ -31,8 +31,9 @@ export function makeTouchOutbox({ dir, store, fs = nodeFs, log = () => {} } = {}
 			return result.ok ? result : { error: result.error, durable };
 		},
 		// The file goes whatever the store answers (issue #961): an abort whose answer was lost left it behind as pending, and
-		// `repair()` then began that action again on every read of the page.
-		async abort(intent) { if (!intent?.event) return; try { await store.abort(intent.event); } finally { drop(intent.event); } },
+		// `repair()` then began that action again on every read of the page. The store's answer is handed on (issue #987):
+		// it ANSWERS an error and never throws, so a caller that logs what it could not take back had nothing to log.
+		async abort(intent) { if (!intent?.event) return { ok: true }; try { return await store.abort(intent.event); } finally { drop(intent.event); } },
 		async repair() {
 			const result = { repaired: 0, pending: 0, invalid: 0 };
 			let names; try { names = fs.readdirSync(dir); } catch { return result; }

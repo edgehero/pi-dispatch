@@ -1805,6 +1805,18 @@ test("a preview's read is marked as Valkey out of reach only for what is known t
     ["the question store's timer", new Error("question-store-timeout")],
     ["the fix store's timer", new Error("fix-store-timeout")],
     ["the answer store's timer", new Error("answer-store-timeout")],
+    // A connect that never reached the Valkey that VALKEY_URL names: the same silence, by its code.
+    ["a name that does not resolve", coded("getaddrinfo ENOTFOUND valkey.invalid", "ENOTFOUND")],
+    ["a name that does not resolve for the moment", coded("getaddrinfo EAI_AGAIN valkey.invalid", "EAI_AGAIN")],
+    ["a host with no route to it", coded("connect EHOSTUNREACH 10.255.255.1:6379", "EHOSTUNREACH")],
+    ["a network with no route to it", coded("connect ENETUNREACH 10.255.255.1:6379", "ENETUNREACH")],
+    ["a host that is down", coded("connect EHOSTDOWN 10.255.255.1:6379", "EHOSTDOWN")],
+    ["a connection given up", coded("connect ECONNABORTED", "ECONNABORTED")],
+    ["a TLS handshake against a Valkey that speaks none", coded("write EPROTO", "EPROTO")],
+    ["the same by Node's own code", coded("wrong version number", "ERR_SSL_WRONG_VERSION_NUMBER")],
+    ["a certificate for another name", coded("Hostname/IP does not match certificate's altnames", "ERR_TLS_CERT_ALTNAME_INVALID")],
+    ["a certificate nobody signed", coded("self-signed certificate", "DEPTH_ZERO_SELF_SIGNED_CERT")],
+    ["a certificate that ran out", coded("certificate has expired", "CERT_HAS_EXPIRED")],
   ];
   for (const [what, error] of silent) {
     assert.equal(valkeySilence(error), true, what);
@@ -1815,6 +1827,14 @@ test("a preview's read is marked as Valkey out of reach only for what is known t
   // Already marked: the same error, as it is.
   const marked = Object.assign(new Error("Valkey did not connect within 6 seconds"), { valkeyNotSent: true });
   assert.equal((await thrown(Promise.reject(marked))).error, marked);
+  // The two marks decide by themselves: an error that carries one and no listed code, name or word. Each was pinned
+  // only beside a code or a word that is listed too, so dropping the mark from the list changed nothing a test saw.
+  const unsent = Object.assign(new Error("the write was not started"), { valkeyNotSent: true });
+  const lostBare = Object.assign(new Error("the answer never came"), { valkeyMayStillRun: true });
+  assert.deepEqual([valkeySilence(unsent), valkeySilence(lostBare)], [true, true]);
+  assert.equal((await thrown(Promise.reject(unsent))).error, unsent);
+  const reread = (await thrown(Promise.reject(lostBare))).error;
+  assert.deepEqual([reread === lostBare, reread.valkeyNotSent, reread.valkeyMayStillRun, reread.message], [false, true, undefined, "the answer never came"]);
   // Everything else a read can reject with is handed on as it is, the same value: none of it says Valkey was silent. It
   // was all marked but Valkey's reply and four classes of the language's errors, which the next caller would inherit.
   const other = [
@@ -1828,6 +1848,9 @@ test("a preview's read is marked as Valkey out of reach only for what is known t
     ["a URI fault", new URIError("URI malformed")],
     ["several failures at once", new AggregateError([new Error("a"), new Error("b")], "all promises were rejected")],
     ["a timeout that is nobody's store", new Error("timeout")],
+    ["a code that only looks like TLS", coded("not a handshake", "ERR_SSLISH")],
+    ["a certificate fault this list does not name", coded("certificate revoked", "CERT_REVOKED")],
+    ["words no client in this tree throws", new Error("Connection is in closing state")],
     ["a rejected string", "nope"],
     ["a rejection with nothing", undefined],
     ["a rejected null", null],

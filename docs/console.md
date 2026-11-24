@@ -603,8 +603,9 @@ The bar's other states:
   reloads the page so you see what did. The audit log has no outcome for a change that partly landed, so such a
   write's line reads `failed` (for the kill switch, its reason says what it reached). An Undo of a zero touch
   instruction whose file was written and whose fix could not then be marked undone is one of these too: "The
-  instruction was put back as it was before this fix, but the fix could not be marked undone: Zero touch still shows
-  it as applied until its row expires. Do not undo it again." A second Undo of it is refused, since the trigger's
+  instruction was put back as it was before this fix, but the fix could not be marked undone: Zero touch may still
+  show it as applied until its row expires. Do not undo it again." ("May": a mark that was sent and not answered lands
+  when Valkey wakes, and the page then reads Reverted.) A second Undo of it is refused, since the trigger's
   instructions already are what it would write. A fix's accounting that Valkey answered with an error says its row
   may have been staged in part.
 - **No answer at all**: the bar says the change may or may not have been made. Reload to see; the audit log says
@@ -1105,8 +1106,10 @@ longer waits out a bound (2026-11-23, #987): its preview says "The dispatch_run 
 Nothing was queued.", and its confirm says "the deployment's Valkey could not be reached, so nothing was changed; try
 again", each at once, where the confirm took 5 seconds. Fire now and a canary stop at their first read, within half a
 second: their preview says the deployment's queue could not be read, so it could not be previewed, and their confirm
-that Valkey could not be reached. A re-run's preview says, after its read's 2.5 seconds, that the fleet's run mirror
-could not be read. An agent's re-run whose run was read and whose allowance then was not says the allowance sentence
+that Valkey could not be reached. A re-run's preview says one of two things, by where its run is recorded: for a run
+this host has no record of, after its read's 2.5 seconds, that the fleet's run mirror could not be read; for a run
+recorded on this host, after about 3 seconds, "could not read the run or its job (nothing answers VALKEY_URL ...);
+nothing was queued". An agent's re-run whose run was read and whose allowance then was not says the allowance sentence
 too. A preview that could not read Valkey says
 "the deployment's Valkey could not be reached, so nothing was changed; try again", with Try again: a zero touch
 grouping or its Undo, dropping an answer draft, a sandbox End, prepare or pin, and a started run's allowance ("The
@@ -3130,7 +3133,12 @@ persist through pagination and live updates. Configuration pages may carry `beca
 link their confirmed changes to that refusal. That is for a change to a file: the envelope, a priorities plan and an
 allocation revert write Valkey and take no `becauseRun` (the field is refused by name, 2026-11-23, #987). What tracks
 such a fix never answers in the change's place: a change that was refused, or that failed, says so in its own words
-whatever became of its accounting. Ordinary record-field filters remain unchanged.
+whatever became of its accounting. What it could not take back is in the console's log, one line per event with its
+cause: `console: Zero touch accounting needs repair (<event>: <cause>)`, where the cause is an error's name and code,
+with its message only when that is one of the console's own fixed sentences, so never a stored value. Of a change
+whose accounting did not finish and whose file does not show it, the Zero touch page says that a reload does not
+settle it and when its record ends.
+Ordinary record-field filters remain unchanged.
 
 
 ## Delegated agent control

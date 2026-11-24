@@ -912,23 +912,35 @@ export const unconfirmedWrite = ({ what, done, asked, next }) => `${what} may or
  * timer ends a read before the client's bound does, and its error carries no code and no name, so the word is the only
  * handle; a test holds each store to its word.
  */
-const STORE_TIMEOUTS = Object.freeze(["question-store-timeout", "fix-store-timeout", "answer-store-timeout"]);
+export const STORE_TIMEOUTS = Object.freeze(["question-store-timeout", "fix-store-timeout", "answer-store-timeout"]);
 /** What a client rejects a command with when no Valkey answered it: its own bound, and a connection refused, reset or broken under the command. */
 const SILENT_CODES = Object.freeze(["ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EPIPE"]);
+/**
+ * What a CONNECT ends with when the Valkey that VALKEY_URL names cannot be reached at all (issue #987): a name that
+ * does not resolve (now, or for the moment), a host or a network with no route to it, a connection given up, and a TLS
+ * handshake that failed (Node's code families, its protocol error, and the certificate faults it names without a
+ * family). Listed because they are the same silence: on the console each reached a preview behind a store's own timer
+ * word and was answered as Valkey unreachable, where a caller with no such timer in front would have said the preview
+ * failed. A certificate fault this list does not name answers as a failed preview, which sends the operator to the
+ * console's log, where such a fault is read.
+ */
+const UNREACHED_CODES = Object.freeze(["ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "EHOSTDOWN", "ECONNABORTED", "EPROTO", "CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_GET_ISSUER_CERT", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "UNABLE_TO_VERIFY_LEAF_SIGNATURE"]);
+const TLS_CODE = /^ERR_(?:SSL|TLS)_[A-Z0-9_]{1,60}$/;
 /** ioredis' words for the same, where it gives no code: a command its bound ended, one on a connection that closed, one on a client with no connection and no offline queue. */
 const SILENT_WORDS = Object.freeze(["Command timed out", "Connection is closed.", "Stream isn't writeable and enableOfflineQueue options is false"]);
 
 /**
  * Whether `err` is KNOWN to be Valkey's silence (issue #987): a mark this project set (`valkeyNotSent`,
  * `valkeyMayStillRun`), a client's timeout or lost connection (`SILENT_CODES`, `SILENT_WORDS`, ioredis' retries run
- * out), or a store's own timer (`STORE_TIMEOUTS`). An allowlist on purpose: anything else a read throws (a row that is
+ * out), a connect that never reached it (`UNREACHED_CODES`, `TLS_CODE`), or a store's own timer (`STORE_TIMEOUTS`).
+ * An allowlist on purpose: anything else a read throws (a row that is
  * not a record, a file that is not there, a configuration that does not load, a fault of the code, a rejection that is
  * no error at all) is not Valkey out of reach, and neither is Valkey's own reply.
  */
 export function valkeySilence(err) {
   if (err === null || typeof err !== "object" || refusedByValkey(err)) return false;
   if (err.valkeyNotSent === true || err.valkeyMayStillRun === true) return true;
-  if (typeof err.code === "string" && SILENT_CODES.includes(err.code)) return true;
+  if (typeof err.code === "string" && (SILENT_CODES.includes(err.code) || UNREACHED_CODES.includes(err.code) || TLS_CODE.test(err.code))) return true;
   if (err.name === "MaxRetriesPerRequestError") return true;
   return typeof err.message === "string" && (SILENT_WORDS.includes(err.message) || STORE_TIMEOUTS.includes(err.message));
 }

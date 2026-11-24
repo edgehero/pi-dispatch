@@ -12,7 +12,7 @@ import { makeTouchOutbox } from "@edgehero/pi-dispatch/touch-outbox";
 import { readZeroTouch, ZERO_TOUCH_NO_PROJECT, zeroTouchProjectMatches } from "@edgehero/pi-dispatch/zero-touch";
 import { runMirrorMaxRunsOf } from "@edgehero/pi-dispatch/retention";
 import { QUEUE_CLOSE_TIMEOUT_MS, readRunById, RUN_MIRROR_UNREAD } from "./read-model.mjs";
-import { boundedClient, checkTriggerFixSource, connectedQueue, CONFIRM_READ_TIMEOUT_MS, refusedByValkey, TRIGGER_FIX_UNCHECKED, unconfirmedWrite, valkeyRead, within } from "./job-actions.mjs";
+import { boundedClient, checkTriggerFixSource, connectedQueue, CONFIRM_READ_TIMEOUT_MS, refusedByValkey, STORE_TIMEOUTS, TRIGGER_FIX_UNCHECKED, unconfirmedWrite, valkeyRead, within } from "./job-actions.mjs";
 import { runMatches } from "./run-filter.mjs";
 import { planZeroTouchGroup, planZeroTouchName, planZeroTouchInstruction, planZeroTouchInstructionUndo, applyZeroTouchFilePlan } from "./zero-touch-actions.mjs";
 const hash = (text) => createHash("sha256").update(text).digest("hex");
@@ -63,7 +63,7 @@ const stageRefusal = (err) => {
  * as applied until its row expires, and a second Undo finds the instructions already as it would write them
  * (`planZeroTouchInstructionUndo` says that).
  */
-export const UNDO_UNMARKED = "The instruction was put back as it was before this fix, but the fix could not be marked undone: Zero touch still shows it as applied until its row expires. Do not undo it again.";
+export const UNDO_UNMARKED = "The instruction was put back as it was before this fix, but the fix could not be marked undone: Zero touch may still show it as applied until its row expires. Do not undo it again.";
 
 /** What a grouping confirm says of an add that was started and not confirmed, and of a status write that was not answered. */
 export const GROUP_UNCONFIRMED = "The grouping job may or may not have been queued: the queue did not confirm it. Preview it again first: the preview says when a grouping is pending. A second one is paid again.";
@@ -71,6 +71,21 @@ export const GROUP_UNCONFIRMED = "The grouping job may or may not have been queu
 // the worker refuses before it starts writes none), or the record's expiry ends it, and the confirm that follows such
 // a mark pays again.
 export const GROUP_STATUS_UNANSWERED = "Nothing was queued: the question's grouping status write was not answered, so it may read as pending until a grouping records a result or its record expires.";
+
+/** This project's own fixed sentences an error may carry into a log line: the stores' timer words, and the fix store's word for a transaction Valkey answered with an error. */
+const LOGGED_SENTENCES = Object.freeze([...STORE_TIMEOUTS, "fix metadata unavailable"]);
+/**
+ * What a log line says of an error (issue #987): its name and its code always, the mark this project set on it, and
+ * its message ONLY when that is one of this project's own fixed sentences (`LOGGED_SENTENCES`). A log names keys,
+ * never values, and that is a guarantee here and not a habit of the errors that happen to come by: any other message
+ * can quote what was stored (a row that did not parse, a reply that repeats a value), so it is left out whole.
+ */
+export const causeOf = (err) => {
+  const name = typeof err?.name === "string" && /^[A-Za-z]{1,40}$/.test(err.name) ? err.name : "Error";
+  const code = typeof err?.code === "string" && /^[A-Z0-9_]{1,40}$/.test(err.code) ? ` ${err.code}` : "";
+  const mark = err?.valkeyMayStillRun === true ? " (may still run)" : err?.valkeyNotSent === true ? " (not sent)" : "";
+  return `${name}${code}${mark}${LOGGED_SENTENCES.includes(err?.message) ? `: ${err.message}` : ""}`;
+};
 
 /** What a read that ran out of time throws: its page says unavailable, its preview that it failed; nothing was written for it. */
 const READ_LATE = Symbol("read-late");
@@ -125,17 +140,26 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
   /**
    * Take back the accounting of a change that was not made (issue #987): the staged row is refused and the touch
    * intent aborted. NEVER throws and never answers, so the change's own answer goes on as it is: a failure here is
-   * logged. The abort is reached whether or not the refusal could be written, and it comes last, since the intent's
-   * file is what a later read of the page would begin again. `landed` is for a change whose answer says it may have
-   * been made: its row is left pending, which the page's repair settles by the file's digest, never refused.
+   * logged with its cause, since the operator is told nothing of it and the row then stays pending. The fix store
+   * throws what it could not do; the touch store ANSWERS an error and never throws, so its answer is read too. The
+   * abort is reached whether or not the refusal could be written, and it comes last, since the intent's file is what
+   * a later read of the page would begin again.
+   *
+   * `landed` is for a change whose answer says it may have been made (`partial`, or a throw marked
+   * `valkeyMayStillRun`): its row is left pending, for the page's repair to settle by the file's digest, never
+   * refused. NO action reaches that today: every action that can be made because of a refusal changes a file alone,
+   * and none of them answers `partial` or throws the mark. It is for one that would write Valkey beside its file, and
+   * the tests reach it through `trackConfiguration` itself.
    */
   async function untrack({ fixes, outbox }, fixId, intent, landed) {
     if (!landed) {
       try { await fixes.reject(fixId); }
-      catch { log("zero_touch_fix_reject_pending", {}); }
+      catch (err) { log("zero_touch_fix_reject_pending", { cause: causeOf(err) }); }
     }
-    try { await outbox.abort(intent); }
-    catch { log("zero_touch_touch_abort_pending", {}); }
+    try {
+      const aborted = await outbox.abort(intent);
+      if (typeof aborted?.error === "string") log("zero_touch_touch_abort_pending", { cause: /^[a-z-]{1,60}$/.test(aborted.error) ? aborted.error : "error" });
+    } catch (err) { log("zero_touch_touch_abort_pending", { cause: causeOf(err) }); }
   }
   async function plan(name, params, stores) {
     if (name === "zero-touch-group") return planZeroTouchGroup({ params, config: config(), meta: await valkeyRead(stores.groups.readMeta(params.runId)), surface: "console" });
@@ -173,8 +197,11 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         const step = () => (left ? boundedBy(left()) : { groups: ownGroups, outbox: ownOutbox });
         const { outbox } = step();
         await outbox.repair();
+        // Whether the repair ran to its end (issue #987): only then is a row that still reads pending one whose file does
+        // not show it, which no reload settles and the page says in other words than "Reload to retry".
+        let repaired = true;
         try { await fixes.repair({ readTrigger: (index) => JSON.parse(fs.readFileSync(paths.triggersPath, "utf8")).triggers?.[index], readFile: (path) => repairFiles.has(path) ? fs.readFileSync(path, "utf8") : null }); }
-        catch { log("zero_touch_fix_repair_pending", {}); }
+        catch (err) { repaired = false; log("zero_touch_fix_repair_pending", { cause: causeOf(err) }); }
         let cfg; let configUnavailable = false;
         try { cfg = config(); } catch { configUnavailable = true; }
         const { groups } = step();
@@ -190,6 +217,10 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         report.grouping.partial = questions.partial || missingSources.length > 0;
         report.fixes = report.fixes.map((f) => f.groupId && report.grouping.partial ? { ...f, partial: true, worked: false, status: "observing" } : f);
         report.fixesPartial = changes.partial;
+        // The changes whose accounting is open and that this read's repair could not settle, and for how many days such
+        // a row lives at most: its record's retention, by the fix store's own rule.
+        report.fixesOpen = repaired && changes.state === "ok" && Number.isSafeInteger(changes.pendingCount) ? changes.pendingCount : 0;
+        report.fixesOpenDays = Math.min(retentionDays > 0 ? retentionDays : 365, 365);
         report.groups = report.groups.map((group) => {
           const fix = report.fixes.filter((f) => f.groupId === group.id && !f.undoneAt).sort((a, b) => b.at - a.at)[0];
           return fix ? { ...group, status: "fixed", fixedAt: fix.at } : group;
@@ -231,7 +262,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         catch (error) { await untrack({ fixes, outbox }, staged.fix.id, intent, error?.valkeyMayStillRun === true); throw error; }
         if (!result?.ok) { await untrack({ fixes, outbox }, staged.fix.id, intent, result?.partial === true); return result; }
         let pending = false;
-        try { pending = !await fixes.commit(staged.fix.id); } catch { pending = true; log("zero_touch_fix_pending", {}); }
+        try { pending = !await fixes.commit(staged.fix.id); } catch (err) { pending = true; log("zero_touch_fix_pending", { cause: causeOf(err) }); }
         const tracked = await outbox.applied(intent);
         return { ...result, ...(pending || !tracked.ok ? { warning: "The configuration was changed; accounting is pending repair. Do not repeat the change." } : {}) };
       });
@@ -298,12 +329,17 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
           catch (err) { await stores.outbox.abort(intent).catch(() => {}); return stageRefusal(err); }
           if (!staged.ok) { await stores.outbox.abort(intent); return { invalid: staged.invalid ?? "The fix could not be recorded; nothing was changed." }; }
         }
-        const result = applyZeroTouchFilePlan({ plan: { ...p, expect: entry.expect }, paths, fs });
+        // The file's write. Refused or thrown, the accounting staged for it is taken back (issue #987): a write that
+        // THREW (a trigger edited between this confirm's look at it and its write) left the row pending and the
+        // intent's file for every later read of the page to begin again, where one that answered a refusal took both back.
+        let result;
+        try { result = applyZeroTouchFilePlan({ plan: { ...p, expect: entry.expect }, paths, fs }); }
+        catch (error) { if (intent) await untrack(stores, staged.fix.id, intent, false); throw error; }
         if (result.invalid || result.ok === false) { if (intent) await untrack(stores, staged.fix.id, intent, false); return result; }
         if (name === "zero-touch-instruction") {
           let fixPending = false;
           try { fixPending = !await stores.fixes.commit(staged.fix.id); }
-          catch { fixPending = true; log("zero_touch_fix_pending", {}); }
+          catch (err) { fixPending = true; log("zero_touch_fix_pending", { cause: causeOf(err) }); }
           const tracked = await stores.outbox.applied(intent);
           return { ok: true, fixId: staged.fix.id, ...(tracked.ok && !fixPending ? {} : { warning: "The instruction was saved; accounting is pending repair. Do not repeat the edit." }) };
         }

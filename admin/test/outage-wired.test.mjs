@@ -623,8 +623,11 @@ test("a configuration fix on a real console that its file refuses, with Valkey s
     assert.equal((await begun()).length, 1, "the intent this confirm began is still Valkey's while it does not answer");
     await c.thawed();
     assert.deepEqual(await begun(), [], "its abort landed when Valkey woke");
-    // What stays: the staged row, whose refusal was never sent. It reads pending until it expires.
+    // What stays: the staged row, whose refusal was never sent. It reads pending until its record expires, unless its
+    // file comes to show it, and the console's log says why, by the event and its cause: the line read "Zero touch
+    // accounting needs repair" and nothing else, of this as of a fault of the code.
     assert.deepEqual((await mine()).map((row) => [row.kind, row.state]), [["config", "pending"]]);
+    assert.ok(c.err.some((line) => line.includes("Zero touch accounting needs repair (zero_touch_fix_reject_pending: Error: fix-store-timeout)")), c.err.join("\n"));
   }, {
     files: ({ dir }) => {
       writeFileSync(join(dir, "settings.json"), JSON.stringify({ maxTurns: 30, maxCostUsd: "2" }));

@@ -345,6 +345,27 @@ test("touched-run links keep their exact window and scope through canonical live
   for (const query of ["touched=2", "touched=1&days=8", "days=90", "touched=1&scope=../escape"]) assert.ok(parsePageQuery("runs", query).refusal, query);
 });
 
+test("a fix whose accounting did not finish and that no reload settles is said so, with what ends it; other gaps keep Reload to retry (#987)", async () => {
+  const draw = async (change) => {
+    const raw = zeroTouchFixture(NOW);
+    change(raw);
+    return String((await renderPage("zero-touch", { session: { name: "ops", role: "operator" }, data: { now: NOW, zeroTouch: raw }, query: { days: 30 } })).html);
+  };
+  // It said "Reload to retry" of a row a reload never cleared.
+  const open = await draw((raw) => { raw.fixesPartial = true; raw.fixesOpen = 1; raw.fixesOpenDays = 30; });
+  assert.ok(open.includes("Fix history is incomplete: the accounting of 1 change did not finish and its file does not show it, so a reload does not settle it. Left alone, its record ends by itself within 30 days of the attempt. Missing changes are not evidence that no fix was made."), open.match(/Fix history[^<]*/)?.[0]);
+  // Nothing is promised of making the change again: it may not be possible (the file already reads so), and where it
+  // is, the open row is committed beside the new one.
+  assert.ok(!open.includes("Reload to retry") && !/made again|counted once/i.test(open));
+  const two = await draw((raw) => { raw.fixesPartial = true; raw.fixesOpen = 2; raw.fixesOpenDays = 1; });
+  assert.ok(two.includes("Fix history is incomplete: the accounting of 2 changes did not finish and their files do not show them, so a reload does not settle it. Left alone, their records end by themselves within 1 day of the attempt."), two.match(/Fix history[^<]*/)?.[0]);
+  // A history that could not be read, or whose repair did not run to its end, is one a reload can mend.
+  const unread = await draw((raw) => { raw.fixesPartial = true; raw.fixesOpen = 0; });
+  assert.ok(unread.includes("Fix history is incomplete. Reload to retry; missing changes are not evidence that no fix was made."));
+  // Nothing open and nothing missing: no note.
+  assert.ok(!(await draw((raw) => { raw.fixesPartial = false; raw.fixesOpen = 3; })).includes("Fix history is incomplete"));
+});
+
 test("unreadable grouping and fix stores never announce known empty histories", async () => {
   const raw = zeroTouchFixture(NOW);
   raw.groups = []; raw.fixes = [];
