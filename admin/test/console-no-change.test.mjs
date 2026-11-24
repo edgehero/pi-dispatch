@@ -2,19 +2,20 @@
 // loader, the fleet reader and the services are the console's own (`helpers/real-console.mjs`), on a client or a queue
 // that fails where a state says so.
 //
-// The rule is about what a change rests on. An edit is previewed against the fleet and its queues, so a page whose
-// snapshot failed (`readFailed` with no snapshot) draws no form: it says so, and that the file can still be changed by
-// hand. A page that read the snapshot offers every form it has, whatever else went unread: the run history alone
-// failing takes nothing away, since no change on these pages is judged by it. The kill switch is not under the rule.
+// The rule is about what the page can show. A page whose snapshot failed (`readFailed` with no snapshot) cannot show
+// what a change would meet, the hosts that read the file, what runs and what waits, so it draws no form: it says so,
+// in the words of the cause, and that the file can still be changed by hand. A page that read the snapshot offers
+// every form it has, whatever else went unread: the run history alone failing takes nothing away. The rule is the
+// page's alone (the routes answer as before), and the kill switch is not under it.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { loadPageData, parsePageQuery } from "../src/console/pages.mjs";
-import { deploymentUnread } from "../src/console/panels/common.mjs";
-import { noChangeText } from "../src/console/panels/config-ui.mjs";
+import { DEPLOYMENT_UNREAD_WORDS, deploymentUnread, deploymentUnreadWhy, noChangeText } from "../src/console/panels/common.mjs";
+import { PAGES, loadPageData, parsePageQuery, renderPage } from "../src/console/pages.mjs";
+import { allocationUnread, drawSpend } from "./helpers/spend-goldens.mjs";
 import { TRIGGER_GETS_WORDS as W } from "../src/trigger-gets-view.mjs";
 import { downQueue, downRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
-import { consoleOn, drawn, failing, healthy, mirroring, rolesOf, FAR, HOST, RUN, STATES } from "./helpers/real-console.mjs";
+import { consoleOn, drawn, failing, failingKey, healthy, mirroring, rolesOf, wordsOf, FAR, HOST, RUN, STATES } from "./helpers/real-console.mjs";
 
 const INSTRUCTIONS = "Keep the diff small.";
 const TASK = "Sweep the logs.";
@@ -35,6 +36,7 @@ const CHANGE_PAGES = [["trigger", "index=0", "triggers file"], ["trigger", "inde
 const OFFERED = { "trigger?index=0": ["trigger-delete", "trigger-edit", "trigger-environment-edit"], "trigger?index=1": ["trigger-delete", "trigger-edit", "trigger-environment-edit"], "trigger-add?": ["trigger-add", "trigger-add"], "triggers?": [], "project?id=web": ["project-delete", "project-edit"], "models?": ["model-role-edit"] };
 /** How often a page says it offers no change: once where each form, or group of forms, would have been. */
 const SAID = { trigger: 2, "trigger-add": 1, triggers: 1, project: 2, models: 1 };
+const between = (words, from, to) => { const at = words.indexOf(from); const end = at < 0 ? -1 : words.indexOf(to, at); return at < 0 ? "" : words.slice(at, end < 0 ? at + 600 : end); };
 const actionsOf = (whole) => [...whole.matchAll(/data-action="([a-z-]+)"/g)].map((m) => m[1]).sort();
 const addButton = (whole) => /<a class="btn btn--primary" href="\/config\/trigger-add">/.test(whole);
 const on = (state) => consoleOn({ records: [STARTED], ...state, triggers: TRIGGERS });
@@ -56,7 +58,9 @@ test("a page that could not read the deployment offers no change and says so; on
         if (role !== "operator") assert.deepEqual([actionsOf(got.whole), addButton(got.whole)], [[], false], where);
         if (unread) {
           assert.deepEqual([actionsOf(got.whole), addButton(got.whole)], [[], false], `${where}: no form over a deployment that was not read`);
-          assert.equal(got.words.split(noChangeText(file)).length - 1, role === "operator" ? SAID[page] : 0, `${where}: said to the one who would have been offered it, where each form was`);
+          // In the words of the cause (`deploymentUnreadWhy`): the sentence of another cause is not on the page.
+          assert.equal(got.words.split(noChangeText({ data: got.data }, file)).length - 1, role === "operator" ? SAID[page] : 0, `${where}: said to the one who would have been offered it, where each form was`);
+          assert.equal(got.words.split("offers no change. The").length - 1, role === "operator" ? SAID[page] : 0, `${where}: and in no other words`);
         } else {
           assert.ok(!got.words.includes("offers no change"), `${where}: a page that read the deployment does not say it offers none`);
         }
@@ -208,4 +212,99 @@ test("Fire now is offered only where its check read what it rests on: the schedu
   assert.equal(await refusalOf("absent"), "The triggers file does not exist. Nothing was queued.");
   assert.equal(await refusalOf("unreadable"), "The triggers file could not be read. Nothing was queued.");
   assert.equal(await refusalOf("invalid"), "The triggers file does not load. Run pi-dispatch doctor and fix its named check. Nothing was queued.");
+});
+
+/**
+ * What a page may draw as a form over a deployment it could not read, each by what names it and why. The list is held
+ * here: a form that is not on it fails the walk below, and so does an entry no page draws in any state.
+ */
+const KILL_SWITCH = "the kill switch: stopping and starting the fleet or one queue is what an operator needs most when the page cannot read it";
+const DRAWN_UNREAD = new Map([
+  ["data-trigger-check", "the event check on /triggers: it reads the triggers file and changes nothing"],
+  ["fleet-pause", KILL_SWITCH], ["fleet-resume", KILL_SWITCH], ["queue-pause", KILL_SWITCH], ["queue-resume", KILL_SWITCH],
+]);
+/** Every form and action control of a page: a form by its action, else by the attribute that names it. */
+const formsOf = (whole) => [...new Set([...[...whole.matchAll(/<form\b[^>]*>/g)].map(([tag]) => tag.match(/data-action="([^"]+)"/)?.[1] ?? tag.match(/\b(data-[a-z-]+)\b/)?.[1] ?? tag), ...[...whole.matchAll(/data-action="([a-z-]+)"/g)].map(([, action]) => action)])];
+const QUERIES = { run: "id=gh-1", host: "name=build3", venue: "name=local", trigger: "index=0", project: "id=web" };
+
+test("no page of the console draws a form that changes something over a deployment it could not read: every page of the page table, in every state", { timeout: 240_000 }, async () => {
+  const found = new Map(), offered = new Set();
+  let unreadPages = 0;
+  for (const [name, make] of STATES) {
+    for (const page of Object.keys(PAGES)) {
+      const got = await drawn(page, QUERIES[page] ?? "", on(make()), "operator");
+      const unread = deploymentUnread({ data: got.data });
+      if (unread) unreadPages += 1;
+      for (const form of formsOf(got.whole)) {
+        if (!unread) offered.add(form);
+        else if (!found.has(form)) found.set(form, `/${page} | ${name}`);
+      }
+    }
+  }
+  assert.ok(unreadPages >= 60, `${unreadPages} pages were drawn over a deployment that was not read`);
+  assert.deepEqual([...found].filter(([form]) => !DRAWN_UNREAD.has(form)), [], "a form drawn over a deployment that was not read, and not on the list");
+  // The walk sees the forms it must not find: where the deployment was read the same pages draw them.
+  for (const form of ["trigger-edit", "trigger-delete", "trigger-environment-edit", "trigger-add", "project-edit", "project-delete", "model-role-edit", "data-trigger-check"]) assert.ok(offered.has(form), `${form} is drawn where the deployment was read`);
+  assert.deepEqual([...DRAWN_UNREAD.keys()], ["data-trigger-check", "fleet-pause", "fleet-resume", "queue-pause", "queue-resume"]);
+  for (const [form, why] of DRAWN_UNREAD) assert.ok(typeof why === "string" && why.length > 30, form);
+});
+
+test("the two pages the rule had missed: Parked's standing answer form, which stood only in the outage, and the budget split's forms", async () => {
+  // Parked draws the Standing answers card beside its failure banner, and a deployment with no answer rule draws that
+  // card in no other state: its form, which writes the triggers file, stood on Parked only while nothing was read.
+  const parked = await drawn("parked", "", on(DOWN()), "operator");
+  assert.equal(deploymentUnread({ data: parked.data }), true);
+  assert.ok(parked.words.includes("Standing answers") && !formsOf(parked.whole).includes("standing-answer-add"), "the card, and no form");
+  assert.equal(parked.words.split(noChangeText({ data: parked.data })).length - 1, 1, "said where the form would be");
+  assert.ok(!(await drawn("parked", "", on(DOWN()), "viewer")).words.includes("offers no change"));
+  // Where the deployment was read and an answer rule draws the card, its form is there.
+  const ruled = { triggers: [TRIGGERS.triggers[0]], answerRules: [{ id: "web", projects: ["web"], flow: "answer" }] };
+  const withRules = await drawn("parked", "", consoleOn({ redis: healthy(HOST), records: [STARTED], triggers: ruled }), "operator");
+  if (withRules.words.includes("Standing answers")) assert.ok(formsOf(withRules.whole).includes("standing-answer-add") && !withRules.words.includes("offers no change"));
+  // The budget split reads no snapshot: its own read says whether the queue answered.
+  const SPLIT_FORMS = ["allocation-revert", "envelope-set", "priorities-set"];
+  const read = await drawSpend("insights-budget-split");
+  assert.deepEqual(SPLIT_FORMS.filter((form) => formsOf(read).includes(form)).length >= 2 && !wordsOf(read).includes("offers no change"), true, "a split that was read: its forms");
+  const unread = await drawSpend("insights-budget-split", { payload: allocationUnread() });
+  assert.deepEqual(SPLIT_FORMS.filter((form) => formsOf(unread).includes(form)), [], "no form under a split that could not be read");
+  assert.ok(wordsOf(unread).includes("The budget split could not be read") && wordsOf(unread).includes("Valkey could not be read, so this page offers no change. The envelope file can still be changed by hand. Reload to try again."));
+  const viewer = await drawSpend("insights-budget-split", { role: "viewer", payload: allocationUnread() });
+  assert.ok(!wordsOf(viewer).includes("offers no change") && SPLIT_FORMS.every((form) => !formsOf(viewer).includes(form)));
+});
+
+test("the sentence is true of its cause: a Valkey that did not answer, one that answered with an error, and a page whose deadline cut the read", async () => {
+  assert.deepEqual(DEPLOYMENT_UNREAD_WORDS, { silent: "Valkey could not be read", error: "Valkey answered this page's read with an error", late: "This page could not read the deployment in time" });
+  const says = (why, file = "triggers file") => `${DEPLOYMENT_UNREAD_WORDS[why]}, so ${why === "late" ? "it" : "this page"} offers no change. The ${file} can still be changed by hand. Reload to try again.`;
+  // Nothing answered.
+  const silent = await drawn("trigger", "index=0", on(DOWN()), "operator");
+  assert.deepEqual([deploymentUnreadWhy({ data: silent.data }), silent.words.split(says("silent")).length - 1], ["silent", 2]);
+  // Valkey answered, with an error (a key of another type): the same rule, and its own words.
+  const error = await drawn("trigger", "index=0", on({ redis: failingKey(healthy(HOST), /^budget:/) }), "operator");
+  assert.deepEqual([error.data.snapshotFailure, deploymentUnreadWhy({ data: error.data }), error.words.split(says("error")).length - 1, error.words.includes("Valkey could not be read, so this page offers no change")], ["error", "error", 2, false]);
+  assert.deepEqual(actionsOf(error.whole), [], "no form either");
+  // The page's deadline cut the read of a Valkey that answers late: it could not read the deployment IN TIME.
+  // (The snapshot answers a quarter of a second on, whole; the page's deadline here is 40 ms.)
+  const slow = on({ redis: healthy(HOST) });
+  const late = (...args) => new Promise((resolve, reject) => { setTimeout(() => slow.fleet.snapshot(...args).then(resolve, reject), 250); });
+  for (const [page, qs, file] of [["trigger", "index=0", "triggers file"], ["triggers", "", "triggers file"], ["project", "id=web", "projects file"], ["models", "", "triggers file"]]) {
+    const query = parsePageQuery(page, new URLSearchParams(qs)).query;
+    const data = await loadPageData(page, query, { ...slow, fleet: { ...slow.fleet, snapshot: late, fileViews: slow.fleet.fileViews }, deadline: { ms: 40 } }, { role: "operator" });
+    assert.deepEqual([data.snapshot, data.readFailed, data.snapshotFailure, deploymentUnreadWhy({ data })], [null, true, "late", "late"], page);
+    const words = wordsOf(String((await renderPage(page, { query, session: { name: "ada", role: "operator" }, data, readOnly: false })).html));
+    assert.ok(words.includes(says("late", file)), `${page}: ${words.match(/[^.]{0,60}offers no change[^.]{0,20}/)?.[0]}`);
+    assert.ok(!words.includes("Valkey could not be read, so this page offers no change"), `${page}: not said of a Valkey that answered late`);
+  }
+  // A page that read the deployment has no cause to give.
+  assert.equal(deploymentUnreadWhy({ data: (await drawn("trigger", "index=0", on({ redis: healthy(HOST) }), "operator")).data }), null);
+});
+
+test("the card that says how a change applies has its own words for a page that could not read the deployment, and never calls a console that takes changes read-only", async () => {
+  const how = (got) => between(got.words, "How a change applies", "A person, at the console.");
+  const down = await drawn("trigger", "index=0", on(DOWN()), "operator");
+  assert.ok(how(down).includes(`No change from this page just now. ${W.unreadHow}`) && !how(down).includes("Read only here") && !down.words.includes(W.readOnly), how(down));
+  // A console that takes no change still says that, and a page that read the deployment says how to change it.
+  const well = await drawn("trigger", "index=0", on({ redis: healthy(HOST) }), "operator");
+  assert.ok(how(well).includes("Change it in place.") && !well.words.includes(W.unreadHow));
+  const viewer = await drawn("trigger", "index=0", on(DOWN()), "viewer");
+  assert.ok(how(viewer).includes("Read only here.") && !viewer.words.includes(W.unreadHow));
 });

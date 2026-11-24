@@ -2,7 +2,7 @@
 import { ANSWER_CLASSIFICATIONS } from "@edgehero/pi-dispatch/answerer";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
-import { ageText, canAct, RUN_ID_RE } from "./common.mjs";
+import { ageText, canAct, changesOffered, noChangeText, RUN_ID_RE } from "./common.mjs";
 import { OVERVIEW_UNREAD_TEXT } from "./overview.mjs";
 
 export const ANSWERER_PASS_WORDS = Object.freeze({
@@ -57,6 +57,9 @@ function questionHead(parked, row, title) {
   return html`<div class="card__head"><span class="tile tone-${row?.draftExists ? "running" : "parked"}">${ui.icon(row?.draftExists ? "edit" : "parked")}</span><h2>${runLink(parked.jobId)} asked a question</h2><span class="end">${ui.chip(Number.isFinite(parked.ageMs) ? `waiting ${ageText(parked.ageMs)}` : "wait unknown", { status: "parked", icon: "clock" })}</span></div><p class="pa-who">${parked.project ? ui.ptag(parked.project) : null}<span class="code">${parked.target ?? parked.jobId}</span><span>${parked.flow ?? "run"}${parked.host ? ` on ${parked.host}` : ""}</span></p><p class="pa-where">${ui.icon("info", { size: "sm" })}<span>The question is the run's last message: read it on its forge thread or ${runLink(parked.jobId, "its run page")}.</span></p>${title ? html`<p>${title}</p>` : null}`;
 }
 
+// The card's form writes the triggers file, so it asks `changesOffered` (issue #988). Parked draws this card beside
+// its failure banner, which is the one state a deployment with no answer rule draws it in: the form stood on Parked
+// only while the deployment could not be read.
 export function answererStanding(view) {
   if (view.role !== "operator") return null;
   const state = view.data?.answerer;
@@ -64,7 +67,7 @@ export function answererStanding(view) {
   const rows = listed ? state.standing : [];
   // How often an answer was cited is counted over the results, so it is said only where they were read.
   const cited = answer => resultsRead(state) ? `${number(answer.used) === 1 ? "cited once" : `cited ${number(answer.used)} times`} in retained results` : "citations not known";
-  return ui.card({ title: "Standing answers", sub: "Adopted by you", body: html`<ul class="pa-sts">${rows.map(answer => html`<li class="pa-st"><span class="pa-st__n">${ui.icon("flag", { size: "sm" })}<b>${answer.title}</b></span><span class="pa-st__a">${answer.text}</span><span class="pa-st__m">${answer.adoptedAt ? `adopted ${answer.adoptedAt}` : "adoption date not recorded"}; ${cited(answer)}</span></li>`)}</ul>${!listed ? html`<p>${fileRefused(state) ? ANSWERER_STANDING_REFUSED : ANSWERER_STANDING_UNREAD}</p>` : !rows.length ? html`<p>No standing answer has been adopted.</p>` : null}${canAct(view) ? standingAnswerEditor({ id: "standing-new", projects: [...new Set((state?.rules ?? []).flatMap(r => r.projects))] }) : null}<p class="pa-foot">A standing answer is reviewed in its own preview and Confirm. Adding one sends no reply.</p>` });
+  return ui.card({ title: "Standing answers", sub: "Adopted by you", body: html`<ul class="pa-sts">${rows.map(answer => html`<li class="pa-st"><span class="pa-st__n">${ui.icon("flag", { size: "sm" })}<b>${answer.title}</b></span><span class="pa-st__a">${answer.text}</span><span class="pa-st__m">${answer.adoptedAt ? `adopted ${answer.adoptedAt}` : "adoption date not recorded"}; ${cited(answer)}</span></li>`)}</ul>${!listed ? html`<p>${fileRefused(state) ? ANSWERER_STANDING_REFUSED : ANSWERER_STANDING_UNREAD}</p>` : !rows.length ? html`<p>No standing answer has been adopted.</p>` : null}${changesOffered(view) ? standingAnswerEditor({ id: "standing-new", projects: [...new Set((state?.rules ?? []).flatMap(r => r.projects))] }) : canAct(view) ? html`<p class="muted">${noChangeText(view)}</p>` : null}<p class="pa-foot">A standing answer is reviewed in its own preview and Confirm. Adding one sends no reply.</p>` });
 }
 
 export function standingAnswerEditor({ id, projects = [], runId = null, text = "", repo = "" }) {

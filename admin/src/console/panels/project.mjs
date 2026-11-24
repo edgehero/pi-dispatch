@@ -7,10 +7,10 @@ import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { bundleDeclaredText } from "../../read-model.mjs";
 import { OUTCOME_KEY_WORDS, reasonWords, shortSentence } from "../../words.mjs";
 import { newerSkippedSentence } from "../../newer-release.mjs";
-import { canAct, changesOffered, runLink, timeHtml, usdText, moneyHtml } from "./common.mjs";
+import { noChangeText, canAct, changesOffered, runLink, timeHtml, usdText, moneyHtml } from "./common.mjs";
 import { LOADED_WORDS } from "../../loaded-words.mjs";
 import { fixButton, loadedFoot, loadedList, stateLine, wordsHtml } from "./loaded-parts.mjs";
-import { actForm, noChangeText } from "./config-ui.mjs";
+import { actForm } from "./config-ui.mjs";
 
 const DAY = 86_400_000;
 const data = (v) => v?.data?.projectView ?? null;
@@ -103,7 +103,7 @@ export function projectLoads(v) {
 export function projectMembers(v) {
   if (!ready(v)) return null;
   const p = data(v);
-  return card("Members", html`<ul class="rows proj-members">${p.members.map((m) => html`<li class="rowpill">${ui.icon(m.local ? "folder" : "git", { size: "sm" })}<b class="code">${m.label}</b><span>${m.local ? "folder" : "repository"}</span><span class="end">${p.historyIncomplete && m.count !== null && m.count !== undefined ? "at least " : ""}${unknown(m.count)} ${m.count === 1 ? "run" : "runs"} this week${m.last ? html` · last ${runLink(m.last.jobId, { pulse: true })} ${timeHtml(m.last.at)}` : m.caveat ? html` · ${m.caveat}` : p.historyIncomplete ? " · no run in what could be read" : " · no run in view"}</span></li>`)}</ul>${note(`Runs of these members record project ${p.id} when a worker picks them up; a record keeps the project it was written with.`)}${p.editRefusal ? html`<p class="proj-refusal">${ui.icon("attention", { size: "sm" })}<span>${p.editRefusal}</span></p>` : changesOffered(v) ? actForm("project-edit", { hidden: [["id", p.id]], fields: html`<div class="field"><label for="proj-members-input">Members</label>${ui.textarea({ id: "proj-members-input", name: "members", value: p.memberInput, rows: 3, maxlength: 16384, describedBy: "proj-members-hint" })}<p class="field__err" data-field-error="members" hidden></p></div><p class="proj-edit-hint" id="proj-members-hint">One repository with its forge, or absolute folder per line. Blank keeps the current members.</p>`, label: "Preview the edit" }) : canAct(v) ? html`<p class="muted">${noChangeText("projects file")}</p>` : null}`, `${p.members.length} members`);
+  return card("Members", html`<ul class="rows proj-members">${p.members.map((m) => html`<li class="rowpill">${ui.icon(m.local ? "folder" : "git", { size: "sm" })}<b class="code">${m.label}</b><span>${m.local ? "folder" : "repository"}</span><span class="end">${p.historyIncomplete && m.count !== null && m.count !== undefined ? "at least " : ""}${unknown(m.count)} ${m.count === 1 ? "run" : "runs"} this week${m.last ? html` · last ${runLink(m.last.jobId, { pulse: true })} ${timeHtml(m.last.at)}` : m.caveat ? html` · ${m.caveat}` : p.historyIncomplete ? " · no run in what could be read" : " · no run in view"}</span></li>`)}</ul>${note(`Runs of these members record project ${p.id} when a worker picks them up; a record keeps the project it was written with.`)}${p.editRefusal ? html`<p class="proj-refusal">${ui.icon("attention", { size: "sm" })}<span>${p.editRefusal}</span></p>` : changesOffered(v) ? actForm("project-edit", { hidden: [["id", p.id]], fields: html`<div class="field"><label for="proj-members-input">Members</label>${ui.textarea({ id: "proj-members-input", name: "members", value: p.memberInput, rows: 3, maxlength: 16384, describedBy: "proj-members-hint" })}<p class="field__err" data-field-error="members" hidden></p></div><p class="proj-edit-hint" id="proj-members-hint">One repository with its forge, or absolute folder per line. Blank keeps the current members.</p>`, label: "Preview the edit" }) : canAct(v) ? html`<p class="muted">${noChangeText(v, "projects file")}</p>` : null}`, `${p.members.length} members`);
 }
 
 /** Geometry is exported so tests can verify actual plotted values and changing run sizes, beyond a golden's bytes. */
@@ -207,6 +207,6 @@ export function projectDelete(v) {
   if (!ready(v) || v.role !== "operator") return null;
   const p = data(v);
   // A page that could not read the deployment offers no change (issue #988): said once, here.
-  if (canAct(v) && !changesOffered(v)) return card("Delete", html`<p class="muted">${noChangeText("projects file")}</p>`);
+  if (canAct(v) && !changesOffered(v)) return card("Delete", html`<p class="muted">${noChangeText(v, "projects file")}</p>`);
   return card("Delete", p.deleteRefusal ? html`<p class="proj-refusal">${ui.icon("attention", { size: "sm" })}<span>${p.deleteRefusal}</span></p>${changesOffered(v) ? html`<button class="btn btn--danger btn--sm" type="button" disabled aria-disabled="true">Delete ${p.id}</button>` : null}` : changesOffered(v) ? html`${note("Removing the project stops future pickups recording this id. Records already written keep it. The preview checks its limits, bundles and envelope floors again.")}${actForm("project-delete", { hidden: [["id", p.id]], label: `Delete ${p.id}` })}` : note("This console is read-only. A writable operator console can preview a delete."));
 }

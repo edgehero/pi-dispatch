@@ -16,8 +16,8 @@ import { html as escapedHtml } from "../html.mjs";
 // Keep indented source readable without emitting whitespace-only lines when an optional fragment is absent.
 const html = (strings, ...values) => escapedHtml(strings.map(s => s.replace(/[ \t]*\n[ \t]*/g, "\n")), ...values);
 import * as ui from "../kit.mjs";
-import { canAct, changesOffered, shownPath, runLink, moneyHtml, timeHtml } from "./common.mjs";
-import { actForm, field, area, table, facts, noChangeText } from "./config-ui.mjs";
+import { noChangeText, canAct, changesOffered, shownPath, runLink, moneyHtml, timeHtml } from "./common.mjs";
+import { actForm, field, area, table, facts } from "./config-ui.mjs";
 const card = (title, body) => ui.card({ title, body });
 const detail = (v) => v.data?.triggerDetail ?? {};
 // The row at this place in the file, as the snapshot's detail found it by the index each row carries, or with Valkey down the row the card read from the
@@ -338,7 +338,7 @@ export function editFields(v, t = {}, group = null) {
 export function triggerEdit(v) {
   const t = trigger(v);
   // A page that could not read the deployment offers no change (issue #988): said here, once, in place of the form.
-  if (canAct(v) && !changesOffered(v)) return card("Edit", html`<p class="muted">${noChangeText()}</p>`);
+  if (canAct(v) && !changesOffered(v)) return card("Edit", html`<p class="muted">${noChangeText(v)}</p>`);
   return !t || !canAct(v)
     ? html``
     : card(
@@ -457,7 +457,7 @@ export function triggerAdd(v) {
     );
   // A page that could not read the deployment offers no change (issue #988): the form's choices (the forges, the
   // projects, the hosts' venues) are the snapshot's.
-  if (!changesOffered(v)) return card("Add a trigger", html`<p class="muted">${noChangeText()}</p>`);
+  if (!changesOffered(v)) return card("Add a trigger", html`<p class="muted">${noChangeText(v)}</p>`);
   const recipe = TRIGGER_RECIPES[v.query?.recipe] ?? null;
   const prefill = recipe?.fields ?? {};
   const forges = opts(v).forges ?? [];

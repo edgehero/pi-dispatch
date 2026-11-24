@@ -70,6 +70,9 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   elsewhere: "Set elsewhere: the image in each host’s environment or run.image in the file, secrets on the Secrets page, and the skills folder (run.skillsDir) in the file.",
   noScript: "Enable JavaScript to preview and confirm a change. Reading and navigation work without it.",
   readOnly: "Forms are off on this read-only console.",
+  // Issue #988: the same card on a console that takes changes, where the page could not read the deployment. It said
+  // the console was read-only, which it is not.
+  unreadHow: "This page could not read the deployment, so it offers no change here. The triggers file can still be changed by hand.",
   viewer: "An operator changes these on this page, with one preview and one Confirm.",
   noTool: "No tool reaches this action; dispatch_trigger_edit keeps today’s scope.",
   flowPicker: "It leaves out what is in a skills folder, or in a repository not on this host, and any other name can be typed.",

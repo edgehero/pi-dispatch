@@ -34,7 +34,7 @@ import {
 } from "./insights.mjs";
 import { OUTCOME_WORD_OF, capitalised } from "../../words.mjs";
 import { newerSkippedSentence } from "../../newer-release.mjs";
-import { canAct, timeHtml, RUN_ID_RE, shownPath } from "./common.mjs";
+import { canAct, changesOffered, noChangeText, timeHtml, RUN_ID_RE, shownPath } from "./common.mjs";
 import { FILE_WORDS } from "../../file-case.mjs";
 
 export const SPEND_VIEWS = Object.freeze([
@@ -749,6 +749,13 @@ function capsTroubleText(b, dollar) {
   return `${capitalised(causes.join(", and "))}; amounts marked unknown are not zero.`;
 }
 
+/**
+ * Whether the budget split's forms are drawn (issue #988): `changesOffered`, and a split that was read. This page
+ * reads no snapshot, so its own read says whether the deployment answered: with the queue not answering it drew the
+ * envelope and priorities forms under "The budget split could not be read".
+ */
+const splitChanges = (v) => changesOffered(v) && allocation(v)?.kind !== "unreachable";
+
 /** The envelope file's trouble, one word per case (issue #988, `normAllocation`'s `fileCase`). */
 const ENVELOPE_WORDS = Object.freeze({
   absent: Object.freeze({ title: "The envelope file does not exist", body: "The envelope file does not exist. Check PI_ENVELOPE_FILE." }),
@@ -1001,7 +1008,7 @@ export function splitRows(v) {
       ${note(
         "A project may spend up to the smaller of its allocation and its own scoped limit. allocation-cap means the split refused it; dollar-cap means the operator's own limit refused it.",
       )}`,
-    canAct(v)
+    splitChanges(v)
       ? ui.btn({
           label: "Set priorities",
           href: "#p-priorities",
@@ -1031,7 +1038,7 @@ export function splitHistory(v) {
                   new Set(rows.map((r) => r.host).filter(Boolean)).size > 1
                     ? html`<th>Host</th>`
                     : null
-                }${canAct(v) ? html`<th>Action</th>` : null}
+                }${splitChanges(v) ? html`<th>Action</th>` : null}
               </tr>
             </thead>
             <tbody>
@@ -1098,7 +1105,7 @@ export function splitHistory(v) {
                       ? html`<td>${r.host ?? "unknown"}</td>`
                       : null
                   }${
-                    canAct(v)
+                    splitChanges(v)
                       ? html`<td>
                         ${
                           historyFact
@@ -1128,7 +1135,7 @@ export function splitHistory(v) {
   );
 }
 export function splitPriorities(v) {
-  if (!canAct(v)) return html``;
+  if (!splitChanges(v)) return html``;
   const p = payload(v).allocation;
   const env = envelopeForm(p);
   if (!env)
@@ -1190,7 +1197,7 @@ export function splitEnvelope(v) {
       ],
       { cols: 1 },
     )}${
-      canAct(v)
+      splitChanges(v)
         ? html`<details>
           <summary>Edit envelope</summary>
           <form
@@ -1269,9 +1276,9 @@ export function splitEnvelope(v) {
             </button>
           </form>
         </details>`
-        : null
+        : canAct(v) ? html`<p class="muted">${noChangeText(v, "envelope file")}</p>` : null
     }`,
-    canAct(v)
+    splitChanges(v)
       ? ui.btn({
           label: "Edit envelope",
           href: "#envelope-form",
