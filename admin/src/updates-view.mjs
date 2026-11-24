@@ -230,6 +230,10 @@ export async function readUpdates({ redis = null, staged, records = [], recordsP
 		if (Array.isArray(indexed)) known = [...known, ...indexed];
 		if (Array.isArray(live?.hosts)) known = [...known, ...live.hosts.map((h) => h?.name ?? h)];
 		else if (Array.isArray(live)) known = [...known, ...live.map((h) => h?.name ?? h)];
+		// A member whose row was not read (issue #1036: `unreadHosts`, a row Valkey answered with an error or that got no answer) is a
+		// host all the same. It was left out, so a host that neither looked nor published a doctor result had no row on this page, and
+		// an Adopt was judged without it.
+		if (Array.isArray(live?.unreadHosts)) known = [...known, ...live.unreadHosts];
 	}
 	const hostNames = [...new Set(known.filter((n) => typeof n === "string" && n !== ""))].sort();
 	// What each staged package's row is about, decided before the third wave so that its reads can go out together.

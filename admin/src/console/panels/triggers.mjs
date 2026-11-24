@@ -8,7 +8,7 @@ import {
   CHECK_PR_ACTIONS,
   CHECK_LIMITS,
 } from "../../trigger-check.mjs";
-import { TRIGGER_LIST_KINDS } from "../../trigger-list.mjs";
+import { SCHEDULES_PART_TEXT, TRIGGER_LIST_KINDS } from "../../trigger-list.mjs";
 import { triggerWhoMayFire } from "../../trigger-policy.mjs";
 import { fmtCost } from "../../panel.mjs";
 import { outcomeWord, recordReason, reasonWords } from "../../words.mjs";
@@ -138,6 +138,8 @@ export function triggersCount(v) {
       )}`,
   );
 }
+/** Under a next fire drawn from a schedule list read in part (issue #986): an earlier one may be on a queue nobody read. */
+const SCHEDULES_NEXT_PART_TEXT = "Not every queue's schedules could be read, so an earlier fire may be registered.";
 export function triggersNext(v) {
   const m = modelOf(v),
     n = m?.next;
@@ -148,7 +150,9 @@ export function triggersNext(v) {
           <p class="tr-kp">
             ${timeHtml(n.at)} ·
             <a href="${ruleHref(v, n.index)}">row ${n.index + 1}</a>
-          </p>`
+          </p>${m?.schedulesReadInPart ? html`<p class="tr-empty">${SCHEDULES_NEXT_PART_TEXT}</p>` : null}`
+      : m?.schedulesReadInPart
+        ? html`<p class="tr-empty">Not known. ${SCHEDULES_PART_TEXT}</p>`
       : m?.schedulersUnread
         ? html`<p class="tr-empty">
             Not known: Valkey could not be read, so no next fire can be shown.
@@ -263,7 +267,7 @@ function ruleRow(v, r) {
                 >;
                 ${hostNames.length
                   ? html`on ${hostNames.join(", ")}`
-                  : next?.unread
+                  : next?.unread || next?.part
                     ? "owning host not known"
                     : "owning host not published"}${next?.zone
                   ? html`; schedule zone ${next.zone}`
@@ -330,6 +334,8 @@ function ruleRow(v, r) {
         ? html`<p class="tr-next">
               ${next.unread
                 ? "Next fire and stall count not known: Valkey could not be read."
+                : next.part
+                ? html`Next fire not known: not every queue's schedules could be read · stalls ${next.stalls ?? "unknown"} of ${next.stallLimit}`
                 : html`Next: ${next.at === null ? "unknown" : timeHtml(next.at)} ·
               ${next.health === "on-time" ? "on time" : next.health} · stalls
               ${next.stalls ?? "unknown"} of ${next.stallLimit}`}
@@ -580,7 +586,7 @@ export function triggersWeek(v) {
           )}
         </ul>
         ${!future.length
-          ? html`<p>${m.schedulersUnread ? "Not known: the next fires could not be read." : "No next fire is published."}</p>`
+          ? html`<p>${m.schedulersUnread ? "Not known: the next fires could not be read." : m.schedulesReadInPart ? `Not known. ${SCHEDULES_PART_TEXT}` : "No next fire is published."}</p>`
           : null}${w.quiet.map(
           (q) =>
             html`<p>

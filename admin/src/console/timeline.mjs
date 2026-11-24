@@ -562,6 +562,9 @@ export function collect({ now, start, recorded, runs, active, hostJobs, waiting,
       startAt: Math.max(ms(w.dueAt) ?? now, now),
       endAt: null,
       bucket,
+      // A row whose bucket rests on a paused flag that was not read (issue #1036, the reader's `pausedUnknown`): it is
+      // in `unknown`, and that bucket's long words are false of it (the job recorded no reason).
+      pausedUnknown: w.pausedUnknown === true,
       why: str(w.why),
       known: w.known === true,
       dueAt: ms(w.dueAt),
@@ -969,11 +972,18 @@ const dueLine = (i, now) => `${TIMELINE_WAIT_WORDS[i.bucket].word} ${dueWords(i.
  */
 const WAIT_START_X = Object.freeze(Object.fromEntries(Object.entries(TIMELINE_WAIT_WORDS).map(([b, w]) => [b, 100 - pct(waitPx("x".repeat(WAIT_NAME_MIN), `${w.word} 00:00`))])));
 
+/**
+ * What a waiting job says where its queue's paused flag was not read (issue #1036): it waits for a free slot or on a
+ * pause, and which is not known. Its pill keeps the `unknown` bucket's glyph and one word, which are true of it.
+ */
+const WAIT_PAUSED_UNKNOWN = Object.freeze({ short: "slot or pause", long: "waits for a free slot or on a pause; whether its queue is paused could not be read" });
+
 /** A waiting job's title: who it is, what it waits for, and when it is due. */
 function waitTitle(i, now) {
   const w = TIMELINE_WAIT_WORDS[i.bucket];
   let what;
-  if (i.bucket === "unknown" && i.why !== null) what = `${i.why}, no explanation yet`;
+  if (i.pausedUnknown) what = WAIT_PAUSED_UNKNOWN.long;
+  else if (i.bucket === "unknown" && i.why !== null) what = `${i.why}, no explanation yet`;
   else if (i.bucket === "due" && i.dueAt !== null) what = `due since ${whenText(i.dueAt, now)} UTC; no worker has taken it`;
   else if (i.bucket === "slot") what = i.host !== null ? `waits for a free slot on ${i.host}` : w.long;
   else if (i.bucket === "run") what = i.holder !== null ? `starts after ${i.holder}` : w.long;
@@ -1004,6 +1014,7 @@ function waitLabel(s, now) {
   let sub;
   if (s.dep === "arrow") sub = i.bucket === "slot" ? "needs this slot" : "after this run";
   else if (i.scheduled !== null && i.scheduled.at !== null) sub = `${hhmm(i.scheduled.at)} run`;
+  else if (i.pausedUnknown) sub = WAIT_PAUSED_UNKNOWN.short;
   else if (i.bucket === "unknown" && i.why !== null) sub = i.why;
   else if (i.bucket === "due" && i.dueAt !== null) sub = `due since ${hhmm(i.dueAt)}`;
   else if (i.bucket === "retry" && i.dueAt !== null) sub = i.dueAt > now ? `retry in ${durText(i.dueAt - now)}` : "retry due now";

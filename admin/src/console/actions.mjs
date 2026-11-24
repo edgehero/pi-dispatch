@@ -84,7 +84,7 @@ import { html } from "./html.mjs";
 import { triggerWhoMayFire } from "../trigger-policy.mjs";
 import { cmd } from "./kit.mjs";
 import { WATCH_ID_RE, WATCH_RULE_ID_RE } from "./watch.mjs";
-import { timeHtml, utcText } from "./panels/common.mjs";
+import { PAUSED_UNKNOWN_TEXT, timeHtml, utcText } from "./panels/common.mjs";
 import { FLASH_MAX_BYTES } from "./sessions.mjs";
 import { actionAgentPolicy, authorizeTransition, evaluateActionPolicy } from "../action-policy.mjs";
 export { evaluateActionPolicy } from "../action-policy.mjs";
@@ -1305,6 +1305,9 @@ function filledLine(sentence, row) {
  */
 export function waitingLine(row) {
   if (row === null || typeof row !== "object") return null;
+  // A row whose bucket rests on a paused flag that was not read (issue #1036): the pages' own line for it, never the
+  // `unknown` bucket's title, which says the job recorded a reason this console does not know.
+  if (row.pausedUnknown === true) return { text: PAUSED_UNKNOWN_TEXT, bar: PAUSED_UNKNOWN_TEXT };
   const why = typeof row.why === "string" && DEFER_WHY_RE.test(row.why) ? row.why : null;
   if (row.bucket === "due") {
     const line = filledLine(DEFER_DUE_SENTENCE, row);

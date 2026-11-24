@@ -25,6 +25,7 @@ import { meteredRunMicros } from "./costs.mjs";
 import { newerSkippedSentence, readableRecords } from "./newer-release.mjs";
 import { FILE_WORDS, fileCaseOfError, fileCaseOfView } from "./file-case.mjs";
 import { mirrorStateOf } from "./mirror-words.mjs";
+import { waitingMarksFloor, waitingMarksOf } from "./waiting-marks.mjs";
 
 /** The waits the Models page lists beside cooldowns, issue #1008's quota reserve among them. */
 const MODEL_WAIT_REASONS = Object.freeze(["model-cooldown", "model-window", "subscription-quota", "subscription-reserve"]);
@@ -206,8 +207,13 @@ export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], dep
   // snapshot the caller says could not be read (null) or whose own read of that list failed; a caller that gives no
   // snapshot at all (undefined: a comparison over records alone) asked for neither list.
   const waitingUnread = snapshot !== undefined && (snapshot === null || !snapshot.waiting || Boolean(snapshot.waiting.unreachable));
+  // Issue #1037: the waiting read's own marks of a floor, for a read that answered: the list above is cut from its
+  // rows, so over a read that was cut, that did not read a queue's list, or whose set of queues may be short, "no job
+  // waits on a model" is not known and a count of them is "at least". The marks alone, never a row.
+  const waitingMarks = waitingUnread || !snapshot?.waiting ? null : waitingMarksOf(snapshot.waiting, { max: MODELS_LIMITS.waits });
+  if (waitingMarksFloor(waitingMarks)) notes.push("Not every waiting job was read; the jobs listed as waiting on a model are a floor.");
   const proposalsUnread = snapshot !== undefined && (snapshot === null || !snapshot.doctor || Boolean(snapshot.doctor.unreachable));
-  return { now, scopes: [...new Set(["default", ...projects.map(project => project.id), ...scopes])], state: configUnknown ? "unreadable" : "ready", ...(configUnknown && configProblem ? { configProblem: { file: configProblem.file, word: configProblem.word } } : {}), partial: true, banners, roles, randomPools, recentRandom, cooldowns: observedCooldowns, cooldownsUnread: cooldowns === null, waitingUnread, proposalsUnread, models, proposals,
+  return { now, scopes: [...new Set(["default", ...projects.map(project => project.id), ...scopes])], state: configUnknown ? "unreadable" : "ready", ...(configUnknown && configProblem ? { configProblem: { file: configProblem.file, word: configProblem.word } } : {}), partial: true, banners, roles, randomPools, recentRandom, cooldowns: observedCooldowns, cooldownsUnread: cooldowns === null, waitingUnread, ...(waitingMarks === null ? {} : { waitingMarks }), proposalsUnread, models, proposals,
     canaries: canariesOf(retained, roles, deployment, now, sourceRecords), waiting, recentFallbacks,
     coverage: { complete: false, partial: true, records: retained.length, days: MODELS_LIMITS.days, truncated: dedup.size > MODELS_LIMITS.records || coverage.truncated === true, notes } };
 }
@@ -350,7 +356,13 @@ export async function readModelsView({ paths = {}, env = {}, deploymentDir = nul
   return { subscriptionAuth, ...modelsViewOf({ entries, modelRoles, projects, deployment, envList, overlay, overlayUnknown, configUnknown, configProblem, cooldowns, records, sourceRecords, snapshot, windows, coverage: historyCoverage, now, ...(reads.status ? { status: reads.status } : {}) }) };
 }
 
-/** Explicit machine projection: no doctor prose, command, path, prompt, URL, arbitrary field or secret reaches a model. */
+/**
+ * Explicit machine projection: no doctor prose, command, path, prompt, URL, arbitrary field or secret reaches a model.
+ *
+ * `waiting` is NULL where the waiting jobs were not read (issue #1037, `waitingUnread`), never `[]`: an empty list said
+ * that no job waits on a model, of a read nobody made. `waitingIncomplete` is true where the list is a floor (the
+ * read was cut, did not read a queue's list, or its set of queues may be short), and `waitingMarks` says which.
+ */
 export function modelsForAgent(view) {
   const model = value => splitModelEntry(value) ? value : null;
   const metrics = value => Object.fromEntries(["runs", "completed", "costPerRun", "averageTurns", "averageTokens", "knownCosts", "knownTurns", "knownTokens"].map(key => [key, finite(value?.[key])]));
@@ -376,7 +388,10 @@ export function modelsForAgent(view) {
     canaries: (view?.canaries ?? []).map(row => ({ id: safeId(row.id), digest: /^[a-f0-9]{64}$/.test(row.digest ?? "") ? row.digest : null, role: roleValid(row.role) ? row.role : null, candidate: model(row.candidate), flow: safeId(row.flow),
       candidateStats: metrics(row.candidateStats), sourceStats: metrics(row.sourceStats), partial: row.partial === true,
       rows: (row.rows ?? []).map(pair => ({ jobId: safeId(pair.jobId), sourceJobId: safeId(pair.sourceJobId), candidate: { model: model(pair.candidate?.model), outcome: safeId(pair.candidate?.outcome), cost: finite(pair.candidate?.cost), turns: integer(pair.candidate?.turns), tokens: integer(pair.candidate?.tokens) }, source: pair.source ? { model: model(pair.source.model), outcome: safeId(pair.source.outcome), cost: finite(pair.source.cost), turns: integer(pair.source.turns), tokens: integer(pair.source.tokens) } : null })) })),
-    waiting: (view?.waiting ?? []).map(row => ({ jobId: safeId(row.jobId), reason: MODEL_WAIT_REASONS.includes(row.reason) ? row.reason : null, resetAt: integer(row.resetAt) })),
+    waiting: view?.waitingUnread === true ? null : (view?.waiting ?? []).map(row => ({ jobId: safeId(row.jobId), reason: MODEL_WAIT_REASONS.includes(row.reason) ? row.reason : null, resetAt: integer(row.resetAt) })),
+    waitingUnread: view?.waitingUnread === true,
+    waitingIncomplete: view?.waitingUnread !== true && waitingMarksFloor(view?.waitingMarks ?? null),
+    ...(view?.waitingUnread !== true && view?.waitingMarks ? { waitingMarks: (({ byQueue: _perQueue, ...marks }) => marks)(waitingMarksOf(view.waitingMarks, { max: MODELS_LIMITS.waits })) } : {}),
     recentFallbacks: (view?.recentFallbacks ?? []).map(row => ({ jobId: runId(row.jobId), provider: providerIdProblem(row.provider) === null ? row.provider : null, model: modelIdProblem(row.model) === null ? row.model : null, modelRole: roleValid(row.modelRole) ? row.modelRole : null, modelWhy: MODEL_WHY.includes(row.modelWhy) ? row.modelWhy : null, providerFailure: providerFailureOf(row.providerFailure) })),
     banners: (view?.banners ?? []).map(row => ({ kind: Object.hasOwn(bannerReasons, row.kind) ? row.kind : "unknown", reason: Object.hasOwn(bannerReasons, row.kind) && bannerReasons[row.kind].includes(row.reason) ? row.reason : null, index: integer(row.index), project: safeId(row.project), projectUnknown: row.projectUnknown === true })),
     coverage: { complete: false, partial: true, records: integer(view?.coverage?.records), days: MODELS_LIMITS.days, truncated: view?.coverage?.truncated === true } };

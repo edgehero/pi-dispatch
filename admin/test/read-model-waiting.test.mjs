@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { createFleetReader, readWaiting, readWaitingRow, RUN_ID_RE, WAITING_DISCOVERY_TTL_MS, WAITING_DUE_GRACE_MS, WAITING_PER_LIST_MAX, WAITING_QUEUES_MAX, WAITING_STATES, WAITING_TTL_MS } from "../src/read-model.mjs";
 import { stateOf } from "../src/console/live.mjs";
+import { discoverHostQueuesReporting } from "@edgehero/pi-dispatch/queue";
 import { DEFER_BUCKETS, DEFER_ID_RE, DEFER_TIME_MAX_MS, deferHsetArgs, deferKey } from "@edgehero/pi-dispatch/defer-reasons";
 
 /**
@@ -928,12 +929,70 @@ test("snapshot({ waiting: true }): a queue no registry row names is read too, by
   };
   await queuesOf();
   assert.deepEqual(await queuesOf(), ["pi-jobs", "pi-jobs@other", "pi-jobs@stopped"], "a scan that failed keeps the last set");
+  assert.equal((await reader.snapshot(ASK)).waiting.queuesShort, true, "and calls it short");
+  // The registry answered, so this was no outage (a SCAN Valkey refuses, a keyspace too big for the bound): asking
+  // again would not end it, and the set is kept for the minute like any other (issue #986 shortens only an outage's).
+  t += WAITING_TTL_MS;
+  await queuesOf();
+  assert.equal(scans.length, 3, "not asked again inside the minute");
   // A whole scan is the set: a queue it no longer finds is not read.
   t += WAITING_DISCOVERY_TTL_MS;
   answer = ["pi-jobs@stopped"];
   await queuesOf();
   assert.deepEqual(await queuesOf(), ["pi-jobs", "pi-jobs@stopped"]);
   assert.equal(scans.length, 4);
+});
+
+test("snapshot({ waiting: true }): a look for queues made while Valkey did not answer is made again a window later, so the floor ends with the outage", async () => {
+  // Issue #986, on the real scan (`discoverHostQueuesReporting`, which answers `{ names: [], incomplete }` for a scan
+  // that got no answer and never throws for it) and a registry read that got no answer either: the pages said that not
+  // every queue could be found for 48 s after a 20 s outage, the look made in it kept for the minute.
+  const logsDir = tempDir("pd-986-waiting-outage-");
+  const v = fakeValkey();
+  addJob(v, "pi-jobs@stopped", "gh-left", { state: "waiting" });
+  const redis = snapshotValkey(v);
+  let t = AT;
+  let down = true;
+  const scans = [];
+  const keyspace = {
+    scan: async (cursor) => {
+      scans.push(t);
+      if (down) throw new Error("Connection is closed.");
+      return ["0", ["bull:pi-jobs@stopped:meta"]];
+    },
+  };
+  const reader = createFleetReader(
+    { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 },
+    {
+      makeQueueFn: quietQueue,
+      parseConnectionFn: () => ({}),
+      redisFn: () => redis,
+      readLiveHostsFn: async () => (down ? { unreachable: "timed out reaching the host registry" } : { hosts: [] }),
+      discoverHostQueuesFn: (_r, opts) => discoverHostQueuesReporting(keyspace, opts),
+      nowFn: () => t,
+    },
+  );
+  try {
+    const queuesOf = async () => {
+      const { waiting } = await reader.snapshot(ASK);
+      return [waiting.byQueue.map((q) => q.queue), waiting.queuesShort === true];
+    };
+    assert.deepEqual(await queuesOf(), [["pi-jobs"], true], "in the outage: the shared queue alone, a set that may be short");
+    assert.equal(scans.length, 1);
+    // Valkey answers again. Inside the window the look made in the outage stands; past it, it is made again, and the
+    // snapshot after the one that started it is whole.
+    down = false;
+    t += WAITING_TTL_MS - 1;
+    await queuesOf();
+    assert.equal(scans.length, 1, "inside the window it is not asked again");
+    t += 1;
+    await queuesOf();
+    assert.equal(scans.length, 2, "past it, asked again");
+    t += 1;
+    assert.deepEqual(await queuesOf(), [["pi-jobs", "pi-jobs@stopped"], false], "whole again, where it waited out the minute");
+  } finally {
+    await reader.dispose();
+  }
 });
 
 test("snapshot({ waiting: true }): the cached read is the same queues' only, on a clock that moves forward", async () => {

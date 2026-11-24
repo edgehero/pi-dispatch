@@ -3775,7 +3775,10 @@ export async function readTriggerSkew({ index, waiting, triggersPath, lookupJob,
     if (!Array.isArray(JSON.parse(fs.readFileSync(triggersPath, "utf8"))?.triggers)) return { rows: [], incomplete: true };
   } catch { return { rows: [], incomplete: true }; }
   const check = makeCheckWaitSkew({ triggersPath, fs });
-  let incomplete = Boolean(waiting.truncated || waiting.queuesCut || waiting.unreachable || waiting.rows.length > 200);
+  // A floor too where the set of queues behind the rows may be short (`queuesShort`, issue #1037: the registry was
+  // not read, or the look for queues was not whole): a job of this trigger may wait in a queue nobody asked. A list
+  // that was not read (`listsUnread`) makes the read `truncated` itself.
+  let incomplete = Boolean(waiting.truncated || waiting.queuesCut || waiting.queuesShort || waiting.unreachable || waiting.rows.length > 200);
   const rows = [];
   const queued = [];
   await Promise.all(waiting.rows.slice(0, 200).map(async (row) => {
@@ -3833,6 +3836,9 @@ export function triggerDetailOf(snapshot, index, { now = snapshot?.readAt, subsc
   const runs24h = runs.filter((r) => runAt(r) >= now - DAY_MS && runAt(r) <= now);
   const measured = runs24h.map((r) => meteredRunMicros(r, { subscriptions, ...(pricing ? { pricing } : {}) }));
   const queued = snapshot.waiting?.unreachable || !snapshot.waiting ? null : (snapshot.waiting.rows ?? []).filter((r) => String(r.trigger ?? triggerValueOf(r)) === value);
+  // Whether those rows are a floor (issue #1037): the waiting read was cut, a list of a queue was not read (which
+  // makes it `truncated`), or its set of queues may be short. The page said "none in view" over each of them.
+  const queuedIncomplete = queued !== null && Boolean(snapshot.waiting.truncated || snapshot.waiting.queuesShort);
   const scheduler = snapshot.schedulers?.find((s) => s.key === trigger.id) ?? null;
   const stalls = snapshot.schedulerStalls?.[trigger.id] ?? null;
   const backend = trigger.backend ?? snapshot.defaultBackend ?? null;
@@ -3852,6 +3858,7 @@ export function triggerDetailOf(snapshot, index, { now = snapshot?.readAt, subsc
     // floor, and not this.
     historyUnread: mirrorDidNotAnswer(snapshot.runMirror),
     lastRuns: runs.slice(0, 5), history: runs, queued: trigger.runKind === "local" ? null : trigger.type === "cron" ? queued : snapshot.triggerSkew?.[index]?.queued ?? queued,
+    queuedIncomplete,
     skewed: snapshot.triggerSkew?.[index]?.rows ?? null,
     skewIncomplete: snapshot.triggerSkew?.[index]?.incomplete ?? true,
     cron: trigger.type === "cron" ? { scheduler, next: scheduler?.next ?? null, overdueMs: scheduler?.overdueMs ?? null, stalls, stallLimit: (snapshot.schedulerStallMax ?? 2) + 1 } : null,
@@ -5634,6 +5641,14 @@ export function createFleetReader(
   // yet, waits for one. A scan that did not finish adds what it read to the last set, and one that failed keeps it: a
   // part-read keyspace never shrinks the set. A clock that went back is no proof the set is fresh. `whole` is false when
   // the scan the set settled from did not read the whole keyspace, so a queue it does not name may still exist.
+  // `failed` when that scan read nothing AND the registry read before it got no answer either (`fleetDegraded` set, not
+  // a read in part, no error code): Valkey was not answering, so the look says nothing of the keyspace. Such a set is
+  // kept for WAITING_TTL_MS only, not the minute, so the floor an outage left on every page ends a tick or two after
+  // Valkey answers again (issue #986: it lasted 48 s after a 20 s outage), and a Valkey that stays away is sent one
+  // bounded scan per window, as the waiting read itself is. The scan seam never throws for a timeout: it answers
+  // `{ names: [], incomplete }`, so "read nothing" is that shape or a throw. A scan that read nothing while the registry
+  // answered keeps the minute: a keyspace too big to scan in the bound, or a SCAN Valkey refuses (NOPERM), is not ended
+  // by asking again, and a scan on every tick is the load the minute exists to spare.
   let discovered = null;
   let discovering = null;
   let scans = 0;
@@ -5642,15 +5657,18 @@ export function createFleetReader(
     scans += 1;
     const seq = scans;
     const previous = discovered?.names ?? [];
+    // Read when the scan settles, after the registry read of the same snapshot (see `failed` above).
+    const unanswered = () => fleetDegraded !== null && !fleetPartial && fleetError === null;
     const settled = Promise.resolve()
       .then(() => discoverHostQueuesFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS }))
       .then((got) => {
         // The seam answers `discoverHostQueuesReporting`'s shape or a bare list (read as whole), as `fleetQueuesOn` does.
         if (Array.isArray(got)) return { names: got, whole: true };
         const list = Array.isArray(got?.names) ? got.names : [];
-        return Array.isArray(got?.names) && (got.incomplete === null || got.incomplete === undefined) ? { names: list, whole: true } : { names: unionQueueNames(previous, list), whole: false };
+        if (Array.isArray(got?.names) && (got.incomplete === null || got.incomplete === undefined)) return { names: list, whole: true };
+        return { names: unionQueueNames(previous, list), whole: false, ...(list.length === 0 && unanswered() ? { failed: true } : {}) };
       })
-      .catch(() => ({ names: previous, whole: false }))
+      .catch(() => ({ names: previous, whole: false, ...(unanswered() ? { failed: true } : {}) }))
       .then((set) => {
         discovered = { at, seq, ...set };
         discovering = null;
@@ -5661,7 +5679,8 @@ export function createFleetReader(
   };
   const existingQueueNames = () => {
     const at = nowFn();
-    const fresh = discovered !== null && at >= discovered.at && at - discovered.at < WAITING_DISCOVERY_TTL_MS;
+    const keep = discovered?.failed === true ? WAITING_TTL_MS : WAITING_DISCOVERY_TTL_MS;
+    const fresh = discovered !== null && at >= discovered.at && at - discovered.at < keep;
     if (!fresh && discovering === null) startScan();
     return discovered !== null ? discovered : discovering.settled;
   };

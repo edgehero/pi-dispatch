@@ -1,10 +1,6 @@
 /** Fleet panels use only the reader's bounded projections, never running Job.data or a remote runtime. */
 import { consumerHealthText } from "@edgehero/pi-dispatch/consumer-health";
-import {
-  DEFER_BUCKETS,
-  DEFER_BUCKET_WORDS,
-  DEFER_WHYS,
-} from "@edgehero/pi-dispatch/defer-reasons";
+import { DEFER_WHYS } from "@edgehero/pi-dispatch/defer-reasons";
 import { GATEWAY_TEXT, venuesView } from "../../read-model.mjs";
 import { VENUE_LABEL, queueErrorsLine, queueErrorsOf, reasonWords } from "../../words.mjs";
 import {
@@ -29,10 +25,10 @@ import {
   workersOnline, plural,
   hostsUnread, HOSTS_UNREAD, HOSTS_UNREAD_TEXT,
   killSwitchUnreadForms, pausedStateUnknown,
-  NO_BEAT_READ, REGISTRY_PART_TEXT, registryReadInPart, rowLastSeen } from "./common.mjs";
+  NO_BEAT_READ, registryPartText, registryReadInPart, rowLastSeen,
+  SCHEDULES_PART_TEXT, WAIT_BUCKETS, WAIT_BUCKET_WORDS, hostQueuesUnasked, schedulesCount, schedulesShort, unaskedQueuesText, waitBucketOf, waitingFloor, waitingPausedUnread } from "./common.mjs";
 import {
   waitingSentence,
-  WAITING_CUT_TEXT,
   NO_WORKER_TEXT,
   STALE_BEATS_TEXT,
   REGISTRY_UNREAD_TEXT,
@@ -74,7 +70,7 @@ const linkHost = (name) =>
 const project = (p) => (p ? ui.ptag(p) : "No project recorded");
 /** The card frame is the design's: tables flush to the edge, inset cards keep their padding. */
 const wrap =
-  (title, fn, { flush = false, sub = null, end = null } = {}) =>
+  (title, fn, { flush = false, sub = null, end = null, foot = null } = {}) =>
   (view) => {
     const snapshot = view.data?.snapshot;
     return ui.card({
@@ -83,7 +79,7 @@ const wrap =
       sub: typeof sub === "function" ? sub(snapshot, view) : sub,
       end: typeof end === "function" ? (snapshot ? end(snapshot, view) : null) : end,
       body: snapshot
-        ? fn(snapshot, view)
+        ? typeof foot === "function" ? html`${fn(snapshot, view)}${foot(snapshot, view)}` : fn(snapshot, view)
         : html`<p class="note">The deployment's Valkey could not be read. The next refresh tries again.</p>`,
     });
   };
@@ -223,7 +219,7 @@ export const fleetBar = (v) => {
             "attention",
           )
         : null
-    }${statistic(count("active"), "active")}${statistic(count("delayed"), "delayed")}${statistic(held, "held")}${statistic(count("failed"), "awaiting retry", "failed")}</div><div class="fl-bar__btns">${buttons}</div></div>${s.queue?.fleetDegraded ? ui.banner({ status: "attention", title: registryReadInPart(s) ? "Registry read in part" : "Registry not read", body: hostsUnread(s) ? HOSTS_UNREAD_TEXT : html`${registryReadInPart(s) ? REGISTRY_PART_TEXT : REGISTRY_UNREAD_TEXT} Registry rows last read ${s.hostsReadAt ? timeHtml(s.hostsReadAt) : "at an unknown time"}.`, sm: true }) : null}${!paused.length && online.none ? ui.banner({ status: "attention", title: NO_WORKER_TEXT, sm: true }) : online.staleBeats ? html`<p class="muted">${STALE_BEATS_TEXT}</p>` : null}${mismatch?.disagreement ? ui.banner({ status: "attention", title: "Two Valkeys: this console and the service disagree",
+    }${statistic(count("active"), "active")}${statistic(count("delayed"), "delayed")}${statistic(held, "held")}${statistic(count("failed"), "awaiting retry", "failed")}</div><div class="fl-bar__btns">${buttons}</div></div>${s.queue?.fleetDegraded ? ui.banner({ status: "attention", title: registryReadInPart(s) ? "Registry read in part" : "Registry not read", body: hostsUnread(s) ? HOSTS_UNREAD_TEXT : html`${registryReadInPart(s) ? registryPartText(s) : REGISTRY_UNREAD_TEXT} Registry rows last read ${s.hostsReadAt ? timeHtml(s.hostsReadAt) : "at an unknown time"}.`, sm: true }) : null}${!paused.length && online.none ? ui.banner({ status: "attention", title: NO_WORKER_TEXT, sm: true }) : online.staleBeats ? html`<p class="muted">${STALE_BEATS_TEXT}</p>` : null}${mismatch?.disagreement ? ui.banner({ status: "attention", title: "Two Valkeys: this console and the service disagree",
           block: true, body: html`<p>${mismatch.disagreement}</p><p>A pause reaches both; a resume neither until they agree.</p>`, sm: true }) : null}${mismatch?.refused ? html`<div class="pp-refusal tone-refused" role="region" aria-label="Resume refused"><p class="pp-refusal__h">${ui.icon("refused")}Refused: Resume the fleet</p><p>${mismatch.refused}</p>${v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p><b>Nothing was changed.</b> One queue can still be resumed on the Valkey this console read it from.</p></div>` : mismatch?.disagreement && v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p class="pp-src">${ui.icon("beat", { size: "sm" })}<span>Read ${ageText(Math.max(0, v.now - Number(s.at ?? s.readAt ?? v.now)))} ago from ${v.role === "operator" ? html`<span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "the deployment's Valkey"} and ${hostsUnread(s) ? html`no host's registry row: the hosts could not be read` : html`${list(s.hostBudgets).length} hosts' registry rows`}. Live: this panel redraws when the fleet changes.</span></p></div>`,
   });
 };
@@ -242,7 +238,7 @@ export const fleetQueues = wrap(
         ),
         ...(canAct(v) ? [{ label: "Action", l: "" }] : []),
       ],
-      rows: list(s.queueCounts).map((q) => ({
+      rows: [...list(s.queueCounts).map((q) => ({
         mark: q.paused ? "attention" : null,
         cells: [
           html`<span class="code"><b>${q.queue}</b></span><span class="reason">${q.queue === "pi-jobs" ? (hostsUnread(s) ? `shared; its hosts are ${HOSTS_UNREAD}` : `shared by ${list(s.hostBudgets).length} hosts`) : q.paused ? "Its host still takes shared jobs." : "its host's own queue"}</span>`,
@@ -265,6 +261,18 @@ export const fleetQueues = wrap(
             : []),
         ],
       })),
+      // A queue Valkey answered with an error (issue #1064) is in no row above, since it has no counts: it is a row of
+      // its own, with what was answered, and paused or running only where its flag was read. The table left it out,
+      // so a deployment's own queue was missing from the card that lists the queues, with nothing saying so here.
+      ...queueErrorsOf(s).map((e) => ({
+        mark: "attention",
+        cells: [
+          html`<span class="code"><b>${e.queue}</b></span><span class="reason">Not read: Valkey answered ${e.error}${typeof e.paused === "boolean" ? " for its counts" : ""}.</span>`,
+          typeof e.paused === "boolean" ? ui.chip(e.paused ? "Paused" : "Running", { status: e.paused ? "attention" : "ok", icon: e.paused ? "pause" : "play" }) : ui.chip("Not known", { status: "attention", icon: "attention" }),
+          ...["waiting", "active", "delayed", "paused", "failed"].map(() => "not read"),
+          ...(canAct(v) ? [""] : []),
+        ],
+      }))],
       empty: "No queue was read.",
     })}${hostsUnread(s) ? html`<p class="note pp-pad">${QUEUES_UNREAD_TEXT}</p>` : null}`,
   { flush: true, sub: "Pause stops new starts; running jobs finish" },
@@ -328,8 +336,10 @@ export const fleetActive = wrap(
         ...(canAct(v) ? [{ label: "Action", l: "" }] : []),
       ],
       rows: all,
-      empty: unread ? ACTIVE_UNREAD_TEXT : "Nothing is running.",
-    })}${unread && all.length ? html`<p class="note pp-pad">${ACTIVE_PARTIAL_TEXT}</p>` : null}`;
+      // Where the cause is a host's own queue that no read asked (issue #1036), the card says that: every queue that
+      // was asked may have answered, so "could not be read ... the next refresh tries again" was false of it.
+      empty: unread ? unaskedQueuesText(s) ?? ACTIVE_UNREAD_TEXT : "Nothing is running.",
+    })}${unread && all.length ? html`<p class="note pp-pad">${unaskedQueuesText(s) ?? ACTIVE_PARTIAL_TEXT}</p>` : null}`;
   },
   {
     flush: true,
@@ -389,14 +399,19 @@ export const fleetDelayed = wrap("Delayed", (s, v) => {
   const cancellable = (r) =>
     r.attemptsMade === 0 && r.stalled === 0 && !r.recovery && !r.schedulerNext;
   const heldCount = list(s.held?.rows).length + Number(s.held?.more ?? 0);
-  return html`${ui.kpi(s.queue?.counts?.delayed ?? "not read", s.queue?.counts?.delayed === 1 ? "delayed job" : "delayed jobs")}<p> ${plural(list(s.schedulers).length, "cron schedule")}; ${
+  // The count is the sum over the queues that were read: a floor while one was answered with an error (issue #1064:
+  // it is in no count) or a host's own queue was not asked (`hostQueuesUnasked`), as the bar says of the same number.
+  const delayedFloor = Number.isFinite(s.queue?.counts?.delayed) && (queueErrorsOf(s).length > 0 || hostQueuesUnasked(s));
+  const floor = waitingFloor(w);
+  const pausedUnread = waitingPausedUnread(w);
+  return html`${ui.kpi(s.queue?.counts?.delayed ?? "not read", delayedFloor ? "or more delayed jobs" : s.queue?.counts?.delayed === 1 ? "delayed job" : "delayed jobs")}<p> ${schedulesCount(s, "cron schedule")}; ${
     s.held?.unreachable ? "held jobs unreadable" : plural(heldCount, "held job")
-  }. Other jobs are grouped by the reason their worker recorded. </p> ${DEFER_BUCKETS.map(
+  }. Other jobs are grouped by the reason their worker recorded. </p>${schedulesShort(s) ? html`<p class="note">${SCHEDULES_PART_TEXT}</p>` : null} ${WAIT_BUCKETS.map(
     (bucket) => {
-      const rows = w.rows.filter((r) => (r.bucket ?? "none") === bucket);
+      const rows = w.rows.filter((r) => waitBucketOf(r) === bucket);
       return rows.length
-        ? html`<h3>${DEFER_BUCKET_WORDS[bucket].title}</h3> ${ui.tbl({
-            label: DEFER_BUCKET_WORDS[bucket].title,
+        ? html`<h3>${WAIT_BUCKET_WORDS[bucket].title}</h3> ${ui.tbl({
+            label: WAIT_BUCKET_WORDS[bucket].title,
             stack: true,
             heads: [
               "Project",
@@ -423,7 +438,7 @@ export const fleetDelayed = wrap("Delayed", (s, v) => {
           })}`
         : null;
     },
-  )}${w.truncated ? html`<p class="note">${WAITING_CUT_TEXT}</p>` : null} <details> <summary>What can delay a job, and when it asks again</summary> <ul> ${Object.entries(
+  )}${floor === null ? null : html`<p class="note">${floor.text}</p>`}${pausedUnread === null ? null : html`<p class="note">${pausedUnread.text}</p>`} <details> <summary>What can delay a job, and when it asks again</summary> <ul> ${Object.entries(
     DEFER_WHYS,
   ).map(
     ([why, d]) =>
@@ -461,7 +476,7 @@ export const fleetHosts = wrap(
     // Nothing read about the hosts is its own sentence: no "as it was last seen" over rows nobody ever saw, and no
     // "No host is registered." (issue #962). A registry read before and not now keeps its last rows and says so.
     const unread = hostsUnread(s);
-    return html`${unread ? html`<p class="note">${HOSTS_UNREAD_TEXT}</p>` : s.queue?.fleetDegraded ? html`<p class="note">${registryReadInPart(s) ? REGISTRY_PART_TEXT : REGISTRY_UNREAD_TEXT}</p>` : null}<ul class="hosts">${hosts.map(
+    return html`${unread ? html`<p class="note">${HOSTS_UNREAD_TEXT}</p>` : s.queue?.fleetDegraded ? html`<p class="note">${registryReadInPart(s) ? registryPartText(s) : REGISTRY_UNREAD_TEXT}</p>` : null}<ul class="hosts">${hosts.map(
       (h) => {
         const jobs = list(h.jobs);
         const orphans = jobs.filter((j) => j.o).length;
@@ -594,9 +609,10 @@ export const fleetSchedulers = wrap(
               : `${n} of ${s.schedulerStallMax ?? "unknown"}`,
         ];
       }),
-      empty: "No schedule is registered.",
+      // Over a list read in part (issue #986) no schedule read is not no schedule registered.
+      empty: schedulesShort(s) ? "No schedule was read." : "No schedule is registered.",
     }),
-  { flush: true, sub: (s) => (s ? headerSub(s.schedulers, "schedule") : null) },
+  { flush: true, sub: (s) => (s ? schedulesCount(s) : null), foot: (s) => (schedulesShort(s) ? html`<p class="note pp-pad">${SCHEDULES_PART_TEXT}</p>` : null) },
 );
 
 export function failedWhy(r) {

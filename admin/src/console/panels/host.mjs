@@ -17,7 +17,7 @@ import {
   doctorByText,
   DOCTOR_CHECKS_SHOWN,
 } from "../../doctor-view.mjs";
-import { VENUE_LABEL } from "../../words.mjs";
+import { VENUE_LABEL, queueErrorsLine } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import {
@@ -29,6 +29,7 @@ import {
   HOSTS_UNREAD_TEXT,
   hostsUnread,
   REGISTRY_PART_TEXT,
+  PAUSED_UNKNOWN_TEXT, hostActiveGap, hostPartCase, hostQueueErrorsOf, hostQueueOf, registryPartText, unaskedQueuesText, unreadHostText, waitingFloor, waitingPausedUnread,
   registryReadInPart,
   runLink as recordLink,
   timeHtml,
@@ -79,7 +80,9 @@ const unreadOf = (v) => hostsUnread(v.data?.snapshot);
 const notKnown = html`<p class="note">${HOSTS_UNREAD_TEXT}</p>`;
 // Issue #1062: over a registry read in part, a host with no row may be one whose row did not answer, not one gone.
 const partNotKnown = html`<p class="note">${REGISTRY_PART_TEXT} Whether this host is live is not known.</p>`;
-const goneOf = (v) => (unreadOf(v) ? notKnown : registryReadInPart(v.data?.snapshot) ? partNotKnown : gone);
+// Issue #1036: which of three cases a host with no row is over a registry read in part (`hostPartCase`).
+const partCaseOf = (v) => (unreadOf(v) ? null : hostPartCase(v.data?.snapshot, label(v)));
+const goneOf = (v) => (unreadOf(v) ? notKnown : partCaseOf(v) === "unread" ? html`<p class="note">${unreadHostText(v.data.snapshot, label(v))}</p>` : partCaseOf(v) === "unnamed" ? partNotKnown : gone);
 
 /** A published id can be a digest; that never becomes a guessed container name. */
 export function orphanCommand(job) {
@@ -128,6 +131,9 @@ export const hostState = (v) => {
   // A row the registry read in part did not reach has no beat of now (`beatAgeOf` null for it): not read, never late.
   const notRead = h?.notRead === true;
   const late = !notRead && (age === null || age > 60000);
+  // A queue this host's jobs can be in that Valkey answered with an error (issue #1064): its own, or the shared one.
+  // Said on the card of a host that has a row; a host with none has no queue this page can say is its own.
+  const errored = h ? hostQueueErrorsOf(v.data?.snapshot, h.name) : [];
   if (
     h &&
     !late &&
@@ -135,14 +141,22 @@ export const hostState = (v) => {
     !h.jobsUnreadable &&
     !unread &&
     skew === null &&
+    errored.length === 0 &&
     h.consumerHealth?.state === "healthy"
   )
     return html``;
   const doctor = doctorHostsOf(v.data?.snapshot).find(
     (row) => row.name === label(v),
   );
-  // Issue #1062: over a registry read in part, a host with no row may be one whose row did not answer in time.
-  if (!h && registryReadInPart(v.data?.snapshot) && !unreadOf(v))
+  // Issue #1062: over a registry read in part, a host with no row may be one whose row was not read. Issue #1036: the
+  // read names the hosts it did not read, so this card says which case holds: this host's row, with its key and what
+  // Valkey answered; a read that does not name them all; or neither, and then the host has gone (the card below).
+  if (!h && partCaseOf(v) === "unread")
+    return ui.card({
+      tint: "attention",
+      body: html`<div class="hd-state"><span class="tile tone-attention">${ui.icon("beat")}</span><div class="hd-state__t"><h2>Row not read</h2><p>${unreadHostText(v.data.snapshot, label(v))}</p></div></div>`,
+    });
+  if (!h && partCaseOf(v) === "unnamed")
     return ui.card({
       tint: "attention",
       body: html`<div class="hd-state"><span class="tile tone-attention">${ui.icon("beat")}</span><div class="hd-state__t"><h2>Host not known</h2><p>${REGISTRY_PART_TEXT} Nothing here says whether ${label(v)} is live, late or gone.</p></div></div>`,
@@ -154,7 +168,7 @@ export const hostState = (v) => {
     });
   return ui.card({
     tint: "attention",
-    body: html`<div class="hd-state"><span class="tile tone-attention">${ui.icon("beat")}</span><div class="hd-state__t"><h2>${!h ? "Host has gone" : notRead ? "Row not read this time" : late ? `Stale: no beat for ${age === null ? "an unknown time" : ageText(age)}` : ["failed", "stalled"].includes(h.consumerHealth?.state) ? "Queue consumer needs attention" : "Host needs attention"}</h2><p>${consumerHealthText(h?.consumerHealth)}</p>${unread ? html`<p>${part ? REGISTRY_PART_TEXT : REGISTRY_UNREAD_TEXT}</p>` : null}${h ? html`${late ? html`<p>Heartbeat late: ${age === null ? "age not known" : ageText(age)} (expected within 1m). The worker beats every 15s; routing stops after three missed beats. Jobs already in its own queue wait for it.${doctor && doctorStale(doctor) ? ` Doctor on ${h.name} is also ${ageText(doctor.ageMs)} old.` : ""}</p>` : null}${h.noExpiry ? html`<p>${HOST_NO_EXPIRY_TEXT}</p>` : null}${skew === null ? null : html`<p>${skew}</p>`}${h.jobsUnreadable ? html`<p>${JOBS_UNREAD_TEXT}</p>` : null}<p>${h.routes === false || h.routes === "false" ? "This host has no routing queue; it still takes shared jobs." : "This host takes its own routed jobs and shared jobs."}</p>` : gone}</div>${h && late && canAct(v) && h.routes !== false && h.routes !== "false" ? html`<div class="hd-state__a">${ui.actForm({ action: "queue-pause", hidden: [["queue", hostQueueName(h.name)]], label: `Pause ${hostQueueName(h.name)}`, kind: ["danger", "sm"] })}</div>` : null}</div>`,
+    body: html`<div class="hd-state"><span class="tile tone-attention">${ui.icon("beat")}</span><div class="hd-state__t"><h2>${!h ? "Host has gone" : notRead ? "Row not read this time" : errored.length > 0 && !late && h.consumerHealth?.state === "healthy" ? "A queue of this host was not read" : late ? `Stale: no beat for ${age === null ? "an unknown time" : ageText(age)}` : ["failed", "stalled"].includes(h.consumerHealth?.state) ? "Queue consumer needs attention" : "Host needs attention"}</h2><p>${consumerHealthText(h?.consumerHealth)}</p>${unread ? html`<p>${part ? unreadHostText(v.data.snapshot, label(v)) ?? registryPartText(v.data.snapshot) : REGISTRY_UNREAD_TEXT}</p>` : null}${errored.length > 0 ? html`<p>${queueErrorsLine(errored)}.</p>` : null}${h ? html`${late ? html`<p>Heartbeat late: ${age === null ? "age not known" : ageText(age)} (expected within 1m). The worker beats every 15s; routing stops after three missed beats. Jobs already in its own queue wait for it.${doctor && doctorStale(doctor) ? ` Doctor on ${h.name} is also ${ageText(doctor.ageMs)} old.` : ""}</p>` : null}${h.noExpiry ? html`<p>${HOST_NO_EXPIRY_TEXT}</p>` : null}${skew === null ? null : html`<p>${skew}</p>`}${h.jobsUnreadable ? html`<p>${JOBS_UNREAD_TEXT}</p>` : null}<p>${h.routes === false || h.routes === "false" ? "This host has no routing queue; it still takes shared jobs." : "This host takes its own routed jobs and shared jobs."}</p>` : gone}</div>${h && late && canAct(v) && h.routes !== false && h.routes !== "false" ? html`<div class="hd-state__a">${ui.actForm({ action: "queue-pause", hidden: [["queue", hostQueueName(h.name)]], label: `Pause ${hostQueueName(h.name)}`, kind: ["danger", "sm"] })}</div>` : null}</div>`,
   });
 };
 
@@ -164,12 +178,34 @@ const sizeText = (size) =>
     : "size not published";
 /** Jobs on the host: the line for an active list that could not be read whole (issue #962), beside what was read. */
 export const HOST_ACTIVE_UNREAD_TEXT = "The running jobs could not be read, so a job running on this host may be missing here.";
+
+/**
+ * What the Jobs card says where the fleet's active list is not whole, or null where nothing of THIS host's is missing
+ * (issue #1036, `hostActiveGap`, the pill's rule for this page too): whose queue was not asked, for a host this
+ * console never read; how many jobs its row names that are not drawn; or, where the row cannot vouch for the card,
+ * the sentence as it was. It said "a job running on this host may be missing here" on every host's page while any
+ * queue anywhere was not read or not asked, also on a host all of whose jobs were listed.
+ */
+function hostActiveText(s, name) {
+  const gap = hostActiveGap(s, name);
+  if (gap === null) return null;
+  // A host this console never read: its own queue was asked by no read. Said as that, never as jobs that "could not
+  // be read".
+  if (gap.kind === "unasked") return unaskedQueuesText(s);
+  if (gap.kind === "unknown") return HOST_ACTIVE_UNREAD_TEXT;
+  return `${name} says it runs ${gap.missing === 1 ? "1 job that is" : `${gap.missing} jobs that are`} not listed here: the running jobs could not be read whole.`;
+}
 export const hostJobs = card("Jobs on the host", (h, v) => {
   const s = v.data?.snapshot ?? {};
   const active = (s.active ?? []).filter((j) => j.host === label(v));
   const waiting = (s.waiting?.rows ?? []).filter(
     (j) => j.host === label(v) || j.queue === hostQueueName(label(v)),
   );
+  // A job of this host waits in its own queue or in the shared one (a queue with no host in its name).
+  const ofHost = hostQueueOf(label(v));
+  const floor = waitingFloor(s.waiting, ofHost);
+  const pausedUnread = waitingPausedUnread(s.waiting, ofHost);
+  const activeText = hostActiveText(v.data?.snapshot ?? null, label(v));
   const rows = active.map((j) => [
     html`${j.project ? ui.ptag(j.project) : "No project recorded"} ${runLink(j.jobId)}`,
     sizeText(j.size),
@@ -210,7 +246,8 @@ export const hostJobs = card("Jobs on the host", (h, v) => {
         : "not recorded",
       j.why === "host-budget"
         ? html`${ui.badge("idle", "Waits for the budget")}<span class="reason">Host budget (${j.budgetWhy ?? "dimension not recorded"}); asks again about every 9 seconds and keeps its place.</span>`
-        : (j.why ?? "No reason was recorded"),
+        // A row whose queue's paused flag was not read (issue #1036) recorded no reason; what is not known is the flag.
+        : j.pausedUnknown === true ? PAUSED_UNKNOWN_TEXT : (j.why ?? "No reason was recorded"),
       canAct(v) &&
       j.attemptsMade === 0 &&
       j.stalled === 0 &&
@@ -234,9 +271,7 @@ export const hostJobs = card("Jobs on the host", (h, v) => {
     rows,
     empty: v.data?.snapshot ? "No running, orphaned or waiting job was read for this host." : "Not known: the jobs on this host could not be read.",
   })}${
-    v.data?.snapshot?.activeUnreachable === true
-      ? html`<p>${HOST_ACTIVE_UNREAD_TEXT}</p>`
-      : null
+    activeText === null ? null : html`<p>${activeText}</p>`
   }${
     h?.jobsUnreadable
       ? html`<p>The host's running-job list is unreadable.</p>`
@@ -250,9 +285,9 @@ export const hostJobs = card("Jobs on the host", (h, v) => {
       ? null
       : !s.waiting || s.waiting.unreachable
       ? html`<p>Waiting jobs could not be read.</p>`
-      : s.waiting.truncated
-        ? html`<p>Not every waiting job was read.</p>`
-        : null
+      // Why the rows are a floor, for the two queues this card reads (issue #1037: `truncated` alone was looked at,
+      // so a set of queues that may be short drew the rows as whole), and a paused flag of theirs that was not read.
+      : html`${floor === null ? null : html`<p>${floor.text}</p>`}${pausedUnread === null ? null : html`<p>${pausedUnread.text}</p>`}`
   }`;
 });
 

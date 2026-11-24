@@ -47,15 +47,15 @@ import { timelineSeed } from "../timeline-data.mjs";
  * note lead the hosts panel; the count and dollar windows are Caps, under the UTC sentence; the active jobs' table with
  * its progress stays on Fleet, and Running here counts them in each host's slots.
  */
-import { DEFER_BUCKETS, DEFER_BUCKET_WORDS, DEFER_DUE_SENTENCE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, DEFER_WHYS, DEFER_WHY_RE } from "@edgehero/pi-dispatch/defer-reasons";
+import { DEFER_BUCKET_WORDS, DEFER_DUE_SENTENCE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, DEFER_WHYS, DEFER_WHY_RE } from "@edgehero/pi-dispatch/defer-reasons";
 import { HOST_SKEW_CLAIM_MS } from "@edgehero/pi-dispatch/host-registry";
 import { FIRST_RUN_COMMANDS, FIRST_RUN_STATES, doctorHostsOf, doctorProblems, doctorStale, firstRunCommandHint, firstRunState } from "../../doctor-view.mjs";
 import { usd2 } from "../../panel.mjs";
-import { NO_EXPLANATION, docsHref } from "../../words.mjs";
+import { NO_EXPLANATION, docsHref, queueErrorsOf } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { TIMELINE_DEFAULTS, TIMELINE_ROWS, TIMELINE_WAIT_WORDS, TIMELINE_ZOOMS, timelineHtml, timelineLegend, timelineModel } from "../timeline.mjs";
-import { BEAT_FRESH_MS, HOSTS_UNREAD_TEXT, NO_BEAT_READ, REGISTRY_PART_TEXT, registryReadInPart, rowLastSeen, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, hostsUnread, killSwitchUnreadForms, pausedStateUnknown, moneyHtml, overlayRefused, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
+import { BEAT_FRESH_MS, HOSTS_UNREAD_TEXT, NO_BEAT_READ, PAUSED_UNKNOWN_BUCKET, PAUSED_UNKNOWN_TEXT, SCHEDULES_PART_TEXT, WAITING_CUT_TEXT, WAIT_BUCKETS, WAIT_BUCKET_WORDS, queueErrorsText, registryPartText, registryReadInPart, rowLastSeen, schedulesShort, waitBucketOf, waitingFloor, waitingPausedUnread, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, hostsUnread, killSwitchUnreadForms, pausedStateUnknown, unaskedQueuesText, moneyHtml, overlayRefused, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
 
 // ---- the sentences -----------------------------------------------------------------------------------------------------
 
@@ -153,11 +153,13 @@ export const SPEND_HOURS_TEXT = "Dots: each UTC hour's settled spend, from the r
 export const SPEND_SUM_TEXT = "Dots: each UTC hour's settled spend, from the run records. The number is their sum.";
 
 /**
- * The one sentence for a waiting read that was cut (`truncated`: it stopped at its bound on queues, or a queue held
- * more waiting jobs than one read takes), whichever the cut was: In line draws it under every cut read, and the
- * timeline's notes draw the same constant (`UNREAD.waitingCut`), so the two cannot say the cut in different words.
+ * The one sentence for a waiting read cut by a bound of its own (it stopped at its bound on queues, or a queue held
+ * more waiting jobs than one read takes), handed on from `common.mjs`, where every reader of the waiting set takes
+ * why its rows are a floor (`waitingFloor`, issue #1037): In line, the Waitlists and the timeline's notes draw that
+ * one text, so no two of them say a floor in different words, and a floor with another cause (a list that was not
+ * read, a set of queues that may be short) says that cause.
  */
-export const WAITING_CUT_TEXT = "Not every waiting job was read, so jobs in line may be missing here.";
+export { WAITING_CUT_TEXT };
 
 /** Caps' sentence when the settings overlay was read whole and sets no cap: it names its source, the overlay. */
 export const CAPS_EMPTY_TEXT = "The settings overlay sets no cap.";
@@ -183,7 +185,6 @@ const UNREAD = Object.freeze({
   active: "The running jobs could not be read, so what runs is not known.",
   activePartial: "Not every queue's running jobs could be read, so more may be running.",
   activeTimeline: "The running jobs could not be read, so runs under way may be missing.",
-  waitingCut: WAITING_CUT_TEXT,
   settings: "The settings overlay could not be read, so its caps are not drawn.",
   // One word per case (issue #988): an overlay that was read and is refused is not a read that failed.
   settingsRefused: "The settings overlay does not load, so its caps are not drawn.",
@@ -500,7 +501,9 @@ export const overviewNeeds = overviewPanel("Needs you", (s, view) => {
 export const WAITING_MAIN_BUCKETS = Object.freeze(["slot", "run", "check", "retry"]);
 
 /** A bucket's icon: the timeline's glyph for it (`timeline.mjs` `TIMELINE_WAIT_WORDS`), so the two draw a reason alike. */
-const bucketIcon = (bucket) => TIMELINE_WAIT_WORDS[Object.hasOwn(TIMELINE_WAIT_WORDS, bucket) ? bucket : "none"].glyph;
+const bucketIcon = (bucket) => (bucket === PAUSED_UNKNOWN_BUCKET ? PAUSED_UNKNOWN_ICON : TIMELINE_WAIT_WORDS[Object.hasOwn(TIMELINE_WAIT_WORDS, bucket) ? bucket : "none"].glyph);
+/** The glyph of the rows whose queue's paused flag was not read (`PAUSED_UNKNOWN_BUCKET`): no worker bucket has it. */
+const PAUSED_UNKNOWN_ICON = "attention";
 
 /** The waiting read, `{ rows, byBucket, ... }`, or null when it was not made or failed. */
 function waitingOf(s) {
@@ -508,10 +511,13 @@ function waitingOf(s) {
   return w && typeof w === "object" && !w.unreachable && Array.isArray(w.rows) ? w : null;
 }
 
-/** Each bucket's count of the jobs in line. */
+/**
+ * Each reason's count of the jobs in line (`WAIT_BUCKETS`: the worker's buckets, and the one for a row whose queue's
+ * paused flag was not read, issue #1036, which is counted under neither a free slot nor a paused queue).
+ */
 function bucketCounts(w) {
-  const by = Object.fromEntries(DEFER_BUCKETS.map((b) => [b, 0]));
-  for (const r of w.rows) by[Object.hasOwn(by, r?.bucket) ? r.bucket : "none"] += 1;
+  const by = Object.fromEntries(WAIT_BUCKETS.map((b) => [b, 0]));
+  for (const r of w.rows) by[waitBucketOf(r)] += 1;
   return by;
 }
 
@@ -523,7 +529,7 @@ function bucketCounts(w) {
  */
 function inLineOf(w) {
   const n = w.rows.length;
-  if (w.truncated === true) return n > 0 ? { n: count(n), label: "or more jobs waiting to start", cut: false } : { n: "-", label: "jobs waiting: not known", cut: true };
+  if (waitingFloor(w) !== null) return n > 0 ? { n: count(n), label: "or more jobs waiting to start", cut: false } : { n: "-", label: "jobs waiting: not known", cut: true };
   return { n: count(n), label: n === 0 ? WAITING_EMPTY.title : n === 1 ? "job waiting to start" : "jobs waiting to start", cut: false };
 }
 
@@ -537,20 +543,25 @@ const floorEnd = (n) => (n > 0 ? html`<b>${count(n)}</b> or more` : html`<b>-</b
  * In line: the big number (`inLineOf`), the age of the longest wait, and each reason's count, the four main ones always.
  * ONE RULE UNDER A CUT READ (`truncated`): every number the card draws is a floor, "N or more", or a dash for none
  * found: the big number in its label, each reason row's count (`floorEnd`), and the longest wait, since the job that has
- * waited longest may be one the read did not reach; and `WAITING_CUT_TEXT` says why, whichever the cut was.
+ * waited longest may be one the read did not reach; and the floor's own words say why (`waitingFloor`, issue #1037:
+ * a bound, a list that was not read, or a set of queues that may be short, which this card drew as whole counts).
+ * A queue whose paused flag was not read is said beside it (`waitingPausedUnread`): its rows are all here, under
+ * neither a free slot nor a paused queue.
  */
 export const overviewWaiting = overviewPanel("In line", (s, view) => {
   const w = waitingOf(s);
   if (w === null) return ui.card({ title: "In line", body: html`<p class="muted">${UNREAD.waiting}</p>` });
-  const cut = w.truncated === true;
+  const floor = waitingFloor(w);
+  const cut = floor !== null;
   const oldest = w.rows.reduce((a, r) => (Number.isSafeInteger(r?.queuedAt) && (a === null || r.queuedAt < a) ? r.queuedAt : a), null);
   const longest = oldest !== null && Number.isFinite(view.now) && view.now >= oldest ? ui.chip(`longest ${ageText(view.now - oldest)}${cut ? " or more" : ""}`) : null;
   const by = bucketCounts(w);
-  const buckets = DEFER_BUCKETS.filter((b) => WAITING_MAIN_BUCKETS.includes(b) || by[b] > 0);
-  const rows = buckets.map((b) => ui.rowPill({ icon: bucketIcon(b), items: [DEFER_BUCKET_WORDS[b].short], end: cut ? floorEnd(by[b]) : by[b] }));
+  const buckets = WAIT_BUCKETS.filter((b) => WAITING_MAIN_BUCKETS.includes(b) || by[b] > 0);
+  const rows = buckets.map((b) => ui.rowPill({ icon: bucketIcon(b), items: [WAIT_BUCKET_WORDS[b].short], end: cut ? floorEnd(by[b]) : by[b] }));
+  const paused = waitingPausedUnread(w);
   // The big number is a count alone, or a dash; a floor is said in its label (`inLineOf`).
   const line = inLineOf(w);
-  return ui.card({ title: "In line", end: longest, body: html`${ui.kpi(line.n, line.label)}<ul class="rows">${rows}</ul>${cut ? html`<p class="card__sub">${WAITING_CUT_TEXT}</p>` : null}` });
+  return ui.card({ title: "In line", end: longest, body: html`${ui.kpi(line.n, line.label)}<ul class="rows">${rows}</ul>${cut ? html`<p class="card__sub">${floor.text}</p>` : null}${paused === null ? null : html`<p class="card__sub">${paused.text}</p>`}` });
 });
 
 // ---- Running ---------------------------------------------------------------------------------------------------------------
@@ -642,12 +653,12 @@ export const overviewActive = overviewPanel("Running", (s) => {
   const live = n > 0 ? ui.chip("live", { status: "running", icon: "running" }) : null;
   // A registry that could not be read says so, under the rows last seen or in their place, never that no host is
   // registered; one never read says that nothing is known of the hosts, since there is no "last seen" to show.
-  const note = hostsUnread(s) ? HOSTS_UNREAD_TEXT : lastSeen ? (registryReadInPart(s) ? REGISTRY_PART_TEXT : REGISTRY_UNREAD_TEXT) : rows.length === 0 ? HOSTS_EMPTY.body : null;
+  const note = hostsUnread(s) ? HOSTS_UNREAD_TEXT : lastSeen ? (registryReadInPart(s) ? registryPartText(s) : REGISTRY_UNREAD_TEXT) : rows.length === 0 ? HOSTS_EMPTY.body : null;
   // An active list that could not be read (issue #962): no 0 and no "nothing is running"; what the queues that
   // answered hold is a floor.
   const unread = activeUnread(s);
   const kpi = unread ? (n === 0 ? ui.kpi("-", "not known") : ui.kpi(count(n), "or more running")) : ui.kpi(count(n), runningLabel(n, slots));
-  return ui.card({ title: "Running", end: live, body: html`${kpi}${unread ? html`<p class="card__sub">${n === 0 ? UNREAD.active : UNREAD.activePartial}</p>` : null}${rows.length > 0 ? html`<ul class="rows">${rows}</ul>` : null}${note === null ? null : html`<p class="card__sub">${note}</p>`}` });
+  return ui.card({ title: "Running", end: live, body: html`${kpi}${unread ? html`<p class="card__sub">${unaskedQueuesText(s) ?? (n === 0 ? UNREAD.active : UNREAD.activePartial)}</p>` : null}${rows.length > 0 ? html`<ul class="rows">${rows}</ul>` : null}${note === null ? null : html`<p class="card__sub">${note}</p>`}` });
 });
 
 // ---- Spend today -----------------------------------------------------------------------------------------------------------
@@ -756,11 +767,11 @@ export const overviewTimeline = overviewPanel("Runs by project", (s, view) => {
   const w = waitingOf(s);
   const notes = [
     runsRead ? null : UNREAD.runs,
-    w === null ? UNREAD.waiting : w.truncated === true ? UNREAD.waitingCut : null,
-    activeUnread(s) ? UNREAD.activeTimeline : null,
+    w === null ? UNREAD.waiting : waitingFloor(w)?.text ?? null,
+    activeUnread(s) ? unaskedQueuesText(s) ?? UNREAD.activeTimeline : null,
     runsRead && s.runsDay.partial === true ? UNREAD.runsPartial : null,
     runsRead && s.runsDay.floor ? "Only the newest runs are read, so older runs in this window may be missing." : null,
-    q.anchor === null && model.empty && runsWhole && w !== null && w.truncated !== true && !activeUnread(s) ? "No run in this window, and nothing in line." : null,
+    q.anchor === null && model.empty && runsWhole && w !== null && waitingFloor(w) === null && !activeUnread(s) ? "No run in this window, and nothing in line." : null,
   ].filter(Boolean);
   const seed = { now: view.now, start: model.start, end: model.end, project: q.project, rows: model.by, notes, items: timelineSeed({ now: view.now, start: model.start, runs: s.runsDay ?? [], active: s.active ?? [], hostJobs: hostsOf(s), waiting: s.waiting, parked }) };
   if (seed.items.length === 2000) seed.notes = [...notes, "The live snapshot reached its 2,000-run limit. Retained history loads separately."];
@@ -897,6 +908,9 @@ function filledSentence(sentence, row) {
  */
 export function waitingSentence(row) {
   if (row === null || typeof row !== "object") return null;
+  // A row whose bucket rests on a paused flag that was not read (issue #1036): the reader keeps it in `unknown`, whose
+  // title is "A reason this console does not know". The job recorded no reason; what is not known is the flag.
+  if (row.pausedUnknown === true) return html`${PAUSED_UNKNOWN_TEXT}`;
   const why = typeof row.why === "string" && DEFER_WHY_RE.test(row.why) ? row.why : null;
   if (row.bucket === "due") {
     const line = filledSentence(DEFER_DUE_SENTENCE, row);
@@ -996,7 +1010,10 @@ function queueRow(s, w) {
   const list = Array.isArray(s?.queueCounts) ? s.queueCounts.filter((q) => typeof q?.queue === "string") : [];
   const counted = new Set(list.map((q) => q.queue));
   const extra = (Array.isArray(w?.byQueue) ? w.byQueue : []).filter((q) => typeof q?.queue === "string" && !counted.has(q.queue) && Number.isSafeInteger(q.inLine) && q.inLine > 0);
-  if (list.length === 0 && extra.length === 0) return null;
+  // A queue Valkey answered with an error is in no count here (issue #1064): it is named in the row, and the one
+  // sentence every surface shares says what was answered (`queueErrorsText`). The row left it out without a word.
+  const errored = queueErrorsOf(s);
+  if (list.length === 0 && extra.length === 0 && errored.length === 0) return null;
   const words = (q) => {
     const c = q.counts ?? {};
     const n = (k) => (Number.isSafeInteger(c[k]) && c[k] > 0 ? c[k] : 0);
@@ -1004,7 +1021,7 @@ function queueRow(s, w) {
     return parts.length === 0 ? "0" : parts.join(", ");
   };
   const strayWords = (q) => `${count(q.inLine)} in line${strayQueue(s, q.queue) ? ", its host not in the registry" : ""}`;
-  return html`<div class="qrow"><span class="card__sub">Queues</span>${list.map((q) => html`<span class="qp"><b class="code">${queueLabel(q.queue)}</b>${words(q)}</span>`)}${extra.map((q) => html`<span class="qp"><b class="code">${queueLabel(q.queue)}</b>${strayWords(q)}</span>`)}</div>`;
+  return html`<div class="qrow"><span class="card__sub">Queues</span>${list.map((q) => html`<span class="qp"><b class="code">${queueLabel(q.queue)}</b>${words(q)}</span>`)}${extra.map((q) => html`<span class="qp"><b class="code">${queueLabel(q.queue)}</b>${strayWords(q)}</span>`)}${errored.map((e) => html`<span class="qp"><b class="code">${queueLabel(e.queue)}</b>not read</span>`)}</div>${errored.length > 0 ? html`<p class="card__sub">${queueErrorsText(s)}</p>` : null}`;
 }
 
 /**
@@ -1014,9 +1031,12 @@ function queueRow(s, w) {
  */
 function scheduledLine(s, view) {
   const list = (Array.isArray(s?.schedulers) ? s.schedulers : []).filter((x) => timeOrNull(x?.next) !== null && typeof x.key === "string" && (!Number.isFinite(view.now) || x.next >= view.now)).sort((a, b) => a.next - b.next);
-  if (list.length === 0) return null;
+  // A schedule list read in part (issue #986, `schedulesShort`): the soonest fire may be one of a queue nobody read,
+  // so the line says so beside the ones it has, and where it has none it says that alone, never nothing.
+  const part = schedulesShort(s) ? ` ${SCHEDULES_PART_TEXT}` : "";
+  if (list.length === 0) return part === "" ? null : html`<p class="card__sub">${ui.icon("clock", { size: "sm" })} Scheduled: not known.${part}</p>`;
   const shown = list.slice(0, 3).map((x, i) => html`${i === 0 ? null : ", "}<span class="code">${x.key}</span> ${timeHtml(x.next)}`);
-  return html`<p class="card__sub">${ui.icon("clock", { size: "sm" })} Scheduled: ${shown}${list.length > 3 ? `, and ${count(list.length - 3)} more` : ""}</p>`;
+  return html`<p class="card__sub">${ui.icon("clock", { size: "sm" })} Scheduled: ${shown}${list.length > 3 ? `, and ${count(list.length - 3)} more` : ""}${part === "" ? "" : `.${part}`}</p>`;
 }
 
 /** Today's soft-hold refusals, linked to those runs: none of them waits in line. */
@@ -1029,16 +1049,22 @@ function softHoldLine(s, view) {
 }
 
 /**
- * Why the waiting counts are a floor, in one line for every role, or null when they are not: the read stopped at its
- * bound on queues (it read the first `byQueue.length` and counts the rest, `queuesCut`), or a queue holds more waiting
- * jobs than one read takes (a `byQueue` entry `truncated`), or both. In line's label says "or more" for the same `truncated`.
+ * Why the waiting counts are a floor, in one line for every role, or null when they are not (`waitingFloor`): a list
+ * of a queue was not read, or the set of queues may be short (issue #1037, which this line did not say: the counts
+ * were then drawn whole); the read stopped at its bound on queues (it read the first `byQueue.length` and counts the
+ * rest, `queuesCut`); or a queue holds more waiting jobs than one read takes. In line's label says "or more" for the
+ * same floor.
  */
 function floorText(w) {
-  const cut = Number.isSafeInteger(w.queuesCut) && w.queuesCut > 0 ? w.queuesCut : 0;
+  const floor = waitingFloor(w);
+  if (floor === null) return null;
   const read = Array.isArray(w.byQueue) ? w.byQueue.length : 0;
-  const part = Array.isArray(w.byQueue) && w.byQueue.some((q) => q?.truncated === true);
-  if (cut > 0) return `Only the first ${count(read)} queues were read; ${count(cut)} more ${cut === 1 ? "was" : "were"} not${part ? ", and a queue holds more waiting jobs than are read" : ""}, so the counts are a floor.`;
-  return w.truncated ? "A queue holds more waiting jobs than are read, so the counts are a floor." : null;
+  // A read that failed (issue #1037: a list not read, a set of queues that may be short) in the floor's own words,
+  // then the bound's, which this card has always said with its numbers.
+  const bound = floor.cut > 0
+    ? `Only the first ${count(read)} queues were read; ${count(floor.cut)} more ${floor.cut === 1 ? "was" : "were"} not${floor.full ? ", and a queue holds more waiting jobs than are read" : ""}, so the counts are a floor.`
+    : floor.full || floor.failedText === null ? "A queue holds more waiting jobs than are read, so the counts are a floor." : null;
+  return [...(floor.failedText === null ? [] : [`${floor.failedText} The counts are a floor.`]), ...(bound === null ? [] : [bound])].join(" ");
 }
 
 /**
@@ -1057,11 +1083,11 @@ export const overviewWaitlists = overviewPanel("Waitlists", (s, view) => {
   const foot = html`${queueRow(s, w)}${scheduledLine(s, view)}${softHoldLine(s, view)}`;
   if (w === null) return ui.card({ title: "Waitlists", body: html`<div class="wl"><p class="muted">${UNREAD.waiting}</p>${foot}</div>` });
   const by = bucketCounts(w);
-  const bar = ui.waitBar(DEFER_BUCKETS.map((b) => ({ icon: bucketIcon(b), count: by[b] })), { label: "In line by reason" });
+  const bar = ui.waitBar(WAIT_BUCKETS.map((b) => ({ icon: bucketIcon(b), count: by[b] })), { label: "In line by reason" });
   let freeSlot = false;
   let unknownProject = false;
-  const groups = DEFER_BUCKETS.filter((b) => by[b] > 0).map((b) => {
-    const rows = w.rows.filter((r) => (Object.hasOwn(by, r?.bucket) ? r.bucket : "none") === b);
+  const groups = WAIT_BUCKETS.filter((b) => by[b] > 0).map((b) => {
+    const rows = w.rows.filter((r) => waitBucketOf(r) === b);
     const items = rows.slice(0, WAITLIST_ROWS_MAX).map((r) => {
       const project = projectId(r.project);
       if (project === null) unknownProject = true;
@@ -1071,11 +1097,13 @@ export const overviewWaitlists = overviewPanel("Waitlists", (s, view) => {
     });
     const more = rows.length > WAITLIST_ROWS_MAX ? html`<p class="card__sub">And ${count(rows.length - WAITLIST_ROWS_MAX)} more waiting for this, not listed: the overview lists the first ${count(WAITLIST_ROWS_MAX)} of each reason.</p>` : null;
     const slotNote = b === "slot" && freeSlot ? html`<p class="card__sub">${FREE_SLOT_TEXT}</p>` : null;
-    return html`<div class="wl__g"><p class="wl__h">${ui.tile("idle", { icon: bucketIcon(b), sm: true, iconSm: true })}<b>${DEFER_BUCKET_WORDS[b].title}</b>${ui.count(by[b])}</p><ul class="wl__l">${items}</ul>${more}${slotNote}</div>`;
+    return html`<div class="wl__g"><p class="wl__h">${ui.tile("idle", { icon: bucketIcon(b), sm: true, iconSm: true })}<b>${WAIT_BUCKET_WORDS[b].title}</b>${ui.count(by[b])}</p><ul class="wl__l">${items}</ul>${more}${slotNote}</div>`;
   });
-  // Calm only over a read made whole: a cut one says its counts are a floor (`floorText`), and may have missed the job.
-  const calm = w.truncated !== true && by.slot === 0 && by.run === 0 && by.check === 0 ? ui.collapsed({ icon: "done", title: WAITLISTS_CALM }) : null;
-  const notes = [unknownProject ? WAITING_UNKNOWN_PROJECT_TEXT : null, floorText(w)].filter(Boolean);
+  // Calm only over a read made whole: one that is a floor says so (`floorText`), and may have missed the job; and
+  // never while a job waits for a free slot or on a pause that nobody could tell apart (`PAUSED_UNKNOWN_BUCKET`),
+  // since "nothing waits for a slot" is then not known.
+  const calm = waitingFloor(w) === null && by.slot === 0 && by.run === 0 && by.check === 0 && by[PAUSED_UNKNOWN_BUCKET] === 0 ? ui.collapsed({ icon: "done", title: WAITLISTS_CALM }) : null;
+  const notes = [unknownProject ? WAITING_UNKNOWN_PROJECT_TEXT : null, floorText(w), waitingPausedUnread(w)?.text ?? null].filter(Boolean);
   return ui.card({ title: "Waitlists", body: html`<div class="wl">${bar}${groups}${calm}${notes.map((n) => html`<p class="card__sub">${n}</p>`)}${foot}</div>` });
 });
 
@@ -1191,7 +1219,13 @@ export const overviewHosts = overviewPanel("Hosts", (s, view) => {
       ? ui.banner({ status: "attention", icon: "beat", sm: true, title: STALE_BEATS_TEXT })
       : null;
   // A registry never read has no rows "as last seen": it says the hosts are not known (issue #962).
-  const degraded = q.fleetDegraded ? ui.banner({ status: "attention", icon: "fleet", sm: true, title: hostsUnread(s) ? HOSTS_UNREAD_TEXT : registryReadInPart(s) ? REGISTRY_PART_TEXT : REGISTRY_UNREAD_TEXT }) : null;
+  // One read in part names the hosts it did not read, each with its key and what Valkey answered (issue #1036).
+  const degraded = !q.fleetDegraded ? null : registryReadInPart(s) && !hostsUnread(s) ? ui.banner({ status: "attention", icon: "fleet", sm: true, title: REGISTRY_PART_TITLE, body: registryPartText(s) }) : ui.banner({ status: "attention", icon: "fleet", sm: true, title: hostsUnread(s) ? HOSTS_UNREAD_TEXT : REGISTRY_UNREAD_TEXT });
+  // A queue Valkey answered with an error (issue #1064): in none of the counts of this card, and its paused state not
+  // known where its flag was not read. The card offered both of the switch's forms for it and said nothing of why.
+  const erroredText = queueErrorsText(s);
+  const errored = erroredText === null ? null : ui.banner({ status: "attention", icon: "queue", sm: true, title: QUEUE_ERRORS_TITLE, body: erroredText });
+  const erroredByHost = new Map(queueErrorsOf(s).filter((e) => e.queue.indexOf("@") > 0).map((e) => [e.queue.slice(e.queue.indexOf("@") + 1), e]));
   const rows = hosts.map((h) => {
     // Per row (issue #1062): every row while the registry could not be read, and over one read in part only a row it
     // did not reach, is as last seen; a row it read is drawn as current, its beat judged and its slots drawn.
@@ -1211,12 +1245,17 @@ export const overviewHosts = overviewPanel("Hosts", (s, view) => {
     const skew = hostSkewText(h);
     // A note in a tone carries its glyph, as the doctor's line does, so the tone is never the only cue.
     const note = (text) => html`<span class="tinted tone-attention">${ui.icon("attention", { size: "sm" })}${text}</span>`;
-    const x = [doctorLine(s, h.name), hostQueueLine(hq), h.jobsUnreadable === true ? note(JOBS_UNREAD_TEXT) : null, skew === null ? null : note(skew), h.noExpiry === true ? note(HOST_NO_EXPIRY_TEXT) : null].filter(Boolean);
+    const own = erroredByHost.get(h.name) ?? null;
+    const x = [doctorLine(s, h.name), hostQueueLine(hq), own === null ? null : note(html`<span class="code">${queueLabel(own.queue)}</span> not read (Valkey answered ${own.error})`), h.jobsUnreadable === true ? note(JOBS_UNREAD_TEXT) : null, skew === null ? null : note(skew), h.noExpiry === true ? note(HOST_NO_EXPIRY_TEXT) : null].filter(Boolean);
     return html`<li class="hostrow">${beat}<span class="hostrow__n"><b>${h.name}</b><span>${venuesText(h)}</span></span>${slotDots(h.name, sl)}${ageCell}<span class="hostrow__p">${act ? hostPause(hq, h.name) : null}</span><span class="hostrow__x">${x}</span></li>`;
   });
   const list = rows.length > 0 ? html`<ul class="hosts">${rows}</ul>` : q.fleetDegraded ? null : html`<p class="muted">${HOSTS_EMPTY.body}</p>`;
-  return ui.card({ title: "Hosts", sub, end: state === null && fleetAct === null ? null : html`${state}${fleetAct}`, body: html`${banner}${degraded}${list}` });
+  return ui.card({ title: "Hosts", sub, end: state === null && fleetAct === null ? null : html`${state}${fleetAct}`, body: html`${banner}${degraded}${errored}${list}` });
 }, { unread: killSwitchUnreadForms });
+
+/** The titles of the Hosts card's two banners over a read that was not whole; each banner's body says which and why. */
+const REGISTRY_PART_TITLE = "Registry read in part";
+const QUEUE_ERRORS_TITLE = "A queue was not read";
 
 // ---- the first run -------------------------------------------------------------------------------------------------------
 
@@ -1305,7 +1344,7 @@ export function overviewSetupEmpty(view) {
   const active = Array.isArray(s.active) ? s.active.length : 0;
   const w = waitingOf(s);
   const inLine = w === null ? null : inLineOf(w);
-  const waiting = inLine === null ? "could not be read" : inLine.cut ? WAITING_CUT_TEXT : w.rows.length === 0 ? WAITING_EMPTY.title : `${inLine.n} ${inLine.label}`;
+  const waiting = inLine === null ? "could not be read" : inLine.cut ? waitingFloor(w).text : w.rows.length === 0 ? WAITING_EMPTY.title : `${inLine.n} ${inLine.label}`;
   return ui.card({
     title: "The Overview, once it runs",
     sub: "each panel says what it is waiting for",
