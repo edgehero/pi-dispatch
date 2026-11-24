@@ -794,7 +794,9 @@ export function killSwitchUnreadForms(view) {
     icon: "pause",
     sm: true,
     title: KILL_SWITCH_UNREAD_TEXT,
-    actions: html`${ui.actForm({ action: "fleet-pause", label: "Pause the fleet", kind: ["danger"], icon: "pause" })}${ui.actForm({ action: "fleet-resume", label: "Resume the fleet", kind: ["paid"], icon: "play" })}`,
+    // In a row of their own that wraps (`formrow`): side by side in the banner's action row, which does not wrap, the
+    // two buttons ran 8 px past a 375 px screen.
+    actions: html`<div class="formrow">${ui.actForm({ action: "fleet-pause", label: "Pause the fleet", kind: ["danger"], icon: "pause" })}${ui.actForm({ action: "fleet-resume", label: "Resume the fleet", kind: ["paid"], icon: "play" })}</div>`,
   });
 }
 
