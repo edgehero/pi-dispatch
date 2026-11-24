@@ -17,6 +17,7 @@ import { createJobModelRuntime, jobModelRuntimeOptions, loadPiAuthStorage } from
 import { attachTokenBudget } from "../src/token-budget.mjs";
 import { attachTurnBudget } from "../src/turn-budget.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { EXPLANATION as REFUSAL_EXPLANATION, HOSTILE_EXPLANATION, PI_AI_FALLBACK, refusalEvents } from "./fixtures/anthropic-refusal.mjs";
 // Importing the child preload runs nothing without a ledger directory.
 import { makeLibraryResolveHook, MODEL_RUNTIME_SUFFIX, PI_ENTRIES, PI_SUBCOMMANDS } from "../src/child-preload.mjs";
 
@@ -1287,6 +1288,15 @@ const STUB_ANSWERS = (() => {
 		]),
 		// A billed call that then fails mid-stream with a retryable error: its usage lands on the failed turn.
 		errusage: (res) => stream(res, [start({ input_tokens: 5000, output_tokens: 1 }), ["error", { type: "error", error: { type: "overloaded_error", message: "Overloaded" } }]]),
+		// Issue #950: Anthropic's refusal stop (fixtures/anthropic-refusal.mjs), bare, with a plain explanation, with one
+		// that holds pi's retry words, and cut: the connection broken after the refusal's message_delta.
+		refusal: (res) => stream(res, refusalEvents().map((event) => [event.type, event])),
+		refusalExplained: (res) => stream(res, refusalEvents({ explanation: REFUSAL_EXPLANATION }).map((event) => [event.type, event])),
+		refusalRetryWord: (res) => stream(res, refusalEvents({ explanation: HOSTILE_EXPLANATION }).map((event) => [event.type, event])),
+		refusalCut: (res) => {
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			res.write(sse(refusalEvents({ cut: true }).map((event) => [event.type, event])), () => res.destroy());
+		},
 	};
 })();
 
@@ -1382,6 +1392,56 @@ async function runLoopbackSession({ plan, maxTurns = 1, tokenCap = null, onSessi
 		server.close();
 	}
 }
+
+test("Anthropic's refusal stop reaches the runner as pi-ai's rawStopReason and exits 2 as provider-stop-refusal (loopback, no key, issue #950)", { skip }, async () => {
+	// pi-ai 1.6.0 anthropic-messages.js: message_delta sets rawStopReason before mapStopReason turns "refusal" into
+	// stopReason "error" with the explanation, or pi-ai's own sentence, as errorMessage. The rule reads rawStopReason
+	// only, so a pin that stops setting it, or moves the refusal off "error", fails here and not in production.
+	assert.match(nestedPiAi("types.d.ts"), /export interface AssistantMessage \{[^}]*\n\s*rawStopReason\?: string;/, "AssistantMessage.rawStopReason moved");
+	const bare = await runLoopbackSession({ plan: ["refusal"] });
+	assert.deepEqual(bare.requests, ["refusal"], "pi retried a bare refusal: re-read its retry predicate against pi-ai's fallback sentence");
+	assert.deepEqual([bare.last?.provider, bare.last?.api, bare.last?.stopReason, bare.last?.rawStopReason, bare.last?.errorMessage], ["anthropic", "anthropic-messages", "error", "refusal", PI_AI_FALLBACK]);
+	assert.equal(bare.terminal, bare.last, "the terminal the runner captures is the refused reply");
+	assert.deepEqual(bare.exit, { code: 2, reason: "provider-stop-refusal" });
+	assert.deepEqual(classifyStopReason(bare.terminal, await loadRetryPredicate({ candidates: resolvePiAiCompat() })), { code: 2, reason: "provider-stop-refusal" });
+
+	const explained = await runLoopbackSession({ plan: ["refusalExplained"] });
+	assert.deepEqual(explained.requests, ["refusalExplained"]);
+	assert.deepEqual([explained.last?.rawStopReason, explained.last?.errorMessage], ["refusal", REFUSAL_EXPLANATION], "pi-ai no longer passes stop_details.explanation through");
+	assert.deepEqual(explained.exit, { code: 2, reason: "provider-stop-refusal" });
+
+	// A named residual, pinned so a pi bump that changes it is seen: an explanation holding one of pi's retry words makes
+	// pi's own predicate call the refusal transient, so pi retries it in the session (PI_RETRY_MAX, 2 here) and pays for
+	// those calls. The runner still names the last refusal, and when a retry is answered the job goes on.
+	const retried = await runLoopbackSession({ plan: ["refusalRetryWord"] });
+	assert.deepEqual(retried.requests, ["refusalRetryWord", "refusalRetryWord", "refusalRetryWord"]);
+	assert.deepEqual(retried.exit, { code: 2, reason: "provider-stop-refusal" });
+	const recovered = await runLoopbackSession({ plan: ["refusalRetryWord", "text"] });
+	assert.deepEqual(recovered.requests, ["refusalRetryWord", "text"]);
+	assert.deepEqual(recovered.exit, { code: 0, reason: "stop" });
+
+	// The connection broken after the refusal: pi-ai's catch rewrites errorMessage to the transport's words, which pi's
+	// retry predicate calls transient, so pi retries in the session as above; rawStopReason stays, and the refusal the
+	// provider sent still names the stop.
+	const cut = await runLoopbackSession({ plan: ["refusalCut"] });
+	assert.deepEqual(cut.requests, ["refusalCut", "refusalCut", "refusalCut"]);
+	assert.equal(cut.last?.rawStopReason, "refusal");
+	assert.notEqual(cut.last?.errorMessage, PI_AI_FALLBACK, "the catch no longer rewrites the message: re-read this case");
+	assert.deepEqual(cut.exit, { code: 2, reason: "provider-stop-refusal" });
+
+	// The production call passes pi-ai's real retry predicate (run-job.mjs). It calls both of these transient, which is
+	// exactly why the rule does not ask it: with it, the runner still names the refusal.
+	const predicate = await loadRetryPredicate({ candidates: resolvePiAiCompat() });
+	for (const { terminal } of [retried, cut]) {
+		assert.equal(predicate(terminal), true, "premise moved: pi-ai no longer calls this refusal transient");
+		assert.deepEqual(classifyStopReason(terminal, predicate), { code: 2, reason: "provider-stop-refusal" });
+	}
+
+	// The control on the same harness: a rate limit is still infrastructure and still retried.
+	const limited = await runLoopbackSession({ plan: ["429"] });
+	assert.equal(limited.exit.code, 1);
+	assert.equal(limited.exit.reason, "error");
+});
 
 test("a tool that returns terminate ends pi's loop after its round, and the runner exits 0 as tool-terminated (loopback, no key)", { skip }, async () => {
 	// Issue #623. pi-agent-core agent-loop.js:167 and :466 at the pin: a batch whose every result carries

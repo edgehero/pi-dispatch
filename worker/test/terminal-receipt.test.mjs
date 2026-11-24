@@ -80,6 +80,9 @@ const infra = (reason) => Object.assign(new Error("container exited 1"), reason 
 test("a label job that ended without completing gets its class and reason, and the completion receipt stays v1", () => {
 	assert.equal(endedReceipt({ job: job(), result: refusedResult }), ended("refused", "auth-mixed-billing"));
 	assert.equal(endedReceipt({ job: job(), result: { outcome: "policy", reason: "cost-cap", budgetReserved: true, exitCode: 2 } }), ended("stopped", "cost-cap"));
+	// Issue #950: a provider's refusal stop is a paid stop the catalog explains, so a consumer can tell it from a stop a
+	// retry might clear without reading the comment's words.
+	assert.equal(endedReceipt({ job: job(), result: { outcome: "policy", reason: "provider-stop-refusal", budgetReserved: true, exitCode: 2 } }), ended("stopped", "provider-stop-refusal"));
 	assert.equal(endedReceipt({ job: job(), result: { outcome: "policy", reason: "operator-cancel", budgetReserved: true } }), ended("stopped", "operator-cancel"));
 	assert.equal(endedReceipt({ job: job(), error: infra("container-infra-exit") }), ended("failed", "container-infra-exit"));
 	assert.equal(endedReceipt({ job: job(), error: infra() }), ended("failed", WORKER_ERROR), "an error with no token is the record's worker-error");

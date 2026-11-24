@@ -427,6 +427,28 @@ test("exit 2 with the runner's provider-auth-refused reason returns that reason,
 	assert.equal(record.reason, "provider-auth-refused");
 });
 
+// --- issue #950: a provider's explicit refusal of the request gets its own label inside exit 2 ---
+
+test("exit 2 with the runner's provider-stop-refusal reason returns that reason, comments its own sentence once, keeps its spend and records it", async () => {
+	const posted = [];
+	const tokens = { total: 940, cost: 0.02 };
+	const { deps: d } = deps({
+		runContainer: async () => ({ code: 2, aborted: false, turns: 3, tokens, exitReason: "provider-stop-refusal" }),
+		comment: async (_j, t) => posted.push(t),
+	});
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "policy", "a determinate refusal RETURNS: never retried (CONST-RETRY-INFRA-ONLY)");
+	assert.equal(r.reason, "provider-stop-refusal");
+	assert.equal(r.exitCode, 2);
+	assert.equal(r.budgetReserved, true);
+	assert.deepEqual([r.turns, r.tokens], [3, tokens], "the paid run's spend stays on the result");
+	// The sentence names the refusal and never the provider's explanation, which the runner keeps off the exit line.
+	assert.deepEqual(posted, ["Stopped: the AI model refused to continue this request, and its provider ended the reply with a refusal. The same request is likely to be refused again. Partial work may exist. Not retried."]);
+	const record = buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, result: r, startedAt: null, endedAt: null });
+	assert.equal(record.outcome, "policy");
+	assert.equal(record.reason, "provider-stop-refusal");
+});
+
 test("every RUNNER_POLICY_REASONS member has its own fixed comment and pages the operator", async () => {
 	// The set is the one list; these are its two lookups, each of which fails QUIETLY on a missing member:
 	// the comment would post `undefined`, and the hook would stay silent on a paid terminal.

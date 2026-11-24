@@ -625,6 +625,31 @@ test("the wire takes ChatGPT's two usage limits as subscription codes and refuse
 	assert.deepEqual(parseExitProviderFailure(line({ providerFailure: { kind: "quota-exhausted", subscriptionCode: "subscription_sharing_usage_limit_exceeded", subscriptionProvider: "openai" } })), { kind: "quota-exhausted", subscriptionCode: "subscription_sharing_usage_limit_exceeded", subscriptionProvider: "openai" });
 });
 
+test("a signed provider-stop-refusal exit is one policy result: no retry, no cooldown, no failover, its spend kept (issue #950)", async () => {
+	// The runner writes no providerFailure beside an exit 2; one is planted here anyway, so the test holds the worker's own
+	// gate (only a verified code 1 records a failure) and not the runner's restraint.
+	const tokens = { input: 900, output: 40, total: 940, cost: 0.02, metered: true };
+	const usage = { v: 1, piAi: "1.6.0", truncated: 0, models: [{ provider: "openai", model: "primary", calls: 3, cost: 0.02, total: 940 }] };
+	const observed = [];
+	const runtime = { inspectPolicy: async () => ({ ok: true }), check: async () => ({ ok: true, managed: [] }), prepare: async () => ({ ok: true, snapshots: [] }), validate: async () => true, observe: async (...args) => { observed.push(args); } };
+	const fixture = pickupFixture({ extraDeps: { subscriptionRuntime: runtime }, container: async () => ({ code: 2, exitLineCode: 2, exitAuth: "verified", aborted: false, exitReason: "provider-stop-refusal", providerFailure: { kind: "rate-limited", resetAt: NOW + 120_000 }, toolsStarted: true, replaySafe: false, turns: 3, tokens, usage }) });
+	const result = await fixture.run();
+	assert.equal(result.outcome, "policy");
+	assert.equal(result.reason, "provider-stop-refusal");
+	assert.equal(result.exitCode, 2);
+	assert.equal(result.budgetReserved, true);
+	assert.deepEqual([result.turns, result.tokens, result.usage], [3, tokens, usage], "the paid run's spend is kept on the one result");
+	assert.equal(fixture.seen.filter((entry) => typeof entry === "object").length, 1, "one container, and no fallback");
+	assert.ok(!fixture.seen.includes("defer"));
+	assert.deepEqual(fixture.redis.writes.filter((row) => row.key.startsWith("dispatch:model-cooldown:")), [], "no model cooldown");
+	for (const row of fixture.redis.writes.filter((row) => row.key.startsWith("dispatch:model-attempt:"))) {
+		const attempt = JSON.parse(row.value);
+		assert.notEqual(attempt.safe, true, "no attempt marked safe for a cross-model replay");
+		assert.equal(attempt.failure ?? null, null, "no provider failure recorded on the attempt (the marker written before spawn holds null)");
+	}
+	assert.deepEqual(observed, [], "no quota observation");
+});
+
 test("a signed ChatGPT usage-limit exit takes the existing road: a safe attempt, a six-hour cooldown, the fallback on the retry (issue #960)", async () => {
 	const failure = { kind: "quota-exhausted", subscriptionCode: "subscription_sharing_usage_limit_exceeded", subscriptionProvider: "openai" };
 	const observed = [];

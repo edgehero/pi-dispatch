@@ -508,6 +508,21 @@ and a label job's requester waited for a job that would never come. Run records,
 label are unchanged; no migration, backup path or older-state detector is needed. An older worker keeps refusing these
 in silence, so upgrade every worker for the comments to appear. See [when another event starts a job](triggers.md#when-another-event-starts-a-job).
 
+### Unreleased: a provider's refusal stop is not retried (#950)
+
+A job image from this release exits 2 as `provider-stop-refusal` when the AI provider ends the reply with an explicit
+refusal (Anthropic's `refusal` stop reason, read from pi-ai or from the Claude subscription adapter). Before, the run
+exited 1 and the queue ran the whole paid job again. The worker gives the stop its own comment, a page through
+`PI_ON_FAILURE` and a reason in the run record; a polled label job's ended receipt reads
+`end=stopped reason=provider-stop-refusal`.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Run records | A new reason, `provider-stop-refusal`, additive. `v` stays 1 and an older reader shows the token as it is. Nothing moves, and no older-state detector applies. |
+| Mixed versions | A job image older than this release still exits 1 on a refusal, which the queue retries as before: upgrade the image for the stop to take effect. A worker older than this release reads the new exit line as `runner-policy`, which is not retried either, with that reason's comment. Upgrade both in one window ([the order](#the-order)). |
+
+See [reasons.md](reasons.md#provider-stop-refusal).
+
 ### 5.4.2
 
 #### Completed label-job receipts (#920)

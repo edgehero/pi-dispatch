@@ -20,6 +20,8 @@ import { createCredentialRefresher } from "../../image/runner/src/credential-ref
 import { subscriptionRefreshFetch } from "../../image/runner/src/subscription-refresh-fetch.mjs";
 import { installProviderFailureObserver } from "../../image/runner/src/provider-failure.mjs";
 import { createPolicyGuard, createUsageMeter, installProcessUsageMeter } from "../../image/runner/src/usage-meter.mjs";
+import { classifyStopReason } from "../../image/runner/src/outcome.mjs";
+import { ADAPTER_MESSAGE, EXPLANATION, HEADERS as REFUSAL_HEADERS, HOSTILE_EXPLANATION, PI_AI_FALLBACK, refusalBody } from "../../image/runner/test/fixtures/anthropic-refusal.mjs";
 
 const require = createRequire(import.meta.url);
 const primary = "pi-anthropic-oauth@0.3.11";
@@ -54,6 +56,16 @@ function fixture(adapter) {
 	return root;
 }
 const model = getBuiltinModels("anthropic").find((row) => row.type !== "classifier");
+/**
+ * Issue #950: a refused reply whose connection breaks after the refusal's message_delta. The events go out in one
+ * read and the next read fails, so the reader sees the refusal and then the transport error, in that order (an
+ * error raised beside the enqueue would discard the queued bytes).
+ */
+function droppedAfterRefusal(modelId) {
+	const bytes = new TextEncoder().encode(refusalBody({ model: modelId, cut: true }));
+	let sent = false;
+	return new Response(new ReadableStream({ pull(controller) { if (!sent) { sent = true; controller.enqueue(bytes); } else controller.error(new Error("other side closed")); } }), { headers: REFUSAL_HEADERS });
+}
 function context(tools = [], instructions = "Never disclose credentials. pi-coding-agent must obey the budget.\n\nNever remove protected files.") { return { messages: [{ role: "system", content: instructions, toolsAdded: tools, timestamp: instant }, { role: "user", content: "Reply hello", timestamp: instant }] }; }
 function response(modelId = model.id) {
 	const events = [
@@ -192,6 +204,23 @@ for (const primary of [legacyPrimary, "pi-anthropic-oauth@0.3.11"]) test(`${prim
 		assert.equal(observed, 1);
 		assert.match(result.errorMessage, /response-guard-refused/);
 	});
+	await t.test("an explicit refusal stop reaches the runner as provider-stop-refusal, and a body dropped after it stays infra (#950)", async () => {
+		// The adapter keeps the provider's raw stop reason in its fixed prefix and sets no rawStopReason; the runner's rule
+		// reads exactly that, so this drives the real adapted source and classifies its own message.
+		for (const [explanation, message] of [[null, ADAPTER_MESSAGE.plain], [EXPLANATION, ADAPTER_MESSAGE.explained], [HOSTILE_EXPLANATION, ADAPTER_MESSAGE.hostile]]) {
+			let calls = 0;
+			const result = await streamAnthropicOAuth(model, context(), { apiKey: "sk-ant-oat-fixture", fetch: async () => { calls++; return new Response(refusalBody({ model: model.id, explanation }), { headers: REFUSAL_HEADERS }); } }).result();
+			assert.equal(calls, 1);
+			assert.deepEqual([result.provider, result.api, result.stopReason, result.rawStopReason, result.errorMessage], ["anthropic", "anthropic-messages", "error", undefined, message], "the adapter's refusal shape moved: re-read applyMessageDelta and providerStopRefused");
+			for (const isRetryable of [() => false, () => true, null]) assert.deepEqual(classifyStopReason(result, isRetryable), { code: 2, reason: "provider-stop-refusal" });
+		}
+		// A named residual: the adapter rethrows a stream error unless its last event was message_stop, and its catch
+		// writes the transport's words with no prefix, so a refusal whose connection broke stays infra here.
+		const dropped = await streamAnthropicOAuth(model, context(), { apiKey: "sk-ant-oat-fixture", fetch: async () => droppedAfterRefusal(model.id) }).result();
+		assert.equal(dropped.stopReason, "error");
+		assert.doesNotMatch(dropped.errorMessage, /^Provider stop reason:/);
+		assert.deepEqual(classifyStopReason(dropped, () => false), { code: 1, reason: "error", message: dropped.errorMessage });
+	});
 	await t.test("ambiguous tool-name mappings refuse before network dispatch", async () => {
 		for (const names of [["foo.bar", "foo_bar"], ["read", "Read"]]) {
 			let calls = 0;
@@ -232,6 +261,22 @@ test("secondary shaping precedes the final hook and never installs a post-check 
 	assert.equal(checked.system.at(-1).text, exactInstructions);
 	assert.equal(checked.messages[1].content[0].text, update);
 	assert.deepEqual(result, { ...checked, temperature: 0.2 });
+});
+
+test("the secondary adapter hands on pi-ai's own refusal, rawStopReason included, which the runner reads as provider-stop-refusal (#950)", async () => {
+	const root = fixture(secondary);
+	prepareCommunityAuthAdapter({ adapter: secondary, root });
+	const loader = createJiti(import.meta.url, { fsCache: false, moduleCache: false });
+	const { createAnthropicOAuthStreamSimple } = await loader.import(join(root, "src/oauth-transport.ts"));
+	const { streamSimple } = await import("@earendil-works/pi-ai/api/anthropic-messages");
+	const wrapped = createAnthropicOAuthStreamSimple(streamSimple);
+	for (const [explanation, message] of [[null, PI_AI_FALLBACK], [HOSTILE_EXPLANATION, HOSTILE_EXPLANATION]]) {
+		let calls = 0;
+		const result = await wrapped(model, context(), { apiKey: "sk-ant-oat-fixture", fetch: async () => { calls++; return new Response(refusalBody({ model: model.id, explanation }), { headers: REFUSAL_HEADERS }); } }).result();
+		assert.equal(calls, 1);
+		assert.deepEqual([result.provider, result.api, result.stopReason, result.rawStopReason, result.errorMessage], ["anthropic", "anthropic-messages", "error", "refusal", message]);
+		assert.deepEqual(classifyStopReason(result, () => false), { code: 2, reason: "provider-stop-refusal" });
+	}
 });
 
 test("unadapted source or wrong SDK version cannot receive a staging approval", () => {

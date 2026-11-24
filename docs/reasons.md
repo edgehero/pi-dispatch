@@ -104,6 +104,17 @@ route.
 What to do: check the provider key on the worker and what it is allowed to use, then run the job again. See
 [notifications.md](notifications.md).
 
+### provider-stop-refusal
+
+The AI model refused to continue, and Anthropic ended the reply with an explicit refusal (its `refusal` stop reason,
+through pi or the Claude subscription adapter). The job had already run and spent. A retry would most likely meet the
+same refusal, so the worker does not retry it, and no other model is tried in its place. The provider's explanation is
+kept out of the job log, the run record and the comment, and a run that stops this way saves no session to resume.
+The same stop from another provider, a gateway included, is not read as this one.
+
+What to do: change the request, the flow or the model, then run the job again. See
+[notifications.md](notifications.md).
+
 ### cost-cap
 
 The next AI call could have taken the run past its cost limit, so the runner did not make it. A call that is held back
