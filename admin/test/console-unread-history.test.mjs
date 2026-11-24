@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { NOW } from "../../launch/fixture-deployment.mjs";
 import { childrenOf, loadPageData, parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { HOSTS_UNREAD, HOSTS_UNREAD_TEXT } from "../src/console/panels/common.mjs";
-import { RUNS_EMPTY, RUNS_HOST_UNREADABLE, RUNS_MIRROR_DEGRADED, RUNS_MIRROR_DEGRADED_EMPTY, RUNS_MIRROR_OFF, RUNS_NONE_WITHOUT_HOST, runsFilters, runsFiltersModel, runsSummary, runsSummaryModel, runsTableModel } from "../src/console/panels/runs.mjs";
+import { RUNS_EMPTY, RUNS_HOST_UNREADABLE, RUNS_MIRROR_DEGRADED, RUNS_MIRROR_DEGRADED_EMPTY, RUNS_MIRROR_OFF, RUNS_NONE_WITHOUT_HOST, runsFilters, runsFiltersModel, runsSummary, runsSummaryModel, runsTableModel, RUNS_MIRROR_CUT, RUNS_MIRROR_CUT_EMPTY } from "../src/console/panels/runs.mjs";
 import { TRANSCRIPT_UNREAD_TEXT, childSearchText, queuedText } from "../src/console/panels/run.mjs";
 import { PROJECT_HOLDS_PART, PROJECT_HOLDS_UNREAD, PROJECT_RUNS_UNREAD, PROJECT_SIZING_PART } from "../src/console/panels/project.mjs";
 import { BREAKDOWN_SCOPE_TEXT, HELD_PART_TEXT, SPEND_PANELS, SPLIT_HOSTS_PART_TEXT, SPLIT_UNREAD_TEXT, heldLabel } from "../src/console/panels/spend.mjs";
@@ -65,7 +65,9 @@ test("/runs: an empty page over a mirror that was not read says so, and \"No run
   assert.deepEqual([unreadHost.runs, unreadHost.mirror, asked], [[], "off", 0], "the reader's answer: no run, and a mirror not asked");
   assert.deepEqual(foot(unreadHost), [RUNS_HOST_UNREADABLE, RUNS_NONE_WITHOUT_HOST]);
   assert.ok(!foot(unreadHost).includes(RUNS_MIRROR_OFF) && !foot(unreadHost).includes(RUNS_EMPTY));
-  assert.deepEqual(foot({ runs: [], mirror: "truncated", next: null }), [RUNS_MIRROR_DEGRADED_EMPTY]);
+  // A mirror that answered and was cut at its bound is read, and not whole (issue #988): neither sentence above.
+  assert.deepEqual(foot({ runs: [], mirror: "truncated", next: null }), [RUNS_MIRROR_CUT_EMPTY]);
+  assert.deepEqual(foot({ runs: [record()], mirror: "truncated", next: null }), ["1 run.", RUNS_MIRROR_CUT]);
   // A read that showed no run keeps its sentence, with the mirror read and with it off.
   assert.deepEqual(foot({ runs: [], mirror: "ok", next: null }), [RUNS_EMPTY]);
   assert.deepEqual(foot({ runs: [], mirror: "off", next: null }), [RUNS_EMPTY, RUNS_MIRROR_OFF]);

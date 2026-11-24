@@ -97,6 +97,22 @@ test("a triggers file that could not be read leaves the spend by trigger not com
   const NOT_SPLIT = "The triggers file could not be read, so this spend is not split by trigger.";
   const without = await breakdown(failed);
   assert.ok(without.includes(NOT_SPLIT));
+  assert.equal(failed.fold.triggersFile, "unreadable");
+  // One word per case (issue #988): a file that was read and is refused does not load. It was split as if it held no
+  // trigger, every forge run under none, with no word of the file.
+  rmSync(paths.triggersPath, { recursive: true, force: true });
+  writeFileSync(paths.triggersPath, "{ not json");
+  const refused = await assembleInsights(paths, "7d", { pricing: PRICING, nowMs, envFn: () => env });
+  assert.deepEqual([refused.fold.byTrigger, refused.fold.triggersFile], [null, "refused"]);
+  const unsplit = await breakdown(refused);
+  assert.ok(unsplit.includes("The triggers file does not load, so this spend is not split by trigger.") && !unsplit.includes(NOT_SPLIT));
+  assert.ok(unsplit.slice(unsplit.indexOf("By trigger"), unsplit.indexOf("By repository")).indexOf("<table") < 0, "no empty table");
+  // A file that is not there holds no trigger: split, with nothing said of the file.
+  rmSync(paths.triggersPath, { force: true });
+  const absent = await assembleInsights(paths, "7d", { pricing: PRICING, nowMs, envFn: () => env });
+  assert.ok(Array.isArray(absent.fold.byTrigger) && !Object.hasOwn(absent.fold, "triggersFile"));
+  // Back to the file nobody could read, for what follows.
+  mkdirSync(paths.triggersPath, { recursive: true });
   assert.ok(without.includes("By trigger") && without.slice(without.indexOf("By trigger"), without.indexOf("By repository")).indexOf("<table") < 0, "no empty table");
   const withTable = await breakdown(read);
   assert.ok(!withTable.includes(NOT_SPLIT));
@@ -328,14 +344,16 @@ test("with an envelope set, the split is read through readAllocations, without h
     assert.deepEqual(await ia.assembleAllocationView({ envelopeFile: null }, null, { nowMs: Date.parse("2026-10-05T12:00:00Z") }), { unset: true });
     writeFileSync(files.envelope, "{ not json");
     // A broken envelope names its file by basename only: a viewer reads the page too.
-    assert.deepEqual(await ia.assembleAllocationView(paths, null, { nowMs: Date.parse("2026-10-05T12:00:00Z") }), { problem: "the envelope file does not load: envelope file is not valid JSON (at character 2): envelope.json" });
+    assert.deepEqual(await ia.assembleAllocationView(paths, null, { nowMs: Date.parse("2026-10-05T12:00:00Z") }), { problem: "the envelope file does not load: envelope file is not valid JSON (at character 2): envelope.json", envelopeCase: "refused" });
+    // One word per case (issue #988): the view says which case the file is in, for a page that words it.
+    assert.deepEqual(await ia.assembleAllocationView({ ...paths, envelopeFile: `${files.envelope}.none` }, null, { nowMs: Date.parse("2026-10-05T12:00:00Z") }), { problem: "the envelope file (PI_ENVELOPE_FILE) does not exist", envelopeCase: "absent" });
     // An operator's ?paths=full is the page's one opt-in for host paths, and it holds here too.
-    assert.deepEqual(await ia.assembleAllocationView(paths, null, { fullPaths: true, nowMs: Date.parse("2026-10-05T12:00:00Z") }), { problem: `the envelope file does not load: envelope file is not valid JSON (at character 2): ${files.envelope}` });
+    assert.deepEqual(await ia.assembleAllocationView(paths, null, { fullPaths: true, nowMs: Date.parse("2026-10-05T12:00:00Z") }), { problem: `the envelope file does not load: envelope file is not valid JSON (at character 2): ${files.envelope}`, envelopeCase: "refused" });
     // The cut is made on the parser's raw text: a folder whose name the escape rewrites still loses its path.
     const odd = join(dir, "zero\u200bwidth");
     mkdirSync(odd);
     writeFileSync(join(odd, "envelope.json"), "{ not json");
-    assert.deepEqual(await ia.assembleAllocationView({ ...paths, envelopeFile: join(odd, "envelope.json") }, null, { nowMs: Date.parse("2026-10-05T12:00:00Z") }), { problem: "the envelope file does not load: envelope file is not valid JSON (at character 2): envelope.json" });
+    assert.deepEqual(await ia.assembleAllocationView({ ...paths, envelopeFile: join(odd, "envelope.json") }, null, { nowMs: Date.parse("2026-10-05T12:00:00Z") }), { problem: "the envelope file does not load: envelope file is not valid JSON (at character 2): envelope.json", envelopeCase: "refused" });
   } finally {
     ia._setAllocationSeamsForTests({});
   }

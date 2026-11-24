@@ -1,3 +1,4 @@
+import * as nodeFs from "node:fs";
 import { SETUP_PANELS, SETUP_DESCRIPTION } from "./panels/setup.mjs";
 import { setupFacts } from "../setup-view.mjs";
 import { TRIGGER_RECIPES } from "../trigger-recipes.mjs";
@@ -131,11 +132,12 @@ import { parseRunPath, RUN_PATH_PREFIX, runPathLink } from "./run-path.mjs";
 import { runTranscriptSection } from "./transcript.mjs";
 import { WHATIF_MODEL_RE } from "./whatif.mjs";
 import { SPEND_TITLE, VENUE_LABEL, recordReason } from "../words.mjs";
-import { RUN_MIRROR_READ_MS, RUN_RECORD_UNREAD, runAbsent, runPlaces, TRIGGER_SKEW_READ_MS } from "../read-model.mjs";
+import { RUN_MIRROR_READ_MS, RUN_RECORD_UNREAD, runPlaces, TRIGGER_SKEW_READ_MS } from "../read-model.mjs";
 import { fromNewerRelease } from "../newer-release.mjs";
 import { agentReadProjection } from "../agent-read.mjs";
 import { runAnswerDraft } from "./panels/run.mjs";
 import { overviewAgentWrites } from "./panels/agent-writes.mjs";
+import { mirrorStateOf } from "../mirror-words.mjs";
 
 /**
  * The screens. `path` is the route, `auth` the least role that may open it, `live` whether the page opens the event
@@ -748,7 +750,7 @@ export async function childrenOf(fleet, record, { readPage = (opts) => fleet.run
       incomplete = true;
       break;
     }
-    if (pageRead.unreachable || (typeof pageRead.mirror === "string" && pageRead.mirror !== "ok" && pageRead.mirror !== "off")) incomplete = true;
+    if (pageRead.unreachable || ["unread", "cut"].includes(mirrorStateOf(pageRead.mirror))) incomplete = true;
     searched += pageRead.runs.length;
     for (const r of pageRead.runs) if (r?.parentJobId === record.jobId) children.push({ jobId: r.jobId ?? null, outcome: r.outcome ?? null, reason: recordReason(r), startedAt: r.startedAt ?? null });
     if (pageRead.next === null || pageRead.next === undefined || (Number.isFinite(startMs) && pageRead.next <= startMs)) break;
@@ -903,8 +905,14 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // The trigger page's Fire now check is started here and awaited where the page reads it (issue #961): it has a bound
   // of its own, and beside the snapshot's read rather than after it a Valkey that stopped answering holds the page for
   // the longer of the two, not their sum.
+  // ONE READING of the triggers file for the whole load of a trigger's page (issue #988). The card, the texts, Fire
+  // now's check and the row itself each read the file for themselves, so a file that changed or vanished between two
+  // of them (an editor's rename) drew a row beside "The triggers file does not exist." and "Task could not be read."
+  // in one answer. Every reader of this load is handed this one reading: the first read's bytes, or its error. Not for
+  // an agent, whose load reads no entry of the file at all: its page is the snapshot's.
+  const reading = name === "trigger" && who?.role !== "agent" && typeof deps.paths?.triggersPath === "string" ? oneReading(deps.fs ?? nodeFs, deps.paths.triggersPath) : null;
   const fireCheck = name === "trigger" && formsDrawn(who)
-    ? Promise.resolve().then(() => (typeof deps.triggerFireCheck === "function" ? deps.triggerFireCheck(q.index) : { refusal: "Fire now is not available in this deployment." })).catch(() => ({ refusal: FIRE_CHECK_UNREAD }))
+    ? Promise.resolve().then(() => (typeof deps.triggerFireCheck === "function" ? deps.triggerFireCheck(q.index, reading ? { fs: reading } : {}) : { refusal: "Fire now is not available in this deployment." })).catch(() => ({ refusal: FIRE_CHECK_UNREAD }))
     : null;
   const reads = PAGE_READS[name];
   // Files and synchronous work, as it was: nothing here asks Valkey, so none of it is a read to start beside another.
@@ -937,9 +945,9 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   if (name === "trigger") {
     // What the card draws, read once with the digest of those same bytes (`readTriggerGetsEntry`), and the digest only where a person's
     // form is drawn, because it covers the entry's prompt and secret references. Not for an agent, whose copy of the data has neither.
-    if (who?.role !== "agent" && typeof deps.paths?.triggersPath === "string") {
+    if (reading !== null) {
       const forForm = who?.role === "operator" && who?.readOnly !== true;
-      data.triggerGets = readTriggerGetsEntry({ triggersPath: deps.paths.triggersPath, index: q.index, withDigest: forForm, ...(deps.fs ? { fs: deps.fs } : {}) });
+      data.triggerGets = readTriggerGetsEntry({ triggersPath: deps.paths.triggersPath, index: q.index, withDigest: forForm, fs: reading });
       if (forForm) {
         try { const models = typeof deps.pricedModels === "function" ? deps.pricedModels() : []; data.modelChoices = Array.isArray(models) ? models : []; } catch { data.modelChoices = []; }
       }
@@ -1038,9 +1046,20 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
         // dropping the texts for that reason.
         if (name === "trigger" && who?.role === "operator" && who?.live !== true && typeof deps.paths?.triggersPath === "string") {
           try {
-            const read = readTriggersWithInstructions({ triggersPath: deps.paths.triggersPath, includeTasks: true, ...(deps.fs ? { fs: deps.fs } : {}) });
+            const read = readTriggersWithInstructions({ triggersPath: deps.paths.triggersPath, includeTasks: true, fs: reading });
             data.fileTexts = { instructions: read.instructions ?? {}, tasks: read.tasks ?? {} };
           } catch { data.fileTexts = null; }
+        }
+      }
+      // The row and its texts from the load's one reading too, where it gave a document: the snapshot read the file
+      // at its own moment, and a page drawn from both said two things of one file. A reading that failed leaves what
+      // the snapshot holds, which the card says is the last read (`triggerGets`).
+      if (reading !== null) {
+        let read = null;
+        try { read = readTriggersWithInstructions({ triggersPath: deps.paths.triggersPath, includeTasks: true, fs: reading }); } catch { read = null; }
+        if (Array.isArray(read?.view?.triggers)) {
+          if (data.snapshot) data.snapshot = { ...data.snapshot, triggers: read.view, triggerInstructions: read.instructions ?? {}, triggerTasks: read.tasks ?? {} };
+          else if (data.files) data.files = { ...data.files, triggers: read.view };
         }
       }
     }
@@ -1408,7 +1427,12 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     updatesRead, fireCheckRead, editorRead, hostHistoryRead, hostCapacityRead, subscriptionsRead, runsPageRead, windowRead, recordReads,
     transcriptRead, inboxRead, insightsRead, auditRead, parkedCountRead,
   ]);
-  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "setup" ? { setup: setupFacts(data.setup, { role: "agent" }) } : {}), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}) } : data;
+  // What each place a run is kept answered (`runPlaces`), told once from the load's own reads (issue #988) and kept
+  // beside an agent's copy of the data. That copy holds no transcript and no progress, and a page that judged the
+  // places from it read two keys it was never handed as two reads that failed: an agent's unknown run id answered
+  // 503 where an operator's answers 404.
+  if (name === "run") data.runPlaces = runPlaces(runPlacesOf(data));
+  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "run" ? { runPlaces: data.runPlaces } : {}), ...(name === "setup" ? { setup: setupFacts(data.setup, { role: "agent" }) } : {}), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}) } : data;
 }
 
 // ---- drawing ---------------------------------------------------------------------------------------------------------
@@ -1481,16 +1505,42 @@ function layoutHtml(items, sections) {
  * progress key. A load whose primary read failed (`readFailed`) and holds no record could not read one, whatever else
  * `run` says.
  */
+/**
+ * `fs`, with `path` read ONCE: the first `readFileSync` of it is kept, bytes or error, and every later one gets the
+ * same. Everything else is `fs`'s own. For a page load whose readers each open one file (issue #988).
+ */
+function oneReading(fs, path) {
+  let got = null;
+  return {
+    ...fs,
+    readFileSync(file, ...rest) {
+      if (file !== path) return fs.readFileSync(file, ...rest);
+      if (got === null) { try { got = { text: fs.readFileSync(file, ...rest) }; } catch (error) { got = { error }; } }
+      if (got.error) throw got.error;
+      return got.text;
+    },
+  };
+}
+
 function runPlacesOf(data) {
   const run = data?.readFailed === true && !data?.run?.record ? { unreadable: RUN_RECORD_UNREAD } : data?.run;
   return { run, lookup: data?.chat, transcript: data?.transcript, progress: data?.progress };
 }
 
 /**
+ * `runPlaces`' answer for a run page's data: the one its load told (`data.runPlaces`, which an agent's copy keeps), or,
+ * for data put together without the loader, the answer told from the data itself.
+ */
+export function runToldOf(data) {
+  const told = data?.runPlaces;
+  return told !== null && typeof told === "object" && typeof told.shown === "boolean" && Array.isArray(told.unread) ? told : runPlaces(runPlacesOf(data));
+}
+
+/**
  * The whole page for screen `name`: `{ status, html }`. `ctx = { query, session: { name, role }, data, readOnly,
  * restart, theme }`, `restart` the restart watch's notice or null (issue #845), `theme` the request's theme choice
  * (`theme.mjs` `themeOf`). Status 200, but: for a run id no place shows a run for, with every place read and saying it
- * holds none (`runAbsent`), the run-not-found page, 404; for one no place shows a run for while a place could not be
+ * holds none (`runAbsent`'s rule, over `runToldOf`), the run-not-found page, 404; for one no place shows a run for while a place could not be
  * read, the run page, 503, its outcome banner saying which could not be read; and 403 for the audit log asked by a viewer
  * (the route table refuses that first; this is the belt, and it draws no panel). A run page some place shows a run for
  * is 200, a queued job's included.
@@ -1507,8 +1557,8 @@ export async function renderPage(name, ctx) {
     const body = shellHtml(name, ctx, meta.auth === "operator" ? forbiddenContent() : peopleOnlyContent());
     return { status: 403, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, theme }) };
   }
-  const places = name === "run" ? runPlacesOf(ctx?.data) : null;
-  if (places !== null && runAbsent(places)) {
+  const places = name === "run" ? runToldOf(ctx?.data) : null;
+  if (places !== null && !places.shown && places.unread.length === 0) {
     return errorPage({ kind: "no-run", status: 404, session: ctx?.session ?? null, readOnly: Boolean(ctx?.readOnly), restart: ctx?.restart ?? null, theme, runId: typeof ctx?.query?.id === "string" ? ctx.query.id : null });
   }
   if (name === "project" && ctx?.data?.projectView?.state === "missing") {
@@ -1533,6 +1583,6 @@ export async function renderPage(name, ctx) {
   const beside = name === "run" && !fromNewerRelease(ctx?.data?.run?.record) ? runPathLink(ctx?.data?.run?.record ?? ctx?.data?.activeRun ?? null) : null;
   const body = shellHtml(name, ctx, html`${["runs", "zero-touch", "sandboxes"].includes(name) ? zeroTouchTabs(viewOf(name, ctx)) : name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${ctx?.query?.becauseRun ? html`<p class="note">Configuration fix started from <a href="${`/run?id=${encodeURIComponent(ctx.query.becauseRun)}`}">${ctx.query.becauseRun}</a>. Confirmed changes on this page will be linked to that refusal.</p>` : null}${inner}`, { ...titleOptions, ...(name === "zero-touch" ? { description: "How often a run needed a person, per project and repository. The goal is zero.", end: zeroTouchControls(viewOf(name, ctx)) } : {}), ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }), ...(beside === null ? {} : { beside }) });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
-  const status = name === "project" && ctx?.data?.projectView?.state !== "ready" || places !== null && !runPlaces(places).shown ? 503 : 200;
+  const status = name === "project" && ctx?.data?.projectView?.state !== "ready" || places !== null && !places.shown ? 503 : 200;
   return { status, html: page({ title: `pi-dispatch console: ${["host", "venue"].includes(name) ? ctx?.query?.name ?? meta.title : meta.title}`, name, body, live, query, theme, becauseRun: ctx?.query?.becauseRun ?? null }) };
 }

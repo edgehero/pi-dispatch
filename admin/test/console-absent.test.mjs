@@ -1,15 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadPageData, parsePageQuery, renderPage } from "../src/console/pages.mjs";
-import { hostLoadsOf } from "../src/console/panels/common.mjs";
+import { dataUnread, hostLoadsOf } from "../src/console/panels/common.mjs";
 import { ANSWERER_FILE_REFUSED, ANSWERER_READ_FAILURE, ANSWERER_STANDING_REFUSED, ANSWERER_STANDING_UNREAD } from "../src/console/panels/answerer.mjs";
 import { readHostLoadsView } from "../src/host-loads-view.mjs";
 import { parkedAnswerRefusalOf } from "../src/job-actions.mjs";
 import { SANDBOX_CONFIG_UNREAD, SANDBOX_NO_TRIGGERS_FILE, sandboxConfigRefusal } from "../src/sandbox-data.mjs";
 import { TRIGGERS_FILE_ABSENT_TEXT } from "../src/trigger-list.mjs";
-import { downQueue, downRedis } from "./helpers/fleet-reader-fakes.mjs";
+import { downQueue, downRedis, registryKeys } from "./helpers/fleet-reader-fakes.mjs";
+import { HOST_SET, hostKey } from "@edgehero/pi-dispatch/host-registry";
 import { readSandboxSessions, sandboxNoticeKey, sandboxSessionKey, sandboxSessionMember, SANDBOX_NOTICE_INDEX, SANDBOX_SESSION_INDEX, SANDBOX_SESSION_MAX } from "@edgehero/pi-dispatch/sandbox-sessions";
-import { consoleOn, doctorKeys, drawn, failing, failingQueue, healthy, HOST, iso, mirroring, NOW, REFUSED, RUN, saysUnread, wordsOf } from "./helpers/real-console.mjs";
+import { consoleOn, doctorKeys, drawn, failing, failingKey, failingQueue, healthy, HOST, iso, mirroring, NOW, REFUSED, RUN, saysUnread, wordsOf } from "./helpers/real-console.mjs";
 import { sandboxFixture, SANDBOX_HOSTS_FIXTURE } from "./helpers/sandbox-goldens.mjs";
 
 /**
@@ -51,6 +52,13 @@ test("a refused run's two cards say could not be read of a read that failed, and
   assert.match(noRow.why, /Venue floor \(PI_BACKEND_FLOOR\) not known: no live registry row for build3 Same reason in the last 24 hours 1 Newest doctor result no doctor result published/);
   assert.match(noRow.host, /Heartbeat no live registry row for build3 Newest failing doctor check no doctor result published Queue waiting no queue of this host is listed Queue running no queue of this host is listed/);
   assert.deepEqual([saysUnread(noRow.words), noRow.pill, noRow.marked], [false, false, false]);
+  // Read, and the host's newest result is one this console's reader refuses (not JSON): it does not load, which is
+  // neither "none published" nor a read that failed.
+  const refusedResult = await cards({ redis: healthy({ ...HOST, ...Object.fromEntries(Object.keys(published).map((key) => [key, "{ not a doctor result"])) }), records: [RUN, REFUSED] });
+  assert.match(refusedResult.why, /Newest doctor result its newest result does not load/);
+  assert.match(refusedResult.host, /Newest failing doctor check its newest result does not load/);
+  assert.ok(!refusedResult.words.includes("no doctor result published"), "a result that is there is not none");
+  assert.deepEqual([saysUnread(refusedResult.words), refusedResult.pill, refusedResult.marked], [false, false, false]);
   // A reason with no other run in the day is counted, as 0.
   const old = await cards({ redis: healthy(HOST), records: [{ ...REFUSED, startedAt: iso(3 * 86_400_000), endedAt: iso(3 * 86_400_000 - 1000) }] });
   assert.match(old.why, /Same reason in the last 24 hours 0 Newest doctor result/);
@@ -84,6 +92,40 @@ test("a refused run's two cards say could not be read of a read that failed, and
   // A viewer's page draws neither card.
   const viewer = await drawn("run", "id=gh-2", consoleOn({ redis: healthy(), records: [REFUSED] }), "viewer");
   assert.ok(!viewer.words.includes("Why it was refused") && !viewer.words.includes("Heartbeat"));
+});
+
+test("a registry that answered once and not again: the refused run's cards say it was not read this time, never that a host has no row", async () => {
+  // The first load reads the registry; then it stops answering, time passes, and a host registers that the last read
+  // did not see. The rows are as they were last seen, and "no live registry row" is a read's answer, not theirs.
+  const clock = { at: NOW }, registry = { down: false };
+  const keys = { ...HOST, ...doctorKeys("build3", [{ ok: true, label: "valkey answers" }]) };
+  const client = healthy(keys);
+  const redis = new Proxy(client, { get: (target, name) => (name === "smembers" ? async (key, ...rest) => { if (registry.down && key === HOST_SET) throw new Error("Command timed out"); return target.smembers(key, ...rest); } : target[name]) });
+  const deps = consoleOn({ redis, records: [RUN, REFUSED, { ...REFUSED, jobId: "gh-3", host: "otherhost" }], now: () => clock.at });
+  const cards = async (id) => {
+    const got = await drawn("run", `id=${id}`, deps, "operator");
+    return { ...got, why: between(got.words, "Why it was refused", "Read the rule"), host: between(got.words, "The host Host", "Open Fleet") };
+  };
+  // Read: the host that has a row has a beat, and the one that has none has none.
+  const first = { known: await cards("gh-2"), other: await cards("gh-3") };
+  assert.match(first.known.host, /Heartbeat \d+s ago /);
+  assert.match(first.other.host, /Heartbeat no live registry row for otherhost .*Queue waiting no queue of this host is listed/);
+  assert.deepEqual([first.known.pill, first.other.pill, saysUnread(first.other.words)], [false, false, false]);
+  registry.down = true;
+  const joined = registryKeys({ build3: {}, otherhost: { version: "5.4.2", concurrency: "2", beatAt: String(Date.now()), jobs: "[]", jobsMore: "0" } });
+  Object.assign(keys, { [HOST_SET]: joined[HOST_SET], [hostKey("otherhost")]: joined[hostKey("otherhost")] });
+  const UNREAD = "not read this time: the host registry could not be read";
+  for (const later of [14_000, 34_000]) {
+    clock.at = NOW + later;
+    const other = await cards("gh-3");
+    assert.ok(other.host.includes(`Heartbeat ${UNREAD} `) && other.host.includes(`Queue waiting ${UNREAD} Queue running ${UNREAD}`), `${later} ms on: ${other.host}`);
+    assert.ok(other.why.includes(`Venue floor (PI_BACKEND_FLOOR) ${UNREAD}`), `${later} ms on: ${other.why}`);
+    assert.ok(!other.words.includes("no live registry row") && !other.words.includes("no queue of this host is listed"), `${later} ms on: none is not said of a registry that was not read`);
+    assert.deepEqual([other.pill, other.marked], [true, true], `${later} ms on`);
+    // A host whose row is as last seen: its beat is not this read's to tell.
+    const known = await cards("gh-2");
+    assert.ok(known.host.includes(`Heartbeat ${UNREAD} `) && !/Heartbeat \d+s ago/.test(known.host), `${later} ms on: ${known.host}`);
+  }
 });
 
 test("a triggers file that does not exist is an empty document on Parked, Watch and Sandboxes; one nobody could read could not be read, and one that was read and is refused does not load", async () => {
@@ -233,10 +275,10 @@ test("a project's page, the Secrets bundle row and the settings card: does not e
   assert.ok(!invalid.words.includes("could not be read"), "one word for the case, on the whole page");
 
   // Secrets: under a bundle's project that could not be looked up, why.
-  const bundled = (files) => {
+  const bundled = (files, bundle = { profile: "shop-env", ref: "shop", project: "web" }) => {
     const deps = on({});
     return import("node:fs").then(({ writeFileSync, chmodSync, rmSync }) => {
-      writeFileSync(deps.paths.triggersPath, JSON.stringify({ triggers: [{ on: { type: "label", any: ["go"] }, run: { kind: "github", flow: "fix" } }], secretBundles: { shop: { profile: "shop-env", ref: "shop", project: "web" } } }));
+      writeFileSync(deps.paths.triggersPath, JSON.stringify({ triggers: [{ on: { type: "label", any: ["go"] }, run: { kind: "github", flow: "fix" } }], secretBundles: { shop: bundle } }));
       if (files.projects === "absent") rmSync(deps.paths.projectsFile);
       if (files.projects === "invalid") writeFileSync(deps.paths.projectsFile, "{ not json");
       if (files.projects === "unreadable") chmodSync(deps.paths.projectsFile, 0o000);
@@ -251,6 +293,10 @@ test("a project's page, the Secrets bundle row and the settings card: does not e
     const words = row((await bundled({ projects: state })).words);
     for (const [other, note] of Object.entries(notes)) assert.equal(words.includes(note), other === state, `${state}: ${note} in ${words}`);
   }
+  // A bundle that names no project has none to look up: with no projects file its row says so of the bundle, and
+  // nothing of the file.
+  const unbound = row((await bundled({ projects: "absent" }, { profile: "shop-env", ref: "shop" })).words);
+  assert.ok(unbound.includes("shop") && !unbound.includes("there is no projects file"), unbound);
 
   // Configuration's settings card: a file nobody could read is not one that does not load.
   const settings = async (files) => between((await drawn("config", "", on(files), "operator")).words, "Settings overlay", "Triggers");
@@ -464,5 +510,61 @@ test("one word per case wherever a page words a file: Models, a project's page, 
   assert.equal(answer({ triggers: "absent" }), "the triggers file does not exist; nothing was queued");
   assert.equal(answer({ triggers: "unreadable" }), "the triggers file could not be read (EACCES); nothing was queued");
   assert.match(answer({ triggers: "invalid" }), /^the triggers file does not load \(.*\); nothing was queued$/);
+  // The parser's words name the file by its name alone, never the host's path; and only the read that failed is
+  // marked as one, which is what a page that draws the refusal tells its pill by.
+  const judged = (files) => { const deps = on(files); return { ...parkedAnswerRefusalOf({ jobId: "gh-1", data: { kind: "github", target: { type: "issue" } }, triggersPath: deps.paths.triggersPath }), dir: deps.paths.triggersPath.slice(0, deps.paths.triggersPath.lastIndexOf("/")) }; };
+  const notJson = judged({ triggers: "invalid" });
+  assert.ok(notJson.refusal.includes("triggers.json") && !notJson.refusal.includes(notJson.dir), notJson.refusal);
+  assert.deepEqual([judged({ triggers: "unreadable" }).unread, notJson.unread, judged({ triggers: "absent" }).unread], [true, undefined, undefined]);
+  assert.equal(dataUnread({ page: "parked", answerer: { state: "ok" }, snapshot: { parked: [] }, parkedChecks: { "gh-1": { refusal: "the triggers file could not be read (EACCES); nothing was queued", unread: true } } }), true);
+  assert.equal(dataUnread({ page: "parked", answerer: { state: "ok" }, snapshot: { parked: [] }, parkedChecks: { "gh-1": { refusal: "the triggers file does not load (x); nothing was queued" } } }), false);
+  // A project's page: the scoped-limits file and the envelope file, each in the word of its case.
+  const projectWith = async (set) => { const deps = on({}); set(deps.paths, deps.paths.triggersPath.slice(0, deps.paths.triggersPath.lastIndexOf("/"))); return (await drawn("project", "id=web", deps, "operator")).words; };
+  const { writeFileSync: write, chmodSync: chmod } = await import("node:fs");
+  const limits = (how) => projectWith((paths, dir) => { paths.scopedLimitsPath = `${dir}/scoped-limits.json`; if (how !== "absent") write(paths.scopedLimitsPath, how === "invalid" ? "{ not json" : JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 10 }] })); if (how === "unreadable") chmod(paths.scopedLimitsPath, 0o000); });
+  assert.ok((await limits("invalid")).includes("The scoped-limits file does not load.") && !(await limits("invalid")).includes("The scoped-limits file could not be read."));
+  assert.ok((await limits("unreadable")).includes("The scoped-limits file could not be read."));
+  for (const how of ["absent", "read"]) assert.ok(!/The scoped-limits file (?:does not load|could not be read|does not exist)\./.test(await limits(how)), how);
+  const envelope = (how) => projectWith((paths, dir) => { paths.envelopeFile = `${dir}/envelope.json`; if (how !== "absent") write(paths.envelopeFile, "{ not json"); });
+  assert.ok((await envelope("absent")).includes("The envelope file does not exist. Run pi-dispatch doctor for the reason.") && (await envelope("absent")).includes("not known: the envelope file does not exist"));
+  assert.ok((await envelope("invalid")).includes("The envelope file does not load. Run pi-dispatch doctor for the reason.") && !(await envelope("invalid")).includes("could not be read. Run pi-dispatch doctor"));
   assert.equal(answer({}), "the triggers file has no github comment trigger, so the receiver would not route a reply either");
+});
+
+test("a key an agent's copy does not hold is not a read that failed: an unknown run id is not found for every role, and a healthy host's slots say what is not known", async () => {
+  // A run id nothing holds, with every place read: 404, whoever asks. An agent's copy of the data holds no transcript
+  // and no progress, and a page that judged the places from it answered 503 on a healthy, empty deployment.
+  for (const role of ["operator", "viewer", "agent"]) {
+    for (const redis of [healthy(), healthy(HOST)]) {
+      const none = await drawn("run", "id=gh-404", consoleOn({ redis, records: [RUN] }), role);
+      assert.deepEqual([none.status, none.data.runPlaces], [404, { shown: false, unread: [] }], role);
+      assert.ok(!none.words.includes("could not read"), role);
+    }
+    // A place that truly could not be read is still said, by name, to each of them: 503.
+    for (const [place, key] of [["the run's progress", /^run:progress:/], ["the live transcript", /^run:live:/]]) {
+      const untold = await drawn("run", "id=gh-404", consoleOn({ redis: failingKey(healthy(HOST), key), records: [RUN] }), role);
+      assert.deepEqual([untold.status, untold.data.runPlaces], [503, { shown: false, unread: [place] }], `${role}: ${place}`);
+      assert.ok(untold.words.includes(`but this page could not read ${place}, so it cannot say whether the run exists`), `${role}: ${place}`);
+    }
+    // And a run that is there is a run.
+    assert.equal((await drawn("run", "id=gh-1", consoleOn({ redis: healthy(HOST), records: [RUN] }), role)).status, 200, role);
+  }
+  // A host's slots: why they are not drawn, by its cause. One sentence said "this host is late or its running-job list
+  // was not read whole" of a healthy host on an agent's page, whose copy of the row holds no slot count.
+  const row = (over) => registryKeys({ build3: { version: "5.4.2", image: "pi-job:latest", concurrency: "2", pid: "1", beatAt: String(Date.now() - 2_000), startedAt: String(NOW - 3_600_000), jobs: "[]", jobsMore: "0", ...over } });
+  const slots = async (keys, role) => (await drawn("host", "name=build3", consoleOn({ redis: healthy(keys), records: [RUN] }), role)).words;
+  const WHY = { count: "Free slots are not known: its slot count is not known here.", late: "Free slots are not known: this host is late.", list: "Free slots are not known: its running-job list was not published whole." };
+  const said = (words) => Object.entries(WHY).filter(([, sentence]) => words.includes(sentence)).map(([why]) => why);
+  assert.deepEqual(said(await slots(HOST, "operator")), [], "an operator's healthy host: its slots are drawn");
+  assert.deepEqual(said(await slots(HOST, "viewer")), []);
+  assert.deepEqual(said(await slots(HOST, "agent")), ["count"], "an agent's copy holds no slot count, and the page says that and nothing else");
+  for (const role of ["operator", "agent"]) {
+    assert.deepEqual(said(await slots(row({ beatAt: String(Date.now() - 300_000) }), role)), ["late"], role);
+    for (const over of [{ jobsMore: "3" }, { jobs: "{ not json" }]) {
+      const words = await slots(row(over), role);
+      assert.deepEqual(said(words), ["list"], `${role} ${JSON.stringify(over)}`);
+      assert.ok(words.includes("The occupied slot count is not known: the host's job list was not published whole."), role);
+    }
+  }
+  for (const role of ["operator", "viewer", "agent"]) assert.ok(!/was not read whole|this host is late or/.test(await slots(HOST, role)), role);
 });

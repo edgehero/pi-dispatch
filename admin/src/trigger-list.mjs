@@ -7,11 +7,12 @@ import { modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
 import cronParser from "cron-parser";
 const { parseExpression } = cronParser;
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
-import { cronRunOf } from "@edgehero/pi-dispatch/bullmq-internals";
 import { foldTriggerCosts, meteredRunMicros, refusedBeforeSpend } from "./costs.mjs";
 import { recordReason } from "./words.mjs";
 import { newerSkippedSentence, readableRecords } from "./newer-release.mjs";
 import { fileUnreadWord } from "./secrets-view.mjs";
+import { recordMatchesTrigger } from "./trigger-match.mjs";
+import { mirrorUnread } from "./mirror-words.mjs";
 
 const DAY = 86400_000;
 const MINUTE = 60_000;
@@ -48,18 +49,7 @@ function ruleOf(t) {
   return out;
 }
 
-/**
- * A record needs the persisted raw index AND kind/type, or the cron id (`cronRunOf`, any id length: a record is this
- * deployment's own history). A shared flow alone is never attribution.
- */
-export function recordMatchesTrigger(record, trigger) {
-  if (trigger.type === "cron") {
-    const run = cronRunOf(record?.jobId);
-    return record?.kind === "local" && run !== null && run.id === trigger.id;
-  }
-  if (trigger.runKind === "local") return record?.kind === "local" && record?.localEvent?.id === trigger.id && record?.localEvent?.forge === trigger.forge && record?.localEvent?.type === trigger.type && record?.localEvent?.digest === trigger.localEventDigest;
-  return Number.isSafeInteger(record?.triggerIndex) && record.triggerIndex === trigger.index && record.triggerType === trigger.type && record.kind === trigger.forge;
-}
+export { recordMatchesTrigger };
 
 function chipsOf(t, packagesAvailable) {
   const chips = [];
@@ -154,8 +144,10 @@ export const SCHEDULERS_UNREAD_NO_RULES_TEXT = "Valkey could not be read: next f
 
 /**
  * Explicit schema shared with the page: rows/groups, unfiltered counts, next fire, typed weekly spend, rolling
- * seven-day lanes and quiet intervals. Records are a bounded retained view; only coverage.complete:true asserts
- * a full requested history. A missing read is null, never a fabricated empty history.
+ * seven-day lanes and quiet intervals. Records are a bounded retained view; only `coverage.whole: true` says the list
+ * was read whole for its window, and a count is bare only then (issue #988). `coverage.partial` (true, or the words
+ * for which side) says a side of it was not read, and `coverage.cut` the words for a list that is not whole. A
+ * missing read is null, never a fabricated empty history.
  *
  * `snapshot.schedulersUnread` (issue #844) marks a snapshot made of the files alone, the fleet's Valkey unread: the
  * rules, quiet windows and staged packages are the files', and what only Valkey says of a schedule (its next fire,
@@ -190,18 +182,29 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
   const dedup = valid === undefined ? null : [...unique.values()];
   const kept = dedup?.slice(0, TRIGGER_LIST_LIMITS.records) ?? null;
   // Two ways the counts can be short, told apart (issue #988). UNREAD: a side of the run history was not read, which
-  // is no records at all, this host's scan failing (`coverage.partial`), a snapshot of the files alone, or a fleet
-  // mirror that did not answer; a rule's zero is then not known. CUT: what was read holds more than is kept (the
-  // caller's `coverage.truncated`, a mirror past its bound, or more than the record limit); a count is then a floor,
-  // and a zero is still zero. `coverage.complete` promised a whole fleet's history, which no reader can, and it made
-  // every count "at least" and every zero "unknown" on reads that answered: it is not asked any more.
-  const mirror = typeof snapshot?.runMirror === "string" ? snapshot.runMirror : "";
-  const unread = source === null || coverage.partial === true || snapshot?.schedulersUnread === true || mirror.startsWith("unreachable");
-  const cutShort = coverage.truncated === true || mirror === "truncated" || (dedup?.length ?? 0) > TRIGGER_LIST_LIMITS.records;
+  // is no records at all, a side the caller says did not answer (`coverage.partial`), a snapshot of the files alone,
+  // or a fleet mirror that did not answer; a rule's zero is then not known. CUT: nothing says the list was read
+  // whole; a count is then a floor, and a zero is still zero. WHOLE is the caller's word (`coverage.whole`), from a
+  // reader that knows its own bound, and a count is itself only over a list that has it. It is never inferred from no
+  // mark being set: a caller whose list was the newest 50 runs of a fleet holding 70 set none, and the page said 41
+  // runs of 65. More than the record limit is cut whatever the caller says. `coverage.complete` promised a whole
+  // fleet's history from a local directory that could be read, and made every zero "unknown": it is not asked.
+  const overLimit = (dedup?.length ?? 0) > TRIGGER_LIST_LIMITS.records;
+  const unread = source === null || Boolean(coverage.partial) || snapshot?.schedulersUnread === true || mirrorUnread(snapshot?.runMirror);
+  const cutShort = coverage.whole !== true || overLimit;
   const incomplete = unread || cutShort;
   const short = { unread, incomplete };
+  // The one clause that says why a count is a floor, by its cause: which side was not read, or that the list was cut.
+  const shortWhy = !incomplete || kept === null ? null
+    : typeof coverage.partial === "string" ? coverage.partial
+    : coverage.partial === true ? "a part of the run history could not be read"
+    : snapshot?.schedulersUnread === true ? "Valkey could not be read, so the fleet's run records were not"
+    : mirrorUnread(snapshot?.runMirror) ? "the fleet's run records could not be read"
+    : overLimit ? `the run history holds more than the ${TRIGGER_LIST_LIMITS.records.toLocaleString("en-US")} runs counted here`
+    : typeof coverage.cut === "string" ? coverage.cut
+    : "the run history was not read whole";
   if (kept === null) problems.push("Run history could not be read; counts and spend are unknown.");
-  else if (incomplete) problems.push("Counts and spend cover retained history only and may be lower bounds.");
+  else if (incomplete) problems.push(`Counts and spend are lower bounds: ${shortWhy}.`);
   const rows = rules.map((trigger) => {
     const own = kept?.filter((r) => recordMatchesTrigger(r, trigger)) ?? null;
     const schedulers = (snapshot?.schedulers ?? []).filter((s) => trigger.type === "cron" && s.key === trigger.id);

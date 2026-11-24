@@ -181,6 +181,19 @@ test("current service trigger selection replaces startup paths and preserves exp
   assert.ok(!empty.rows.some(row => row.provider === "openai"), "explicit empty never silently reads triggers.json");
 });
 
+test("a triggers file that does not exist names no provider, which is a read's answer; one that is there and does not load leaves the list partial", () => {
+  // Issue #988: an absent file was "Some provider references could not be read." (the list `partial`), on a deployment
+  // that simply has no triggers yet.
+  const f = fixture({ document: { triggers: [], modelRoles: { default: { code: "openai/gpt-5" } } } });
+  assert.ok(f.read().rows.some(row => row.provider === "openai"), "the control: the file names a provider");
+  fs.rmSync(join(f.dir, "triggers.json"));
+  const absent = f.read();
+  assert.equal(absent.state, "ready");
+  assert.ok(!absent.rows.some(row => row.provider === "openai"), "and no provider is listed from a file that is not there");
+  fs.writeFileSync(join(f.dir, "triggers.json"), "{ not json");
+  assert.equal(f.read().state, "partial", "a file that is there and does not load: the list may be short");
+});
+
 test("random pool providers are inventoried even when no primary or allowed list names them", () => {
   const f = fixture({ document: { version: 6, triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", modelSelection: { strategy: "random", candidates: ["openai/gpt-5", "mistral/m"] } } }] } });
   const inventory = f.read();

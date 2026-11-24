@@ -57,6 +57,8 @@ import { RECORD_REASON_RE, recordReason } from "./words.mjs";
 import { fromNewerRelease, shownRecord } from "./newer-release.mjs";
 import { jobDataNewer } from "@edgehero/pi-dispatch/job-data-version";
 import { FORGE_JOB_RETENTION_DAYS, FORGE_JOB_RETENTION_MS, LOCAL_JOB_KEPT_COMPLETED_S, LOCAL_JOB_KEPT_FAILED_S } from "@edgehero/pi-dispatch/retention";
+import { basename } from "node:path";
+import { FILE_WORDS, fileCaseOfError, fileErrnoOf } from "./file-case.mjs";
 
 /** The most jobs one bulk action names, and so the most one preview lists (issue #642). */
 export const BULK_MAX = 100;
@@ -673,9 +675,15 @@ function loadTriggerEntries(triggersPath, fs) {
     // One word per case (issue #988): a file that is not there does not exist, and one nobody could read could not be
     // read, said by the error's code (its message names the host's path). "Does not load" is a file that was read
     // and is refused.
-    if (e?.code === "ENOENT") return { refusal: "the triggers file does not exist; nothing was queued" };
-    if (typeof e?.code === "string" && /^E[A-Z0-9]+$/.test(e.code)) return { refusal: `the triggers file could not be read (${e.code}); nothing was queued` };
-    return { refusal: `the triggers file does not load (${e?.message ?? e}); nothing was queued` };
+    const fileCase = fileCaseOfError(e);
+    if (fileCase === "absent") return { refusal: `the triggers file ${FILE_WORDS.absent}; nothing was queued` };
+    // `unread`: this refusal is a read that failed, which a page that draws it marks as one (a check is kept for a
+    // while, so its sentence can outlast the failure, and the pill then says so for as long as the sentence does).
+    if (fileCase === "unreadable") return { refusal: `the triggers file ${FILE_WORDS.unreadable} (${fileErrnoOf(e)}); nothing was queued`, unread: true };
+    // The parser's own words, with the file by its name alone: its message spells the host's path, and this sentence is
+    // drawn on a page.
+    const why = String(e?.message ?? e).split(String(triggersPath)).join(basename(String(triggersPath)));
+    return { refusal: `the triggers file ${FILE_WORDS.refused} (${why}); nothing was queued` };
   }
 }
 
@@ -1874,7 +1882,7 @@ export function parkedAnswerRefusalOf({ jobId, data, triggersPath, approval = fa
   if (data.target?.type !== "issue") return { refusal: `${jobId} parked on a pull request, whose reply must carry the trigger phrase (the receiver's rule: its key needs the head branch); answer on the forge` };
   if (typeof triggersPath !== "string" || triggersPath === "") return { refusal: "the triggers file is not known here (PI_TRIGGERS_FILE), so the reply cannot be built as the receiver builds it" };
   const rule = commentTriggerFor(triggersPath, kind, fs);
-  if (rule?.refusal) return { refusal: rule.refusal };
+  if (rule?.refusal) return { refusal: rule.refusal, ...(rule.unread === true ? { unread: true } : {}) };
   if (!rule) return { refusal: `the triggers file has no ${kind} comment trigger, so the receiver would not route a reply either` };
   if (rule.run.command !== undefined) return { refusal: `the ${kind} comment trigger runs a command, and a parked reply resumes only a flow (the receiver's rule)` };
   if (rule.run.resume !== true) return { refusal: `the ${kind} comment trigger does not set run.resume, so a reply cannot resume the parked transcript (the receiver's rule)` };

@@ -10,6 +10,7 @@ import { makeAnswerDraftStore, answerStandingSource, answerRuleConfigDigest, ans
 import { planStandingAnswerAdd, applyStandingAnswerAdd, planAnswerDraftDrop } from "./answerer-actions.mjs";
 import { boundedClient, CONFIRM_READ_TIMEOUT_MS, refusedByValkey, unconfirmedWrite, valkeyRead, within } from "./job-actions.mjs";
 import { writeTracking } from "./read-model.mjs";
+import { fileCaseOfError } from "./file-case.mjs";
 
 /** What a read that ran out of time answers inside the service, told apart from every value a store returns. */
 const READ_LATE = Symbol("read-late");
@@ -129,7 +130,7 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
           // answer rule and no standing answer, which is an empty document and the page's true empty state.
           // Which of the two it is rides beside the state (issue #988): a file nobody could read (the read failed with
           // an errno, EACCES and the like), or one that was read and is refused.
-          if (err?.code !== "ENOENT") return { state: "configuration-unavailable", configuration: typeof err?.code === "string" && /^E[A-Z0-9]+$/.test(err.code) ? "unreadable" : "invalid", partial: true, rows, rules: [], stats: answererStats(rows, now()) };
+          if (err?.code !== "ENOENT") return { state: "configuration-unavailable", configuration: fileCaseOfError(err) === "unreadable" ? "unreadable" : "invalid", partial: true, rows, rules: [], stats: answererStats(rows, now()) };
           config = { triggers: [], answerRules: [], standingAnswers: [] };
         }
         const standing = (config.standingAnswers ?? []).map(answer => ({ ...answer, used: rows.filter(r => r.sources?.some(s => s.kind === "standing" && s.id === answerStandingSource(answer).id)).length }));

@@ -28,7 +28,8 @@
  *      regroup one snapshot, so every overview query shares one load; any other page's is its whole query. The
  *      loads of a tick are started together (issue #988), and each key then waits for its own in the order the keys
  *      have, so a tick's loads take the longest of them and not their sum, and what is sent keeps its order. A load
- *      the page's deadline cut (`data.deadlineSpent`) is drawn by its tick and never kept for `pageMinMs`;
+ *      the page's deadline cut (`data.deadlineSpent`) is drawn by its tick and never kept for `pageMinMs`, and one
+ *      with a part of its page unread is kept only once its page has been so for that long (`partSince`);
  *   4. `pagePanels` renders each view (page + whole query + the viewer's role and name: the role rule makes a viewer's
  *      panels differ from an operator's), and only the panels whose digest changed are written, each as
  *      `id: <seq>`, `event: panel`, `data: {"id","html"}`. Run-page panels have no event id: only transcript entries
@@ -212,6 +213,12 @@ export function makeLiveHub({
    * Never a load the page's deadline cut (issue #988): what it could not read in time is not the page's data.
    */
   const loaded = new Map();
+  /**
+   * dataKey -> the hub clock at which the key's page TURNED partly unread (issue #988): its load answered, with a part
+   * of the page unread, after a load that was whole, a load Valkey did not answer, or none. A page that has been so
+   * for less than its `pageMinMs` is read again at the next tick; after that its loads are kept as any other's are.
+   */
+  const partSince = new Map();
   /** Data and view keys that failed at their last attempt, so a lasting failure is logged once. */
   const failing = new Set();
   const failed = (key, line) => {
@@ -435,6 +442,7 @@ export function makeLiveHub({
     for (const sub of subs) if (isPage(sub) && sub.jobId && !sub.transcriptDone) shown.add(`transcript\n${sub.jobId}`);
     for (const key of [...failing]) if (!shown.has(key)) failing.delete(key);
     for (const dk of [...loaded.keys()]) if (!shown.has(`data\n${dk}`)) loaded.delete(dk);
+    for (const dk of [...partSince.keys()]) if (!shown.has(`data\n${dk}`)) partSince.delete(dk);
     // The keep-alive, so a proxy or the browser does not take a quiet stream for a dead one.
     if (t - lastPing >= pingMs) {
       lastPing = t;
@@ -483,13 +491,24 @@ export function makeLiveHub({
         if (load === null) data = held.data;
         else {
           data = await load;
-          // Only a load whose page says nothing unread is kept (`dataUnread`, issue #988): one the page's deadline cut,
-          // one whose own read failed, or one with a part of its page unread says what a Valkey that did not answer
-          // left unread, so it is this tick's to draw and no later one's. The next tick reads again, and a Valkey that
-          // answers again is drawn at once, not when the page's `pageMinMs` has run out: a load in flight as Valkey
-          // came back, its early reads unread, was kept and held a page at Not live for that long. A page that stays
-          // unread is then read every tick, as a page with no `pageMinMs` always is.
-          if (minMs > 0 && !dataUnread(data)) loaded.set(dk, { at: t, data, viewersOnly });
+          // Which loads are kept for the page's `pageMinMs` (issue #988), by what the load says (`dataUnread`):
+          //   - whole: kept, as always.
+          //   - one Valkey did not answer (the page's deadline cut it, or its own read failed): never kept. It is this
+          //     tick's to draw and no later one's, and each such load costs what the deadline lets it.
+          //   - one that answered with a part of its page unread: read again at the next tick while the page has been
+          //     so for less than its `pageMinMs`, and kept after that. A load in flight as Valkey came back, its early
+          //     reads unread, was kept and held a page at Not live for five seconds: that page has just turned, so the
+          //     next tick reads it again and draws it whole. A part that STAYS unread on a Valkey that answers (a
+          //     mirror alone broken) is not that: reading it every tick sent 2.4 times the commands for as long as it
+          //     lasted, and it is read at the page's own pace.
+          if (minMs > 0) {
+            if (!dataUnread(data)) { partSince.delete(dk); loaded.set(dk, { at: t, data, viewersOnly }); }
+            else if (data?.readFailed === true || data?.deadlineSpent === true) partSince.delete(dk);
+            else {
+              if (!partSince.has(dk)) partSince.set(dk, t);
+              if (t - partSince.get(dk) >= minMs) loaded.set(dk, { at: t, data, viewersOnly });
+            }
+          }
         }
       } catch (e) {
         failed(`data\n${dk}`, `console: live data for page ${page} failed (${codeOf(e)}); its streams keep their last panels`);
@@ -764,6 +783,7 @@ export function makeLiveHub({
       for (const sub of [...subs]) finish(sub, STREAM_SHUTDOWN);
       views.clear();
       loaded.clear();
+      partSince.clear();
       if (timer !== null) {
         timers.clearInterval(timer);
         timer = null;

@@ -163,7 +163,8 @@ export function projectAllocation(v) {
   if (!ready(v)) return null;
   const a = data(v).allocation;
   // No split read is not no split published (issue #962), and refusals counted over a history read short are a floor.
-  const noSplit = a.problem ? "not known: the allocation could not be read" : "No split has been published.";
+  // The view's own sentence for it (issue #988): the envelope file in the word of its case, or a Valkey that did not answer.
+  const noSplit = a.problem ? `not known: ${a.problem.charAt(0).toLowerCase()}${a.problem.slice(1).replace(/\.( Run pi-dispatch doctor for the reason\.)?$/, "")}` : "No split has been published.";
   const floor = data(v).historyIncomplete ? "at least " : "";
   return card("Allocation", html`${a.unset ? note("No envelope is configured, so this project has no allocation share.") : html`${facts([["Weight", `${unknown(a.weight)} of ${unknown(a.totalWeight)}`], ["Floor", html`${money(a.floorMicros)} a ${a.window}`], ["Share", html`${money(a.shareMicros)} of the ${money(a.totalMicros)} ${a.window} envelope`], ["Split", a.split ? html`<span class="code">${a.split.id ?? "neutral"}</span> by ${a.split.writer ?? "unknown"}, applied ${timeHtml(at(a.split.appliedAt))}, until ${a.split.validUntil ? timeHtml(at(a.split.validUntil)) : "no expiry"}` : noSplit], ["Refused by the split", `${floor}${a.refused} in this ${a.window}, among retained runs`]])}${a.problem ? note(a.problem) : null}`}<p><a class="link" href="/insights/budget-split">Open the budget split</a></p>`);
 }
@@ -182,7 +183,7 @@ export function projectLimits(v) {
     const fields = Object.entries(words).filter(([key]) => l[key] !== null && l[key] !== undefined).map(([key, render]) => render(l[key]));
     return [`Row ${l.index + 1}`, html`<span class="code">${l.scope}</span>${fields.length ? html`: ${fields.map((value, index) => html`${index ? ", " : null}${value}`)}` : ": no caps or size fields set"}`];
   });
-  return card("Limits", html`${rows.length ? facts(rows) : note("No scoped-limits row names this project.")}${facts([["Jobs a day", p.limits[0]?.day ?? "not set"], ["At once", p.limits[0]?.concurrent ?? "not set; a local folder still runs one job at a time"]])}${p.limitsUnreadable ? note("The scoped-limits file could not be read.") : null}<p><a class="link" href="/config#cf-scoped-limits">Open scoped limits</a></p>`);
+  return card("Limits", html`${rows.length ? facts(rows) : note("No scoped-limits row names this project.")}${facts([["Jobs a day", p.limits[0]?.day ?? "not set"], ["At once", p.limits[0]?.concurrent ?? "not set; a local folder still runs one job at a time"]])}${p.limitsUnreadable ? note(`The scoped-limits file ${p.limitsFile ?? "could not be read"}.`) : null}<p><a class="link" href="/config#cf-scoped-limits">Open scoped limits</a></p>`);
 }
 
 export function projectBundle(v) {

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadPageData, PAGE_READS, pagePanels, parsePageQuery } from "../src/console/pages.mjs";
+import { loadPageData, PAGE_READS, pagePanels, PAGES, parsePageQuery } from "../src/console/pages.mjs";
 import { PAGE_DEADLINE_MS, PAGE_VIEW_GRACE_MS } from "../src/console/page-deadline.mjs";
 import { dirname } from "node:path";
 import { cachedPerWindow, HOST_CAPACITY_TIMEOUT_MS, SCHEDULE_ZONES_TIMEOUT_MS, UPDATES_FACTS_TIMEOUT_MS, waitedFor } from "../src/console/cli.mjs";
@@ -320,6 +320,8 @@ const nameOf = (c) => `${c.page}${c.label ? ` (${c.label})` : ""}`;
  */
 function asDrawn(data) {
   const drawn = { ...data };
+  // What the load told of a run's places (`runPlaces`) is told from the reads below, and is compared through them.
+  delete drawn.runPlaces;
   if (drawn.hostLoads?.unreachable === true && drawn.hostLoads.hosts?.length === 0) Object.assign(drawn, { hostLoads: null, hostLoadsUnread: true });
   if (typeof drawn.progress?.unreachable === "string") drawn.progress = { ...drawn.progress, unreachable: true };
   if (typeof drawn.recoveryProgress?.progress?.unreachable === "string") drawn.recoveryProgress = null;
@@ -704,6 +706,23 @@ test("the Insights assembly is started as soon as the load has read its clock, b
       await assert.rejects(() => loadPageData(page, page === "run" ? { id: "gh-1" } : {}, deps, OP), /the lookup's question/, page);
       assert.deepEqual(calls.map((call) => call.name), [], page);
     }
+    // The whole list, page by page: the question is a keyspace scan's worth, and it is the run page's and Parked's
+    // alone. Asked on Sandboxes or the overview it would cost every load of theirs a scan nothing there reads; and a
+    // load the live stream makes asks none, whatever its page.
+    const QUERIES = { run: { id: "gh-1" }, host: { name: "build3" }, venue: { name: "local" }, trigger: { index: 0 }, project: { id: "web" } };
+    const asks = async (page, who) => {
+      const { deps } = probe(time, {});
+      let asked = 0;
+      deps.fleet.lookupQuestion = () => { asked += 1; return {}; };
+      const loading = loadPageData(page, QUERIES[page] ?? {}, deps, who).catch(() => null);
+      await time.settled();
+      await loading;
+      return asked;
+    };
+    const asking = [];
+    for (const page of Object.keys(PAGES)) if (await asks(page, OP) > 0) asking.push(page);
+    assert.deepEqual(asking.sort(), ["parked", "run"]);
+    for (const page of Object.keys(PAGES)) assert.equal(await asks(page, { ...OP, live: true }), 0, `${page}: a live load`);
     await time.settled();
   } finally {
     process.off("unhandledRejection", note);

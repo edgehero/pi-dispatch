@@ -11,6 +11,7 @@ import { parseProjects } from "@edgehero/pi-dispatch/projects";
 import { parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
 import { repoOfTarget } from "./costs.mjs";
 import { unconfirmedWrite } from "./job-actions.mjs";
+import { FILE_WORDS, fileCaseOfError } from "./file-case.mjs";
 export const SANDBOX_READ_DEPS = Object.freeze({ makeSandboxPrepareQueueFn: makeSandboxPrepareQueue, enqueueSandboxPreparationFn: enqueueSandboxPreparation, readSandboxPreparationFn: readSandboxPreparation });
 const sha = (x) => createHash("sha256").update(typeof x === "string" ? x : JSON.stringify(x)).digest("hex");
 /** What a sandbox End says when nothing acknowledged it in time, and when the read of the acknowledgment failed after the request was written (issue #843): Valkey not answering, or answering that read with an error, so the sentence names neither. */
@@ -38,7 +39,7 @@ export const SANDBOX_NO_TRIGGERS_FILE = "The triggers file does not exist, so th
 export const sandboxConfigRefusal = (file, word) => `The ${file} ${word}. Fix the deployment configuration before preparing a sandbox.`;
 const configRefusal = (error) => (error?.noTriggersFile === true ? SANDBOX_NO_TRIGGERS_FILE : error?.sandboxConfig ? sandboxConfigRefusal(error.sandboxConfig.file, error.sandboxConfig.word) : SANDBOX_CONFIG_UNREAD);
 /** A read of `file` that failed, as the error `configRefusal` words: by what the failure was (an errno is a read that failed; anything else is a file that was read and is refused). */
-const configError = (file, error) => Object.assign(new Error("sandbox configuration unreadable", { cause: error }), { sandboxConfig: { file, word: error?.code === "ENOENT" ? "does not exist" : typeof error?.code === "string" && /^E[A-Z0-9]+$/.test(error.code) ? "could not be read" : "does not load" } });
+const configError = (file, error) => Object.assign(new Error("sandbox configuration unreadable", { cause: error }), { sandboxConfig: { file, word: FILE_WORDS[fileCaseOfError(error)] } });
 const refusalOf = (out) => out?.refusal ?? out?.message ?? out?.refused ?? "The sandbox request was refused.";
 
 export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs = nodeFs, now = Date.now, random = randomBytes, planFn = planSandboxPreparation } = {}) {

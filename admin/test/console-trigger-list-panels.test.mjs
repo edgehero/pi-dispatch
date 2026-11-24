@@ -97,9 +97,9 @@ test("an empty history: unknown where a side of it was not read, a floor where i
   const cut = await triggerListGolden({ recordsOverride: [], coverage: { truncated: true } });
   assert.match(text(panel(cut, "p-tr-github")), /No run in retained history at least 0 runs in 30 days · \$0 \(retained or partially metered history\)/);
   assert.match(text(panel(cut, "p-tr-spend")), /at least 0 run records since/);
-  // Read whole: a zero is 0. It said "unknown" on every deployment, an empty one too, since no caller could promise a
-  // whole fleet's history and the list asked for that promise.
-  for (const coverage of [{}, { complete: true }, { complete: false }]) {
+  // Read whole, which is the caller's word (`coverage.whole`): a zero is 0. It said "unknown" on every deployment, an
+  // empty one too.
+  for (const coverage of [{ whole: true }, { whole: true, complete: false }]) {
     const read = await triggerListGolden({ recordsOverride: [], coverage });
     assert.match(text(panel(read, "p-tr-github")), /No run in retained history 0 runs in 30 days · \$0 this UTC week/, JSON.stringify(coverage));
     assert.match(text(panel(read, "p-tr-spend")), /\$0 attributed to these rules 0 run records since/);

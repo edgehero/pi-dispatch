@@ -33,6 +33,7 @@ import { OUTCOME_KEYS, OUTCOME_KEY_WORDS, VENUE_LABEL, rowNumber } from "../../w
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { RUN_ID_RE, capMicrosOf, costText, count, mirrorUnread as mirrorWordUnread, moneyHtml, msOf, outcomeCell, runCost, utcText } from "./common.mjs";
+import { mirrorStateOf } from "../../mirror-words.mjs";
 
 // ---- the sentences ---------------------------------------------------------------------------------------------------
 
@@ -56,6 +57,13 @@ export const RUNS_MIRROR_DEGRADED_EMPTY = "Other hosts' runs could not be read, 
 export const RUNS_NONE_WITHOUT_HOST = "No run is listed without it, another host's included.";
 /** No run passes the filter, said only where every side that was asked answered. */
 export const RUNS_EMPTY = "No run matches.";
+/**
+ * Over a mirror that answered and holds more than the read's bound (its word "truncated", `mirror-words.mjs`): other
+ * hosts' runs were read, and not all of them. That is neither a read that failed nor a whole answer, so an empty page
+ * is not "No run matches."
+ */
+export const RUNS_MIRROR_CUT = "The fleet's run mirror holds more runs than were read; older runs of other hosts may be missing.";
+export const RUNS_MIRROR_CUT_EMPTY = "No run matches in what was read; the fleet's run mirror holds more runs than were read.";
 /** What the summary and the project chips count: the last 24 hours, while the list pages through the whole history. */
 export const RUNS_WINDOW_TEXT = "Counts are of the runs that ended in the last 24 hours.";
 /** The summary when the last 24 hours could not be read. */
@@ -77,7 +85,8 @@ export function runsTruncatedText(n) {
  * ("read from 3 hosts through the fleet's run mirror"), or null when the mirror was not read or no row names a host.
  */
 export function runsSourceText(page) {
-  if (page?.mirror !== "ok") return null;
+  // A mirror that answered, in an operator's word or an agent's (`mirrorStateOf`): "ok" alone lost an agent this line.
+  if (mirrorStateOf(page?.mirror) !== "read") return null;
   const hosts = new Set((Array.isArray(page.runs) ? page.runs : []).map((r) => r?.host).filter((h) => typeof h === "string" && h !== ""));
   if (hosts.size === 0) return null;
   return `read from ${count(hosts.size)} ${hosts.size === 1 ? "host" : "hosts"} through the fleet's run mirror`;
@@ -386,16 +395,18 @@ export function runsTableModel(view) {
   const mirrorUnread = mirrorWordUnread(page.mirror);
   // With this host's files unread the reader answers no run and a mirror it never asked: its `mirror` word is not a fact.
   const hostOnly = runs.length === 0 && Boolean(page.unreachable);
+  const mirrorCut = mirrorStateOf(page.mirror) === "cut";
   if (runs.length === 0) {
-    if (!mirrorUnread && !page.unreachable) foot.push(RUNS_EMPTY);
+    if (!mirrorUnread && !mirrorCut && !page.unreachable) foot.push(RUNS_EMPTY);
   } else {
     const source = runsSourceText(page);
     foot.push(`${count(runs.length)} ${runs.length === 1 ? "run" : "runs"}${source === null ? "" : `, ${source}`}.`);
   }
   if (page.unreachable) foot.push(RUNS_HOST_UNREADABLE);
   if (hostOnly) foot.push(RUNS_NONE_WITHOUT_HOST);
-  else if (page.mirror === "off") foot.push(RUNS_MIRROR_OFF);
+  else if (mirrorStateOf(page.mirror) === "off") foot.push(RUNS_MIRROR_OFF);
   else if (mirrorUnread) foot.push(runs.length === 0 ? RUNS_MIRROR_DEGRADED_EMPTY : RUNS_MIRROR_DEGRADED);
+  else if (mirrorCut) foot.push(runs.length === 0 ? RUNS_MIRROR_CUT_EMPTY : RUNS_MIRROR_CUT);
   if (page.truncated) foot.push(runsTruncatedText(page.examined));
   // A group row before each UTC day's first run: the history is newest first, so a day's runs stand together.
   const rows = [];

@@ -19,6 +19,8 @@ import { outcomeNote } from "../../loaded-words.mjs";
 import { KILL_SWITCH_UNREAD_TEXT, NO_EXPLANATION, NO_REASON_FAILED, outcomeKey, outcomeWord, queueErrorsOf, reasonWords, recordReason, shortSentence } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
+import { fileCaseOfView } from "../../file-case.mjs";
+import { mirrorUnread } from "../../mirror-words.mjs";
 
 const SEC = 1000;
 const MIN = 60 * SEC;
@@ -175,13 +177,11 @@ export const REGISTRY_PART_TEXT = "The host registry was read in part: some host
 const unreached = (read) => read !== null && typeof read === "object" && Boolean(read.unreachable);
 
 /**
- * Whether the fleet mirror's word says it did not answer whole: any word but the three of a mirror that answered or
- * is off, which are "ok", "off" and "bounded", an agent's copy of "ok" (`agentReadProjection`; its copy of the
- * reader's "unreachable (why)" is "unreachable"). The rule knew two of the three (issue #988), so an agent's `/runs`
- * said other hosts' runs could not be read, with a Not live pill, over a healthy mirror for good.
+ * Whether the fleet mirror's word says it did not answer: the one rule of `mirror-words.mjs`, which every reader of the
+ * word asks (issue #988). It knew two of the words of a mirror that answered and not an agent's "bounded", so an
+ * agent's `/runs` said other hosts' runs could not be read, with a Not live pill, over a healthy mirror for good.
  */
-const MIRROR_ANSWERED = Object.freeze(["ok", "off", "bounded"]);
-export const mirrorUnread = (word) => typeof word === "string" && !MIRROR_ANSWERED.includes(word);
+export { mirrorUnread };
 
 /**
  * A page of the run history read without one of its sides: this host's files (`unreachable`), or a fleet mirror that
@@ -252,7 +252,7 @@ const partUnread = (s, parts) => s !== null && typeof s === "object" && parts.so
  * not a read that failed. The settings reader folds a file nobody could read into the same `invalid`, with these
  * words first, and that one "could not be read".
  */
-export const overlayRefused = (read) => read !== null && typeof read === "object" && typeof read.invalid === "string" && !/^settings file unreadable/.test(read.invalid);
+export const overlayRefused = (read) => read !== null && typeof read === "object" && fileCaseOfView(read) === "refused";
 
 /**
  * A settings overlay the snapshot holds and that was not read: a file nobody could read, or a view that holds no
@@ -280,8 +280,9 @@ const dayUnread = (s) => s !== null && typeof s === "object" && (s.failures24h =
  * read the page did not make, never a mark: the loader sets each key a page reads.
  *
  *   - overview, fleet: the waiting jobs, the failed jobs and the doctor results, which their cards draw; on the
- *     overview the settings overlay too, which its Caps card draws, and the day's fold (`dayUnread`), which its
- *     other unread sentences come from (the day's failures, the run history, the spend per hour).
+ *     overview the settings overlay too where nobody could read it, which its Caps card draws, and the day's fold
+ *     (`dayUnread`), which its other unread sentences come from (the day's failures, the run history, the spend
+ *     per hour); on Fleet the held jobs, which its Held card and its header draw.
  *   - setup: the doctor results, which four of its steps are told from, and a triggers file that could not be read
  *     (one that does not load, or does not exist, is read and says so).
  *   - parked: the answer rules' results (any state but "ok", drawn as one banner where the parked runs were read), the
@@ -309,14 +310,17 @@ const dayUnread = (s) => s !== null && typeof s === "object" && (s.failures24h =
  */
 const PAGE_UNREAD = Object.freeze({
   overview: (d) => partUnread(d.snapshot, ["waiting", "failed", "doctor"]) || overlayUnread(d.snapshot) || dayUnread(d.snapshot),
-  fleet: (d) => partUnread(d.snapshot, ["waiting", "failed", "doctor"]),
+  // The held jobs too: Fleet's own card says "The held jobs could not be read." and its header "held jobs unreadable".
+  fleet: (d) => partUnread(d.snapshot, ["waiting", "failed", "doctor", "held"]),
   setup: (d) => partUnread(d.snapshot, ["doctor"]) || Boolean(d.snapshot?.triggers?.unreadable),
   parked: (d) => {
     const answerer = d.answerer;
     // A triggers file that was read and is refused (`configuration: "invalid"`) does not load: the page says that, and
     // it is not a read that failed.
     if (answerer !== null && typeof answerer === "object" && typeof answerer.state === "string" && answerer.state !== "ok" && answerer.configuration !== "invalid") return true;
-    if (d.parkedChecks !== null && typeof d.parkedChecks === "object" && Object.values(d.parkedChecks).some(unreached)) return true;
+    // A check that could not be made, and one whose refusal is a read that failed (`unread`: a triggers file nobody
+    // could read), which the page draws in the check's own words.
+    if (d.parkedChecks !== null && typeof d.parkedChecks === "object" && Object.values(d.parkedChecks).some((check) => unreached(check) || check?.unread === true)) return true;
     const rows = Array.isArray(d.snapshot?.parked) ? d.snapshot.parked : [];
     return rows.some((row) => row !== null && typeof row === "object" && Object.hasOwn(row, "pendingScan") && parkedVerdictOf(row.pendingScan).says === CHAT_REFUSALS.parkedUnknown);
   },
@@ -332,7 +336,7 @@ const PAGE_UNREAD = Object.freeze({
     if (d.inbox?.found === true && d.inbox.steer === true && (d.inbox.entries === null || d.inbox.open === null)) return true;
     if (d.childrenIncomplete === true || shellsShort(d) === "unread") return true;
     if (refused) return d.snapshot === null || unreached(d.snapshot?.doctor) || windowUnread(d.runsWindow);
-    if ([d.transcript, d.chat, d.chatAnswer].some(unreached) || d.chat?.says === CHAT_REFUSALS.parkedUnknown) return true;
+    if ([d.transcript, d.chat, d.chatAnswer].some(unreached) || d.chatAnswer?.unread === true || d.chat?.says === CHAT_REFUSALS.parkedUnknown) return true;
     // The progress key is the page's only source of progress while there is no record; with one, the card draws the
     // record's. The hosts' doctor runs are no mark here: the card that holds a run against them says which other
     // hosts lack what it loaded, and says nothing of hosts it could not ask.

@@ -171,11 +171,11 @@ test("the staged packages read tells a manifest that is not there from one that 
 });
 
 /** A deployment folder holding one cron trigger in a bundled project, for the trigger page's own file read. */
-function triggerFolder() {
+function triggerFolder({ bundle = true } = {}) {
   const dir = tempDir("pd-962-trigger-");
   assert.ok(dir.startsWith(tmpdir()), "a temp folder, checked before anything is written");
   const triggersPath = join(dir, "triggers.json");
-  writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/shop", flow: "tidy", task: "tidy up" } }], secretBundles: { shop: { profile: "shop", ref: "shop/env", project: "shop" } } }));
+  writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/shop", flow: "tidy", task: "tidy up" } }], ...(bundle ? { secretBundles: { shop: { profile: "shop", ref: "shop/env", project: "shop" } } } : {}) }));
   return triggersPath;
 }
 const EDITOR = { backends: [{ name: "local", serves: { liveTranscript: "yes", steering: "yes", recovery: "yes", sandboxShell: "yes" } }], forges: ["github"], flows: [], defaults: { backend: "local" } };
@@ -195,13 +195,15 @@ test("/config/trigger with no snapshot names the trigger's bundle from the files
   // Its schedule too: what the queue publishes was not read, which is not "not published".
   // The stall cap is a deployment setting the file views hold, as the Triggers page counts it.
   assert.ok(fromFiles.words.includes(`Health: ${SCHEDULE_UNREAD}; stalls not known of 5.`) && !fromFiles.words.includes("not published") && !fromFiles.words.includes(STALL_CAP_UNREAD), fromFiles.words.match(/Health:[^.]*\./)?.[0]);
-  const none = await triggerPage({ fleet: noSnapshotFleet({ fileViews: () => ({ ...BOUND, triggers: { triggers: BOUND.triggers.triggers, secretBundles: [] } }) }) });
+  // The file itself binds none: the page draws from its one reading of the file (issue #988), so the file says it.
+  const none = await triggerPage({ paths: { triggersPath: triggerFolder({ bundle: false }) }, fleet: noSnapshotFleet({ fileViews: () => ({ ...BOUND, triggers: { triggers: BOUND.triggers.triggers, secretBundles: [] } }) }) });
   assert.ok(none.words.includes("Bundle: no declared project bundle."), "the file was read and binds none");
   const neither = await triggerPage({ fleet: noSnapshotFleet({ fileViews: () => { throw new Error("no files"); } }) });
   assert.ok(neither.words.includes(`Bundle: ${BUNDLE_UNREAD}.`) && !neither.words.includes("no declared project bundle"), neither.words.match(/Bundle:[^.]*\./)?.[0]);
   assert.ok(neither.words.includes(`stalls not known of ${STALL_CAP_UNREAD}.`), "neither a snapshot nor the files hold the cap");
-  const unreadFile = await triggerPage({ fleet: noSnapshotFleet({ fileViews: () => ({ ...BOUND, triggers: { unreadable: "EACCES" } }) }) });
-  assert.ok(unreadFile.words.includes(`Bundle: ${BUNDLE_UNREAD}.`), "file views whose triggers file could not be read say nothing of its bundles");
+  // Nobody could read the file: the views say so, and so does the load's own reading of it.
+  const unreadFile = await triggerPage({ fs: { readFileSync: () => { throw Object.assign(new Error("permission denied"), { code: "EACCES" }); }, existsSync: () => true }, fleet: noSnapshotFleet({ fileViews: () => ({ ...BOUND, triggers: { unreadable: "EACCES" } }) }) });
+  assert.ok(unreadFile.words.includes("What starts it The triggers file could not be read.") && !unreadFile.words.includes("no declared project bundle") && !unreadFile.words.includes("Bundle: shop"), "a triggers file nobody could read gives no row, and nothing is said of its bundles");
   // A snapshot that was read answers for itself, whatever the files would say.
   const snapshot = { readAt: NOW, triggers: { triggers: BOUND.triggers.triggers }, runs: [], waiting: { rows: [] }, schedulers: [], settings: { overlay: {} }, secretBundles: null };
   const read = await triggerPage({ fleet: { snapshot: async () => snapshot } });

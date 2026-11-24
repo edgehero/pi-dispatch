@@ -12,6 +12,7 @@ import { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 import { withJobDataVersion } from "@edgehero/pi-dispatch/job-data-version";
 import { ALLOWANCE_UNREAD, checkDispatchRun, QUEUE_CLOSE_TIMEOUT_MS } from "./read-model.mjs";
 import { ALREADY_MATCH, boundedClient, connectedQueue, CONFIRM_READ_TIMEOUT_MS, LOOK_FIRST, PAID_PLAN_TIMEOUT_MS, queuedAlready, within } from "./job-actions.mjs";
+import { FILE_WORDS, fileCaseOfError } from "./file-case.mjs";
 
 const digest = (s) => createHash("sha256").update(s).digest("hex");
 const changed = "The triggers file changed since the preview. Preview Fire now again. Nothing was queued.";
@@ -63,10 +64,15 @@ export async function planTriggerFire({
     if (!raw) return { refusal: `There is no trigger at row ${index + 1}. Nothing was queued.` };
     if (raw.on?.type !== "cron") return { refusal: "Only a cron trigger can be fired now. Nothing was queued." };
     schedule = schedules.find((s) => s.schedulerId === raw.on.id);
-  } catch {
+  } catch (error) {
     // The loader's raw message includes absolute paths. Doctor carries the named diagnosis; this
     // action's result, also returned to a model, must not expose an account's home or prompt text.
-    return { refusal: "The triggers file does not load. Run pi-dispatch doctor and fix its named check. Nothing was queued." };
+    // One word per case (issue #988, `file-case.mjs`): "does not load" was said of a file that is not there and of one
+    // nobody could read as well.
+    const fileCase = fileCaseOfError(error);
+    if (fileCase === "absent") return { refusal: `The triggers file ${FILE_WORDS.absent}. Nothing was queued.` };
+    if (fileCase === "unreadable") return { refusal: `The triggers file ${FILE_WORDS.unreadable}. Nothing was queued.` };
+    return { refusal: `The triggers file ${FILE_WORDS.refused}. Run pi-dispatch doctor and fix its named check. Nothing was queued.` };
   }
   if (!schedule || schedule.unserved) return { refusal: "This cron trigger is served on another host. Fire it from that host's console. Nothing was queued." };
   if (schedule.data?.command !== undefined) return { refusal: "A run.command trigger cannot be fired from the console or a tool. Nothing was queued." };

@@ -326,6 +326,8 @@ export function normFold(fold) {
     byFlow,
     byModel,
     byTrigger,
+    // Issue #988: why `byTrigger` is null, where the fold says: the triggers file's case, a closed word.
+    triggersFile: ["unreadable", "refused"].includes(fold.triggersFile) ? fold.triggersFile : null,
     byRepo,
     byProject,
     plans,
@@ -599,7 +601,8 @@ function splitCountMap(v, keys) {
 export function normAllocation(v) {
   if (v === null || v === undefined || typeof v !== "object") return null;
   if (v.unset === true) return { kind: "unset" };
-  if (typeof v.problem === "string" && v.problem !== "") return { kind: "problem", problem: clip(escapeInterpreted(v.problem), 240) };
+  // `fileCase` (issue #988): which case the envelope file is in, a closed word; a payload that says none was refused.
+  if (typeof v.problem === "string" && v.problem !== "") return { kind: "problem", problem: clip(escapeInterpreted(v.problem), 240), fileCase: ["absent", "unreadable", "refused"].includes(v.envelopeCase) ? v.envelopeCase : "refused" };
   const window = SPLIT_WINDOWS.includes(v.window) ? v.window : null;
   const totalMicros = microsOr(v.totalMicros);
   if (typeof v.unreachable === "string" && v.unreachable !== "") return { kind: "unreachable", unreachable: clip(escapeInterpreted(v.unreachable), 160), window };
