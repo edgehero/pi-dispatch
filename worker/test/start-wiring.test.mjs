@@ -8031,6 +8031,50 @@ test("a refused terminal-receipt POST never retries or changes the completed job
 	assert.deepEqual(result, { outcome: "completed", exitCode: 0 });
 });
 
+// Issue #971: the ended receipt, from the same two listeners, after the comment that says why.
+test("a label job that returned a refusal or a stop gets the ended receipt after the queue completed it; a completion gets v1", { skip }, async () => {
+	const posted = [];
+	const { handlers } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost({ postStatusComment: async (_job, _target, text) => { posted.push(text); } }),
+	});
+	const job = { id: "gh-poll-e1234", name: "github", attemptsMade: 0, opts: { attempts: 2 }, data: { kind: "github", repo: "o/r", flow: "review", target: { type: "pull_request", number: 12 }, trigger: { event: "pull_request", action: "labeled", deliveryId: "poll-e1234", matched: { type: "pull_request", action: "labeled" } } } };
+	const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve)); };
+	handlers.completed(job, { outcome: "policy", reason: "auth-mixed-billing", budgetReserved: false });
+	await settle();
+	assert.deepEqual(posted, [], "no queue completion timestamp, no receipt");
+	handlers.completed({ ...job, finishedOn: 123 }, { outcome: "policy", reason: "auth-mixed-billing", budgetReserved: false });
+	handlers.completed({ ...job, finishedOn: 124 }, { outcome: "policy", reason: "cost-cap", budgetReserved: true, exitCode: 2 });
+	handlers.completed({ ...job, finishedOn: 125 }, { outcome: "completed", exitCode: 0 });
+	handlers.completed({ ...job, finishedOn: 126, data: { ...job.data, trigger: { ...job.data.trigger, deliveryId: "a-webhook-guid" } } }, { outcome: "policy", reason: "auth-mixed-billing", budgetReserved: false });
+	await settle();
+	assert.deepEqual(posted.map((text) => text.split("\n")[0]), [
+		"<!-- pi-dispatch-ended:v1 job=gh-poll-e1234 end=refused reason=auth-mixed-billing -->",
+		"<!-- pi-dispatch-ended:v1 job=gh-poll-e1234 end=stopped reason=cost-cap -->",
+		"<!-- pi-dispatch-terminal:v1 job=gh-poll-e1234 -->",
+	]);
+});
+
+test("a label job's final failure posts its failure comment, then the ended receipt; a retried attempt posts neither", { skip }, async () => {
+	const { InfraRetry } = await import("../src/processor.mjs");
+	const posted = [];
+	const { handlers } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost({ postStatusComment: async (_job, _target, text) => { await new Promise((resolve) => setImmediate(resolve)); posted.push(text); } }),
+	});
+	const job = { id: "gh-poll-e1234", name: "github", attemptsMade: 1, opts: { attempts: 2 }, data: { kind: "github", repo: "o/r", flow: "fix", target: { type: "issue", number: 12 }, trigger: { event: "issues", action: "labeled", deliveryId: "poll-e1234", matched: { type: "label" } } } };
+	const settle = async () => { for (let i = 0; i < 40; i++) await new Promise((resolve) => setImmediate(resolve)); };
+	const err = new InfraRetry("container-infra-exit", { reason: "container-infra-exit" });
+	handlers.failed(job, err);
+	await settle();
+	assert.deepEqual(posted, [], "an attempt the queue retries posts nothing");
+	handlers.failed({ ...job, finishedOn: 123 }, err);
+	await settle();
+	assert.equal(posted.length, 2);
+	assert.match(posted[0], /^Failed: /, "the explanation first");
+	assert.equal(posted[1].split("\n")[0], "<!-- pi-dispatch-ended:v1 job=gh-poll-e1234 end=failed reason=container-infra-exit -->");
+});
+
 test("a final forge record with artifacts posts one harness comment with the kept names and the run page's link (#920)", { skip }, async () => {
 	const { InfraRetry } = await import("../src/processor.mjs");
 	const store = tempDir("pi-artifacts-wiring-");

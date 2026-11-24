@@ -100,7 +100,7 @@ import { fileURLToPath } from "node:url";
 import { listSandboxes, sandboxDeadline, makeSandboxReaper } from "./sandbox-store.mjs";
 import { artifactLimitsOf, makeArtifactsReaper, makeArtifactsRuntime } from "./artifacts.mjs";
 import { artifactsComment } from "./artifacts-comment.mjs";
-import { terminalReceipt } from "./terminal-receipt.mjs";
+import { endedReceipt, terminalReceipt } from "./terminal-receipt.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckPrivateEndpoints, makeCheckQuotaReserve, makeCheckRetainSandbox, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
@@ -3740,7 +3740,9 @@ export async function startWorker(
 			log("job_completed", { jobId: job?.id, outcome: result?.outcome, ...(result?.reason ? { reason: result.reason } : {}) });
 			// A zero-artifact run needs the same scheduling evidence as one that kept files. Only this event proves the
 			// queue accepted completion; recordRun is earlier and cannot attest it. Posting is best-effort, never retried.
-			const receipt = terminalReceipt({ job, result });
+			// Issue #971: a label job that RETURNED a refusal or a stop gets the ended receipt instead, after the comment that
+			// says why (the processor's own, or the refusal net's), which the processor awaited before it returned.
+			const receipt = terminalReceipt({ job, result }) ?? endedReceipt({ job, result });
 			if (receipt !== null) void comment(job.data, receipt);
 			// The hook's POLICY half (issue #288): worker-abort, runner-policy and provider-auth-refused RETURN, so they land here
 			// and never in the failed listener -- a failed-only mount would miss exactly the paid terminals
@@ -3812,7 +3814,12 @@ export async function startWorker(
 					// a second close (the processor settled first) acts on nothing.
 					if (job.data?.awaitInput === true) void heldSettle({ job, error: { reason: typeof err?.reason === "string" ? err.reason : "infra" } });
 				}
-				if (!settledElsewhere) void comment({ ...job.data, id: job.id }, failedComment(err));
+				// Issue #971: a label job's final failure gets the ended receipt AFTER its failure comment, chained so the
+				// explanation is on the item first. The adapter never throws, so the chain always reaches the receipt.
+				if (!settledElsewhere) {
+					const ended = endedReceipt({ job, error: err });
+					void comment({ ...job.data, id: job.id }, failedComment(err)).then(() => (ended !== null ? comment({ ...job.data, id: job.id }, ended) : undefined));
+				}
 				onFailure?.({ jobId: job?.id, outcome: "failed", reason: typeof err?.reason === "string" ? err.reason : "infra" });
 			}
 		};

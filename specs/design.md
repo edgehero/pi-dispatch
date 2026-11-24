@@ -12273,11 +12273,38 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   after its successful queue transition. A pinned-method failure test and a real queue retry/completion test hold
   those facts. Rejected: `recordRun` (runs before the queue transition and its writer can fail open), the artifact
   comment (zero files emits none), and receipts for failed jobs (an operator can retry a failed job under the same
-  id). Recovery roots, replicas and parked continuations need separate completion proof and are outside this first
+  id; reversed for a separate ended receipt by #971, below, which says how such a retry is read). Recovery roots, replicas and parked continuations need separate completion proof and are outside this first
   protocol. No new store or retry publisher: a failed POST or process exit can lose a receipt, which leaves the
   consumer uncertain instead of repeating paid work. Existing artifact comments and failure hooks stay unchanged.
   The job and host share their existing forge App identity, so the marker is operational evidence, not a new
   authenticated authority channel or protection against deliberate forgery by a job with that identity.
+
+- **Ended label-job receipts (2026-11-24, #971)**: a dispatcher that adds a label and waits for its job's end could
+  bind a completion to its request through `INT-FORGE-TERMINAL-RECEIPT`, but a stop, a failure or a refusal before
+  start was English only, and two jobs stopped the same way posted the same sentence. So the two listeners that post
+  v1 post `INT-FORGE-ENDED-RECEIPT` for the other ends, with v1's binding (one function now holds it for both):
+  the completed listener for a returned `policy` result, `refused` or `stopped` by its `budgetReserved`, and the
+  failed listener's terminal branch for `failed`, chained after the failure comment. The marker carries the job id,
+  the end and the reason token, the last only when the reason catalog explains it, so a consumer can tell a stop it
+  may ask again for (`worker-abort`, `credential-expired`, `idle`, `stalled`) from one that would meet the same answer,
+  from `docs/reasons.md`, without parsing a sentence. A separate comment, not a marker inside the existing ones: the
+  human comments stay byte-identical (the catalog's identity tests and `docs/reasons.md`'s word-for-word promise hold
+  them), the refusal comments are posted before the queue's transition while a receipt must follow it (the reason v1
+  waits for the completed event), and one place posts it instead of more than eighty. **Reversing "receipts for failed
+  jobs"**: v1 rejected them because an operator can retry a failed job under the same id. The ended receipt is posted
+  only after BullMQ's terminal decision, an operator's retry clears `finishedOn` and ends with a later receipt for that
+  id, so the protocol says the newest receipt per job id is its end, which a consumer already orders by (v1 asks it to
+  check chronology). Its sentence says the label stays on and how to ask again, which #969 asked of a refused label job;
+  it does not say nothing else can start one, since on GitHub another label event on the item can. Rejected: a marker
+  in each human comment (moves their bytes, posts before the transition, and needs every call site); a new v1 field
+  (v1 pins its whole body and has no outcome field, and a lax consumer reading `job=` would take a stop for a
+  completion, so the ended receipt has its own marker name); a retry hint in the marker (it would be a second
+  vocabulary beside the reason, which already says it). Residuals: a retry while the first receipt's POST is in flight
+  can order two receipts by their POSTs, not their ends; a job whose completion lost its lock and is settled in the
+  failed listener gets no receipt (as v1); a recovered run gets none at its real end; webhook deliveries stay outside,
+  as in v1. **Code evidence**: worker/src/terminal-receipt.mjs -> endedReceipt, labelDelivery; worker/src/start.mjs
+  (the completed and failed listeners); worker/test/terminal-receipt.test.mjs, worker/test/start-wiring.test.mjs,
+  worker/test/bullmq-internals.integration.test.mjs.
 
 - **Decision** (issue #288): the post-spend terminals comment through the EXISTING adapter -- worker-abort,
   operator-cancel and runner-policy at their processor return sites via a `TERMINAL_COMMENTS` map keyed by
@@ -21360,3 +21387,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-20 (explicit auxiliary routes) | `DES-HOST-OWNED-SUBSCRIPTION-AUTH` and `DES-MODEL-FAILOVER` AMENDED: hand-authored finite auxiliary grants survive root selection, receive independent auth/quota admission and share the existing meter and cost cap. Whole-panel admission is conservative. `DES-STORE-VERSION-WHEN-NEEDED` applied to trigger version 9 and job-data version 11. UNCHANGED, checked: root candidate billing, subscription identity custody, API fallback prohibition, request guards and accounting ledgers. |
 | 2026-11-20 (append snapshots) | `DES-OPERATOR-GLOBAL-OVERLAY`, `DES-OPERATOR-CONSOLE` and `DES-DOCTOR-RESULTS-PUBLISHED` AMENDED: immutable loader append snapshots, watch and answer-draft overlay wiring, shaped source hashes in Loaded and a content-free doctor check. Rejected rereads, prompt-text records and claims of complete wire-prompt proof. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: optional metadata, legal absence, no new store or migration. |
 | 2026-11-24 (#969) | **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: the refusal net. Each attempt counts its comments, and a forge refusal before spend that posted none gets the reason catalog's sentence once from the pickup; five reasons stay silent by decision (named on one line a test reads); the knob, per-site comments, a dedup store and label removal are rejected. OQ-023's prepare-policy silence is ended, its every-delivery hazard bounded as every spend refusal's is. UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, the post-spend terminals, the failure hook and its paging, and `INT-FORGE-TERMINAL-RECEIPT`. |
+| 2026-11-24 (#971) | **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: ended label-job receipts. The two listeners that post the completion receipt post `INT-FORGE-ENDED-RECEIPT` for a returned refusal or stop and for a final failure, after the comment that says why, with the same binding. The rejection of receipts for failed jobs is reversed for this separate receipt, with supersession by the newest receipt per job id; a marker inside the human comments, a v1 field and a retry hint are rejected. UNCHANGED, checked: the completion receipt, the human comments' bytes, the refusal net, the failure hook and its paging. |
