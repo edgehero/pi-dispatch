@@ -110,6 +110,10 @@ export async function runRealJob(root, env = {}, { key = null, whenStarted = () 
 			PI_PROVIDER: JOB_PROVIDER,
 			PI_MODEL: JOB_MODEL,
 			PI_MAX_TURNS: "3",
+			// The job's own processes only, as its pid namespace gives it in a container: on a Linux host the suite runs
+			// several real jobs at once, and the child detector would read another test's runner as this job's
+			// unmetered child (fixtures/remap-roots.mjs).
+			PI_DISPATCH_TEST_OWN_PROC: "1",
 			...(key ? { PI_EXIT_AUTH: "stdin" } : {}),
 			...env,
 		},

@@ -205,7 +205,7 @@ export async function verifySubscriptionRoles(root) {
  * the tool, which latches the guard's conflict before the tool runs. `mayMerge` stages the job's merge permission.
  * Resolves with the exit code, the decisive exit line and what each request carried.
  */
-export async function subscriptionRunnerJob({ root, latch = false, mayMerge = false, timeoutMs = 60_000 }) {
+export async function subscriptionRunnerJob({ root, latch = false, mayMerge = false, ownProcesses = false, timeoutMs = 60_000 }) {
 	for (const dir of ["job/pi/skills", "workspace", "session", "outbox", "opt/pi-global/extensions", "opt/pi-dispatch", "home", "tmp"]) mkdirSync(join(root, dir), { recursive: true });
 	writeFileSync(join(root, "job", "prompt.md"), "Run the checker once.\n");
 	// The image's guardrails carry the default merge rule; this file does too, so the merge permission is told as it is.
@@ -267,6 +267,9 @@ globalThis.fetch = async (input, init) => {
 			PI_MODEL_ROLES_FILE: "/job/model-roles.json",
 			PI_AGENTS_FILE: "/job/agents.json",
 			NODE_OPTIONS: `--import=${preload}`,
+			// A suite on a Linux host runs other jobs beside this one; the runner's child detector is then shown only this
+			// job's own processes, as in a container (fixtures/remap-roots.mjs). The image's own run, in a container, needs none.
+			...(ownProcesses ? { PI_DISPATCH_TEST_OWN_PROC: "1" } : {}),
 		},
 		cwd: join(root, "workspace"),
 		stdio: ["ignore", "pipe", "pipe"],
@@ -284,8 +287,8 @@ globalThis.fetch = async (input, init) => {
 }
 
 /** The runner's own wiring: the parent's call answered by an in-process child, admitted, metered, and the job completes. */
-export async function verifySubscriptionRolesRunner(root) {
-	const job = await subscriptionRunnerJob({ root });
+export async function verifySubscriptionRolesRunner(root, { ownProcesses = false } = {}) {
+	const job = await subscriptionRunnerJob({ root, ownProcesses });
 	const said = `${JSON.stringify(job.exit)}\n${job.stderr.slice(-2000)}`;
 	assert.equal(job.code, 0, said);
 	assert.deepEqual(job.requests.map((request) => request.who), ["root", "child", "root"], `the child answered in process and the parent went on: ${said}`);
