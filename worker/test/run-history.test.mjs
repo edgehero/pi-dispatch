@@ -2898,3 +2898,28 @@ test("the record's `loaded` is the last key before `v`, absent when the source h
 	assert.equal(Object.hasOwn(buildRecord({ job, result: { outcome: "completed", loaded: { ...loaded, runner: "fine" } } }), "loaded"), false, "a source that fails its door holds no key");
 	assert.ok(!RECORD_CORE_FIELDS.includes("loaded"), "not core: a reader of a newer record does not need it to say what the run was");
 });
+
+// --- Issue #998: where the main model's credential came from ---
+
+test("issue #998: mainCredential is rebuilt from closed words, carries a variable's name for a declared key alone, and never a value", async () => {
+	const { MAIN_CREDENTIAL_SOURCES, recordedMainCredential } = await import("../src/run-history.mjs");
+	assert.deepEqual(MAIN_CREDENTIAL_SOURCES, ["host-env", "pi-login", "subscription", "run-secret", "keyless"]);
+	for (const source of ["host-env", "pi-login", "subscription", "keyless"]) {
+		assert.deepEqual(recordedMainCredential({ source }), { source });
+		assert.deepEqual(recordedMainCredential({ source, variable: "OPENAI_API_KEY" }), { source }, `no variable beside ${source}`);
+	}
+	assert.deepEqual(recordedMainCredential({ source: "run-secret", variable: "OPENAI_API_KEY" }), { source: "run-secret", variable: "OPENAI_API_KEY" });
+	// Only a variable pi reads for some provider: a value, a reference or a made-up name keeps the word and drops the name.
+	for (const variable of ["sk-proj-abc123", "op://vault/openai/key", "DATABASE_URL", "openai_api_key", 7, null]) assert.deepEqual(recordedMainCredential({ source: "run-secret", variable }), { source: "run-secret" }, String(variable));
+	for (const value of [undefined, null, "host-env", ["host-env"], { source: "env" }, { source: "HOST-ENV" }, { variable: "OPENAI_API_KEY" }]) assert.equal(recordedMainCredential(value), null, JSON.stringify(value));
+	// On a record: after notionalProviders, before v, and absent when the result has none or an unknown word.
+	const job = { id: "gh-1", data: { kind: "github", repo: "acme/web", target: { type: "issue", number: 1 } } };
+	const at = { startedAt: "2026-07-16T10:00:00.000Z", endedAt: "2026-07-16T10:01:00.000Z" };
+	const record = buildRecord({ job, result: { outcome: "completed", notionalProviders: ["anthropic"], mainCredential: { source: "run-secret", variable: "ANTHROPIC_API_KEY", value: "sk-ant-private" } }, ...at });
+	assert.deepEqual(record.mainCredential, { source: "run-secret", variable: "ANTHROPIC_API_KEY" });
+	assert.deepEqual(Object.keys(record).slice(-3), ["notionalProviders", "mainCredential", "v"]);
+	assert.equal(record.v, RUN_RECORD_VERSION);
+	assert.equal(JSON.stringify(record).includes("private"), false);
+	assert.deepEqual(buildRecord({ job, error: Object.assign(new Error("boom"), { mainCredential: { source: "pi-login" } }), ...at }).mainCredential, { source: "pi-login" });
+	for (const result of [{ outcome: "completed" }, { outcome: "completed", mainCredential: { source: "vault" } }]) assert.equal("mainCredential" in buildRecord({ job, result, ...at }), false);
+});

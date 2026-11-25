@@ -619,7 +619,9 @@ how a run is followed or picked up, and that page's Edit form and `dispatch_trig
   jobs receive as environment variables. Use `"secretsProfile"` to choose which of your declared
   resolvers reads them. The worker runs your one line script (`exec op read --no-newline "$1"`) on the
   host before the container starts. The job gets values. It never gets your manager's credential
-  ([`docs/secrets.md`](secrets.md))
+  ([`docs/secrets.md`](secrets.md)). When one of them is the API key of the provider the job runs on, it is that
+  model's key, and the run record says so (`mainCredential`, the variable's name, never its value; the run page's
+  [Credential row](console.md#which-key-a-run-spent))
 
 - `"secretBundle": false` keeps this trigger's jobs out of their project's secret bundle, the one environment
   `secretBundles` at the top of this file grants a whole project
