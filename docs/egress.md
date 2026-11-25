@@ -245,9 +245,12 @@ and deleting it changes no slot enforcement. Reload Connections for a later obse
 
 `slots` is how many requests the server runs at once (Ollama's `OLLAMA_NUM_PARALLEL`, llama.cpp's
 `--parallel`, vLLM's `--max-num-seqs`, LM Studio's default of 4). A job whose model is served by the endpoint takes
-one slot when it is picked up and keeps it until it ends. When every slot is taken, the next such job waits: the
-log says `endpoint_busy_deferred` with the endpoint id, and the job is tried again 7 seconds later. It is never
-refused and never fails for this, and it spends nothing while it waits. Local and forge jobs both take a slot.
+one slot when it is picked up and keeps it until it ends. When every slot is taken, the next such job waits and is
+tried again every 7 seconds. The log says `endpoint_busy_deferred` with the endpoint id once, when the wait starts,
+and `endpoint_busy_ended` once, when the job has its slot, with how many times it was put back (`deferrals`) and
+`waitedMs`, the sum of those 7 second delays. A job that then waits for another endpoint says the first line again.
+It is never refused and never fails for this, and it spends nothing while it waits. Local and forge jobs both take a
+slot.
 
 The worker rereads the file when you edit it, so a new `slots` applies to the next job; a broken edit is logged as
 `model_endpoints_reload_invalid` and the last good file stays in force. It watches the file only when
@@ -348,8 +351,8 @@ Zero spend.
 6. Run a job on it with `--provider local-ollama --model qwen2.5:0.5b`. It needs no key. Its record shows cost `$0`.
    A worker you start by hand reads your shell's environment, not `.env` (`doctor` says so): export the `.env`
    first, or run the installed service.
-7. Start two such jobs at once. They share the one slot: the second logs `endpoint_busy_deferred` until the first
-   ends, then runs.
+7. Start two such jobs at once. They share the one slot: the second logs `endpoint_busy_deferred` once and waits
+   until the first ends, then logs `endpoint_busy_ended` and runs.
 
 ### Upgrading a deployment from before #503
 
@@ -455,8 +458,10 @@ file, so until a secret can arrive as a file (issue #919) the flow writes it wit
 
 `slots` bounds how many jobs hold the device at once, on this host and, when the workers share Valkey, across the
 fleet, as a model server's `slots` do. A job that finds every slot taken waits, and the console's waiting list says
-which endpoint it waits for (`private-endpoint`); it is never refused for it. Without `slots` there is no bound. A slot
-takes turns and resets nothing: what one job leaves on the device, the next one finds.
+which endpoint it waits for (`private-endpoint`); it is never refused for it. The worker's log says
+`private_endpoint_busy_deferred` when the wait starts (and again if the job then waits for another device) and
+`private_endpoint_busy_ended` when the job has its slot, as for a model server. Without `slots` there is no bound. A
+slot takes turns and resets nothing: what one job leaves on the device, the next one finds.
 
 ### Venues, and the egress policy off
 
