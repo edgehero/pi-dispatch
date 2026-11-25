@@ -1487,7 +1487,8 @@ test("a confirm is a write in flight until it has answered: a stop that cuts it 
   pauseAnswer = async () => ({ results: [{ shown: "redis://a/0", res: { ok: true, queues: ["pi-jobs"] } }] });
   const rows = c.audit.rows.length;
   assert.equal((await c.both("fleet-pause", {})).confirm.status, 200);
-  assert.deepEqual([writes.size(), writes.abandon(), c.audit.rows.length], [0, 0, rows + 1]);
+  // Its intent and its receipt (issue #1072), and no row of a cut.
+  assert.deepEqual([writes.size(), writes.abandon(), c.audit.rows.length], [0, 0, rows + 2]);
   // A confirm refused before its `ok` row (a ticket nobody issued) has no outcome to record.
   assert.equal((await c.confirm("fleet-pause", "no-such-ticket")).status, 409);
   assert.equal(writes.size(), 0);
@@ -2473,7 +2474,7 @@ test("an Undo decided at the confirm that cannot be offered costs the banner its
     assert.equal(logs.at(-1), "console: the rerun Undo could not be decided after the write (error); its banner offers none");
   }
   assert.equal(enqueued, 2, "each write landed once");
-  assert.deepEqual(rows.map((r) => [r.kind, r.outcome]), [["run-rerun", "ok"], ["run-rerun", "ok"]], "one ok row each, no failed row: the write landed");
+  assert.deepEqual(rows.map((r) => [r.kind, r.action, r.outcome]), [["run-rerun", "write", "ok"], ["run-rerun", "write-applied", "ok"], ["run-rerun", "write", "ok"], ["run-rerun", "write-applied", "ok"]], "an intent and a receipt each, no failed row: the write landed");
 });
 
 test("a successful re-run with incomplete touch accounting keeps success and warns in its response and next-page banner", async () => {
@@ -2997,7 +2998,7 @@ test("retry-all-failed shows each job's reserve and the sum; a job whose data ca
   assert.deepEqual([r.count, r.done], [2, 1]);
   assert.deepEqual(acted[0], [{ jobId: "gh-a", attemptsMade: 1, finishedOn: 5 }, { jobId: "gh-b", attemptsMade: 2, finishedOn: 6 }], "the funnel got exactly the previewed list and fingerprints");
   const rows = c.audit.rows.filter((x) => x.kind === "failed-retry-all");
-  assert.deepEqual(rows.map((x) => [x.target, x.outcome, x.count, x.reserve ?? null]), [["gh-a", "ok", 2, 1_500_000], ["gh-b", "ok", 2, null], ["gh-b", "failed", 2, null]]);
+  assert.deepEqual(rows.map((x) => [x.target, x.action, x.outcome, x.count, x.reserve ?? null]), [["gh-a", "write", "ok", 2, 1_500_000], ["gh-b", "write", "ok", 2, null], ["gh-b", "write", "failed", 2, null], ["gh-a", "write-applied", "ok", 2, 1_500_000]]);
   assert.equal(new Set(rows.map((x) => x.ticket)).size, 1, "one ticket digest shared by every job's rows");
   // Issue #737: the bar said what Confirm does, with a floor where a reserve is unknown; the answer links the rows.
   assert.deepEqual([p.confirmLabel, p.danger, p.undo], ["Retry 2, at least $1.50", false, UNDO_SENTENCES.retried]);
@@ -3508,7 +3509,7 @@ test("remove-all-failed on Valkey: a job that changed between preview and confir
     assert.equal(await shared.getJob("gh-a"), undefined);
     assert.equal(await (await shared.getJob("gh-b")).getState(), "waiting", "the changed one is left as the other hand made it");
     const rows = c.audit.rows.filter((r) => r.kind === "failed-remove-all");
-    assert.deepEqual(rows.map((r) => [r.target, r.outcome, r.count]).sort(), [["gh-a", "ok", 2], ["gh-b", "failed", 2], ["gh-b", "ok", 2]]);
+    assert.deepEqual(rows.map((r) => [r.target, r.action, r.outcome, r.count]).sort(), [["gh-a", "write", "ok", 2], ["gh-a", "write-applied", "ok", 2], ["gh-b", "write", "failed", 2], ["gh-b", "write", "ok", 2]]);
   } finally {
     await v.done();
   }
@@ -3674,11 +3675,11 @@ test("a fleet pause or resume that switched every queue it knew over a set that 
     const paused = await rowsOf(() => c.both("fleet-pause", {}));
     assert.equal(paused.res.confirm.status, 200, paused.res.confirm.text);
     assert.equal(paused.res.confirm.json().change.summary, "Paused the fleet, but the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers");
-    assert.deepEqual(paused.rows, [["write", "ok", null], ["write", "ok", switchShortNote(true)]]);
+    assert.deepEqual(paused.rows, [["write", "ok", null], ["write", "ok", switchShortNote(true)], ["write-applied", "ok", null]]);
     assert.equal(await shared.isPaused(), true);
     const resumed = await rowsOf(() => c.both("fleet-resume", {}));
     assert.equal(resumed.res.confirm.json().change.summary, "Resumed the fleet, but the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not resumed. Resume the fleet again once Valkey answers");
-    assert.deepEqual(resumed.rows, [["write", "ok", null], ["write", "ok", switchShortNote(false)]]);
+    assert.deepEqual(resumed.rows, [["write", "ok", null], ["write", "ok", switchShortNote(false)], ["write-applied", "ok", null]]);
     // An agent session's row carries the closed word, and its answer the machine fact.
     const agent = await c.cookieFor(AGENT_TOKEN);
     const byAgent = await rowsOf(async () => c.confirm("fleet-pause", (await c.act("fleet-pause", {}, agent)).json().ticket, agent));
@@ -3689,7 +3690,7 @@ test("a fleet pause or resume that switched every queue it knew over a set that 
     registry = { hosts: [] };
     const whole = await rowsOf(() => c.both("fleet-pause", {}));
     assert.equal(whole.res.confirm.json().change.summary, "Paused the fleet");
-    assert.deepEqual(whole.rows, [["write", "ok", null]]);
+    assert.deepEqual(whole.rows, [["write", "ok", null], ["write-applied", "ok", null]]);
   } finally {
     await fleet.dispose();
     await v.done();
@@ -4088,7 +4089,7 @@ test("a stop during a bulk retry on a Valkey that answers cuts nothing: every jo
     assert.equal(writes.abandon(), 0, "nothing was left to cut");
     assert.deepEqual(await shared.getJobCounts("failed", "waiting"), { failed: 0, waiting: 60, paused: 0 }, "every job was retried by the time the stop went on");
     const rows = c.audit.rows.filter((r) => r.kind === "failed-retry-all");
-    assert.deepEqual([rows.length, rows.filter((r) => r.outcome !== "ok").length], [60, 0], "one ok row per job and no other");
+    assert.deepEqual([rows.filter((r) => r.action === "write").length, rows.filter((r) => r.action === "write-applied").length, rows.filter((r) => r.outcome !== "ok").length], [60, 60, 0], "an ok row and a receipt per job, and no other");
     const res = await pending;
     assert.deepEqual([res.status, res.json().done], [200, 60]);
   } finally {
@@ -6345,7 +6346,7 @@ test("a fleet pause or resume over a list that may be short says why in its bann
       const paused = await rowsOf(() => c.both("fleet-pause", {}));
       assert.equal(paused.res.confirm.status, 200, `${what}: ${paused.res.confirm.text}`);
       assert.equal(paused.res.confirm.json().change.summary, `Paused the fleet, but ${note}`, what);
-      assert.deepEqual(paused.rows, [["write", "ok", null], ["write", "ok", kept(note)]], what);
+      assert.deepEqual(paused.rows, [["write", "ok", null], ["write", "ok", kept(note)], ["write-applied", "ok", null]], what);
       assert.deepEqual([paused.res.confirm.json().queuesMayBeShort, paused.res.confirm.json().queuesShortLasting], [true, lasting], what);
       // The preview's own line for the registry (the look for queues has had its line since issue #964).
       assert.equal(paused.res.preview.summary.find((line) => line.startsWith("The host registry")) ?? null, registryLine, `${what}: ${JSON.stringify(paused.res.preview.summary)}`);
@@ -6353,7 +6354,7 @@ test("a fleet pause or resume over a list that may be short says why in its bann
       await fleet.snapshot();
       const resumed = await rowsOf(() => c.both("fleet-resume", {}));
       assert.equal(resumed.res.confirm.json().change.summary, `Resumed the fleet, but ${resumeNote}`, what);
-      assert.deepEqual(resumed.rows, [["write", "ok", null], ["write", "ok", kept(resumeNote)]], what);
+      assert.deepEqual(resumed.rows, [["write", "ok", null], ["write", "ok", kept(resumeNote)], ["write-applied", "ok", null]], what);
       // What to put right is inside what the row keeps, whatever follows it.
       if (lasting !== undefined) assert.match(kept(resumeNote), /Waiting does not change that: (?:remove or repair that key|fix this Valkey user's ACL|fix the Valkey user and password)[,.]/, what);
       assert.equal(resumed.res.preview.summary.find((line) => line.startsWith("The host registry")) ?? null, registryLine, what);
@@ -6370,7 +6371,7 @@ test("a fleet pause or resume over a list that may be short says why in its bann
     await fleet.snapshot();
     const whole = await rowsOf(() => c.both("fleet-pause", {}));
     assert.equal(whole.res.confirm.json().change.summary, "Paused the fleet");
-    assert.deepEqual([whole.rows, whole.res.preview.summary.some((line) => line.startsWith("The host registry")), whole.res.confirm.json().queuesShortLasting], [[["write", "ok", null]], false, undefined]);
+    assert.deepEqual([whole.rows, whole.res.preview.summary.some((line) => line.startsWith("The host registry")), whole.res.confirm.json().queuesShortLasting], [[["write", "ok", null], ["write-applied", "ok", null]], false, undefined]);
   } finally {
     await fleet.dispose();
   }

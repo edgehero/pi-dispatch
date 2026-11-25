@@ -1031,7 +1031,8 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       // The audit page (issue #737) asks for each row's position (`positions`), so a row's chain state can be told by
       // where it sits against the verification's last good row and its first damaged one.
       audit: ({ limit, before, positions } = {}) => m.audit.readConsoleAudit({ logsDir: config.logsDir, limit, before, fs, positions: positions === true }),
-      auditVerify: cachedFor(async () => ({ ...(await m.audit.verifyConsoleAudit({ logsDir: config.logsDir, fs, withLast: true })), checkedAt: now() }), { now, ttlMs: AUDIT_VERIFY_CACHE_MS }),
+      // `withOutcomes` (issue #1072): the write intents the walk found nothing after, which the page calls outcome unknown.
+      auditVerify: cachedFor(async () => ({ ...(await m.audit.verifyConsoleAudit({ logsDir: config.logsDir, fs, withLast: true, withOutcomes: true })), checkedAt: now() }), { now, ttlMs: AUDIT_VERIFY_CACHE_MS }),
       // The subscriptions file, for a run's cost class (a plan-covered run is not a dollar run).
       subscriptions: () => m.readModel.readSubscriptions({ subscriptionsPath: side.paths.subscriptionsPath, fs }),
       env: side.env,

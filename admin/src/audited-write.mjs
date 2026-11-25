@@ -14,6 +14,15 @@
  * row for a ticket as its outcome. If that second append also fails, the log keeps an `ok` row for a write that did not
  * land: the safe direction to be wrong in.
  *
+ * A RECEIPT FOR EVERY WRITE THAT LANDED (issue #1072): the `ok` row is an intent, written before the outcome is known, so a
+ * writer that stopped during the write (a crash, a kill, a console stopped past its deadline) left that row alone, and
+ * the log read it as a write that landed. Every write that lands now appends `{ action: "write-applied", outcome: "ok" }`
+ * on the same ticket, kind and target, whoever wrote it: an agent's receipt since #766, a person's and the panel's
+ * since #1072. The audit page reads an intent with neither a receipt nor a `failed` row as "outcome unknown"
+ * (`audit-view.mjs`). REJECTED: a `started` outcome written before the write and an `ok` after it: an older console reads a
+ * `write` row that is not `ok` as a failed write, and its "Agent writes today" leaves out every receipt whose ticket has
+ * one, so it would have dropped every new write from its count.
+ *
  * Pi-free, like `write-plans.mjs`: the console can wrap its own calls with it, and the tests import it directly.
  */
 import { randomBytes } from "node:crypto";
@@ -125,9 +134,14 @@ function thrownAgentWord(kind, e, failure) {
  *      (`thrownAgentWord`, issue #965), whoever the caller is.
  *   4. When the write landed and `note(result)` names a reason (issue #964: a kill switch that switched every queue it
  *      knew over a set of queues that may be short), append a second `{ outcome: "ok", reason }` row with the same
- *      ticket, before an agent's receipt. The write's outcome is still `ok`, so a reader taking the last row for a
- *      ticket reads it as landed, and the reason says what the first row, written before the outcome, could not. One
- *      that fails is reported to `log` and swallowed, like a compensating row.
+ *      ticket, before the receipt. The write's outcome is still `ok`, so a reader taking the last row for a ticket reads
+ *      it as landed, and the reason says what the first row, written before the outcome, could not. One that fails is
+ *      reported to `log` and swallowed, like a compensating row.
+ *   5. When the write landed, append its receipt, `{ action: "write-applied", outcome: "ok" }` with the same ticket, for
+ *      every actor (issue #1072; an agent's alone before it). A receipt that cannot be appended is reported to `log`;
+ *      an agent's result also carries `warning: "tracking-incomplete"`, since its count of writes reads receipts and it
+ *      must not repeat the action. A person's and the panel's result is handed back as it is: their write landed, and
+ *      the page then says its outcome is unknown, which is what the log can say of it.
  */
 export function auditedWrite({ audit, actor, kind, target, beforeDigest = null, afterDigest = null, reserve = null, count = null, failure = defaultFailure, note = () => null, refusal = (s) => ({ ok: false, invalid: s, refused: s }), log = () => {}, ticket = writeTicket() }, fn) {
   const row = { actor, action: "write", kind, target: target === null || target === undefined ? null : String(target), beforeDigest, afterDigest, reserve, count, ticket };
@@ -155,14 +169,16 @@ export function auditedWrite({ audit, actor, kind, target, beforeDigest = null, 
         log(`panel: audit append failed (${e?.code ?? "error"}) for what a ${kind} write that landed had to say; the log's rows for ticket ${ticket} say ok without it`);
       }
     }
-    if (actor?.role === "agent") {
-      try {
-        // An intent says a write was attempted. This correlated receipt is evidence that it landed.
-        audit.append({ ...row, action: "write-applied", outcome: "ok" });
-      } catch {
-        log("panel: agent write succeeded but its audit receipt could not be written; accounting is incomplete, do not repeat the action");
-        return result !== null && typeof result === "object" ? { ...result, warning: "tracking-incomplete" } : { ok: true, value: result, warning: "tracking-incomplete" };
+    try {
+      // An intent says a write was attempted. This correlated receipt is evidence that it landed, for every actor.
+      audit.append({ ...row, action: "write-applied", outcome: "ok" });
+    } catch (e) {
+      if (actor?.role !== "agent") {
+        log(`panel: audit append failed (${e?.code ?? "error"}) for the receipt of a ${kind} write that landed; the log reads ticket ${ticket} as an outcome unknown`);
+        return result;
       }
+      log("panel: agent write succeeded but its audit receipt could not be written; accounting is incomplete, do not repeat the action");
+      return result !== null && typeof result === "object" ? { ...result, warning: "tracking-incomplete" } : { ok: true, value: result, warning: "tracking-incomplete" };
     }
     return result;
   };

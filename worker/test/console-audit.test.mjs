@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { join } from "node:path";
-import { CONSOLE_AUDIT_ACTION_RE, CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_FIELD_MAX, CONSOLE_AUDIT_KEY, CONSOLE_AUDIT_OUTCOME_RE, CONSOLE_AUDIT_OUTCOMES, CONSOLE_AUDIT_READ_MAX, makeConsoleAudit, makeConsoleAuditReaper, mirrorRow, readConsoleAudit, verifyConsoleAudit } from "../src/console-audit.mjs";
+import { CONSOLE_AUDIT_ACTION_RE, CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_FIELD_MAX, CONSOLE_AUDIT_KEY, CONSOLE_AUDIT_OUTCOME_RE, CONSOLE_AUDIT_OUTCOMES, CONSOLE_AUDIT_READ_MAX, makeConsoleAudit, makeConsoleAuditReaper, mirrorRow, readConsoleAudit, UNSETTLED_MAX, verifyConsoleAudit } from "../src/console-audit.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // The console's audit log (issue #640, INT-CONSOLE-AUDIT-LOG). Every test drives an injected clock: rows land in the
@@ -890,3 +890,69 @@ test("the writer stays closed: an action or outcome it does not list throws and 
 	assert.deepEqual([after.seq, after.prev], [3, sha(c.lines[1])]);
 	assert.deepEqual(verifyConsoleAudit({ logsDir: c.logsDir }), { ok: true, rows: 3, startsAt: null, unknown: 1 });
 });
+
+// ---- issue #1072: the write intents nothing follows (`withOutcomes`) ----
+
+/** One write's rows as `auditedWrite` appends them: its intent, then what became of it ("landed", "failed", "noted", or nothing). */
+function write(audit, role, ticket, end, { kind = "setting-set", target = "/d/s.json" } = {}) {
+	const base = { actor: { name: role === "agent" ? "bot" : "ops", role, session: null }, action: "write", kind, target, ticket };
+	const intent = audit.append({ ...base, outcome: "ok" });
+	if (end === "landed" || end === "noted") {
+		if (end === "noted") audit.append({ ...base, outcome: "ok", reason: "the list of queues may be short" });
+		audit.append({ ...base, action: "write-applied", outcome: "ok" });
+	}
+	if (end === "failed") audit.append({ ...base, outcome: "failed", reason: "refused" });
+	if (end === "noted-only") audit.append({ ...base, outcome: "ok", reason: "the list of queues may be short" });
+	return intent.seq;
+}
+
+test("withOutcomes names the intents nothing settles, from each role's own first receipt on, and only on an intact chain (#1072)", () => {
+	const { logsDir, audit, dir } = setup();
+	// An older console: an agent's writes have receipts, a person's and the panel's never do.
+	write(audit, "agent", "a00000000001", "landed");
+	const oldPerson = write(audit, "operator", "a00000000002", null);
+	const oldPanel = write(audit, "panel", "a00000000003", null);
+	const agentLost = write(audit, "agent", "a00000000004", null);
+	// This release: a person's first receipt, then every way a write can end.
+	write(audit, "operator", "a00000000005", "landed");
+	write(audit, "operator", "a00000000006", "failed");
+	write(audit, "operator", "a00000000007", "noted");
+	write(audit, "operator", "a00000000008", "noted-only");
+	const personLost = write(audit, "operator", "a00000000009", null);
+	// A pi session still on the older release: its panel intents have no receipt, and its role has none yet.
+	const panelOld = write(audit, "panel", "a00000000010", null);
+	// A row with no ticket (a gateway's, a shell's) is no intent.
+	audit.append({ actor: { name: "ops", role: "operator", session: null }, action: "write", kind: "sandbox-browser-launch", target: "h:1", outcome: "ok" });
+	const got = verifyConsoleAudit({ logsDir, withOutcomes: true });
+	assert.equal(got.ok, true);
+	assert.deepEqual(got.unsettled, [agentLost, personLost], "the agent's lost write (receipts since #766) and the person's after its first receipt");
+	assert.ok(![oldPerson, oldPanel, panelOld].some((seq) => got.unsettled.includes(seq)), "before its role's first receipt an intent reads as it did");
+	assert.equal(got.unsettledMore, undefined);
+	// Opt-in: without it the result is exactly as before.
+	assert.deepEqual(verifyConsoleAudit({ logsDir }), { ok: true, rows: got.rows, startsAt: null });
+	// The panel's first receipt is its cutover: a lone panel intent after it counts.
+	write(audit, "panel", "a00000000011", "landed");
+	const panelLost = write(audit, "panel", "a00000000012", null);
+	assert.deepEqual(verifyConsoleAudit({ logsDir, withOutcomes: true }).unsettled, [agentLost, personLost, panelLost]);
+	// A write that lands later settles its intent, whenever its receipt comes.
+	audit.append({ actor: { name: "ops", role: "operator", session: null }, action: "write-applied", kind: "setting-set", target: "/d/s.json", ticket: "a00000000009", outcome: "ok" });
+	assert.deepEqual(verifyConsoleAudit({ logsDir, withOutcomes: true }).unsettled, [agentLost, panelLost]);
+	// A broken chain says nothing of outcomes: a receipt may be past the break.
+	const file = join(dir, "2026-10.jsonl");
+	const lines = fs.readFileSync(file, "utf8").split("\n").filter((l) => l !== "");
+	fs.writeFileSync(file, `${lines.map((l, i) => (i === 3 ? l.replace('"ops"', '"opz"') : l)).join("\n")}\n`);
+	const broken = verifyConsoleAudit({ logsDir, withOutcomes: true });
+	assert.equal(broken.ok, false);
+	assert.equal(broken.unsettled, undefined);
+});
+
+test("withOutcomes names the newest UNSETTLED_MAX intents and counts the rest (#1072)", () => {
+	const { logsDir, audit } = setup();
+	write(audit, "operator", "b00000000000", "landed");
+	const lost = [];
+	for (let i = 1; i <= UNSETTLED_MAX + 2; i++) lost.push(write(audit, "operator", `b${String(i).padStart(11, "0")}`, null));
+	const got = verifyConsoleAudit({ logsDir, withOutcomes: true });
+	assert.equal(got.unsettled.length, UNSETTLED_MAX);
+	assert.deepEqual([got.unsettled[0], got.unsettled.at(-1), got.unsettledMore], [lost[2], lost.at(-1), 2]);
+});
+

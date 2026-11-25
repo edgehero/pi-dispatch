@@ -27,7 +27,8 @@ function setup() {
     assert.equal(JSON.parse(readFileSync(paths.triggersPath)).modelRoles.default.editor, "openai/old");
     const c = await confirmAction(context({ ticket: p.body.ticket }), action);
     assert.equal(c.status, 200, JSON.stringify(c.body));
-    assert.equal(audit.length, 1); assert.equal(audit[0].kind, "model-role-edit");
+    // The intent, then the receipt of a write that landed (issue #1072).
+    assert.deepEqual(audit.map((row) => [row.kind, row.action]), [["model-role-edit", "write"], ["model-role-edit", "write-applied"]]);
   };
   const events = [], records = [], data = new Map();
   const redis = { get: async key => data.get(key) ?? null, set: async (key, value) => (data.set(key, value), "OK"), incr: async key => { events.push("reserve"); const value = Number(data.get(key) ?? 0) + 1; data.set(key, value); return value; }, decr: async key => { const value = Number(data.get(key) ?? 0) - 1; data.set(key, value); return value; }, expire: async () => 1 };

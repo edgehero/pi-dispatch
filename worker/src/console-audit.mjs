@@ -353,18 +353,37 @@ export function makeConsoleAudit({ logsDir, fs = nodeFs, now = () => Date.now(),
  *     when the file no longer agrees). One entry a month, so it stays small.
  *
  * Opt-in, so the result doctor, the CLI and the tests compare whole stays as it was.
+ *
+ * `withOutcomes` (issue #1072, the console's audit screen) adds `unsettled: [seq, ...]` to the intact shape: the intents
+ * the walk found nothing after, oldest first. A write's first `ok` row (`action: "write"`, a `ticket`, no `reason`) is
+ * its intent, appended before the write; a write that landed appends a receipt (`write-applied`) on the same ticket,
+ * kind and target, and one that did not a `write` row that is not `ok`, and #964's note (a second `ok` row with a
+ * `reason`) is written only once a write landed. Any of those after it settles an intent. An intent counts only from
+ * the first receipt of its own actor role the walk passed: before #1072 only an agent's write had a receipt, so a
+ * person's and the panel's older intents have none, and a role's own first receipt is where its writes start to have
+ * one (a pi session that still runs an older release writes the panel's intents without one after the console was
+ * upgraded, and goes on as before until it has written a receipt itself). `unsettledMore: n` counts those past the
+ * newest `UNSETTLED_MAX`, only when there are some. A broken result carries neither: the rows after the break, where a
+ * receipt may be, are not walked. What the walk accepts is unchanged: this only reports what it passed.
  */
-export function verifyConsoleAudit({ logsDir, fs = nodeFs, withLast = false }) {
+export function verifyConsoleAudit({ logsDir, fs = nodeFs, withLast = false, withOutcomes = false }) {
 	const dir = join(logsDir, CONSOLE_AUDIT_DIR);
 	let last = null; // { file, line, seq } of the last good row, for `withLast`
 	let beforeLast = null; // the good row before `last`, which a line that does not link to `last` leaves as the last vouched for
 	const index = []; // { file, seq, rows } per month file the walk passed a row in, for `withLast`
 	let unknown = 0; // rows that passed every check with an action or outcome this build does not know (issue #761)
+	// For `withOutcomes` (issue #1072): the roles a receipt was walked for, and each intent nothing has settled yet, by its
+	// write's key, in the order they were walked (a Map keeps it; one settled is deleted, one repeated moves to the end).
+	const receiptRoles = new Set();
+	const open = new Map();
 	// `unknown` only on an intact chain and only when some row has it (issue #761), so a chain of known rows answers
 	// exactly as it always did (doctor, the CLI and the tests compare this result whole), and a broken one never counts
 	// the row before its break, which nothing vouches for.
 	const shaped = (result, unlinked = false) => {
-		const counted = result.ok && unknown > 0 ? { ...result, unknown } : result;
+		const known = result.ok && unknown > 0 ? { ...result, unknown } : result;
+		const seqs = [...open.values()];
+		const outcomes = { unsettled: Object.freeze(seqs.slice(-UNSETTLED_MAX)), ...(seqs.length > UNSETTLED_MAX ? { unsettledMore: seqs.length - UNSETTLED_MAX } : {}) };
+		const counted = withOutcomes && result.ok ? { ...known, ...outcomes } : known;
 		if (!withLast) return counted;
 		return unlinked ? { ...counted, last: beforeLast, suspect: last, files: index } : { ...counted, last, suspect: null, files: index };
 	};
@@ -424,12 +443,39 @@ export function verifyConsoleAudit({ logsDir, fs = nodeFs, withLast = false }) {
 				index[index.length - 1].rows += 1;
 				rows += 1;
 				if (!known) unknown += 1;
+				if (withOutcomes) walkOutcome(row, receiptRoles, open);
 			}
 		} catch (err) {
 			return shaped({ ok: false, rows, broken: { file, line: i + 1, reason: `the file cannot be read (${err?.code ?? "error"})` } });
 		}
 	}
 	return shaped({ ok: true, rows, startsAt });
+}
+
+/** The most intents `verifyConsoleAudit`'s `unsettled` names (issue #1072): the newest, the rest counted. */
+export const UNSETTLED_MAX = 1000;
+
+/** What a write's rows share (issue #1072): its ticket, kind and target, as the agent writes count pairs them. */
+const writeKey = (row) => `${row.ticket}\u0000${row.kind ?? ""}\u0000${row.target ?? ""}`;
+
+/**
+ * One walked row's part in `withOutcomes` (issue #1072, see `verifyConsoleAudit`): a row that settles a write deletes its
+ * intent, and an intent of a role a receipt was already walked for is held until something settles it.
+ */
+function walkOutcome(row, receiptRoles, open) {
+	if (typeof row.ticket !== "string" || row.ticket === "") return;
+	const said = typeof row.reason === "string" && row.reason !== "";
+	const role = row.actor !== null && typeof row.actor === "object" && typeof row.actor.role === "string" ? row.actor.role : null;
+	if (row.action === "write-applied" || (row.action === "write" && (row.outcome !== "ok" || said))) {
+		open.delete(writeKey(row));
+		if (row.action === "write-applied" && role !== null) receiptRoles.add(role);
+		return;
+	}
+	if (row.action === "write" && row.outcome === "ok" && role !== null && receiptRoles.has(role)) {
+		const key = writeKey(row);
+		open.delete(key);
+		open.set(key, row.seq);
+	}
 }
 
 /** The most rows one `readConsoleAudit` call returns, whatever it is asked for. */
