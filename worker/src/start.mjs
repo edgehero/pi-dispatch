@@ -116,7 +116,7 @@ import { optionalUsdMicros } from "./money.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeHookRunsPublisher } from "./hook-runs.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
-import { makeWaitState } from "./wait-state.mjs";
+import { makeWaitState, sweepHeld } from "./wait-state.mjs";
 import { hostQueueName, makeQueue, enqueueWatchJob, discoverHostQueuesReporting, QUEUE } from "./queue.mjs";
 import { endpointShown, execDockerBounded, makeDockerEndpointResolver, makeJobContainerLister, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
@@ -4063,6 +4063,14 @@ export async function startWorker(
 		const reapForkSources = forkStore ? (options) => forkStore.sweep(options) : null;
 		const reapCheckpoints = workspaceCheckpointer ? async (options) => void (await workspaceCheckpointer.sweep(options)) : null;
 		const reapHostLost = async () => void (await sweepHostLost());
+		// Issue #1075: the held index's stale members (`wait:held`, a SET, so nothing expires them), which before this only
+		// the `/dispatch` panel and `/dispatch status` removed: a deployment run from the tools and the web console, which
+		// write nothing, grew it until no read was whole. Counts only in its line. On the TIMER and not at boot, unlike
+		// the host-lost sweep beside it: nothing at boot needs the index short (a read walks past stale members, issue
+		// #1036), and the index is fleet-wide, so a pass at every start would also run in every test that boots a worker
+		// against the shared test Valkey, beside the tests that plant stale members there and count them. At
+		// PI_SWEEP_INTERVAL_HOURS=0 it never runs, and the person's surfaces are its only pruners, as before.
+		const reapHeldIndex = async (options) => void log("held_index_swept", await sweepHeld({ redis, stopped: options?.stopped }));
 		// NOT awaited: the host-lost sweep's first command waits for Valkey however long it is away, and the boot must not.
 		// Each settles into its own log line; neither can reject unhandled.
 		for (const [name, reap] of [["recovery_host_lost", reapHostLost], ...(reapForkSources ? [["fork_source", reapForkSources]] : []), ...(reapCheckpoints ? [["checkpoint", reapCheckpoints]] : [])]) {
@@ -4091,6 +4099,7 @@ export async function startWorker(
 					{ name: "session", reap: (options) => sessionStore.reapSessions(options) },
 					...(reapForkSources ? [{ name: "fork_source", reap: reapForkSources }] : []),
 					{ name: "recovery_host_lost", reap: reapHostLost },
+					{ name: "held_index", reap: reapHeldIndex },
 					...(reapCheckpoints ? [{ name: "checkpoint", reap: reapCheckpoints }] : []),
 				],
 				intervalMs: config.sweepIntervalHours * 3600000,
