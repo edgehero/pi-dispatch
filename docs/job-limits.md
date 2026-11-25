@@ -5,7 +5,8 @@ another AI step. It stops after 15 minutes of inactivity. An operator can explic
 Watch jobs retain their separate 30-minute ceiling.
 
 Money is bounded separately, as before: the turn limit (`PI_MAX_TURNS`, `run.maxTurns`) and the cost caps
-(`PI_MAX_COST_USD`, `run.maxCostUsd`) end a job that spends too much, whatever its limits below say.
+(`PI_MAX_COST_USD`, `run.maxCostUsd`) end a job that spends too much, whatever its limits below say. A job is warned
+before the turn limit, the cost cap and a time ceiling stop it ([warnings before the limits](#warnings-before-the-limits)).
 
 ## The three limits
 
@@ -62,7 +63,9 @@ network, and stops the job itself the moment a limit is reached. It writes two c
 files). The worker reads them every 15 seconds and stops the container itself two minutes after the runner should have,
 which only happens when the runner is stuck too badly to stop its own job.
 
-`max-minutes` is the worker's own timer, from the moment the job took its slot.
+`max-minutes` is the worker's own timer, from the moment the job took its slot. The job's runner is told the
+ceiling's length and what was left of it, for the warning at 70% ([warnings before the limits](#warnings-before-the-limits)),
+but only the timer stops the job.
 
 ## When the 30-minute limit still applies
 
@@ -110,12 +113,14 @@ Two things keep the old token: a process the job started before the renewal (a s
 and the forge's own MCP server ([MCP](mcp.md)), which reads its token when it starts. After the token's hour such a
 process's GitHub calls fail, while new commands keep working.
 
-## A warning before the cost cap
+## Warnings before the limits
 
-A job that reaches its cost cap is stopped between two AI calls, and what it had not pushed or reported by then is
-lost. So a job with a cost cap above 0 is told once, when what it has spent reaches 70% of the cap, to write its report
-now and, if its flow pushes, to commit and push its work, and to start no new parallel work. The message is a fixed
-sentence, the same for every job.
+A job that reaches its cost cap, its turn limit or its time limit is stopped, and what it had not pushed or reported by
+then is lost. So a job is told once, when it reaches 70% of each of those limits, to write its report now and, if its
+flow pushes, to commit and push its work, and to start no new parallel work. Each message is a fixed sentence naming
+its limit, the same for every job. The rules listed under the cost cap, all but what counts, apply to each of them.
+
+**The cost cap**: a job with a cost cap above 0 is told when what it has spent reaches 70% of the cap.
 
 - **What counts** is what the cap has charged for calls that finished, the job's and its pi child processes'
   ([what the cap charges](costs.md#what-the-cap-charges)). What calls still running hold does not count: it is the most
@@ -138,14 +143,30 @@ of it, the same advice, under the same rules. What counts is the run record's `t
 finished; a subscription call whose cost could not be read warns nothing, since the next subscription call is refused
 anyway. The record's `costWarned` stays the cap's ([a subscription allowance](triggers.md#a-subscription-allowance-per-job)).
 
-It is a warning and not a stop: the cap still stops the job when the next call could pass it. The turn limit
-(`maxTurns`) and the time limits above have no warning; they stop the job when reached.
+**The turn limit** (`PI_MAX_TURNS`, `run.maxTurns`): every job has one, so every job is told when it has used 70% of
+its turns, counted as the limit counts them (pi's own retries of a step that made no progress do not count). The
+default of 30 warns at the end of step 21 and leaves nine. A limit of 1 or 2 warns at the end of the last step it allows,
+so the AI may never read it. The record's `tokens.turnsWarned` is 1 or 0.
+
+**The time limit** (`max-minutes`: `PI_JOB_MAX_MINUTES`, `run.maxMinutes`): a job with a ceiling is told when 70% of it
+has passed, counted from the moment the job took its slot, as the ceiling is. The worker tells the job's runner the
+ceiling's length and how much of it was left when it built the container's environment, and the runner adds what its
+own clock has seen since; no clock time crosses into the container, so a container whose clock is wrong warns at the
+right time. The container's own start is not counted, so the warning comes that many seconds late. Time is read at
+step ends, so one long tool run can take a job past 70% and past the ceiling with no warning. The 30-minute limit
+([below](#when-the-30-minute-limit-still-applies)) has no warning, and an older job image sends none. The record's
+`tokens.timeWarned` is 1 or 0 on a run with a ceiling.
+
+A warning is not a stop: the cap still stops the job when the next call could pass it, the turn limit at the start of
+the step past it, and the worker's timer at the ceiling. The idle and stall limits have no warning: a job that is idle or
+stalled is taking no steps, so there is no step end to tell it at.
 
 ## What the run record says
 
 Every job that took a slot carries `limits` in its record: the three limits it ran under, `basis` (`activity` or
 `wall-clock`), `why` and `unavailable` when they apply, and from the worker's backstop the last step and the last
-activity it saw. ([`INT-RUN-HISTORY-FILE-CONTRACT`](../specs/interfaces.md))
+activity it saw. Its `tokens` say whether the warnings were queued: `turnsWarned`, and `timeWarned` on a run with a
+ceiling; the run page shows them as Turn warning and Time warning. ([`INT-RUN-HISTORY-FILE-CONTRACT`](../specs/interfaces.md))
 
 ## Claims and cleanup follow the job
 

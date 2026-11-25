@@ -837,6 +837,7 @@ const recordSummary = withRun("Run", (r, view, source) => {
     ["Provider failure", providerFailureSentence(r.providerFailure)],
     ["Provider reset", providerFailureOf(r.providerFailure)?.resetAt !== undefined ? timeHtml(r.providerFailure.resetAt) : null],
     ["Turns", `${cell(r.turns)}${Number.isSafeInteger(r.maxTurns) ? ` of ${r.maxTurns}` : ""}`],
+    ["Turn warning", limitWarningText(r.tokens?.turnsWarned, "turn limit")],
     ["Trigger", r.triggerIndex !== null && r.triggerIndex !== undefined ? html`<a href="/config">row ${r.triggerIndex + 1}</a> (${cell(r.triggerType)})${triggerMatchWords(view)}` : "-"],
     ["MCP", triggerServersRow(view, r)],
     ["Replica", Number.isInteger(r.replica) ? html`${r.replica} of ${cell(r.replicas)}${view.data?.siblings?.length ? html` · ${view.data.siblings.map((s) => html`${runLink(s.jobId)} ${ui.outcomeBadge(s.outcome, recordReason(s))} `)}` : null}` : null],
@@ -948,6 +949,15 @@ export const runCostPanel = withRun("Tokens and dollars", (r, view) => {
 /** Bytes as MiB. */
 const mib = (bytes) => (Number.isFinite(bytes) ? `${count(bytes / (1024 * 1024))} MiB` : "-");
 
+/**
+ * Whether the warning at 70% of a limit was queued (issue #1055, the record's `tokens.turnsWarned` and
+ * `tokens.timeWarned`), in fixed words, or null for a record without the key: a run that did not watch that limit, or
+ * one from before it, renders as it did.
+ */
+function limitWarningText(value, limit) {
+  return value === 1 ? `queued for the agent at 70% of the ${limit}` : value === 0 ? "not queued" : null;
+}
+
 /** Why a run kept the 30-minute limit (issue #888, the record's `limits.why` and `limits.unavailable`), in words. */
 const LIMITS_WHY_WORDS = Object.freeze({ image: "its job image does not declare idleWatch", subscription: "it signed in to its model with a subscription", "forge-token": "its GitHub token comes from an App and lives an hour" });
 const LIMITS_UNAVAILABLE_WORDS = Object.freeze({ "venue-copies": "its venue has no channel for the activity counters", "no-capability": "its image cannot sign the counters on this venue", "no-exit-key": "it had no exit key to sign the counters with", "no-transcript": "it had no transcript folder for the counters" });
@@ -976,6 +986,7 @@ export const runResources = withRun("Resources", (r) => {
     ["Memory pressure", x ? `${(x.memSomeUsec ?? 0) / 1e6} s some, ${(x.memFullUsec ?? 0) / 1e6} s full` : null],
     ["Throttled periods", x?.throttledPeriods],
     ["Limits", limitsText(r.limits)],
+    ["Time warning", limitWarningText(r.tokens?.timeWarned, "time limit")],
     ["Last step seen", r.limits?.lastStepAt ? timeHtml(msOf(r.limits.lastStepAt)) : null],
     ["Last activity seen", r.limits?.lastActivityAt ? timeHtml(msOf(r.limits.lastActivityAt)) : null],
     ["Host offered at admission", r.capacity ? `${r.capacity.slots ?? "?"} slots, ${r.capacity.memMiB ?? "?"} MiB, ${r.capacity.cpuCenti === "off" ? "CPU budget off" : r.capacity.cpuCenti != null ? coresText(r.capacity.cpuCenti) : "CPU budget unknown"}; ${r.capacity.cpus ?? "?"} physical CPUs` : null],

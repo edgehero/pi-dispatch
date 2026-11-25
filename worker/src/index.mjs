@@ -1725,6 +1725,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		let timer;
 		// Issue #888: the job's ceiling (`max-minutes`, only when one is set) and the renewal of its fleet claims.
 		let maxTimer = null;
+		// Issue #1055: when that ceiling falls, on this processor's clock, for the warning before it (`timeLimit` below).
+		let maxDeadlineAt = null;
 		let claimRefresh = null;
 		let subscriptionDeadlineAt = null;
 		// Issue #1046: whether this attempt asked the subscription runtime to prepare (which may claim a connection's trial),
@@ -1852,6 +1854,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			}, timeoutMs);
 			// Issue #888: an operator's ceiling, from the pickup, whatever the watch does. Only when one is set.
 			if (jobLimitsNow?.maxMinutes) {
+				maxDeadlineAt = now() + jobLimitsNow.maxMinutes * minuteMs;
 				maxTimer = setTimeout(() => {
 					Promise.resolve(cancelJob(job.id, "max-minutes")).catch(() => {});
 				}, jobLimitsNow.maxMinutes * minuteMs);
@@ -2023,6 +2026,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// Issue #888: the job's limits and the three hooks its activity watch needs. A dep, never a field of the job:
 				// the job's data is what a recovery re-enqueues, and a worker-computed value must not ride into the queue.
 				activityLimits: jobLimitsNow,
+				// Issue #1055: the ceiling above, for the runner's warning at 70% of it: the whole limit and a reader of what is
+				// left of it, both durations, read when the container's environment is built (run-container.mjs), so the
+				// clone and the image checks before it count, as they count for the timer. Only when the timer is armed.
+				...(maxDeadlineAt !== null ? { timeLimit: { limitMs: jobLimitsNow.maxMinutes * minuteMs, left: () => maxDeadlineAt - now() } } : {}),
 				onActivityArmed: () => {
 					clearTimeout(timer);
 					timer = null;

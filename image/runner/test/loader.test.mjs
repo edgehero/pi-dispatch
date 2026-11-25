@@ -1492,6 +1492,14 @@ test("no builtin: extension (MCP, codemode, tool-search, llama.cpp) is loaded in
 	assert.match(runJob, /if \(policyGuard\?\.cost && cfg\.maxCostMicros > 0\) costWarnings\.watch\(\{ name: COST_CAP, limit: cfg\.maxCostMicros, settled: \(\) => policyGuard\.spend\(\)\.spentMicros \+ childWatch\.settled\(\) \}\);/, "the warning watches a cap above 0, by settled spend only");
 	// Issue #1008: and the subscription allowance above 0, by the meter's settled notional total, only when one is set.
 	assert.match(runJob, /if \(policyGuard\?\.allowance && cfg\.subscriptionAllowanceMicros > 0\) costWarnings\.watch\(\{ name: SUBSCRIPTION_ALLOWANCE, limit: cfg\.subscriptionAllowanceMicros, settled: \(\) => meter\.notionalMicros\(\) \}\);/, "the warning watches an allowance above 0, by the settled notional total");
+	// Issue #1055: the turn limit on every job, by the turn budget's own count read lazily (the budget is attached once
+	// the session exists, so it is declared before the factories and assigned there), and the time limit only when the
+	// worker handed one, by what had passed then plus the process's monotonic clock.
+	assert.match(runJob, /const warnsTurnsAndTime = !\(watchReadOnly \|\| Boolean\(answerDraftInput\)\);/, "not in a run whose loader takes none of these factories");
+	assert.match(runJob, /if \(warnsTurnsAndTime\) costWarnings\.watch\(\{ name: TURN_LIMIT, limit: cfg\.maxTurns, settled: \(\) => budget\?\.state\.turns \?\? null \}\);/, "the warning watches the turn limit on the budget's count");
+	assert.match(runJob, /if \(warnsTurnsAndTime && timeLimit !== null\) costWarnings\.watch\(\{ name: TIME_LIMIT, limit: timeLimit\.maxMs, settled: \(\) => timeLimit\.maxMs - timeLimit\.leftMs \+ performance\.now\(\) \}\);/, "the warning watches a time limit the worker handed");
+	assert.ok(runJob.indexOf("let budget = null;") < runJob.indexOf("costWarnings.watch({ name: TURN_LIMIT") && runJob.indexOf("costWarnings.watch({ name: TURN_LIMIT") < runJob.indexOf("budget = attachTurnBudget(session, cfg.maxTurns"), "declared before the watch, attached after it");
+	assert.match(runJob, /const timeLimit = readTimeLimit\(process\.env\);/, "read, and taken out of the environment, with the other limits");
 	assert.equal(runJob.split("extensionFactories").length - 1, 3, "extensionFactories is built once and passed once");
 	assert.match(runJob, /\.\.\.\(extensionFactories\.length > 0 && \{ extensionFactories \}\)/);
 	assert.match(runJob, /const awaitInput = cfg\.awaitInput \? createAwaitInput\(\{ sessionFile: cfg\.sessionFile \}\) : null;/);

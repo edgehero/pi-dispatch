@@ -213,3 +213,20 @@ test("issue #1008: the allowance used rounds up, as the runner's allowance guard
   assert.equal((models.match(/<tr><td>/g) ?? []).length, 1, "the null row is no table row");
   assert.doesNotMatch(models, /undefined/);
 });
+
+test("a run says whether the warnings at 70% of its turn and time limits were queued, and a run without the keys renders as before (issue #1055)", () => {
+  const run = (tokens, limits = { idleMinutes: 15, stallMinutes: 0, maxMinutes: 60, basis: "activity" }) => view({ run: { record: record({ outcome: "completed", reason: null, turns: 22, maxTurns: 30, tokens: { input: 1, output: 1, total: 2, metered: true, ...tokens }, limits }) } });
+  const warned = run({ turnsWarned: 1, timeWarned: 1 });
+  assert.match(String(runSummary(warned)), /<dt>Turn warning<\/dt><dd>queued for the agent at 70% of the turn limit<\/dd>/);
+  assert.match(String(runResources(warned)), /<dt>Time warning<\/dt><dd>queued for the agent at 70% of the time limit<\/dd>/);
+  const quiet = run({ turnsWarned: 0, timeWarned: 0 });
+  assert.match(String(runSummary(quiet)), /<dt>Turn warning<\/dt><dd>not queued<\/dd>/);
+  assert.match(String(runResources(quiet)), /<dt>Time warning<\/dt><dd>not queued<\/dd>/);
+  // A run that watched no time limit (none was set) carries `turnsWarned` alone; one from before issue #1055 neither.
+  const noCeiling = run({ turnsWarned: 0 }, { idleMinutes: 15, stallMinutes: 0, maxMinutes: null, basis: "activity" });
+  assert.doesNotMatch(String(runResources(noCeiling)), /Time warning/);
+  const older = run({});
+  assert.doesNotMatch(String(runSummary(older)), /Turn warning/);
+  assert.doesNotMatch(String(runResources(older)), /Time warning/);
+  for (const bad of [true, "1", 2, -1]) assert.doesNotMatch(String(runSummary(run({ turnsWarned: bad }))), /Turn warning/, `${bad}: only 0 or 1 is said`);
+});

@@ -939,8 +939,15 @@ function rebuildResources(r) {
  * subscription calls in integer micro-dollars, which the runner's allowance guard writes (after the model guard's
  * counter) only when the trigger set `run.maxSubscriptionUsd`. On the list so the record says what the `costNotional`
  * beside it was held to; nothing settles from it.
+ *
+ * And last `turnsWarned` and `timeWarned` (issue #1055), after `costWarned`: 1 when the warning at 70% of the turn limit,
+ * or of the time limit, was queued for the agent, else 0. The runner writes `turnsWarned` on every run that watched the
+ * turn limit (every run that loads the warnings, under a cap or not) and `timeWarned` on one the worker handed a time
+ * limit (PI_JOB_MAX_MS). Not billing, like `costWarned`: they ride this block because it is the record's closed list of
+ * the runner's numbers, and a sibling block would need a parser of its own. No settlement reads them, and they are no
+ * floor counters. A worker before them drops both.
  */
-export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "childTotal", "childProcesses", "unmeteredChildren", "costUnreported", "costNotional", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused", "allowanceMicros", "costChargedMicros", "costLiftedMicros", "costWaited", "costWarned"]);
+export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "childTotal", "childProcesses", "unmeteredChildren", "costUnreported", "costNotional", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused", "allowanceMicros", "costChargedMicros", "costLiftedMicros", "costWaited", "costWarned", "turnsWarned", "timeWarned"]);
 
 /**
  * Rebuild the billed totals from a closed key list rather than passing the container's object through.
@@ -954,8 +961,8 @@ export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "me
  * did not, and the asymmetry was an oversight rather than a decision.
  *
  * A key the runner omitted stays OMITTED rather than becoming null: the fallback shape legitimately
- * carries only five of the twenty-nine, and a null there would read as "measured zero" for a number nobody
- * measured. `typeof === "number"` rather than `Number.isFinite`, deliberately, so this narrows WHICH
+ * carries only five of the thirty-one (six with issue #1055's `turnsWarned`), and a null there would read as
+ * "measured zero" for a number nobody measured. `typeof === "number"` rather than `Number.isFinite`, deliberately, so this narrows WHICH
  * KEYS survive and never which objects are admitted -- the admission gate above is unchanged.
  */
 function rebuildTokens(t) {

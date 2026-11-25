@@ -240,3 +240,30 @@ test("watch output uses the updated credential redactor after rotation", { skip 
 	h.recorder.close(0);
 	await h.done;
 });
+
+/** A plain run (no watch) with an optional `timeLimit`, recording the argv. */
+function timedRun(timeLimit) {
+	const recorder = {};
+	const jobDir = tempDir("time-limit-run-");
+	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: heldSpawn(recorder), log: () => {} });
+	const done = run({ job: JOB, prepared: { workspace: jobDir, jobDir }, name: "pi-job-time-1", jobId: "time-1", ...(timeLimit !== undefined ? { timeLimit } : {}) });
+	return { recorder, done };
+}
+
+test("issue #1055: the job's ceiling and what is left of it are read when the environment is built, as two durations, and a reader that fails hands nothing", { skip }, async () => {
+	let reads = 0;
+	const { recorder, done } = timedRun({ limitMs: 60 * MIN, left: () => ((reads += 1), 42 * MIN + 0.75) });
+	await new Promise((resolve) => setImmediate(resolve));
+	const env = envOf(recorder.args);
+	assert.deepEqual([env.PI_JOB_MAX_MS, env.PI_JOB_LEFT_MS, reads], [String(60 * MIN), String(42 * MIN), 1], "floored, read once");
+	recorder.close(0);
+	await done;
+	for (const [timeLimit, why] of [[undefined, "no ceiling"], [null, "none handed"], [{ limitMs: 60 * MIN, left: () => { throw new Error("clock"); } }, "a reader that throws"], [{ limitMs: 60 * MIN, left: () => Number.NaN }, "not a number"], [{ limitMs: 60 * MIN, left: () => 0 }, "nothing left"]]) {
+		const quiet = timedRun(timeLimit);
+		await new Promise((resolve) => setImmediate(resolve));
+		const quietEnv = envOf(quiet.recorder.args);
+		assert.deepEqual([quietEnv.PI_JOB_MAX_MS, quietEnv.PI_JOB_LEFT_MS], [undefined, undefined], why);
+		quiet.recorder.close(0);
+		await quiet.done;
+	}
+});

@@ -106,6 +106,10 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// set its own limits past what the file and the deployment allow.
 	"PI_JOB_IDLE_MS",
 	"PI_JOB_STALL_MS",
+	// Issue #1055: the ceiling and what is left of it, for the runner's warning before it. A trigger binding either would
+	// move or silence that warning.
+	"PI_JOB_MAX_MS",
+	"PI_JOB_LEFT_MS",
 	// Issue #888, part 3: a trigger binding it through run.secrets would make the runner read a drop folder the worker never
 	// mounted, or stop it from applying one it did.
 	"PI_CREDENTIAL_REFRESH",

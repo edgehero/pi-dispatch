@@ -72,7 +72,7 @@ import { awaitInputShadow, createAwaitInput, parkedTerminal } from "./src/await-
 import { createRoleSubagents, readRoleInputs, roleSubagentShadow } from "./src/model-roles.mjs";
 import { createReportProgress, reportProgressShadow } from "./src/report-progress.mjs";
 import { assertSteerReady, createInbox } from "./src/inbox.mjs";
-import { createCostWarnings, steersQueued } from "./src/cost-warning.mjs";
+import { createCostWarnings, readTimeLimit, steersQueued, TIME_LIMIT, TURN_LIMIT } from "./src/cost-warning.mjs";
 import { FRAME_FD, frameFdOpen, isolateStdin, openFrameReader } from "./src/steer-frames.mjs";
 import { RECOVERY_PROMPT, recoverSession } from "./src/recover.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
@@ -205,6 +205,9 @@ async function main() {
 	// Issue #888, part 3: whether the worker renews this job's expiring credentials while it runs (a GitHub App token, a
 	// subscription snapshot), through the read-only drop it mounts. Read and removed here, with the limits.
 	const credentialRefreshWanted = readCredentialRefreshWanted(process.env);
+	// Issue #1055: the time limit the worker asked to be warned about (src/cost-warning.mjs `readTimeLimit`), read and taken
+	// out of the environment here with the limits above. A broken value is refused now, free (exit 2).
+	const timeLimit = readTimeLimit(process.env);
 	let subscriptionEntries = [];
 	try { subscriptionEntries = verifySubscriptionAuthEntries(JSON.parse(process.env.PI_SUBSCRIPTION_AUTH ?? "[]")); }
 	catch { throw configError("the subscription snapshot or adapter is unavailable; reconnect or re-stage on its owner host"); }
@@ -387,6 +390,16 @@ async function main() {
 	// The cost warning (issue #985, src/cost-warning.mjs), declared before the meter's exit fields read whether it was
 	// sent (`costWarned`), and built with the extensions below.
 	let costWarnings = null;
+	// The turn budget, declared before the warnings read its count (issue #1055) and attached once the session exists
+	// (attachTurnBudget below). Until then the turn limit's reader answers null, which has not reached it.
+	let budget = null;
+	// Issue #1055: whether the turn and time warnings were queued, on the exit line's tokens after `costWarned`, the
+	// worker's TOKEN_KEYS order: each only when its limit was watched (the turn limit on every job that loads the
+	// warnings, the time limit when the worker handed one), so a classifier, watch or answer-draft run's line has neither.
+	const limitWarnedFields = () => ({
+		...(costWarnings?.watched(TURN_LIMIT) ? { turnsWarned: costWarnings.warned(TURN_LIMIT) ? 1 : 0 } : {}),
+		...(costWarnings?.watched(TIME_LIMIT) ? { timeWarned: costWarnings.warned(TIME_LIMIT) ? 1 : 0 } : {}),
+	});
 	const stopHandler = meterStopHandler({ onTokenAbort, abort: () => void session?.abort() });
 
 	const failureObserver = installProviderFailureObserver({ ModelRuntime, rootSessionId, ...(subscriptionCredentials && credentialRefresher ? { fetch: subscriptionRefreshFetch({ credentials: subscriptionCredentials, refresh: () => credentialRefresher.apply() }) } : {}) });
@@ -449,9 +462,10 @@ async function main() {
 			// The guard's counters with the children's added (childWatch.guardFields): a child's partial count floors the job.
 			// Under a cap, after them (and after `modelRefused`), issue #985's: what the cap charged, the part of it above
 			// pi's own price and the calls that waited, the children's added (chargeFields, read after snapshot() settled a
-			// pending slot), and whether the warning at 70% was queued.
+			// pending slot), and whether the warning at 70% was queued. Then, under a cap or not, whether the turn and time
+			// warnings were queued (issue #1055, limitWarnedFields).
 			const charged = policyGuard?.cost ? { ...childWatch.chargeFields(policyGuard.charges()), costWarned: costWarnings?.warned(COST_CAP) === true ? 1 : 0 } : {};
-			const fields = { tokens: { ...meter.snapshot(), ...(policyGuard ? childWatch.guardFields(policyGuard.snapshot()) : {}), ...charged }, ...(usage ? { usage } : {}) };
+			const fields = { tokens: { ...meter.snapshot(), ...(policyGuard ? childWatch.guardFields(policyGuard.snapshot()) : {}), ...charged, ...limitWarnedFields() }, ...(usage ? { usage } : {}) };
 			return { ...fields, ...roleExitFields() };
 		};
 		finishMeter = () => usageMeter.uninstall();
@@ -530,6 +544,15 @@ async function main() {
 	// allowance would refuse and never on a call still in flight. A total that cannot be read (Infinity) warns nothing:
 	// the next subscription call is refused anyway.
 	if (policyGuard?.allowance && cfg.subscriptionAllowanceMicros > 0) costWarnings.watch({ name: SUBSCRIPTION_ALLOWANCE, limit: cfg.subscriptionAllowanceMicros, settled: () => meter.notionalMicros() });
+	// Issue #1055: the same warning at 70% of the turn limit, for every job (each has one), by the turn budget's own count,
+	// read lazily because the budget is attached once the session exists; it reads N at the end of turn N. Not watched in
+	// a read-only watch or answer-draft run, whose loader takes none of these factories (below), so its exit line says
+	// nothing of a warning it could never send.
+	const warnsTurnsAndTime = !(watchReadOnly || Boolean(answerDraftInput));
+	if (warnsTurnsAndTime) costWarnings.watch({ name: TURN_LIMIT, limit: cfg.maxTurns, settled: () => budget?.state.turns ?? null });
+	// And at 70% of the time limit, only when the worker handed one: what had passed when it built the environment
+	// (`maxMs - leftMs`) plus this process's monotonic clock, which counts from the process's own start.
+	if (warnsTurnsAndTime && timeLimit !== null) costWarnings.watch({ name: TIME_LIMIT, limit: timeLimit.maxMs, settled: () => timeLimit.maxMs - timeLimit.leftMs + performance.now() });
 	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(requestApproval?.factories ?? []), ...(reportProgress?.factories ?? []), ...(roleSubagents?.factories ?? []), ...(inbox ? [inbox.factory] : []), ...(costWarnings.armed() ? [costWarnings.factory] : [])];
 	const watchTools = watchReadOnly ? createWatchTools({ config: watchToolsConfig, runtime: modelRuntime }) : null;
 	const answerTools = answerDraftInput ? createAnswerDraftTools({ input: answerDraftInput, runtime: modelRuntime }) : null;
@@ -832,7 +855,7 @@ async function main() {
 		if (event.type === "auto_retry_end") retryInFlight = false;
 	});
 
-	const budget = attachTurnBudget(session, cfg.maxTurns, {
+	budget = attachTurnBudget(session, cfg.maxTurns, {
 		onAbort: (turns) => log("turn_budget_exceeded", { turns, maxTurns: cfg.maxTurns }),
 	});
 	// Issue #888 (REQ-JOB-ACTIVITY-LIMITS): stop the job when it is idle or stalled, not when it is old. Only when the
@@ -1002,8 +1025,9 @@ async function main() {
 	// `metered: true` on the process-wide snapshot is what tells the daily token counter that this
 	// total includes every in-process session, not just the root's turns.
 	// The cost fields (issue #501) ride only when a cap is set and `modelRefused` (issue #502) only when a list is,
-	// so every other exit line stays byte-identical.
-	const tokens = usageMeter.ok ? meteredExitFields().tokens : { ...pickTotals(tokenBudget.state), metered: false };
+	// so every other exit line stays byte-identical. `turnsWarned` (issue #1055) rides on every line whose run watched
+	// the turn limit, the meter's and this fallback's alike, and `timeWarned` on one that watched a time limit.
+	const tokens = usageMeter.ok ? meteredExitFields().tokens : { ...pickTotals(tokenBudget.state), metered: false, ...limitWarnedFields() };
 	// The per-(provider,model) ledger (issue #53, INT-RUN-HISTORY-FILE-CONTRACT) -- a SIBLING of
 	// `tokens`, never a widening of it: `tokens` rides through the worker verbatim because it holds
 	// nothing but numbers, while the ledger carries id STRINGS the host re-validates through its own

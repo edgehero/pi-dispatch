@@ -40,6 +40,8 @@ Each guide keeps the notes about its own feature. [The last sections](#notes-kep
    sets in jobs itself ([job limits](job-limits.md)). Then plan to rebuild every job image you derived from ours on
    the 5.3.0 image: until it is rebuilt, its jobs keep the 30-minute limit and their credentials are not renewed
    ([the 5.3.0 rows](#530)). The console moves to `http://pi-dispatch.localhost:4790/`, so each browser signs in once more.
+9. **Before the release with the turn and time warnings**, the same check for `PI_JOB_MAX_MS` and `PI_JOB_LEFT_MS`, which
+   that release sets in jobs itself ([the row](#unreleased-warnings-before-the-turn-and-time-limits-1055)).
 
 ## The order
 
@@ -485,7 +487,7 @@ See [what the cap counts](costs.md#what-the-cap-counts) and [a subscription allo
 | Stored state | What changes and how to move it |
 |---|---|
 | Run records | A `cost-cap` record's `why` can be `final-payload` or `turn` (a call that cannot wait refused while another process's call waited), each from the worker's closed list. A capped run's `tokens` gain `costChargedMicros`, `costLiftedMicros`, `costWaited` and `costWarned`, and a `cost-cap` record with a `why` gains `costRefusal`, the refusal's four numbers. Nothing moves: older records keep their values and show none of these rows on the run page. |
-| Jobs | A job with a cost cap above 0 is told once, at 70% of the cap by what it has spent, to report and, if its flow pushes, to push ([job limits](job-limits.md#a-warning-before-the-cost-cap)). Nothing to set. |
+| Jobs | A job with a cost cap above 0 is told once, at 70% of the cap by what it has spent, to report and, if its flow pushes, to push ([job limits](job-limits.md#warnings-before-the-limits)). Nothing to set. |
 | Mixed versions | A worker older than this release drops a `why` it does not know, so a newer job image's `turn` or `final-payload` stop is recorded as `cost-cap` with no `why`; the stop itself is the same. It also drops the four new `tokens` keys and `costRefusal`. An older job image writes none of them and sends no warning. The job image and the worker ship in one window ([the order](#the-order)). |
 
 See [reasons.md](reasons.md#cost-cap) and [what the cap charges](costs.md#what-the-cap-charges).
@@ -517,6 +519,21 @@ worker's daily sweep still records unfinished touches on a host that shares the 
 queue keys and the accounting keys are unchanged; no migration, backup path or older-state detector is needed. An older
 console keeps settling on a view. After upgrading, open the Zero touch page once as an operator and settle anything it
 says is waiting. See [Zero touch](zero-touch.md).
+
+### Unreleased: warnings before the turn and time limits (#1055)
+
+A job is now told once, at 70% of its turn limit (`run.maxTurns`) and at 70% of its time limit (`run.maxMinutes`,
+`PI_JOB_MAX_MINUTES`), to write its report and, if its flow pushes, to commit and push, as it already was at 70% of its
+cost cap ([job limits](job-limits.md#warnings-before-the-limits)).
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Run records | A run's `tokens` gain `turnsWarned` (on every run that watched its turn limit) and `timeWarned` (on a run with a time limit), each 1 when the warning was queued, else 0, after `costWarned`. `v` stays 1. Nothing moves: older records have neither and show no row for them on the run page. |
+| Jobs | Every job now gets the turn warning when it reaches 70% of its turn limit: the default 30 warns at the end of turn 21. A job with a time limit gets the time warning at 70% of it. Nothing to set. |
+| Configuration | The worker writes `PI_JOB_MAX_MS` and `PI_JOB_LEFT_MS` into a job with a time limit and refuses both names anywhere else: a trigger's `run.secrets`, a secret bundle's `endpoints` or what its resolver returns, an overlay `mcp.json` server, and `PI_FORWARD_ENV` ([before you start](#before-you-start), step 9). |
+| Mixed versions | An older job image ignores both variables and sends neither warning, and writes neither key; the time limit still stops the job. An older worker sends no time limit, so a newer image sends the turn warning only, and drops both keys from the record. Upgrade the job image and the worker in one window ([the order](#the-order)). |
+
+See [reasons.md](reasons.md#max-minutes) and [runner-policy](reasons.md#runner-policy) for the stops themselves.
 
 ### Unreleased: a provider's refusal stop is not retried (#950)
 

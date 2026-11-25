@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { createCostWarnings, HELD_TURNS_MAX, LIMIT_WARNING_CUSTOM_TYPE, LIMIT_WARNING_FACTORY, LIMIT_WARNING_PERCENT, LIMIT_WARNINGS, steersQueued, warningThreshold } from "../src/cost-warning.mjs";
+import { createCostWarnings, HELD_TURNS_MAX, LIMIT_WARNING_CUSTOM_TYPE, LIMIT_WARNING_FACTORY, LIMIT_WARNING_PERCENT, LIMIT_WARNINGS, readTimeLimit, steersQueued, TIME_LEFT_ENV, TIME_LIMIT, TIME_LIMIT_ENV, TURN_LIMIT, warningThreshold } from "../src/cost-warning.mjs";
+import { EXIT_POLICY } from "../src/outcome.mjs";
+import { attachTurnBudget } from "../src/turn-budget.mjs";
 import { createJobModelRuntime } from "../src/model-runtime.mjs";
 import { sessionFixture, scriptedSession } from "./helpers/recover-session.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -208,5 +210,79 @@ test("on a real session a queued follow-up never holds the warning back, a queue
 		} finally {
 			s.session.dispose();
 		}
+	}
+});
+
+test("issue #1055: the turn and time limits have their own fixed words, named for the reason each stops a job with, and are watched like the cost cap", () => {
+	assert.equal(TURN_LIMIT, "turn_budget", "the runner's own stop reason (outcome.mjs decideExit)");
+	assert.equal(TIME_LIMIT, "max-minutes", "the worker's timer's reason (processor.mjs)");
+	assert.match(LIMIT_WARNINGS[TURN_LIMIT], /^pi-dispatch: about 70% of this job's turn limit is used\. Write your report now/);
+	assert.match(LIMIT_WARNINGS[TIME_LIMIT], /^pi-dispatch: about 70% of this job's time limit has passed\. Write your report now/);
+	assert.deepEqual(Object.keys(LIMIT_WARNINGS), ["cost-cap", "subscription-allowance", TURN_LIMIT, TIME_LIMIT]);
+	// The default turn limit (30) warns at the end of turn 21; a time limit of an hour at 42 minutes.
+	assert.deepEqual([warningThreshold(30), warningThreshold(60 * 60_000)], [21, 42 * 60_000]);
+	const warnings = createCostWarnings({ rootSessionId: "root" });
+	warnings.watch({ name: TURN_LIMIT, limit: 30, settled: () => 0 });
+	assert.deepEqual([warnings.watched(TURN_LIMIT), warnings.watched(TIME_LIMIT), warnings.warned(TURN_LIMIT)], [true, false, false]);
+	assert.throws(() => warnings.watch({ name: TURN_LIMIT, limit: 30, settled: () => 0 }), /once/);
+	assert.throws(() => warnings.watch({ name: TIME_LIMIT, limit: 1.5, settled: () => 0 }), /whole number above 0/);
+});
+
+test("issue #1055: with several limits past 70% at one turn's end, one warning a turn goes, in the order they were watched, each once", () => {
+	const handlers = [];
+	const sent = [];
+	const warnings = createCostWarnings({ rootSessionId: "root" });
+	let turns = 0;
+	warnings.watch({ name: "cost-cap", limit: 1000, settled: () => 100 });
+	warnings.watch({ name: TURN_LIMIT, limit: 10, settled: () => turns });
+	warnings.watch({ name: TIME_LIMIT, limit: 60_000, settled: () => 50_000.5 });
+	warnings.factory.factory({ on: (event, handler) => handlers.push(handler), sendMessage: (message) => sent.push(message.details.limit) });
+	const turnEnd = () => handlers[0]({ type: "turn_end", toolResults: [{ role: "toolResult" }] }, { sessionManager: { getSessionId: () => "root" }, isIdle: () => false });
+	for (turns = 1; turns <= 9; turns += 1) turnEnd();
+	assert.deepEqual(sent, [TIME_LIMIT, TURN_LIMIT], "the time limit first (past 70% from turn 1), the turn limit at turn 7, the cost cap never");
+	assert.deepEqual([warnings.warned(TIME_LIMIT), warnings.warned(TURN_LIMIT), warnings.warned("cost-cap")], [true, true, false]);
+});
+
+test("issue #1055: the time limit is read from the two variables the worker writes, both or neither, and a broken value is refused before anything spends", () => {
+	assert.deepEqual([TIME_LIMIT_ENV, TIME_LEFT_ENV], ["PI_JOB_MAX_MS", "PI_JOB_LEFT_MS"]);
+	const env = { PI_JOB_MAX_MS: "3600000", PI_JOB_LEFT_MS: "3540000", OTHER: "kept" };
+	assert.deepEqual(readTimeLimit(env), { maxMs: 3_600_000, leftMs: 3_540_000 });
+	assert.deepEqual(env, { OTHER: "kept" }, "both leave the environment once read, so no tool or child sees them");
+	assert.equal(readTimeLimit({}), null, "none handed: no ceiling, or a worker before issue #1055");
+	assert.equal(readTimeLimit({ PI_JOB_MAX_MS: "", PI_JOB_LEFT_MS: "" }), null);
+	assert.deepEqual(readTimeLimit({ PI_JOB_MAX_MS: "2678400000", PI_JOB_LEFT_MS: "1" }), { maxMs: 2_678_400_000, leftMs: 1 }, "31 days and 1 ms are the bounds");
+	const refused = [
+		{ PI_JOB_MAX_MS: "60000" },
+		{ PI_JOB_LEFT_MS: "60000" },
+		{ PI_JOB_MAX_MS: "0", PI_JOB_LEFT_MS: "0" },
+		{ PI_JOB_MAX_MS: "60000", PI_JOB_LEFT_MS: "60001" },
+		{ PI_JOB_MAX_MS: "2678400001", PI_JOB_LEFT_MS: "1" },
+		{ PI_JOB_MAX_MS: "6e4", PI_JOB_LEFT_MS: "1" },
+		{ PI_JOB_MAX_MS: "-1", PI_JOB_LEFT_MS: "1" },
+		{ PI_JOB_MAX_MS: "60000", PI_JOB_LEFT_MS: "1.5" },
+	];
+	for (const bad of refused) assert.throws(() => readTimeLimit({ ...bad }), (error) => error?.piDispatchExit === EXIT_POLICY && /invalid PI_JOB_(MAX|LEFT)_MS/.test(error.message), JSON.stringify(bad));
+});
+
+test("issue #1055: on a real session the turn limit's warning lands once, after the turn the budget counts as the 70% one, and before the next model call", { skip }, async () => {
+	const f = sessionFixture(tempDir("pi-dispatch-cost-warning-turns-"));
+	const { openSessionManager } = await import("../src/session.mjs");
+	const { sessionManager } = openSessionManager({ sessionFile: f.sessionFile, cwd: f.workspace });
+	// As run-job.mjs wires it: the budget attached once the session exists, read lazily by the warning.
+	let budget = null;
+	const warnings = createCostWarnings({ rootSessionId: sessionManager.getSessionId() });
+	warnings.watch({ name: TURN_LIMIT, limit: 4, settled: () => budget?.state.turns ?? null });
+	const built = await scriptedSession(deps, f, { api: "pi-dispatch-cost-warning-turns", script: [lsCall("call-1"), lsCall("call-2"), lsCall("call-3"), text("done")], sessionManager, extensionFactories: [warnings.factory] });
+	budget = attachTurnBudget(built.session, 4, {});
+	try {
+		await built.session.prompt("start");
+		const turnWarnings = (messages) => messages.filter((message) => message.role === "user" && userText(message) === LIMIT_WARNINGS[TURN_LIMIT]).length;
+		assert.equal(built.contexts.length, 4, "no model call of its own");
+		assert.deepEqual(built.contexts.map((context) => turnWarnings(context.messages)), [0, 0, 0, 1], "70% of 4 is 3: after turn 3, read in call 4");
+		assert.deepEqual([budget.state.turns, budget.state.aborted, warnings.warned(TURN_LIMIT)], [4, false, true]);
+		assert.equal(customEntries(f.sessionFile).filter((entry) => entry.details?.limit === TURN_LIMIT).length, 1);
+	} finally {
+		budget.unsubscribe();
+		built.session.dispose();
 	}
 });

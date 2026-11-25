@@ -618,7 +618,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     credential fail mid-run: the agent's calls would fail one by one on a slot it keeps.
   - **The backstop** reads the counters every 15 s and stops the container two minutes after the runner should have
     (`BACKSTOP_GRACE_MS`), so it fires only for a runner too wedged to stop its own job.
-  - **`max-minutes`** is the worker's own timer, from the pickup, armed only when a ceiling is set.
+  - **`max-minutes`** is the worker's own timer, from the pickup, armed only when a ceiling is set. Since issue #1055 the
+    runner is told its length and what was left of it as the environment was built, two durations, for the warning
+    at 70% of it (`DES-DOLLAR-RESERVE-AND-SETTLE`, THE TURN AND TIME WARNINGS); the timer alone still stops the job.
   - **Claims are renewed.** A fleet claim's TTL was safe without a refresh only because no container outlived 30
     minutes. The processor renews every claim it holds every 5 minutes while its job runs (`CLAIM_REFRESH_MS`), each
     refresh acting only on a key still its own; the TTL now bounds only how long a claim outlives a dead worker.
@@ -6816,6 +6818,22 @@ free local model, or using a few successful live probes as proof of every routin
     (`LIMIT_WARNINGS`), a limit and a reader of its settled measure, so a second limit is one row and one `watch`.
     Not in a classifier run, a read-only watch or answer-draft run, or a pi child. Settled, not in flight: a hold is
     far above what it settles at, so counting holds would warn a job of parallel calls at a fraction of its spend.
+  - **THE TURN AND TIME WARNINGS** (issue #1055): the same hook, two more rows, each with its own fixed text whose
+    only figure is the same 70, named for the reason each limit stops a job with. The turn limit (`turn_budget`,
+    `run.maxTurns`) is watched on EVERY job that loads the hook, since every job has one (`PI_MAX_TURNS` is required),
+    on the turn budget's own count (`attachTurnBudget`: root turns, pi's retries of a turn that made no progress left
+    out), read lazily since the budget is attached once the session exists; it reads N at the end of turn N, and the
+    budget stops the job at the start of the turn past the limit, so the default 30 warns at the end of turn 21 and
+    leaves nine. Never pi's `turnIndex`, which starts again at every `agent_start` and counts the retries. The time
+    limit (`max-minutes`, `run.maxMinutes` and `PI_JOB_MAX_MINUTES`) is the worker's own timer from the moment the job
+    took its slot, so the runner knows nothing of it unless told: the worker writes `PI_JOB_MAX_MS` (the whole
+    limit) and `PI_JOB_LEFT_MS` (what was left of it as the container's environment was built), both durations, only
+    when the timer is armed (`INT-CONTAINER-RUNTIME-CONTRACT`), and the runner watches `maxMs - leftMs` plus its own
+    monotonic clock (`performance.now()`, which counts from the process's start). No wall clock crosses the boundary:
+    the container's clock is not trusted (`DES-JOB-ACTIVITY-WATCH`' rule), and a duration measured on each side's own
+    monotonic clock needs none. The exit line says whether each was queued (`turnsWarned`, `timeWarned`), each only
+    when its limit was watched. No capability gates the two variables: an older runner ignores them and warns nothing,
+    the timer still stops the job.
 - **Notional calls** (issue #1008, `notionalProviders`). A call on a subscription connection with no paid extra usage
   bills nothing, so the cap does not count it. The runner builds ONE set of notional providers and hands it to the
   meter and the cost guard alike: a provider is in it only when its entry in the runner's own VERIFIED
@@ -7239,8 +7257,17 @@ free local model, or using a few successful live probes as proof of every routin
 - **Rejected**:
   - **The warning through the steer inbox** (issue #985): the inbox exists only for a steerable job, and a capped job
     need not be one. **The warning by spent plus in-flight holds** (the issue's proposal): a hold is the call's worst
-    case, so a job of parallel calls would be warned at a fraction of its spend. **Turn and time warnings** with it:
-    the turn and time limits are hard stops with no channel of their own; a follow-up, not this change.
+    case, so a job of parallel calls would be warned at a fraction of its spend. ~~**Turn and time warnings** with it:
+    the turn and time limits are hard stops with no channel of their own; a follow-up, not this change.~~ REVERSED by
+    issue #1055: the hook was generic from the start, so a limit is one row and one `watch`, and a job stopped at
+    either limit lost its report exactly as #985's jobs did at the cap; the time limit's missing channel is two
+    worker-written durations, never a clock.
+  - **The time warning on the runner's own clock alone** (issue #1055): the runner starts minutes after the worker's
+    timer does (the clone, the image checks, the container's start), so a limit counted from the runner's start would
+    warn late by all of it, and could warn after the stop. **The wall-clock deadline in the environment**: the
+    container's clock is not trusted, and a skewed one would warn at the wrong time in either direction. **A warning
+    from the worker** (a steer through the inbox at 70%): the inbox exists only for a steerable job, and the worker
+    cannot tell a turn's end, so the message could land after a park.
   - **Count subscription calls at list price** (before issue #1008): a subscription with no paid extra usage bills
     nothing per call, so the cap stopped long subscription work over dollars nobody paid while its quota, the limit
     that matters there, went unguarded by it.
@@ -7335,6 +7362,14 @@ free local model, or using a few successful live probes as proof of every routin
     gets none; the children's spend is as of the last fold, up to a tick old; `costWarned` means queued on the agent: a
     run stopped right after its turn's end never reads it; and the message persists in the transcript, so a resumed or
     recovered run reads an earlier attempt's warning though its own cap starts afresh, and may be warned again.
+  - **the turn and time warnings** (issue #1055): the measures are read at turn ends only, so one long tool run can
+    carry a job past 70% of its time limit and past the limit itself with no warning; the runner's clock starts after
+    the worker built the environment, so the time measure reads short by the container's start and the warning comes
+    that much late; a time limit whose deadline had passed when the environment was built hands nothing (the timer is
+    about to stop the job); the 30-minute wall clock a job keeps without an activity watch (`job-timeout-30m`) has no
+    warning, since only an operator's ceiling is handed; a limit of 1 or 2 turns warns at the end of the turn the
+    budget then stops after, which the model may never read; and a recovered or resumed run counts its own turns and
+    its own timer afresh, as the cap does.
   - **waiting** (issue #985): a job can sit up to 15 minutes behind a hung call before the waiter is refused (the job's
     idle limit, 15 minutes by default, usually ends it first). Across processes (issue #985, part 2): every process
     judges the others as of the last tick, so a waiter waits up to a tick (and its own timer's phase) after a hold
@@ -21429,3 +21464,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-24 (#950) | **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: one row, `provider-stop-refusal`, the runner's exit-2 stop of a run whose provider ended the reply with an explicit refusal. A fixed sentence that never carries the provider's explanation, a reason catalog row whose sentence is that comment, and a page through the hook's spread of `RUNNER_POLICY_REASONS`. Rejected: putting the explanation in the comment, since it is the provider's prose about what the job was asked. UNCHANGED, checked: `DES-MODEL-FAILOVER` (the stop is an exit 2: its model attempt keeps only the marker written before the container started, it writes no cooldown, and it is never retried, so it never fails over), the refusal net and the ended receipt's binding. |
 | 2026-11-25 (#1046) | **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` AMENDED**: the retest residual is closed. An attempt that claimed a trial and never reached the provider gives it back, on the runtime's `container-never-started` verdict and on a refusal returned after the prepare before any container was asked for, through one release in the pickup that names the connection from `auth.check` and is guarded by the holder. A wait keeps its claim; a non-retryable throw before the container is the residual. `CONST-RETRY-INFRA-ONLY` UNCHANGED, checked: the release never throws and never changes the result. `INT-SUBSCRIPTION-QUOTA-KEY` AMENDED (its settled-trial bullet): the store's release and its guards are as they were, with a second caller. |
 | 2026-11-25 (#1076) | **`DES-OPERATOR-CONSOLE` AMENDED**, the passage on the read rule: one known exception (signing in) where there were two. The zero touch page's read, which repaired its accounting outbox and the pending fixes on every view, counts what a settle would do and writes nothing; `zero-touch-settle`, a confirmed operator action, settles; the report's `unresolvedOnly` lets the view say what waits rather than "could not be read". Rejected: the repair kept on the view, repairing on the next console write, a console timer, and the fix repair moved to the worker. **`DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` UNCHANGED, checked**: durable intents and an idempotent completion still separate telemetry failure from action failure; only who runs the completion changed. |
+| 2026-11-25 (#1055) | **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: NEW bullet **THE TURN AND TIME WARNINGS** under the warning: issue #985's hook gains two rows, `turn_budget` (`run.maxTurns`, watched on every job that loads the hook, on the turn budget's own count read lazily, never pi's `turnIndex`; the default 30 warns at the end of turn 21) and `max-minutes` (the operator's ceiling, watched only when the worker hands `PI_JOB_MAX_MS` and `PI_JOB_LEFT_MS`, two durations read as the environment is built, plus the runner's monotonic clock; no wall clock crosses the boundary), each with its own fixed text whose only figure is 70, each recorded (`turnsWarned`, `timeWarned`) only when watched, no capability gate since an older runner ignores the variables. **Rejected**: the 2026-11-22 (#985) bullet's "turn and time warnings with it" REVERSED (the hook was generic, and either limit lost a job its report as the cap did); NEW: the time warning on the runner's clock alone (late by the clone and the start, possibly after the stop), a wall-clock deadline in the environment (an untrusted clock), and a warning sent by the worker (the inbox is for steerable jobs, and the worker cannot tell a turn's end). **Residuals**, NEW **the turn and time warnings**: read at turn ends only, so one long tool run can pass 70% and the limit unwarned; the runner's clock starts after the environment is built, so the time warning is late by the container's start; a deadline already past hands nothing; the 30-minute wall clock without an activity watch has no warning; a limit of 1 or 2 turns warns at the end of the turn the budget stops after; a recovered or resumed run counts afresh. **`DES-JOB-ACTIVITY-WATCH` AMENDED**, one sentence: the `max-minutes` bullet says the runner is told the ceiling's length and what was left of it for the warning, and the timer alone still stops the job; its decision, counters and backstop UNCHANGED, checked. **Code evidence**: image/runner/src/cost-warning.mjs -> LIMIT_WARNINGS, TURN_LIMIT, TIME_LIMIT, readTimeLimit, createCostWarnings (watched); image/runner/run-job.mjs; worker/src/index.mjs (`timeLimit`); worker/src/processor.mjs; worker/src/run-container.mjs; worker/src/env-allowlist.mjs -> buildContainerEnv; worker/src/run-history.mjs -> TOKEN_KEYS; admin/src/console/panels/run.mjs -> limitWarningText. |

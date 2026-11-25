@@ -369,7 +369,7 @@ record says both, under `tokens` (issue #985):
 | `costChargedMicros` | what the cap charged: every settled call of the run and of its pi child processes, in micro-dollars |
 | `costLiftedMicros` | the part of that above pi's own price |
 | `costWaited` | calls that waited for room ([Parallel calls](#parallel-calls)) |
-| `costWarned` | 1 when the warning at 70% of the cap was queued for the agent, else 0 ([job limits](job-limits.md#a-warning-before-the-cost-cap)) |
+| `costWarned` | 1 when the warning at 70% of the cap was queued for the agent, else 0 ([job limits](job-limits.md#warnings-before-the-limits)) |
 
 `tokens.cost` is pi's price for each call, added up. `costChargedMicros` less `costLiftedMicros` is the same amount,
 each call rounded up to the micro-dollar. The lift comes from two rules that keep the cap a hard limit where pi's price

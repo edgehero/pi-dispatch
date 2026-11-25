@@ -76,7 +76,9 @@ mint tokens (`pi-dispatch doctor`). For a subscription, sign in to it again on i
 The run reached its time limit: a ceiling the trigger (`run.maxMinutes`) or the deployment (`PI_JOB_MAX_MINUTES`) set,
 or the 30-minute limit a job keeps when nothing else can bound it (an image without the `idleWatch` capability, or a
 credential that expires while it runs). The run record's `limits` says which. Partial work may exist, and the run is
-not retried.
+not retried. A job with a ceiling was told once, at 70% of it, to report and, if its flow pushes, to push
+(`tokens.timeWarned` is 1 when that message was queued); a job that crosses 70% and the ceiling within one step gets
+no warning, and the 30-minute limit has none.
 
 What to do: raise the ceiling if the work needs longer. For the 30-minute limit, rebuild a derived job image on a
 current base ([job-limits.md](job-limits.md)).
@@ -91,7 +93,8 @@ What to do: nothing to fix. Run the job again if its work is still wanted.
 ### runner-policy
 
 The run ended inside the container before it finished: it used up its turn or token budget, or the runner refused its
-configuration. The model was called, so the run cost money.
+configuration. The model was called, so the run cost money. A job was told once, at 70% of its turn limit, to report
+and, if its flow pushes, to push (`tokens.turnsWarned` is 1 when that message was queued).
 
 What to do: read the job log for the budget it reached or the refusal, and adjust the trigger. See
 [notifications.md](notifications.md).

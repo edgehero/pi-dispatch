@@ -629,7 +629,7 @@ Evidence convention as in `constitution.md`.
   scanned once, so a long line in small chunks costs linear time. The code is still never inferred from provider
   prose: a message that holds the sentence, or even the code, is no evidence. pi-ai's two retryable ChatGPT outages,
   `subscription_sharing_usage_unavailable` and `subscription_sharing_user_unavailable`, are not quota codes. The
-  longest code makes the worst-case line 8,170 characters (the issue #800 paragraph below). The test fixtures are
+  longest code makes the worst-case line 8,215 characters (the issue #800 paragraph below). The test fixtures are
   synthetic shapes verified against the pinned pi 1.5.2 (`image/runner/test/fixtures/chatgpt-usage-limit.mjs`). Exit
   codes, signing and supervisor precedence are UNCHANGED, checked.
 
@@ -869,9 +869,10 @@ refactor apart.
 
   **The whole line has a limit of its own (issue #800): `EXIT_LINE_MAX_BYTES`, 7680 bytes for the whole write**, its
   two newlines and its signature included. Every field above can ride one line, and measured at the pin that line is
-  8,170 characters before the writer fits it, `costNotional` and `allowanceMicros` (issue #1008) included at their
-  widest, 17 characters and 13 digits (through the writer, its message held to the 256-byte head, 6,720, and 7,213 with
-  the supervisor's line); a supervisor's line after the unfitted one (493 at a 44-character job id) makes 8,663, past
+  8,215 characters before the writer fits it, `costNotional` and `allowanceMicros` (issue #1008) included at their
+  widest, 17 characters and 13 digits, and issue #1055's `turnsWarned` and `timeWarned` at the width of every other
+  counter (through the writer, its message held to the 256-byte head, 6,765, and 7,258 with the supervisor's line); a
+  supervisor's line after the unfitted one (493 at a 44-character job id) makes 8,708, past
   the 8,192-character tail, so
   the MAC of a genuine line could already be lost and with it every field, the dollars settling at the floor. 7680
   is 8192 less those 493 less 19 to spare. A job id past 63 characters takes its excess off the limit
@@ -1201,7 +1202,14 @@ refactor apart.
   the runner's monotonic clock, and whether the CPU and network probes could read (`false` where a venue hides them:
   such a probe never counts as activity). The counters the worker's backstop reads are `INT-JOB-ACTIVITY-FILE`.
   Since #895 the worker omits `PI_JOB_STALL_MS` by default (`PI_JOB_STALL_MINUTES=0`), so continuing activity alone
-  keeps a regular job alive. Explicit stall or maximum-time settings and Watch jobs' ceiling are unchanged. The
+  keeps a regular job alive.
+  **The time limit's warning (NEW 2026-11-25, issue #1055).** Given `PI_JOB_MAX_MS` and `PI_JOB_LEFT_MS` (both or
+  neither; each a decimal count of milliseconds from 1 to 31 days, the second no more than the first; env-internal,
+  written only by a worker of issue #1055 or later, removed from the environment before any extension loads; any other
+  value, or one without the other, is a `config` refusal, exit `2`), the runner watches `PI_JOB_MAX_MS - PI_JOB_LEFT_MS`
+  plus its process's monotonic clock against the first and sends the time limit's fixed warning once at 70% of it, at a
+  turn's end (`DES-DOLLAR-RESERVE-AND-SETTLE`); it never stops the job for it, which stays the worker's timer
+  (`max-minutes`). Absent, the run is exactly as before, with no `timeWarned`. Explicit stall or maximum-time settings and Watch jobs' ceiling are unchanged. The
   environment and counters retain their existing shapes; this changes only the worker's default.
 
   **The transcript records (AMENDED 2026-10-19, issue #686 part 1): on a copying venue, the session file's lines on
@@ -1349,6 +1357,14 @@ refactor apart.
   each charged call, rounded up call by call, and the reason a run's `cost` can be far below the cap it stopped at. Numbers
   only; no settlement reads them, and they are no floor counters. The worker's closed key list admits all four; a worker
   before them drops them.
+  **Two more last (issue #1055)**, after `costWarned` (or after whatever the line carries last, under a cap or not, on
+  the meter's line and the fallback's alike): `turnsWarned` (1 when the warning at 70% of the turn limit was queued for
+  the agent, else 0), written on every line whose run watched the turn limit, which is every run that loads the
+  warnings (so not a classifier, read-only watch or answer-draft run, and not a line written before the hook was built),
+  and `timeWarned` (the same for the time limit), written only when the worker handed one (`PI_JOB_MAX_MS`,
+  `INT-CONTAINER-RUNTIME-CONTRACT`; `DES-DOLLAR-RESERVE-AND-SETTLE`, THE TURN AND TIME WARNINGS). Numbers only; no
+  settlement reads them, and they are no floor counters. The worker's closed key list admits both; a worker before them
+  drops them.
   **`costUnreported` (issue #571)** is written by the METER on every metered line, capped or not, after the child
   keys and before the cost fields: calls on a priced model (a rate above 0 in its table, a tier or an allowed
   fallback) whose answer carried broken usage, which pi records as zeros or a partial count, so `cost` holds about $0
@@ -2858,7 +2874,14 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
     (`INT-JOB-ACTIVITY-FILE`), the stall one only when the stall limit is on; absent otherwise, never empty or 0, and
     reserved (`CONTAINER_ENV_NAMES`) so neither `run.secrets` nor `PI_FORWARD_ENV` can set them. `PI_CREDENTIAL_REFRESH`
     (issue #888 part 3), `1` only for an attempt whose renewed credentials are dropped in the read-only
-    `/run/pi-dispatch/credentials` mount (`INT-CREDENTIAL-DROP`), reserved likewise. `PI_MAX_COST_MICROS` (issue #501),
+    `/run/pi-dispatch/credentials` mount (`INT-CREDENTIAL-DROP`), reserved likewise. `PI_JOB_MAX_MS` and
+    `PI_JOB_LEFT_MS` (issue #1055), the job's ceiling (`max-minutes`: the trigger's `run.maxMinutes` and the
+    deployment's `PI_JOB_MAX_MINUTES`, the smaller, a watch job's at most 30) in milliseconds and what was left of it
+    as this environment was built, read on the processor's clock from the timer's own deadline, so the clone and the
+    image checks before the container count as they count for the timer (`INT-RUNNER-EXIT-CODE-PROTOCOL`, "The time
+    limit's warning"); both written only while that timer is armed and some time is left, the second never more than
+    the first, to every image whatever it declares (an older runner ignores them and warns nothing, so no capability
+    gates them), never empty or 0, and reserved likewise. `PI_MAX_COST_MICROS` (issue #501),
     **written by the worker whenever the job has a dollar cap**: the smaller of the trigger's `run.maxCostUsd`
     and the deployment's `maxCostUsd`, each counted only when set (`INT-CONFIG-OVERLAY-CONTRACT`), or `0` for a
     job a dollar window reserves nothing for because every model it may call is local and zero-rated
@@ -7153,7 +7176,8 @@ validator rather than a second copy of it.
                    "modelRefused": <int>,                                                      // issue #502: written only when a model list was set
                    "allowanceMicros": <int>,                                                   // issue #1008: the subscription allowance, written only when the job carried one
                    "costChargedMicros": <int>, "costLiftedMicros": <int>,                       // issue #985: written only when a cost cap was set:
-                   "costWaited": <int>, "costWarned": 0 | 1 } | null,                            // what the cap charged, above pi's price, waits, the 70% warning
+                   "costWaited": <int>, "costWarned": 0 | 1,                                    // what the cap charged, above pi's price, waits, the 70% warning
+                   "turnsWarned": 0 | 1, "timeWarned": 0 | 1 } | null,                          // issue #1055: the 70% warnings of the turn and time limits, each only when watched
     "usage":     { "v": <int>,                                                                  // ledger block version; readers treat an unknown v as opaque-but-present
                    "piAi": "<major.minor.patch>" | null,                                        // the pi-ai the meter priced with, read from the resolved package at install; a rates PROVENANCE stamp
                    "truncated": <int> | null,                                                   // named rows folded into the "other" row at the 8-row cap; 0 = none; null = not reported
@@ -8344,6 +8368,13 @@ validator rather than a second copy of it.
   run stopped at its cap can carry a `cost` far below it (`DES-DOLLAR-RESERVE-AND-SETTLE`). Numbers, rebuilt by the same
   closed list (`TOKEN_KEYS`); no settlement and no cost view's floor reads them. Absent on an uncapped run, from an older
   image, and from a worker before them, which drops them.
+  **Two warning keys (issue #1055)** come last, after `costWarned` or whatever the line carries last: `turnsWarned` (1
+  when the warning at 70% of the turn limit was queued for the agent, else 0), on every run that watched its turn limit,
+  capped or not and on the `metered: false` fallback too, and `timeWarned` (the same for the time limit), only on a run
+  the worker handed a time limit (`INT-CONTAINER-RUNTIME-CONTRACT`'s `PI_JOB_MAX_MS`). Not billing, like `costWarned`:
+  they ride this block because it is the closed list of the runner's numbers. Numbers, rebuilt by `TOKEN_KEYS`; nothing
+  settles from them. Absent on a classifier, read-only watch or answer-draft run, from an older image, and from a worker
+  before them, which drops them. The run page shows them as "Turn warning" and "Time warning".
   **`costUnreported` (issue #571)** rides after the child keys and before the cost guard's counters, on every
   metered line, capped or not, written by the meter: the calls on a priced model whose answer carried broken usage
   (`INT-RUNNER-EXIT-CODE-PROTOCOL` has the rule), the children's included. A non-zero value says pi recorded a
@@ -16517,3 +16548,4 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-24 (#950) | **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: the stopReason table gains the refusal-stop row. A `stopReason: "error"` on provider `anthropic` and `api: "anthropic-messages"` whose pi-ai `rawStopReason` is `refusal`, or which has no `rawStopReason` and whose `errorMessage` begins with the subscription adapter's fixed prefix `Provider stop reason: refusal` (closed by its end or by a space, an em dash and a space), exits `2` / `provider-stop-refusal` with no `message`, where before it was `1` and the queue repeated the whole paid run. It is checked before the credential row, takes no retry-predicate veto, and takes no `providerFailure`, so it records no failure on its model attempt, never cools a model down and never fails over. Its named residuals: every other content stop stays `1`, and so does a `refusal` from a gateway or any other provider on the same api; a proxy an operator puts behind the `anthropic` name is read as Anthropic; pi's own in-session retry of a refusal whose text holds a retry word, or whose connection broke, still pays for its tries; a connection that breaks after the refusal stays a refusal on pi-ai and `1` on the adapter. The contract table's code `2` names the new refusal, the `parseExitReason` member list gains the token, and the paragraph that called the credential row the one place pi's error text is read now names both places that choose the code and the failover reader beside exit `1`. A command job whose handler threw after a refusal stays `command-error`, named as a residual. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record's `reason` enum gains `provider-stop-refusal`, and the runner-reason paragraph's count, which had gone stale, gives way to the set's name and the members it explains. **`INT-ON-FAILURE-HOOK-CONTRACT` AMENDED**: the token is named among the paid terminals that page; the hook's set spreads `RUNNER_POLICY_REASONS`, so nothing in it changed. UNCHANGED, checked: `INT-REASON-CATALOG` (one row, whose sentence is the comment table's, as for every runner stop), `INT-FORGE-ENDED-RECEIPT` (the token prints as `end=stopped reason=provider-stop-refusal` because the catalog now explains it), `INT-FORGE-TERMINAL-RECEIPT`, the exit line's signing and fields, and the worst-case line length (the token is shorter than the longest runner reason). Code evidence: image/runner/src/outcome.mjs (`providerStopRefused`, `PROVIDER_STOP_REFUSAL`); worker/src/run-history.mjs; worker/src/comment-tables.mjs; worker/src/reason-catalog.mjs; tests image/runner/test/outcome.test.mjs, image/runner/test/pinned-api.test.mjs, worker/test/community-auth-adapters.test.mjs. |
 | 2026-11-25 (#1046) | **`INT-SUBSCRIPTION-QUOTA-KEY` AMENDED**, two bullets. The settled-trial bullet's residual is closed. An attempt that never reached the provider (the pickup's `container-never-started` verdict, or a refusal returned after the prepare before any container was asked for) calls the same `releaseTrial` under the same guards, naming the connection from `auth.check`. The #867 bullet on the terminal CLI gains one sentence: a configuration error the deployment reader names is printed as `error: <message>` with exit 2, as by every other verb, where it was reported as `auth-unavailable`. The key, its states and the release's guards are unchanged; no stored state changes. |
 | 2026-11-25 (#1076) | **`INT-TOUCH-INDEX` AMENDED**: who publishes an applied outbox entry (the worker's sweep and an operator's settle, never a page view), the read's `inspect`, and the report's `unresolvedOnly` mark. **`INT-ZERO-TOUCH-FIXES` AMENDED**: the fix store's `settleable` proof by reads alone, `repair` committing what it proves and throwing on a commit not answered, the read's `waiting` counts and its `fixesOpen` from the proof, and the `zero-touch-settle` action with its preview, refusal and confirm answers. **`INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked**: a settle is audited as a `write` row whose kind is `zero-touch-settle`, as each other zero touch action is under its own kind, so no action word is added. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: the action routes are generated per action, and the settle's statuses follow the rules #987 set for a preview and a partial confirm. |
+| 2026-11-25 (#1055) | **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: NEW **The time limit's warning**: `PI_JOB_MAX_MS` and `PI_JOB_LEFT_MS`, both or neither, each 1 ms to 31 days and the second no more than the first, env-internal, removed before any extension loads, any other value a `config` refusal; the runner watches what had passed plus its monotonic clock and warns once at 70%, never stopping the job for it. NEW tokens keys last, after `costWarned`: `turnsWarned` on every line whose run watched its turn limit, capped or not, the fallback's too, and `timeWarned` only with a time limit; the worker's closed list admits both, an older one drops them. The measured worst-case line, the two keys at the width of every other counter, is now 8,215 characters before the writer fits it, 8,708 with a supervisor's line, and through the writer 6,765 and 7,258 (the `subscriptionCode` paragraph's figure moves with it); `EXIT_LINE_MAX_BYTES`, the message room and their reasoning UNCHANGED, checked. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_JOB_MAX_MS` and `PI_JOB_LEFT_MS`, the ceiling and what was left of it as the environment was built, read on the processor's clock from the timer's own deadline, written only while that timer is armed and time is left, to every image (no capability: an older runner ignores them), never empty or 0, reserved (`CONTAINER_ENV_NAMES`) so neither `run.secrets`, a secret bundle, an overlay MCP server nor `PI_FORWARD_ENV` can set them; the capability table UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `tokens.turnsWarned` and `tokens.timeWarned` (0 or 1) last on the closed key list, each only when its limit was watched, shown on the run page; `buildRecord` and the record's version UNCHANGED, checked (tokens pass through it as parsed, so the record fixtures do not move). `INT-JOB-ACTIVITY-FILE` UNCHANGED, checked: the counters and the backstop do not read the new variables. **Code evidence**: image/runner/src/cost-warning.mjs -> readTimeLimit, LIMIT_WARNINGS; image/runner/run-job.mjs; worker/src/env-allowlist.mjs -> buildContainerEnv; worker/src/reserved-env.mjs -> CONTAINER_ENV_NAMES; worker/src/run-container.mjs; worker/src/run-history.mjs -> TOKEN_KEYS. |

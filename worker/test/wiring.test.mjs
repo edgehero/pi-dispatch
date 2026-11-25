@@ -103,7 +103,7 @@ test("the timeout fires cancelJob after timeoutMs", { skip }, async () => {
 });
 
 /** Issue #888: a processor whose container calls `onArmed(args)` once it starts, then waits for the abort. */
-function watchedProcessor({ timeoutMs = 20, jobLimits = () => ({}), minuteMs = 60_000, onStart = () => {}, capabilities = ["idleWatch"], extraDeps = {} }) {
+function watchedProcessor({ timeoutMs = 20, jobLimits = () => ({}), minuteMs = 60_000, onStart = () => {}, capabilities = ["idleWatch"], extraDeps = {}, now = null }) {
 	const cancels = [];
 	let fired;
 	const cancelled = new Promise((resolve) => (fired = resolve));
@@ -118,6 +118,7 @@ function watchedProcessor({ timeoutMs = 20, jobLimits = () => ({}), minuteMs = 6
 		timeoutMs,
 		jobLimits,
 		minuteMs,
+		...(now ? { now } : {}),
 		deps: {
 			mintToken: async () => "t",
 			isDefaultBranchProtected: async () => true,
@@ -235,6 +236,28 @@ test("issue #888: a ceiling cancels as max-minutes, whatever the watch does", { 
 	assert.equal(await within(cancelled, 10_000), "max-minutes");
 	ac.abort();
 	await running;
+});
+
+test("issue #1055: a ceiling reaches the container as its whole length and a reader of what is left of it, on the processor's clock; no ceiling, no reader", { skip }, async () => {
+	let t = 1_000_000;
+	for (const [maxMinutes, expect] of [[60, true], [null, false]]) {
+		let seen = null;
+		let started;
+		const ran = new Promise((resolve) => (started = resolve));
+		const { processor } = watchedProcessor({ timeoutMs: 600_000, jobLimits: () => ({ maxMinutes }), now: () => t, onStart: (args) => { seen = args; started(); } });
+		const ac = new AbortController();
+		const running = processor({ id: `j-time-${maxMinutes}`, data: { kind: "github", repo: "o/r" } }, "tok", ac.signal).catch(() => {});
+		await within(ran, 10_000);
+		assert.equal(Object.hasOwn(seen, "timeLimit"), expect, String(maxMinutes));
+		if (expect) {
+			assert.equal(seen.timeLimit.limitMs, 60 * 60_000);
+			assert.equal(seen.timeLimit.left(), 60 * 60_000, "all of it, at the clock the timer was armed on");
+			t += 90_000;
+			assert.equal(seen.timeLimit.left(), 60 * 60_000 - 90_000, "the clone and the checks before the container count, as they count for the timer");
+		}
+		ac.abort();
+		await running;
+	}
 });
 
 test("an abort stops the container", { skip }, async () => {

@@ -231,7 +231,7 @@ export function makeRunContainer({
 	// credential, so buildContainerEnv writes that value as the credential and reads no host key for the provider. Off the
 	// call bag, never off `job`, for `secrets`' reason. Null (every job that declares none) builds the env as before.
 	// `secondaryCredential` (issue #997) is the same for the role model's provider (a watch rule's `decide` model).
-	const attempt = async function runContainer({ job, token, prepared, checkSecretFilesPlacement = null, secrets = {}, mainCredential = null, secondaryCredential = null, secretFiles = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, privateEndpoints = [], size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null }, counted = NOT_COUNTED) {
+	const attempt = async function runContainer({ job, token, prepared, checkSecretFilesPlacement = null, secrets = {}, mainCredential = null, secondaryCredential = null, secretFiles = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, privateEndpoints = [], size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null, timeLimit = null }, counted = NOT_COUNTED) {
 		// Issue #1023: this run's report that its container is up. Never a throw: it runs inside the child's listeners.
 		const containerUp = () => {
 			try {
@@ -476,6 +476,18 @@ export function makeRunContainer({
 			});
 		}
 		const secretFilePaths = Object.fromEntries(fileNames.map((name) => [name, `${paths.secretFiles}/${name}`]));
+		// Issue #1055: the job's ceiling and what is left of it NOW, as the environment is built, for the runner's warning at
+		// 70% of it: both durations, so no clock crosses into the container. A reader that throws or answers nothing usable
+		// hands nothing (buildContainerEnv omits both), and the timer still stops the job.
+		const timeLeftMs = (() => {
+			if (timeLimit === null || typeof timeLimit?.left !== "function") return null;
+			try {
+				const left = timeLimit.left();
+				return Number.isFinite(left) ? Math.floor(left) : null;
+			} catch {
+				return null;
+			}
+		})();
 		const env = beforeSpawn(() => buildContainerEnv({
 			size,
 			provider: job.provider,
@@ -553,6 +565,8 @@ export function makeRunContainer({
 			idleMs: activityChannel !== null ? activityWatch.idleMs : null,
 			credentialRefresh: credentialsDir !== null,
 			stallMs: activityChannel !== null && Number.isSafeInteger(activityWatch.stallMs) && activityWatch.stallMs > 0 ? activityWatch.stallMs : null,
+			timeLimitMs: timeLeftMs !== null ? timeLimit.limitMs : null,
+			timeLeftMs,
 			authFromPi, // source the provider key from pi's auth.json when the env has none
 			// REQ-TRIGGER-SECRETS: this trigger's resolved secrets, fetched by the processor BEFORE anything
 			// spent. Off the call bag rather than off `job` or the closure: it is neither a per-job fact the
