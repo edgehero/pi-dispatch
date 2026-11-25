@@ -750,6 +750,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     The waiter bookkeeping is one wrapper around the whole pickup (a budget deferral keeps the waiter, any other
     deferral suspends it, any other end forgets it), and every hold is given back by ONE `releaseAllHolds`, pinned by a
     bolt test.
+  - **One wait, two lines** (issue #1074): a job the budget defers logs `host_budget_deferred` (its fields as
+    before) at its wait's first deferral and again only when the gate's `why` changes, and `host_budget_ended`
+    `{ jobId, kind, waitedMs, deferrals }` once when it is admitted, kept in the worker's memory of waits
+    (`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, *The other gates' waits*). Before, it logged a line at every 9 s wake,
+    about 400 an hour for one waiting job. The re-check stays a fixed `BUDGET_RECHECK_MS` (9 s). **Rejected**:
+    backing it off as the scope re-check does. A hold keeps room for its job while the job is away and nothing wakes
+    the job when room frees, so a longer delay is held room left unused for longer, and a waiter must ask again
+    within `HOLD_VERIFY_AFTER_MS` (15 s) or its hold is verified against the queue at every absence.
   - **Never fits**: for a job that can run nowhere else, a size above the budget, or above the project's share of it,
     is a determinate POLICY refusal before any spend (`job-size-exceeds-host`, `-share`), recorded with both sizes
     (`hostBudget` on the record, the log line); the forge comment is generic. Such a job is one on this host's OWN
@@ -8952,7 +8960,7 @@ free local model, or using a few successful live probes as proof of every routin
     a run arriving every 150s behind it) the wakes were 14,254 at the fixed 5s, 4,054 per job and 7,220 per scope.
   - *One cadence per worker, not per processor.* A worker with a host queue runs two processors, one per queue,
     over one in-flight map (`createWorker`). What is remembered of the waits is built once there too
-    (`makeScopeWaitState`) and handed to both, as the in-flight map is. With a memory per processor one scope had
+    (`makeWaitEpisodes`, named `makeScopeWaitState` before issue #1074) and handed to both, as the in-flight map is. With a memory per processor one scope had
     two cadences: a local run waiting on the host queue asked at 20s while a forge job arriving on the shared queue
     asked at 5s, and a take on one queue left the other queue's waiters at the ceiling. Measured as above with the
     older waiter on the host queue and the newcomer on the shared one: the older went first in 15% of 1,600 cases
@@ -8987,14 +8995,16 @@ free local model, or using a few successful live probes as proof of every routin
     coincide: the wait gate's throttled re-ask is the larger of 11s and a quarter of its backoff, plus jitter,
     which is 20s to 22s at an 80s interval. The instant is evidence; the defer record is the answer.
     **Rejected**: a ceiling of a minute, which saves more wakes and would need that floor moved.
-- **A wait is one episode in the log** (issue #1023). The worker keeps two maps in memory (`makeScopeWaitState`,
-  built once in `createWorker` and read and written by the processor of each of its queues).
+- **A wait is one episode in the log** (issue #1023, and since issue #1074 at three more gates, below). The worker
+  keeps two maps in memory (`makeWaitEpisodes`, named `makeScopeWaitState` before issue #1074, built once in
+  `createWorker` and read and written by the processor of each of its queues).
   `scopeBusy` holds, per scope as above, when it became busy with a job waiting (the first deferral on it while it
   had no entry), its newest deferral, and how many remembered jobs wait for it; the entry goes when a job takes the
   scope through this worker (it holds every scope slot it needs: the cadence of each scope it took starts over, and
   of no other scope; a job that took a slot and was deferred at a later gate has taken nothing) and when the last
-  remembered job waiting for it is gone, and it is replaced when the scope has been quiet (above). `scopeWaits`
-  holds, per queue and job id (a job id is unique only within its queue), the job's own `timestamp`, its deferral
+  remembered job waiting for it is gone, and it is replaced when the scope has been quiet (above). `waits`
+  (`scopeWaits` before issue #1074) holds, per gate, queue and job id (a job id is unique only within its queue;
+  the gate is `scope` here, and the other three are below), the job's own `timestamp`, its deferral
   count, the delays its scope deferrals added up to, and the scope it last waited for, from the first deferral
   any of the five scope gates gives it (the folder's identity, the scope's slot, its fleet lease, the project
   row, its fleet lease: all through `deferScope`) until the job holds every scope slot it needs. The log says
@@ -9018,13 +9028,13 @@ free local model, or using a few successful live probes as proof of every routin
     nothing is decided on it: it shapes a delay and two log lines. A restart forgets it, so the scopes start again
     at 5s and a waiting job logs its first line again. **Rejected**: keeping it in Valkey or on the job, a second
     stored fact for a number nothing decides on.
-  - *Bounded.* `scopeWaits` holds at most `SCOPE_WAITS_MAX` (1,000) jobs over the worker's queues, the one
-    deferred longest ago dropped first. An entry goes when its job takes its scope (and with it the job's place
+  - *Bounded.* `waits` holds at most `WAIT_EPISODES_MAX` (1,000, `SCOPE_WAITS_MAX` before issue #1074) waits over
+    the worker's queues and all four gates together, the one deferred longest ago dropped first. An entry goes when its job takes its scope (and with it the job's place
     among the jobs waiting for the scope it last waited for, whatever it then took: a limits row can be gone when
     the job returns), and when the job leaves its processor any other way than
     by a deferral (it ran, it was refused, it failed into a retry or for good: one `finally` around every exit).
     `scopeBusy` holds no entry without a remembered job waiting for it, so it can hold no more entries than
-    `scopeWaits` does and needs no bound of its own. A dropped wait starts over like one a restart forgot.
+    `waits` does and needs no bound of its own. A dropped wait starts over like one a restart forgot.
     A remembered job need not be a live one: a job another host ran, or one cancelled or removed while delayed, is
     remembered until the bound drops it, and its scope's entry with it. So an entry can outlive every live waiter
     of its scope. That is memory only, at most 1,000 waits a worker, and it decides nothing: an entry nobody has
@@ -9045,13 +9055,45 @@ free local model, or using a few successful live probes as proof of every routin
       it says its first line again, and the end line then counts from there.
     - A chained child that waits one re-check for its parent's folder now logs two lines, the first deferral and
       the end, where it logged one.
-  - *Left as they were*, with the flood this entry had: a job the host budget defers logs `host_budget_deferred`
-    on every 9s wake, and a job waiting for a model endpoint or a private endpoint's slot logs
-    `endpoint_busy_deferred` or `private_endpoint_busy_deferred` on every 7s wake. They do not go through
-    `deferScope`, and their cadences are other entries' decisions (`DES-HOST-BUDGET`,
-    `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`). The host slot's own deferral (`host_busy_deferred`, a fixed 5s) runs only where a
-    worker is built without a host budget, which the shipped worker never is, and the canary's deferral (a fixed
-    5s) logs no line.
+  - *The other gates' waits* (issue #1074, which replaced *Left as they were*: until then a job the host budget
+    deferred logged `host_budget_deferred` on every 9s wake, about 400 lines an hour, and a job waiting for a model
+    endpoint's or a private endpoint's slot logged `endpoint_busy_deferred` or `private_endpoint_busy_deferred` on
+    every 7s wake, about 514 an hour). The host budget, a model endpoint's slots and a private endpoint's slots
+    each keep a wait of their own in the same `waits` map, the gate being part of the key (`WAIT_EPISODE_GATES`:
+    `scope`, `endpoint`, `private-endpoint`, `host-budget`), and each wait is one episode in the log:
+    `host_budget_deferred`, `endpoint_busy_deferred` and `private_endpoint_busy_deferred` keep their fields and are
+    said at a wait's first deferral, and `host_budget_ended`, `endpoint_busy_ended` and
+    `private_endpoint_busy_ended`, each `{ jobId, kind, waitedMs, deferrals }`, once when the job gets through that
+    gate holding what it guards (its room in the budget, every endpoint slot, every private endpoint slot it needs).
+    - *A cause*, which a scope wait does not have: such a wait says its first line again when its cause changes. For
+      the budget the cause is the gate's `why` (a wait that starts `unseeded` or `workspace-unseeded` and goes on for
+      `memory`, or one its project's `share` stopped that now waits for `memory`); for an endpoint gate it is the
+      endpoint the job waits for (a job that took its first endpoint and waits for its second). A cause changes when
+      the host's own state does (a job starts or ends, a listing is read), never at a wake, so these lines follow
+      what the host does and not how long a job waits. `where` (`host` or `fleet`) and the budget's `rank` are not
+      causes: neither says the job waits for something else.
+    - *Why the gate is in the key*: the gates are passed in order and each can hold the job up. With one entry per
+      job, a scope wait that followed an endpoint wait (the job's folder taken while the job was away) was read as
+      the endpoint wait going on, and its first line was never said.
+    - *The same rules as a scope wait*: `waitedMs` is the sum of the fixed delays that gate gave the job, a deferral
+      by another gate neither ends the wait nor adds to it, the defer record is still written on every deferral,
+      the processor's one `finally` forgets every gate's wait of a job that leaves it other than by a deferral, the
+      bound covers all four gates together, and an end line is wrapped as `scope_busy_ended` is, since each is said
+      while the job holds slots or room. The lines missing or doubled above are missing or doubled here too, a job
+      one host deferred and another ran first among them.
+    - *Not episodes*: `private_endpoint_hold` (the processor's deferral of a job whose private endpoint this host
+      does not declare, on a fleet's shared queue, once a minute, or of a grant the pickup's own read did not
+      confirm, a rare race) logs as before. The host slot's own deferral (`host_busy_deferred`, a fixed 5s) runs only where a worker is built
+      without a host budget, which the shipped worker never is, and the canary's deferral (a fixed 5s) logs no line.
+    - **Rejected**: backing the 7s and 9s re-checks off as the scope's does, which the issue offered. The flood is
+      cured by the episode alone, and each fixed delay is fixed for its own reason. Nothing wakes a delayed job when a
+      slot or room frees, so every second added to a delay is a freed endpoint slot, or room the budget keeps, left
+      unused for that second. The budget's ranked hold keeps room for its job while the job is away, and a waiter
+      must ask again within `HOLD_VERIFY_AFTER_MS` (15 s) or its hold is verified against the queue at every
+      absence (a test pins `HOLD_VERIFY_AFTER_MS > BUDGET_RECHECK_MS`, `DES-HOST-BUDGET`). And the instants must stay
+      distinct (`INT-WAIT-PROFILES-CONTRACT`): a delay that doubles from 9s or 7s passes the wait gate's 30s floor
+      at its second or third doubling (36s, 56s), and the floor is what tells a polled wait deferral from these by
+      its instant for a reader older than the defer record.
 - **The admin surface** (issue #242's third slice): the pause-windows stack copied — confirm-gated
   `dispatch_limit_*` tools plus the panel's `m` key. The `m` hint lives in the section DIVIDER, not the
   footer: the footer's own width arithmetic (its review-gate comment) has no headroom for another hint,
@@ -11275,7 +11317,10 @@ a tunnel.
     and its address) would still split it, and the id is what the operator already names it by.
   - **A miss is a free deferral**, never a refusal: everything taken so far goes back (endpoint holds, the
     scope's fleet claim and in-process slot, the host slot), the log says `endpoint_busy_deferred` with the
-    endpoint id, and the job is moved to `now + ENDPOINT_BUSY_RECHECK_MS` (7 s, distinct from every other
+    endpoint id at the first miss of a wait (issue #1074: again only when the job comes to wait for another
+    endpoint, and `endpoint_busy_ended` once when the job holds every endpoint slot it needs, where it was a line
+    at every miss; `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, *The other gates' waits*, which also says why the 7 s does
+    not back off), and the job is moved to `now + ENDPOINT_BUSY_RECHECK_MS` (7 s, distinct from every other
     deferral's instant, since the instant was the only trace of why a job is delayed; since issue #737 the move
     records the reason too, `endpoint` with the endpoint's id, `INT-DEFER-REASON-KEY`, and the instant stays the
     trace for a reader older than that record). Nothing has been
@@ -11285,7 +11330,9 @@ a tunnel.
     share an id never share a bound. They are taken in their own step at pickup, after the model endpoints' holds
     and outside the failover branch (inside `acquireEndpoints` a full device would read as "skip this model" and move
     the job to a fallback model), in id order, so the order rule holds across both. An endpoint without `slots`
-    takes none. A miss defers with `private-endpoint` and logs `private_endpoint_busy_deferred`. The boot sweep
+    takes none. A miss defers with `private-endpoint` and logs `private_endpoint_busy_deferred`, at the first miss
+    of a wait and when the job comes to wait for another device, with `private_endpoint_busy_ended` once when it
+    holds its slots (issue #1074, as a model endpoint's wait). The boot sweep
     deletes this host's private claims with the model endpoints', on a host that declares no model endpoint too, and
     the alias-name rule above applies unchanged.
   - **The settings read moved above it**, once per pickup, because the job's effective provider and model
@@ -21465,4 +21512,5 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-25 (#1046) | **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` AMENDED**: the retest residual is closed. An attempt that claimed a trial and never reached the provider gives it back, on the runtime's `container-never-started` verdict and on a refusal returned after the prepare before any container was asked for, through one release in the pickup that names the connection from `auth.check` and is guarded by the holder. A wait keeps its claim; a non-retryable throw before the container is the residual. `CONST-RETRY-INFRA-ONLY` UNCHANGED, checked: the release never throws and never changes the result. `INT-SUBSCRIPTION-QUOTA-KEY` AMENDED (its settled-trial bullet): the store's release and its guards are as they were, with a second caller. |
 | 2026-11-25 (#1076) | **`DES-OPERATOR-CONSOLE` AMENDED**, the passage on the read rule: one known exception (signing in) where there were two. The zero touch page's read, which repaired its accounting outbox and the pending fixes on every view, counts what a settle would do and writes nothing; `zero-touch-settle`, a confirmed operator action, settles; the report's `unresolvedOnly` lets the view say what waits rather than "could not be read". Rejected: the repair kept on the view, repairing on the next console write, a console timer, and the fix repair moved to the worker. **`DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` UNCHANGED, checked**: durable intents and an idempotent completion still separate telemetry failure from action failure; only who runs the completion changed. |
 | 2026-11-25 (#1055) | **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: NEW bullet **THE TURN AND TIME WARNINGS** under the warning: issue #985's hook gains two rows, `turn_budget` (`run.maxTurns`, watched on every job that loads the hook, on the turn budget's own count read lazily, never pi's `turnIndex`; the default 30 warns at the end of turn 21) and `max-minutes` (the operator's ceiling, watched only when the worker hands `PI_JOB_MAX_MS` and `PI_JOB_LEFT_MS`, two durations read as the environment is built, plus the runner's monotonic clock; no wall clock crosses the boundary), each with its own fixed text whose only figure is 70, each recorded (`turnsWarned`, `timeWarned`) only when watched, no capability gate since an older runner ignores the variables. **Rejected**: the 2026-11-22 (#985) bullet's "turn and time warnings with it" REVERSED (the hook was generic, and either limit lost a job its report as the cap did); NEW: the time warning on the runner's clock alone (late by the clone and the start, possibly after the stop), a wall-clock deadline in the environment (an untrusted clock), and a warning sent by the worker (the inbox is for steerable jobs, and the worker cannot tell a turn's end). **Residuals**, NEW **the turn and time warnings**: read at turn ends only, so one long tool run can pass 70% and the limit unwarned; the runner's clock starts after the environment is built, so the time warning is late by the container's start; a deadline already past hands nothing; the 30-minute wall clock without an activity watch has no warning; a limit of 1 or 2 turns warns at the end of the turn the budget stops after; a recovered or resumed run counts afresh. **`DES-JOB-ACTIVITY-WATCH` AMENDED**, one sentence: the `max-minutes` bullet says the runner is told the ceiling's length and what was left of it for the warning, and the timer alone still stops the job; its decision, counters and backstop UNCHANGED, checked. **Code evidence**: image/runner/src/cost-warning.mjs -> LIMIT_WARNINGS, TURN_LIMIT, TIME_LIMIT, readTimeLimit, createCostWarnings (watched); image/runner/run-job.mjs; worker/src/index.mjs (`timeLimit`); worker/src/processor.mjs; worker/src/run-container.mjs; worker/src/env-allowlist.mjs -> buildContainerEnv; worker/src/run-history.mjs -> TOKEN_KEYS; admin/src/console/panels/run.mjs -> limitWarningText. |
+| 2026-11-25 (#1074) | **`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` AMENDED**: its sub-bullet *Left as they were* is REPLACED by *The other gates' waits*. The host budget, a model endpoint's slots and a private endpoint's slots now log a wait as one episode, as the scope gates do since #1023: `host_budget_deferred`, `endpoint_busy_deferred` and `private_endpoint_busy_deferred` keep their fields and are said at a wait's first deferral, and NEW `host_budget_ended`, `endpoint_busy_ended` and `private_endpoint_busy_ended`, each `{ jobId, kind, waitedMs, deferrals }`, once when the job gets through that gate holding what it guards. Measured before: about 400 budget lines and about 514 lines per endpoint gate an hour for one waiting job. Such a wait has a cause (the budget's `why`, the endpoint waited for) and says its first line again when the cause changes, which follows the host's own state and never a wake; `where` and `rank` are not causes. The memory is generalised, not doubled: `makeScopeWaitState`, `scopeWaits` and `SCOPE_WAITS_MAX` are now `makeWaitEpisodes`, `waits` and `WAIT_EPISODES_MAX` (still 1,000, one bound over all four gates), keyed by gate (`WAIT_EPISODE_GATES`), queue and job id, because one entry per job read a scope wait that followed an endpoint wait as the endpoint wait going on and never said its first line. The processor's `finally` forgets every gate's wait. `private_endpoint_hold`, `host_busy_deferred` and the canary's deferral are UNCHANGED, checked, and said so. **Rejected**, with reasons: backing the 7 s and 9 s re-checks off as the scope's does (nothing wakes a delayed job, so a freed slot or held room sits unused for longer; a budget waiter must ask again within `HOLD_VERIFY_AFTER_MS`; a doubled delay passes the wait gate's 30 s floor that tells a polled wait deferral by its instant). The passages that named `makeScopeWaitState` and `scopeWaits` (the one memory per worker, the bound) now name the new spellings and say the old. **`DES-HOST-BUDGET` AMENDED**: NEW sub-bullet **One wait, two lines**, with the rejected backoff and its reasons; the re-check stays `BUDGET_RECHECK_MS`. **`DES-FLEET-LEASES-FOR-SHARED-BOUNDS` AMENDED**: *A miss is a free deferral* and the private endpoint paragraph say the lines are said once per wait, again when the job comes to wait for another endpoint, with the end line; the 7 s instant and every lease rule UNCHANGED, checked. **`DES-WAITING-REASONS` UNCHANGED, checked**: the instants stay distinct, and no delay moved. **Code evidence**: worker/src/index.mjs -> `WAIT_EPISODE_GATES`, `WAIT_EPISODES_MAX`, `makeWaitEpisodes`, `ENDPOINT_BUSY_RECHECK_MS` (its comment), `makeProcessor` (`waits`, `waitKey`, `forgetWait`, `waitAt`, `countWait`, `noteWaitEpisode`, `endWaitEpisode`, `deferScope`, the endpoint, private endpoint and budget gates, the `finally` in `processor`), `createWorker` (the one `waitEpisodes`); worker/src/host-budget.mjs -> `BUDGET_RECHECK_MS` (its comment); worker/test/scope-mutex.test.mjs (a model endpoint wait as one episode at the fixed 7 s, a private endpoint wait said again for another device, an endpoint wait and a scope wait as two episodes, the one bound over two gates, and the renamed bound); worker/test/host-budget-gate.test.mjs (a budget wait as one episode said again when its why changes, at the fixed 9 s; a logger that throws on the end line); worker/test/wiring.test.mjs (one memory per worker, unchanged). |
 | 2026-11-25 (#1072) | **`DES-OPERATOR-CONSOLE` AMENDED**, "The kill switch is offered without a read", part (e), ONE BOUND: a preview and a confirm are two requests with a person between them, so the kill switch's one bound is that a fleet pause or resume preview does not wait on a Valkey the console already knows is silent. The fleet reader keeps when its last registry read ended and says `knownSilent()` when that read got no answer within `SILENCE_KNOWN_MS` (30 s); such a preview reads nothing and says why (`SWITCH_SILENT_LINE`). Otherwise its snapshot stops at its own registry read when that gets no answer (`stopUnanswered`, `registryUnansweredError`), and `PAUSE_SNAPSHOT_TIMEOUT_MS` rises from 2 s to the page deadline less its grace (5 s), closing the slow-Valkey residual; before and after timings measured on a throwaway Valkey, one RESIDUAL (a stop between a preview's registry read and its queue reads) and four REJECTED alternatives. "A paid request has two phases": its first residual is closed, a first add refused by its client with ioredis' `STREAM_NOT_WRITABLE` says nothing was queued (`addNeverLeft`, read at ioredis 5.11.1 and BullMQ 5.80.4, held by a text pin) and its queue is dropped beside its close (`dropDeadQueue`); a later repair add and "Connection is closed." stay may or may not. **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: `knownSilent` joins the `TOOL_FLEET_METHODS` list, and the tool's timing after the change (8.0 s on a stopped Valkey, its reader being new on each call; every queue listed on a slow one). UNCHANGED, checked: `INT-CONSOLE-AUDIT-LOG` (no row, outcome or field changes), the rest of `DES-OPERATOR-CONSOLE`'s residual list (the lock SET, the seed, the expiry compare-and-set, the 11 s connect plus add), `SWITCH_STEP_TIMEOUT_MS` and the confirm's switch. |
