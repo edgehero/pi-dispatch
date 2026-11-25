@@ -211,6 +211,7 @@
     "./question-groups": "./src/question-groups.mjs",
     "./question-group-runtime": "./src/question-group-runtime.mjs",
     "./zero-touch-fixes": "./src/zero-touch-fixes.mjs",
+    "./zero-touch-outcomes": "./src/zero-touch-outcomes.mjs",
     "./local-event": "./src/local-event.mjs",
     "./local-event-store": "./src/local-event-store.mjs",
     "./local-job": "./src/local-job.mjs"

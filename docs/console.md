@@ -1000,12 +1000,14 @@ With no worker online the line is never All clear, and starts with "No worker on
 them." (which then stands in for "Nothing needs you."). On a deployment that has never run a job the line says how
 many steps stand before the first one ([First run](#first-run)), and when Valkey cannot be read, that it could not be
 and the next refresh tries again. The console keeps running while Valkey is down, restarts, stops answering or is refused,
-started that way or not, and within about 30 seconds of Valkey answering its pages read it again, with no restart of the
-console. A page is drawn within about 8 seconds whatever Valkey does: its load asks Valkey for 6 seconds in all, and
-what did not answer by then is said as in any outage, beside what the deployment's files hold (the Insights pages keep
-the bounds of their own reads and can take longer). A page's reads go out together, so a Valkey that is slow and still
-answers is read as before: a page takes its longest chain of reads, and only a chain that is itself longer than those
-6 seconds is cut. While Valkey stays down, a page says "not known" for what it could not read and still shows what the
+started that way or not, and within about 10 seconds of Valkey answering its pages read it again, with no restart of the
+console. A read that could not be made is kept about 5 seconds and then made again, where one that answered is kept for
+its own while (up to 30 seconds): a page stops saying a read failed soon after Valkey is back, and during an outage each
+of the heavier reads is still made at most once in those 5 seconds. A page is drawn within about 8 seconds whatever
+Valkey does, the Insights pages too: its load asks Valkey for 6 seconds in all, and what did not answer by then is said
+as in any outage, beside what the deployment's files hold. A page's reads go out together, so a Valkey that is slow and
+still answers is read as before: a page takes its longest chain of reads, and only a chain that is itself longer than
+those 6 seconds is cut. While Valkey stays down, a page says "not known" for what it could not read and still shows what the
 deployment's files hold: a host page says the hosts could not be read rather than that the host has gone, Set up counts
 the steps it could not judge as not known, Triggers lists the file's rules without their next fires, Configuration shows
 its files read-only, its two secret cards counted from the files too, Connections shows the triggers, the MCP servers
@@ -1748,7 +1750,8 @@ because the question is the run's own words, which only a run page's transcript 
 later run on the same issue exists, because an answer is a new delivery on that issue. "The same issue" ignores the case
 of the repository path and leading zeros in the number. Until that later run ends it has no record, so the console also
 looks in the queue: a park with a run queued or running on its issue is **being answered**, its card links that run, and
-it gets no answer form. The console reads the queue for this at most every 15 seconds while something is parked, up to
+it gets no answer form. The console reads the queue for this at most every 15 seconds while something is parked (a look
+that could not be read is made again after 5), up to
 10,000 queued and running jobs in all (it reads each job's kind and issue, never its text). When that look cannot see
 everything, the card says so and the park gets no answer form, as the run page's Chat panel draws none: a queue too deep
 to check says so ("answer it on the forge, or wait until the queue is shorter"), because on such a queue an answer
@@ -2179,7 +2182,8 @@ the fleet at most 10 seconds, as a held job's cancel does, then says the fleet d
 
 On the parked page, an operator can type an answer under a run that is waiting on an issue and send it. The page offers
 the answer box only where the console has checked, as it will before it queues anything, that it can build the answer
-(for the first 20 parked runs on the page, each check kept 15 seconds; the run page checks the rest): a park it cannot
+(for the first 20 parked runs on the page, each check kept 15 seconds, one that refused or could not be read 5; the run
+page checks the rest): a park it cannot
 answer from here (a pull request, expired data, a comment trigger that would not route a reply) says why under "This
 question cannot be answered here", and one whose check could not be read sends you to its run page, whose Chat panel
 takes the answer too. A viewer, and a read-only console, see the cards without a box. The console does not comment on
@@ -2261,7 +2265,8 @@ the copy would drop what it does not know) are refused by name; re-run either of
 release. A scheduled run is not refused for its data, since it is rebuilt from its trigger alone. The run's page
 offers the re-run only where these checks pass: for a run that cannot be re-run
 for one of them, or for a kind the console cannot re-run, the page says "Not offered for a re-run:" and the reason, in
-the same words the preview would give. The page asks the queue for the run's data at most every 15 seconds; when it
+the same words the preview would give. The page asks the queue for the run's data at most every 15 seconds (every 5
+while the check refuses or could not be read, so a fix is seen within seconds); when it
 cannot, it judges from the record alone, and then only says the data is gone once the run ended more than 8 days ago (a local run:
 a week and a day) or 31 days and a day ago (a forge run, or a recovery of either kind). It looks in the same queues the
 preview does, including the queue of a host that has stopped and left the host registry, and looks for the fleet's
@@ -3275,7 +3280,9 @@ console settles them with **Preview settling**, then **Confirm**: the preview li
 records each once and never runs an action again. Settling twice records nothing twice, and the worker's daily sweep
 also records unfinished touches on a host that shares the logs folder. A viewer, and an operator on a read-only
 console, see who can settle. An action interrupted before it said whether it ran stays unknown: a settle cannot prove
-it.
+it. A change the console knows was not made, whose refusal Valkey did not take, waits for the same settle (2026-11-25,
+#1072): "1 change that was not made is waiting to be settled". The settle closes it, and it is never listed as a fix,
+whatever bytes its file shows later ([Zero touch](zero-touch.md#fix-a-recurring-cause)).
 Ordinary record-field filters remain unchanged.
 
 

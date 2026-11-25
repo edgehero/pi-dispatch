@@ -800,8 +800,8 @@ async function together(reads) {
  *   - `fleet`: a `createFleetReader` instance (`snapshot`, `runsPage`, `runById`, and `parkedCount` for the screens that
  *     read no snapshot). `snapshot()` is called at most once, asked for the waiting jobs only by a screen that draws
  *     them (`PAGE_READS`' `waiting`).
- *   - `insights(window, { fullPaths })`: the assembled insights payload for a window (the caller caches it: it is the
- *     expensive read). `fullPaths` is true only for an operator's `paths=full`.
+ *   - `insights(window, { fullPaths, within })`: the assembled insights payload for a window (the caller caches it: it is the
+ *     expensive read). `fullPaths` is true only for an operator's `paths=full`; `within` is this load's deadline's.
  *   - `whatIf({ model, flow })` (optional): the what-if answer (`whatif.mjs`'s reader, cached and bounded by the caller).
  *   - `pricedModels()` (optional): the priced catalog's `provider/id` strings, for the what-if form's suggestions.
  *   - `audit({ limit, before })`: `readConsoleAudit` bound to the deployment's logs directory.
@@ -845,8 +845,10 @@ async function together(reads) {
  *
  * A load the deadline cut says so (`data.deadlineSpent`), and `data.snapshotFailure` is `{ kind: "late" }` where the snapshot is
  * what it cut. A Valkey that is slow and still answers inside the deadline is cut nowhere. Not timed: what reads
- * files alone (the audit log, the secrets view, the editor's hints), synchronous work, and the Insights pages'
- * assembly, which is mostly a fold over the run records and whose Valkey reads keep the bounds they have inside it.
+ * files alone (the audit log, the secrets view, the editor's hints) and synchronous work, the Insights pages' folds
+ * over the run records among it. The Insights assembly's Valkey reads are under the deadline since issue #1073: they
+ * are made together and each is handed `within` (`assembleInsightsView`), so an assembly ends with its own words for a
+ * read that did not answer, as a `drawn` read does, and is awaited whole.
  *
  * THE READS START TOGETHER (issue #988, with issue #987's sums). One deadline over reads made one after another has a
  * cost of its own: a Valkey that is slow and still answers pays its delay once per read, so a page of thirty reads
@@ -866,18 +868,6 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // Issue #737: the deployment the console serves, by its folder's last part (`cli.mjs`'s `pageDeps.deployment`), for
   // the first run's checklist; null where the caller passes none.
   const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
-  // The Insights assembly is started here, before anything else of the load is set up, and awaited where the page
-  // reads it. It reads the clock for its own window as it starts, and its charts are drawn against `now` above: with
-  // work between the two readings a capacity bar whose window ends a millisecond after the page's instant is drawn as
-  // one with part of it missing, which a first load after a start then showed. The console's cache starts an assembly
-  // one turn of the microtask queue after it is asked for (`cachedPerWindow`), so that turn is given at once: the
-  // assembly has read its clock before this load goes on.
-  const insightsStarted = PAGE_READS[name].includes("insights")
-    ? (async () => deps.insights(q.range ?? INSIGHTS_DEFAULT_RANGE, { fullPaths: q.paths === "full" && who?.role === "operator", project: q.project ?? null, role: who?.role ?? "viewer", view: name === "insights" ? "spend" : name.slice("insights-".length) }))()
-    : null;
-  // Its rejection is taken where the page awaits it; until then it must not be one nobody handles.
-  insightsStarted?.catch(() => {});
-  if (insightsStarted !== null) await null;
   // This load's deadline, and the ways a read runs under it (see above). `cut` marks the load; `within` is the
   // deadline's, remembering whether it handed out less than a read's own bound, which with a deadline that has passed
   // by the time that read's view returns says the view was cut too.
@@ -892,6 +882,18 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     if (ms < ownMs) shortened = true;
     return ms;
   };
+  // The Insights assembly is started here, before anything else of the load is set up, and awaited where the page
+  // reads it. Its Valkey reads are made together and each is handed its own bound or what is left of this load's
+  // deadline (`within`, issue #1073), so a Valkey that does not answer holds the page one bound and not the sum of five.
+  // Its folds over the run records are not timed, as on every page. Its charts are drawn against the instant it was
+  // assembled at (`nowMs`, which it carries), never this load's `now`: a cached assembly is up to its window older than
+  // the load that draws it, and a capacity bar whose window ends after the instant it is drawn against was drawn with
+  // part of it missing.
+  const insightsStarted = PAGE_READS[name].includes("insights")
+    ? (async () => deps.insights(q.range ?? INSIGHTS_DEFAULT_RANGE, { fullPaths: q.paths === "full" && who?.role === "operator", project: q.project ?? null, role: who?.role ?? "viewer", view: name === "insights" ? "spend" : name.slice("insights-".length), within }))()
+    : null;
+  // Its rejection is taken where the page awaits it; until then it must not be one nobody handles.
+  insightsStarted?.catch(() => {});
   const drawn = async (read) => {
     const got = await deadline.settle(read, passed, { grace: true });
     if (shortened && deadline.spent()) cut();

@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeLiveHub } from "../src/console/live.mjs";
 import { loadPageData, PAGES, pagePanels, parsePageQuery } from "../src/console/pages.mjs";
-import { consoleOn, drawn, failing, failingKey, failingQueue, FAR, healthy, HOST, mirroring, NOT_THE_PILLS, NOW, pillOf, READS, REFUSED, rolesOf, RUN, saysUnread, saysWhatIsMissing, STATES, unanswered, UNREAD_WORDS, wordsOf } from "./helpers/real-console.mjs";
+import { WAITING_CUT_TEXT, waitingFloor } from "../src/console/panels/common.mjs";
+import { WAITING_PER_LIST_MAX } from "../src/read-model.mjs";
+import { consoleOn, drawn, erroringKey, failing, failingKey, failingQueue, FAR, healthy, HOST, mirroring, NOT_THE_PILLS, NOW, pillOf, READS, REFUSED, rolesOf, RUN, saysUnread, saysWhatIsMissing, STATES, unanswered, UNREAD_WORDS, wordsOf } from "./helpers/real-console.mjs";
 
 /**
  * The live pill agrees with the page (issue #988): it says Not live wherever a panel of the page says "could not be
@@ -98,6 +100,27 @@ test("each read of these pages that fails is said by a panel and by the pill, in
     assert.deepEqual(marks(got.data).map(Boolean), marks(got.data).map(() => true), `${what}: the reader's own mark`);
     assert.ok(!Object.hasOwn(got.data, "readFailed"), `${what}: the page's own read did not fail, so nothing else said so`);
     assert.deepEqual([got.pill, got.marked], [true, true], `${what}: Not live`);
+  }
+});
+
+test("a waiting read cut only by its own bound leaves the pill Live: the page says the jobs in line may be missing, and no read failed (#1073)", async () => {
+  // Held until now by a golden's bytes alone (issue #1073): the rule (`waitingMarked`) turns the pill for a list that
+  // could not be read and never for the read's bound, since a list read whole and cut at its bound is an answer. One
+  // queue's wait list longer than the read takes, on the real reader.
+  const line = Array.from({ length: WAITING_PER_LIST_MAX + 1 }, (_, i) => `gh-${1000 + i}`);
+  const cut = () => ({ redis: healthy({ ...HOST, "bull:pi-jobs:wait": line }), records: [RUN] });
+  for (const [page, qs] of [["overview", ""], ["fleet", ""], ["host", "name=build3"]]) {
+    for (const role of rolesOf(page)) {
+      const what = `/${page}?${qs} for ${role}`;
+      const got = await drawn(page, qs, consoleOn(cut()), role);
+      const waiting = got.data.snapshot.waiting;
+      assert.deepEqual([waiting.truncated, waiting.queuesCut, Boolean(waiting.unreachable), waiting.listsUnread ?? null, waitingFloor(waiting)?.unread], [true, 0, false, null, false], `${what}: cut at its bound, no list unread`);
+      if (role !== "agent") assert.ok(got.words.includes(WAITING_CUT_TEXT), `${what}: the page says so`);
+      assert.deepEqual([got.pill, got.marked, saysUnread(got.words)], [false, false, false], `${what}: Live`);
+      // The control: the same list answered with an error is a list not read, and the pill says so.
+      const unread = await drawn(page, qs, consoleOn({ ...cut(), redis: erroringKey(healthy({ ...HOST, "bull:pi-jobs:wait": line }), /^bull:pi-jobs:wait$/) }), role);
+      assert.deepEqual([unread.data.snapshot.waiting.listsUnread?.length > 0, unread.pill, unread.marked], [true, true, true], `${what}: a list not read is Not live`);
+    }
   }
 });
 

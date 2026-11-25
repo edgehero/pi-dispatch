@@ -59,6 +59,17 @@ test("Capacity hosts render venues, three state shares, a chart and distinct ope
   assert.match(truncated, /History truncated/);
 });
 
+test("a capacity chart is drawn against the instant its report was assembled at, never the page's later one (#1073)", () => {
+  const p = spendFixture();
+  assert.ok(Number.isFinite(p.nowMs) && p.capacity.window.toMs <= p.nowMs, "the fixture's report ends at its instant");
+  const at = String(capacityHosts(viewOf(p)));
+  // A cached report is drawn by later loads for up to its window: the same chart.
+  assert.equal(String(capacityHosts({ ...viewOf(p), now: p.nowMs + 25_000 })), at, "drawn 25 s later, the same chart");
+  // The control: with no instant of its own (an older payload), the page's is used, and the axis moves with it.
+  const { nowMs, ...older } = p;
+  assert.notEqual(String(capacityHosts({ ...viewOf(p), now: nowMs + 25_000, data: { insights: older } })), at);
+});
+
 test("Capacity chart key explains the five distinct chart marks", () => {
   const text = String(capacityKey());
   for (const label of ["average", "most", "slots", "no data", "idle"]) assert.ok(text.toLowerCase().includes(label), label);

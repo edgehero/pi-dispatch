@@ -23,7 +23,8 @@ export const ZERO_TOUCH_FAILURES = Object.freeze(["read-failed"]);
  * recorded (`touches`), ones interrupted before they said whether they ran (`unknown`, which a settle cannot prove),
  * and fixes whose change landed and whose accounting did not finish (`fixes`). Counts only.
  */
-const waitingOf = (raw) => ({ touches: count(raw?.waiting?.touches), unknown: count(raw?.waiting?.unknown), fixes: count(raw?.waiting?.fixes) });
+// `refused` (issue #1072): changes this host knows were not made, whose refusal waits for a settle.
+const waitingOf = (raw) => ({ touches: count(raw?.waiting?.touches), unknown: count(raw?.waiting?.unknown), fixes: count(raw?.waiting?.fixes), refused: count(raw?.waiting?.refused) });
 /** A view with nothing counted: no totals, so a panel has no zero to draw. */
 const nothing = (state, { nowMs, windowDays, failure = null, waiting = waitingOf(null) }) => ({ state, ...(failure === null ? {} : { failure }), nowMs, windowDays, waiting, coverage: { partial: true, reasons: [] }, totals: {}, projects: [], causes: causes([]), trend: [], groups: [], fixes: [], fixesPartial: true, touchedRunIds: [], waitingRuns: [], ungroupedRunIds: [], grouping: { enabled: false, pending: 0, unassigned: 0, state: "disabled", sources: [] } });
 /**

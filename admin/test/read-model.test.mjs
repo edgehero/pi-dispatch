@@ -2785,6 +2785,40 @@ test("the fleet reader's registry read in part joins the rows it read to the las
   }
 });
 
+test("the kill switch says its list may be short by its OWN discovery's registry read, never by what a snapshot beside it read while it flipped (#1073)", async () => {
+  // Issue #1073 names it, beside the waiting read's: the reader keeps the last registry read of any call in a variable,
+  // and a pause waits on its flips after its discovery. A snapshot beside it can read the registry in that wait; what
+  // the switch says of its list is still its own discovery's, either way round.
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const down = { unreachable: "timed out reaching the host registry" };
+  for (const [mine, beside] of [[down, { hosts: [] }], [{ hosts: [] }, down]]) {
+    const logsDir = tempDir("pd-1073-switch-own-");
+    let open = null;
+    let gate = null;
+    const queue = (_c, opts) => ({ name: opts?.name ?? "pi-jobs", async isPaused() { return false; }, async getJobCounts() { return { waiting: 0 }; }, async getWorkers() { return []; }, async getJobSchedulers() { return []; }, async getActive() { return []; }, async getFailed() { return []; }, async pause() { if (gate) await gate; }, async close() {} });
+    const redis = { on() {}, async get() { return null; }, async mget(...keys) { return keys.map(() => null); }, async smembers() { return []; }, async hgetall() { return {}; }, async zrevrangebyscore() { return []; }, async exists() { return 0; }, async scan() { return ["0", []]; }, async eval() { return null; }, pipeline() { return { hmget() { return this; }, async exec() { return []; } }; }, disconnect() {} };
+    const answers = [mine, beside];
+    const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 }, { makeQueueFn: queue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => answers.shift() ?? { hosts: [] }, discoverHostQueuesFn: async () => ({ names: [], incomplete: null }), nowFn: () => 1_000 });
+    try {
+      gate = new Promise((resolve) => { open = resolve; });
+      const pausing = reader.pause();
+      // Its discovery has read the registry, and its flips wait.
+      while (answers.length > 1) await tick();
+      await tick();
+      const snap = await reader.snapshot();
+      gate = null;
+      open();
+      const res = (await pausing).results[0].res;
+      const what = `own ${JSON.stringify(mine)}, beside ${JSON.stringify(beside)}`;
+      assert.equal(Boolean(snap.queue.fleetDegraded), Boolean(beside.unreachable), `${what}: the snapshot beside it read the registry as it says`);
+      assert.equal(res.blind ?? null, mine.unreachable ?? null, `${what}: the switch says its own discovery's word`);
+    } finally {
+      open?.();
+      await reader.dispose();
+    }
+  }
+});
+
 test("resolveWorkerCount prefers the registry, because getWorkers rests on CLIENT SETNAME", () => {
   assert.deepEqual(resolveWorkerCount({ hosts: [{ name: "b", routes: "true" }, { name: "a", routes: "true" }], workerCount: 9 }), { count: 2, names: ["a", "b"] });
   assert.deepEqual(resolveWorkerCount({ hosts: [], workerCount: 2 }), { count: 2, names: [] }, "an unnamed fleet still counts");
