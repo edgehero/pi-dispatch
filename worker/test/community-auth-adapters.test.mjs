@@ -8,6 +8,7 @@ import { execFileSync } from "node:child_process";
 import { createJiti } from "jiti";
 import { createHash } from "node:crypto";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { fakeNpm } from "./helpers/fake-npm.mjs";
 import { createDefaultAuthAdapters, prepareCommunityAuthAdapter, verifyCommunityAuthAdapter } from "../src/community-auth-adapters.mjs";
 import { loadCommunityAuthHelper } from "../src/community-auth-helper.mjs";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
@@ -322,4 +323,23 @@ for (const adapter of [legacyPrimary, primary]) test(`${adapter} stages without 
 	assert.equal(verifyCommunityAuthAdapter({ adapter, root, digest: receipt.digest }).compatibility, "verified");
 	fs.symlinkSync("../src/auth.ts", join(root, "unsafe-link"));
 	assert.throws(() => verifyCommunityAuthAdapter({ adapter, root, digest: receipt.digest }), /auth-adapter-unsafe-path/);
+});
+
+// Issue #945: a service stages in two steps (`resolveFirst`: `install --package-lock-only`, then `npm ci` of that lock), and
+// each is an npm run that would make the SDK's CLI link the digest walk refuses. Both carry the flag, for both reviewed versions.
+for (const adapter of [legacyPrimary, primary]) test(`${adapter}: a service's stage resolves and installs it without SDK CLI links too, and the receipt verifies (#945)`, async () => {
+	const unpacked = fixture(adapter);
+	const staging = tempDir("auth-stage-service-");
+	const version = adapter.split("@")[1];
+	const npm = fakeNpm({ materialize: (root) => fs.cpSync(unpacked, root, { recursive: true }) });
+	const root = await preparePackage({ fs, entry: { name: "pi-anthropic-oauth", version, dir: "claude-oauth" }, staging, npmBin: "npm", platform: "linux", exec: npm.exec, resolveFirst: true });
+	const runs = npm.calls.map(({ args }) => args).filter((args) => args[0] === "install" || args[0] === "ci");
+	assert.deepEqual(runs.map((args) => args[0]), ["install", "ci"], "the service's two steps, in order");
+	assert.ok(runs[0].includes("--package-lock-only"), "the first resolves and installs nothing");
+	for (const args of runs) {
+		assert.ok(args.includes("--no-bin-links"), `${args[0]}: ${args.join(" ")}`);
+		assert.ok(args.includes("--ignore-scripts"), args[0]);
+	}
+	const receipt = JSON.parse(fs.readFileSync(join(root, ".dispatch-auth-adapter.json"), "utf8"));
+	assert.equal(verifyCommunityAuthAdapter({ adapter, root, digest: receipt.digest }).compatibility, "verified");
 });
