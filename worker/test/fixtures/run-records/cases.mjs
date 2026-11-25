@@ -209,6 +209,8 @@ export function caseInput(name) {
 					costRefusal: { spentMicros: 1_820_000, inflightMicros: 900_000, externalMicros: 40_000, boundMicros: 600_000 },
 					// Issue #1008: the subscription providers whose calls the run made as notional.
 					notionalProviders: ["anthropic"],
+					// Issue #998: where the main model's credential came from, a declared key by its variable's name.
+					mainCredential: { source: "run-secret", variable: "ANTHROPIC_API_KEY" },
 					openshell: { mode: "copy", ruleHosts: ["github.com", "api.anthropic.com"], ruleHostCount: 2, providers: 1, placeholders: 1 },
 					touches: [{ runId: "gh-9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d-r2", at: ms("2026-09-14T14:10:00.000Z"), cause: "steer" }],
 					touchLineageSkipped: "source-unavailable",

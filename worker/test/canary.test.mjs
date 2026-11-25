@@ -169,42 +169,58 @@ test("canary queue discovery takes a queue's meta key only, never a job hash the
 });
 
 test("local runtime restores only base objects, passes only provider credentials and reserves through runJob", async () => {
-	const root = tempDir("canary-runtime-"), workspace = join(root, "original"), retained = join(root, "sandboxes", "one"), logs = join(root, "logs"), jobs = join(root, "jobs");
-	mkdirSync(workspace); mkdirSync(retained, { recursive: true }); mkdirSync(logs);
-	const git = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { PATH: process.env.PATH, HOME: root, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } }).trim();
-	git(["init", "--template=", workspace]); writeFileSync(join(workspace, "file"), "base"); mkdirSync(join(workspace, ".pi", "skills", "edit"), { recursive: true }); writeFileSync(join(workspace, ".pi", "skills", "edit", "SKILL.md"), "---\nname: edit\ndescription: Fixture editing flow\n---\nEdit the repository.\n"); git(["-C", workspace, "add", "."]); git(["-C", workspace, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"]);
-	const sha = git(["-C", workspace, "rev-parse", "HEAD"]);
-	git(["-C", workspace, "remote", "add", "origin", "https://forge.invalid/private"]);
-	writeFileSync(join(workspace, "file"), "original edits");
-	const model = builtinChatModels("anthropic").find((m) => new URL(m.baseUrl).hostname === "api.anthropic.com").id;
-	const candidate = `anthropic/${model}`;
-	writeFileSync(join(retained, "manifest.json"), JSON.stringify({ jobId: "one", backend: "local", baseSha: sha, workspace, createdAt: new Date(instant - 1000).toISOString(), retainUntil: new Date(instant + 86400_000).toISOString() }));
-	writeFileSync(join(retained, "prompt.md"), "Original task, kept private"); writeFileSync(join(retained, "event.json"), "{}"); writeFileSync(join(retained, "model-roles.json"), JSON.stringify({ version: 1, roles: { editor: candidate } }));
-	writeFileSync(join(logs, "one.json"), JSON.stringify(original("one", { session: { resumed: false, reason: "disabled", bytes: null } })));
-	writeFileSync(join(root, "triggers.json"), JSON.stringify({ triggers: [], modelRoles: { default: { editor: candidate } } }));
-	const counters = new Map(), dockerCalls = [], factoryOptions = [];
-	const redis = { on() {}, async ping() {}, disconnect() {}, async scan() { return ["0", []]; }, async set(k, v) { if (counters.has(k)) return null; counters.set(k, v); return "OK"; }, async eval(script, _n, key, token) { if (counters.get(key) !== token) return 0; if (script.includes("DEL")) counters.delete(key); return 1; }, async get(k) { return counters.get(k) ?? null; }, async incr(k) { return this.incrby(k, 1); }, async incrby(k, n) { const value = Number(counters.get(k) ?? 0) + Number(n); counters.set(k, value); return value; }, async decr(k) { return this.incrby(k, -1); }, async decrby(k, n) { return this.incrby(k, -n); }, async expire() {} };
-	const realExec = promisify(execFile);
-	const runtime = await createCanaryRuntime({ env: { PI_LOGS_DIR: logs, PI_JOBS_DIR: jobs, PI_SANDBOX_DIR: join(root, "sandboxes"), PI_TRIGGERS_FILE: join(root, "triggers.json"), PI_SETTINGS_FILE: join(root, "settings.json"), PI_MAX_COST_USD: "1", PI_DAILY_COST_USD: "10", PI_DAILY_TOKEN_CAP: "1000", ANTHROPIC_API_KEY: "provider-only", GITHUB_TOKEN: "never-pass", PI_AUTH_FROM_PI: "0" }, options: { ...options, model: candidate }, now, execCommand: async (bin, args, opts) => { if (bin === "git") return realExec(bin, args, opts); dockerCalls.push(args); return { stdout: "", stderr: "" }; }, redisFactory: () => redis, queueFactory: () => ({ async getJobCounts() { return { active: 0 }; }, async isPaused() { return false; }, async close() {} }), imagePreflightFactory: () => async () => ({ ok: true, capabilities: ["costCap", "modelPolicy", "modelRoles", "exitAuth", "anyUid"] }), containerFactory: (opts) => { factoryOptions.push(opts); return async (args) => {
-		assert.equal(readFileSync(join(args.prepared.workspace, "file"), "utf8"), "base");
-		assert.throws(() => git(["-C", args.prepared.workspace, "remote", "get-url", "origin"]));
-		assert.ok(!existsSync(join(args.prepared.workspace, ".git", "hooks")));
-		assert.equal(args.home, "/home/pi");
-		assert.equal(args.prepared.outboxDir, undefined); assert.equal(args.token, null); assert.deepEqual(args.secrets, {});
-		return { code: 0, aborted: false, exitLineCode: 0, exitAuth: "verified", tokens: { total: 10, cost: 0.1, metered: 0.1 }, usage: null };
-	}; } });
-	try {
-		const report = await executeCanary({ ...options, model: candidate }, { ...runtime, now, id: () => "canary-one" });
-		assert.equal(report.rows[0].candidate.outcome, "completed");
-		assert.ok([...counters.keys()].some((k) => k.startsWith("budget:usd:")), "real dollar reservation executed");
-		assert.ok([...counters.keys()].some((k) => /^budget:\d/.test(k)), "real count reservation executed");
-		assert.ok([...counters.keys()].some((k) => k.startsWith("budget:t:")), "real token ledger executed");
-		assert.deepEqual(factoryOptions[0].hostEnv, { ANTHROPIC_API_KEY: "provider-only" }); assert.equal(factoryOptions[0].globalPiDir, undefined); assert.equal(factoryOptions[0].egress, true);
-		assert.equal(readFileSync(join(workspace, "file"), "utf8"), "original edits");
-		assert.equal(JSON.parse(readFileSync(join(logs, "canary-one.json"))).canary.sourceJobId, "one");
-		assert.ok(!dockerCalls.some((args) => args.includes("--privileged")));
-	} finally { await runtime.close(); }
-	assert.deepEqual(readdirSync(jobs), []);
+	// Issue #998: once with the key in the host's environment, once from the host's pi login, which the replay's container is
+	// handed as its whole environment: its record names the source the key was read from, not the container's view of it,
+	// and so does the record of a replay whose container failed after it ran.
+	for (const via of [{ env: { ANTHROPIC_API_KEY: "provider-only", PI_AUTH_FROM_PI: "0" }, key: "provider-only", source: "host-env" }, { env: { PI_AUTH_FROM_PI: "1" }, key: "sk-from-pi", source: "pi-login", login: true }, { env: { PI_AUTH_FROM_PI: "1" }, key: "sk-from-pi", source: "pi-login", login: true, fails: true }]) {
+		const root = tempDir("canary-runtime-"), workspace = join(root, "original"), retained = join(root, "sandboxes", "one"), logs = join(root, "logs"), jobs = join(root, "jobs");
+		mkdirSync(workspace); mkdirSync(retained, { recursive: true }); mkdirSync(logs);
+		const git = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { PATH: process.env.PATH, HOME: root, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } }).trim();
+		git(["init", "--template=", workspace]); writeFileSync(join(workspace, "file"), "base"); mkdirSync(join(workspace, ".pi", "skills", "edit"), { recursive: true }); writeFileSync(join(workspace, ".pi", "skills", "edit", "SKILL.md"), "---\nname: edit\ndescription: Fixture editing flow\n---\nEdit the repository.\n"); git(["-C", workspace, "add", "."]); git(["-C", workspace, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"]);
+		const sha = git(["-C", workspace, "rev-parse", "HEAD"]);
+		git(["-C", workspace, "remote", "add", "origin", "https://forge.invalid/private"]);
+		writeFileSync(join(workspace, "file"), "original edits");
+		const model = builtinChatModels("anthropic").find((m) => new URL(m.baseUrl).hostname === "api.anthropic.com").id;
+		const candidate = `anthropic/${model}`;
+		writeFileSync(join(retained, "manifest.json"), JSON.stringify({ jobId: "one", backend: "local", baseSha: sha, workspace, createdAt: new Date(instant - 1000).toISOString(), retainUntil: new Date(instant + 86400_000).toISOString() }));
+		writeFileSync(join(retained, "prompt.md"), "Original task, kept private"); writeFileSync(join(retained, "event.json"), "{}"); writeFileSync(join(retained, "model-roles.json"), JSON.stringify({ version: 1, roles: { editor: candidate } }));
+		writeFileSync(join(logs, "one.json"), JSON.stringify(original("one", { session: { resumed: false, reason: "disabled", bytes: null } })));
+		writeFileSync(join(root, "triggers.json"), JSON.stringify({ triggers: [], modelRoles: { default: { editor: candidate } } }));
+		const agentDir = join(root, "agent");
+		if (via.login) { mkdirSync(agentDir); writeFileSync(join(agentDir, "auth.json"), JSON.stringify({ anthropic: { type: "api_key", key: via.key } })); }
+		const counters = new Map(), dockerCalls = [], factoryOptions = [];
+		const redis = { on() {}, async ping() {}, disconnect() {}, async scan() { return ["0", []]; }, async set(k, v) { if (counters.has(k)) return null; counters.set(k, v); return "OK"; }, async eval(script, _n, key, token) { if (counters.get(key) !== token) return 0; if (script.includes("DEL")) counters.delete(key); return 1; }, async get(k) { return counters.get(k) ?? null; }, async incr(k) { return this.incrby(k, 1); }, async incrby(k, n) { const value = Number(counters.get(k) ?? 0) + Number(n); counters.set(k, value); return value; }, async decr(k) { return this.incrby(k, -1); }, async decrby(k, n) { return this.incrby(k, -n); }, async expire() {} };
+		const realExec = promisify(execFile);
+		const runtime = await createCanaryRuntime({ env: { PI_LOGS_DIR: logs, PI_JOBS_DIR: jobs, PI_SANDBOX_DIR: join(root, "sandboxes"), PI_TRIGGERS_FILE: join(root, "triggers.json"), PI_SETTINGS_FILE: join(root, "settings.json"), PI_MAX_COST_USD: "1", PI_DAILY_COST_USD: "10", PI_DAILY_TOKEN_CAP: "1000", GITHUB_TOKEN: "never-pass", PI_CODING_AGENT_DIR: agentDir, ...via.env }, options: { ...options, model: candidate }, now, execCommand: async (bin, args, opts) => { if (bin === "git") return realExec(bin, args, opts); dockerCalls.push(args); return { stdout: "", stderr: "" }; }, redisFactory: () => redis, queueFactory: () => ({ async getJobCounts() { return { active: 0 }; }, async isPaused() { return false; }, async close() {} }), imagePreflightFactory: () => async () => ({ ok: true, capabilities: ["costCap", "modelPolicy", "modelRoles", "exitAuth", "anyUid"] }), containerFactory: (opts) => { factoryOptions.push(opts); return async (args) => {
+			assert.equal(readFileSync(join(args.prepared.workspace, "file"), "utf8"), "base");
+			assert.throws(() => git(["-C", args.prepared.workspace, "remote", "get-url", "origin"]));
+			assert.ok(!existsSync(join(args.prepared.workspace, ".git", "hooks")));
+			assert.equal(args.home, "/home/pi");
+			assert.equal(args.prepared.outboxDir, undefined); assert.equal(args.token, null); assert.deepEqual(args.secrets, {});
+			// What the real container builder answers for a key in its host environment, which is all this container is handed:
+			// on its answer, or on the throw of a container that ran and then failed (a copying venue's collect, say).
+			if (via.fails) throw Object.assign(new Error("output collection failed"), { mainCredentialSource: { source: "host-env" } });
+			return { code: 0, aborted: false, exitLineCode: 0, exitAuth: "verified", tokens: { total: 10, cost: 0.1, metered: 0.1 }, usage: null, mainCredentialSource: { source: "host-env" } };
+		}; } });
+		try {
+			if (via.fails) {
+				await assert.rejects(executeCanary({ ...options, model: candidate }, { ...runtime, now, id: () => "canary-one" }), /canary replay failed/);
+				assert.deepEqual(JSON.parse(readFileSync(join(logs, "canary-one.json"))).mainCredential, { source: via.source }, "the failed replay's record names the pi login too");
+				continue;
+			}
+			const report = await executeCanary({ ...options, model: candidate }, { ...runtime, now, id: () => "canary-one" });
+			assert.equal(report.rows[0].candidate.outcome, "completed");
+			assert.ok([...counters.keys()].some((k) => k.startsWith("budget:usd:")), "real dollar reservation executed");
+			assert.ok([...counters.keys()].some((k) => /^budget:\d/.test(k)), "real count reservation executed");
+			assert.ok([...counters.keys()].some((k) => k.startsWith("budget:t:")), "real token ledger executed");
+			assert.deepEqual(factoryOptions[0].hostEnv, { ANTHROPIC_API_KEY: via.key }); assert.equal(factoryOptions[0].globalPiDir, undefined); assert.equal(factoryOptions[0].egress, true);
+			assert.equal(readFileSync(join(workspace, "file"), "utf8"), "original edits");
+			assert.equal(JSON.parse(readFileSync(join(logs, "canary-one.json"))).canary.sourceJobId, "one");
+			assert.deepEqual(JSON.parse(readFileSync(join(logs, "canary-one.json"))).mainCredential, { source: via.source });
+			assert.ok(!dockerCalls.some((args) => args.includes("--privileged")));
+		} finally { await runtime.close(); }
+		assert.deepEqual(readdirSync(jobs), []);
+	}
 });
 
 

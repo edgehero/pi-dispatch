@@ -966,6 +966,8 @@ const RUN_CARD_STATES = {
   "run-artifacts-expired.operator": () => runCard({ rec: record({ jobId: "gh-pulse", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { state: "expired", counts: { kept: 2, bytes: 190_437, dropped: {} } } }),
   "run-artifacts-elsewhere.operator": () => runCard({ rec: record({ jobId: "gh-pulse", host: "mini2", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { state: "elsewhere", host: "mini2", counts: { kept: 2, bytes: 190_437, dropped: {} } } }),
   "run-artifacts-unreadable.operator": () => runCard({ rec: record({ jobId: "gh-pulse", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { state: "unreadable", counts: { kept: 2, bytes: 190_437, dropped: {} } } }),
+  // Issue #998: a run whose main model spent the key its trigger declared, named on the Model usage card, never a value.
+  "run-credential-declared.operator": () => runCard({ rec: record({ jobId: "gh-pulse", usage: { piAi: "1.6.0", models: [{ provider: "anthropic", model: "claude-sonnet-5-5", calls: 4, input: 900, output: 300, cost: 0.11 }] }, mainCredential: { source: "run-secret", variable: "ANTHROPIC_API_KEY" } }) }),
 };
 export const RUN_PANEL_STATES = Object.freeze(Object.keys(RUN_CARD_STATES));
 

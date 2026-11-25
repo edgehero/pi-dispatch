@@ -411,7 +411,7 @@ test("issue #967: the declared main credential is resolved when the processor na
 	}
 });
 
-test("issue #967: the exemption refuses another provider's name, a PI_FORWARD_ENV name, a file secret and a decision job", async () => {
+test("issue #967: the exemption refuses another provider's name, a PI_FORWARD_ENV name and a file secret, and admits a decision job's declared key", async () => {
 	const restore = withoutEnv(PROVIDER_VARS);
 	try {
 		const spawnFn = () => assert.fail("a reserved name must refuse before any resolver runs");
@@ -424,10 +424,11 @@ test("issue #967: the exemption refuses another provider's name, a PI_FORWARD_EN
 		// A file secret of the same name keeps it reserved, in either map.
 		assert.equal((await fn(job({ OPENROUTER_API_KEY: "op://ci/or/key" }, { provider: "openrouter", secretFiles: { OPENROUTER_API_KEY: "op://ci/or/file" } }), { mainCredential: "OPENROUTER_API_KEY" })).reserved, "OPENROUTER_API_KEY");
 		assert.equal((await fn(job({}, { provider: "openrouter", secretFiles: { OPENROUTER_API_KEY: "op://ci/or/file" } }), { mainCredential: "OPENROUTER_API_KEY" })).reserved, "OPENROUTER_API_KEY");
-		// An answer draft keeps the host's credential, so its provider's variable stays reserved however it is named.
-		assert.equal((await fn(job({ OPENROUTER_API_KEY: "op://ci/or/key" }, { provider: "openrouter", answerDraft: { runId: "r" } }), { mainCredential: "OPENROUTER_API_KEY" })).reserved, "OPENROUTER_API_KEY");
-		// Issue #997: a watch job declares a key like any trigger's job.
-		assert.equal((await resolver({}, { hostEnv: {} }).fn(job({ OPENROUTER_API_KEY: "op://ci/or/key" }, { provider: "openrouter", watch: { findingId: "f" } }), { mainCredential: "OPENROUTER_API_KEY" })).ok, true);
+		// Issue #997: a watch job declares a key like any trigger's job, and since issue #1013 an answer draft and a question
+		// grouping do too, with the secrets their answer rule or the zeroTouch block declares.
+		for (const decision of [{ watch: { findingId: "f" } }, { answerDraft: { runId: "r" } }, { questionGrouping: { runId: "r" } }]) {
+			assert.equal((await resolver({}, { hostEnv: {} }).fn(job({ OPENROUTER_API_KEY: "op://ci/or/key" }, { provider: "openrouter", ...decision }), { mainCredential: "OPENROUTER_API_KEY" })).ok, true, Object.keys(decision)[0]);
+		}
 	} finally {
 		restore();
 	}

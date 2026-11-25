@@ -618,8 +618,6 @@ In detail:
 - **Only the API-key variable counts**, and only when all of these hold:
   - it is in `run.secrets`, not `run.secretFiles` (a file secret's variable is a path, never the key);
   - it is not on `PI_FORWARD_ENV`;
-  - the job is not an answer draft or a question grouping (an answer rule and the `zeroTouch` settings have no
-    `run.secrets`, so their models always take this host's credential);
   - the provider is not one that needs host authentication (`amazon-bedrock`, `github-copilot`, `google-vertex`,
     `openai-codex`);
   - the provider is not bound to a subscription on this host ([subscription-auth.md](subscription-auth.md)).
@@ -631,17 +629,37 @@ In detail:
   the same terms as above: the host's key for that provider is not read, an empty value refuses, and its other
   variables (`ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`) stay `secret-name-reserved`. A watch rule's investigation
   declares its own provider's key the same way. A classifier on the investigation's provider shares that one key.
+- **An answer rule and the `zeroTouch` block declare their models' keys in `secrets`.** Neither has a `run`, so each
+  takes `secrets` (and `secretsProfile`) of its own, beside its other fields
+  ([answer rules](answer-rules.md#a-key-of-the-rules-own), [zero touch](zero-touch.md)). Its names are judged by the
+  rules of `run.secrets` above, and must be the API-key variable of a provider pi knows: an OAuth or bearer variable
+  (`..._OAUTH_TOKEN`, `..._AUTH_TOKEN`), a host-authenticated provider's variable and any other name (a typo such as
+  `OPENAI_APIKEY`, or `DATABASE_URL`) are refused when the file loads, so a name no model could take never leaves its
+  model on this host's key. A draft job receives the keys its model's and its decision model's providers read; a
+  grouping job those of its classifier's provider (`zeroTouch.model`) and of the deployment's default provider, which
+  it runs on as its main model and which is known only when the job starts. The worker withholds the key of any other
+  provider, resolving nothing for it, and logs `declared_key_withheld` with the names, never a value; doctor warns
+  about such a name. Each declared key then works as above: it is that model's only
+  credential, the host's key for that provider never reaches the job, an empty value refuses the job before anything
+  spends, and the other rules (`PI_FORWARD_ENV`, host authentication, a subscription binding) apply unchanged. Both
+  fields need triggers file version 12.
 - **A project bundle never sets it.** A bundle carrying a provider variable of the job, or of the provider of a
   model in its `run.auxiliaryModels`, is refused as `secret-name-reserved`: its names exist only once it is read, after
   the credential gates, and one bundle serves every trigger of a project.
 - **The worker says so.** The log line `provider_credential_declared` names the provider and the variable (never
-  the value), for the main model's key, a watch rule's `decide` model's and an auxiliary model's alike, and
-  `pi-dispatch doctor` prints a line naming each trigger whose key replaces this host's credential, for which of those
-  models, and where: on every job of the trigger, on a random candidate's draws, or on a fallback's failover attempts.
+  the value), for the main model's key, a watch rule's `decide` model's, an auxiliary model's, an answer draft's and a
+  grouping job's alike, and `pi-dispatch doctor` prints a line naming each trigger whose key replaces this host's
+  credential, for which of those models, and where: on every job of the trigger, on a random candidate's draws, or on a
+  fallback's failover attempts. It names an answer rule's and the `zeroTouch` block's declared keys in lines of their
+  own. Afterwards, the run's record says which key its main model spent (`mainCredential`): `run-secret` with the
+  declared variable's name, or `host-env`, `pi-login`, `subscription` or `keyless`, never a value. The run page shows it
+  as the Model usage card's Credential row ([which key a run spent](console.md#which-key-a-run-spent)).
   The console's Provider API keys card (Connections) names the same triggers under the provider's slot, watch rules
   included, resolving model roles as doctor does (a watch rule takes none, as in the worker), adds "(for its decide
   model)" or "(for its auxiliary model)" to a trigger whose own jobs run on another provider, and says where this host
   refuses them (a managed row, or this host's `PI_FORWARD_ENV`) and that another host's forward list or bindings can.
+  It names an answer rule or the `zeroTouch` block that declares the slot's variable after the triggers, with "(for
+  its decision model)" or "(for its grouping model)" where only that model runs on the provider.
   Doctor
   checks each trigger, each random candidate and each fallback the worker would try against that one's own
   provider, so a trigger on `openai` binding `ANTHROPIC_API_KEY` is not a clash, and one on `openrouter` with

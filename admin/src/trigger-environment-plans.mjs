@@ -38,7 +38,7 @@ import { makeMcpCheck, mcpRouteCuts, reservedJobNames } from "@edgehero/pi-dispa
 import { readOverlayModels } from "@edgehero/pi-dispatch/model-endpoints";
 import { checkFailoverCandidate, selectFailoverJob } from "@edgehero/pi-dispatch/model-failover";
 import { RADIUS_COST_CAP_FIX, RADIUS_COST_CAP_LABEL } from "@edgehero/pi-dispatch/model-observation";
-import { failoverListUsable, modelOnList, splitModelEntry } from "@edgehero/pi-dispatch/model-ref";
+import { failoverListUsable, modelOnList, modelSelectionProblem, modelSelectionShares, modelShareText, splitModelEntry } from "@edgehero/pi-dispatch/model-ref";
 import { effectiveCostCapMicros, formatMicros, optionalUsdMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { outputCapView, outputUnboundable } from "@edgehero/pi-dispatch/output-cap";
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
@@ -206,8 +206,12 @@ function changeWords(key, before, after, facts, effective = null) {
     }
     case "models":
       return { line: listChange("Allowed models", before, after) };
-    case "modelSelection":
-      return { line: after === undefined ? "Random selection: removed; fixed or ordered fallback mode applies." : `Random selection: one eligible model from ${after.candidates.join(", ")}, chosen once per new run. No primary or fallback order applies.` };
+    case "modelSelection": {
+      if (after === undefined) return { line: "Random selection: removed; fixed or ordered fallback mode applies." };
+      // Issue #996: a weighted pool says each candidate's share of the pool, the page's own rule; one without weights reads as before.
+      const shares = after.weights !== undefined && modelSelectionProblem(after) === null ? modelSelectionShares(after).map(({ ref, share }) => `${ref} ${modelShareText(share)}`).join(", ") : null;
+      return { line: `Random selection: one eligible model from ${after.candidates.join(", ")}${shares === null ? "" : `, weighted to these shares of the pool: ${shares}`}, chosen once per new run. No primary or fallback order applies.` };
+    }
     case "fallbackModels":
       return { line: listChange("Fallback models", before, after) };
     case "mcp": {

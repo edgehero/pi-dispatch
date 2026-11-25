@@ -2,14 +2,17 @@ import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { parseTriggersDocument } from "./triggers.mjs";
 import { questionDigest, QUESTION_RUN_RE, QUESTION_GROUP_LIMITS } from "./question-groups.mjs";
+import { declaredKeyFields } from "./answerer-runtime.mjs";
 
 export const QUESTION_GROUP_REASONS = Object.freeze(["question-group-unavailable", "question-group-config-changed", "question-group-source-expired", "question-group-source-unavailable", "question-group-source-oversize", "question-group-candidates-expired", "question-group-limit", "question-group-stale", "question-group-refused", "question-group-unanswered", "question-group-output-invalid"]);
 const policy = (reason) => ({ outcome: "policy", reason, budgetReserved: false });
 const modelRef = (text) => { const slash = text.indexOf("/"); return { provider: text.slice(0, slash), id: text.slice(slash + 1) }; };
 export const questionGroupConfigDigest = (config) => questionDigest(config);
 
-/** Queue data is references only. Private context is non-enumerable because queue deferrals serialize job.data. */
-export function makeQuestionGroupRuntime({ store, triggersPath, getSettings = () => ({}), resolveClassifier = () => null, readFile = nodeFs.readFileSync, fs = nodeFs } = {}) {
+/** Queue data is references only. Private context is non-enumerable because queue deferrals serialize job.data.
+ * `providerKeyNames` (issue #1013) is pi's variable list for a provider, as the answer draft's builder takes it: it decides
+ * which of the block's declared keys the grouping job receives. Unwired, none. */
+export function makeQuestionGroupRuntime({ store, triggersPath, getSettings = () => ({}), resolveClassifier = () => null, providerKeyNames = () => [], readFile = nodeFs.readFileSync, fs = nodeFs, log = () => {} } = {}) {
 	const config = () => parseTriggersDocument(readFile(triggersPath, "utf8"), triggersPath).zeroTouch;
 	return {
 		async resolve(data, runId) {
@@ -48,8 +51,12 @@ export function makeQuestionGroupRuntime({ store, triggersPath, getSettings = ()
 				candidateIds: { value: source.candidates.map((candidate) => candidate.id) },
 				revision: { value: source.revision }, project: { value: source.meta.project }, jobId: { value: runId },
 			});
+			// Issue #1013: the block's declared provider keys, for the job's main model (the settings file's provider, known only
+			// now, never at load) and its classifier only. Names only in the log line, never a reference.
+			const declared = declaredKeyFields(current, [settings.provider, classifier.provider], providerKeyNames);
+			if (declared.withheld.length > 0) log("declared_key_withheld", { zeroTouch: true, names: declared.withheld });
 			await store.setStatus(ref.runId, "pending");
-			return { data: { kind: "local", purpose: "zero-touch-grouping", provider: settings.provider, model: settings.model, maxCostUsd: current.maxCostUsd, models: [...new Set([`${settings.provider}/${settings.model}`, current.model])], maxTurns: 1, packages: false, github: false, questionGroupModel: classifier, questionGrouping: grouping } };
+			return { data: { kind: "local", purpose: "zero-touch-grouping", provider: settings.provider, model: settings.model, maxCostUsd: current.maxCostUsd, models: [...new Set([`${settings.provider}/${settings.model}`, current.model])], maxTurns: 1, packages: false, github: false, ...declared.fields, questionGroupModel: classifier, questionGrouping: grouping } };
 		},
 		/** Collection never throws: neither invalid output nor a store failure is permission to buy the call again. */
 		async collect({ job, prepared, completed }) {

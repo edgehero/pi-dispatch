@@ -1,6 +1,6 @@
 import { readConsumerStatus } from "@edgehero/pi-dispatch/consumer-status";
 import { consumerHealthOf } from "@edgehero/pi-dispatch/consumer-health";
-import { modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
+import { copyModelSelection, modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
 import { makeHistoryReader, readHostHistory, historyRow } from "@edgehero/pi-dispatch/history-reader";
 import { readSubscriptionStatus } from "@edgehero/pi-dispatch/subscription-status";
 import { readSandboxInventories } from "@edgehero/pi-dispatch/sandbox-inventory";
@@ -38,7 +38,7 @@ import { DEFAULT_VALKEY_URL, artifactsDirPath, logsDirPath, defaultSandboxDir, d
 import { JOB_IDLE_MINUTES_DEFAULT, JOB_STALL_MINUTES_DEFAULT } from "@edgehero/pi-dispatch/job-limit-rules";
 import { settingsFilePath, readOverlay, readOverlayDocument, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
-import { modelRolesTelemetryOf, approvalRecordOf, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedSecretFiles, recordedCheckpoints, recordedOpenshell, recordedPrivateEndpoints, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { modelRolesTelemetryOf, approvalRecordOf, recordedMainCredential, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedSecretFiles, recordedCheckpoints, recordedOpenshell, recordedPrivateEndpoints, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
 import { LOADED_BASE_SHA_RE } from "@edgehero/pi-dispatch/loaded-record";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
@@ -4070,7 +4070,8 @@ export function normalizeTriggerForDisplay(entry) {
     // a dollar amount, the operator's own words, never a value a job chose. Spread only when present, so a trigger
     // that sets neither keeps exactly its keys.
     ...(Array.isArray(run.models) && run.models.length > 0 && run.models.every((m) => typeof m === "string") && { models: [...run.models] }),
-    ...(run.modelSelection != null && modelSelectionProblem(run.modelSelection) === null && { modelSelection: { strategy: "random", candidates: [...run.modelSelection.candidates] } }),
+    // A pool's weights (issue #996) ride with it, `copyModelSelection`'s rule: the page shows each candidate's share.
+    ...(run.modelSelection != null && modelSelectionProblem(run.modelSelection) === null && { modelSelection: copyModelSelection(run.modelSelection) }),
     ...(Array.isArray(run.fallbackModels) && run.fallbackModels.length > 0 && run.fallbackModels.every((m) => typeof m === "string") && { fallbackModels: [...run.fallbackModels] }),
     ...(Array.isArray(run.auxiliaryModels) && run.auxiliaryModels.length > 0 && run.auxiliaryModels.every((m) => typeof m === "string") && { auxiliaryModels: [...run.auxiliaryModels] }),
     ...((typeof run.maxCostUsd === "string" || typeof run.maxCostUsd === "number") && { maxCostUsd: String(run.maxCostUsd) }),
@@ -9163,8 +9164,9 @@ export function modelRunRecord(record, { list = false } = {}) {
   const hasRoles = Object.hasOwn(record, "modelRole") || Object.hasOwn(record, "modelRoles");
   const hasFailover = Object.hasOwn(record, "modelWhy") || Object.hasOwn(record, "providerFailure");
   const freeReason = Object.hasOwn(record, "reason") && record.reason !== null && recordReason(record) === null;
-  if (!hasSecretFiles && !hasBundle && !hasLoaded && !hasOpenshell && !hasProfile && !freeReason && !hasFailover && !hasRoles) return record;
-  const { secretFiles: _secretFiles, modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, loaded: _loaded, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, ...rest } = record;
+  const hasCredential = Object.hasOwn(record, "mainCredential");
+  if (!hasSecretFiles && !hasBundle && !hasLoaded && !hasOpenshell && !hasProfile && !freeReason && !hasFailover && !hasRoles && !hasCredential) return record;
+  const { secretFiles: _secretFiles, modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, loaded: _loaded, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, mainCredential: _credential, ...rest } = record;
   const out = { ...rest };
   if (hasSecretFiles) {
     const files = recordedSecretFiles(record.secretFiles);
@@ -9197,6 +9199,12 @@ export function modelRunRecord(record, { list = false } = {}) {
   if (hasProfile) {
     const name = recordSecretsProfile(record);
     if (name !== null) out.secretsProfile = name;
+  }
+  // Issue #998: where the main model's credential came from, the closed word alone, never the declared variable's name:
+  // a model reads secret names as counts (`secretFiles` above), so it reads "run-secret" and not which one.
+  if (hasCredential) {
+    const credential = recordedMainCredential(record.mainCredential);
+    if (credential !== null) out.mainCredential = { source: credential.source };
   }
   return out;
 }
