@@ -1132,8 +1132,9 @@ test("the reserved-name list triggers.mjs refuses covers every STATIC name this 
 	// The drift guard. reserved-env.mjs is a hand-written list in a module with no imports (so the shared
 	// validator and the admin bundle can have it for free), and a variable added to the closed map without
 	// being added there would open a hole a trigger could drive through. This is the test that closes it.
-	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true, transcriptStderr: true, reportProgress: true, recover: true, recovering: true, steer: true, bundleEnvFile: true, observableRunner: true });
+	const env = mod.buildContainerEnv({ ...secretsBase, maxTokens: 100, packagePaths: ["/opt/pi-global/packages/x"], sessionFile: "/session/current.jsonl", flow: "fix", excludeTools: ["bash"], allowGlobalExtensions: false, home: "/home/pi", exitAuth: true, transcriptStderr: true, reportProgress: true, recover: true, recovering: true, steer: true, bundleEnvFile: true, observableRunner: true, timeLimitMs: 3_600_000, timeLeftMs: 3_000_000 });
 	assert.equal(env.PI_STEER, "1", "the drift check must see PI_STEER (issue #646)");
+	assert.deepEqual([env.PI_JOB_MAX_MS, env.PI_JOB_LEFT_MS], ["3600000", "3000000"], "the drift check must see the time limit (issue #1055)");
 	assert.equal(env.PI_RUNNER_OBSERVABLE, "1", "the drift check must see PI_RUNNER_OBSERVABLE (issue #730)");
 	assert.equal(env.PI_BUNDLE_ENV, "1", "the drift check must see PI_BUNDLE_ENV (issue #704 part 3)");
 	assert.equal(env.PI_TRANSCRIPT, "stderr", "the drift check must see PI_TRANSCRIPT (issue #686)");
@@ -1772,4 +1773,16 @@ test("withheldPoolKeys: a fallback's API key that neither the attempt's nor an a
 	// "openai:" and "openaiX" have no `/`, so no provider part: sliced as a reference, either would name `openai`.
 	for (const failoverPrimary of [null, "openai", "/gpt-5", "openai:", "openaiX", 7]) assert.deepEqual(withheldPoolKeys({ ...one, provider: "openrouter" }, primaryKeyed, { failoverPrimary }), [], String(failoverPrimary));
 	assert.deepEqual(withheldPoolKeys({ modelSelection: { strategy: "random", candidates: ["openrouter/a", "anthropic/b"] }, provider: "openrouter" }, primaryKeyed, { failoverPrimary: "openai/gpt-5" }), []);
+});
+
+test("issue #1055: the time limit and what is left of it ride as two whole millisecond counts, both or neither, never a 0 or an empty string", { skip }, () => {
+	const base = { provider: "anthropic", model: "claude-x", maxTurns: 20, jobId: "abc", hostEnv: HOST };
+	const env = buildContainerEnv({ ...base, timeLimitMs: 3_600_000, timeLeftMs: 3_540_000 });
+	assert.deepEqual([env.PI_JOB_MAX_MS, env.PI_JOB_LEFT_MS], ["3600000", "3540000"]);
+	assert.equal(buildContainerEnv({ ...base, timeLimitMs: 60_000, timeLeftMs: 90_000 }).PI_JOB_LEFT_MS, "60000", "never more left than the limit");
+	for (const [timeLimitMs, timeLeftMs, why] of [[null, null, "no ceiling"], [3_600_000, null, "nothing read"], [3_600_000, 0, "the deadline has come"], [3_600_000, -5, "and gone"], [0, 10, "a 0 limit"], [1.5, 1, "not whole"], [3_600_000, 0.5, "not whole"]]) {
+		const quiet = buildContainerEnv({ ...base, timeLimitMs, timeLeftMs });
+		assert.deepEqual([Object.hasOwn(quiet, "PI_JOB_MAX_MS"), Object.hasOwn(quiet, "PI_JOB_LEFT_MS")], [false, false], why);
+	}
+	for (const name of ["PI_JOB_MAX_MS", "PI_JOB_LEFT_MS"]) assert.ok(CONTAINER_ENV_NAMES.has(name), `${name} is reserved, so run.secrets and PI_FORWARD_ENV cannot set it`);
 });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { test } from "node:test";
 import { costRefusalOf, parseExitCostRefusal, parseExitTokens, TOKEN_KEYS } from "../../../worker/src/run-history.mjs";
-import { LIMIT_WARNINGS } from "../src/cost-warning.mjs";
+import { LIMIT_WARNINGS, TIME_LIMIT, TURN_LIMIT } from "../src/cost-warning.mjs";
 import { chatServer, jobTree, put, runRealJob } from "./helpers/real-job.mjs";
 
 /**
@@ -47,8 +47,10 @@ test("a capped job past 70% of its cap after a tool turn reads the warning in it
 		assert.deepEqual([t.costChargedMicros, t.costLiftedMicros, t.costWaited, t.costWarned], [SPEND + 3 + 13, 0, 0, 1]);
 		assert.equal(Math.ceil(t.cost * 1e6), t.costChargedMicros - t.costLiftedMicros, "the charge less the lift is what pi priced");
 		// After the cap's own keys, in the worker's order, and read back byte for byte by the worker's parser.
-		assert.deepEqual(Object.keys(t).slice(-4), ["costChargedMicros", "costLiftedMicros", "costWaited", "costWarned"]);
-		assert.deepEqual(TOKEN_KEYS.slice(-4), Object.keys(t).slice(-4));
+		// Then issue #1055's `turnsWarned` (every run watches its turn limit; this one's 3 turns warn at 3, and it ran 2).
+		assert.deepEqual(Object.keys(t).slice(-5), ["costChargedMicros", "costLiftedMicros", "costWaited", "costWarned", "turnsWarned"]);
+		assert.equal(t.turnsWarned, 0);
+		assert.deepEqual(TOKEN_KEYS.slice(-6, -1), Object.keys(t).slice(-5));
 		const line = `${JSON.stringify(exit)}\n`;
 		assert.equal(JSON.stringify(parseExitTokens(line)), JSON.stringify(t));
 		assert.equal(Object.hasOwn(exit, "costRefusal"), false, "no refusal, no numbers");
@@ -190,6 +192,61 @@ test("a pi child's cost refusal that stops the job is the job's: the exit line's
 		assert.deepEqual([exit.reason, exit.why, exit.costRefusal], ["cost-cap", "over-cap", numbers]);
 		assert.deepEqual(parseExitCostRefusal(`${JSON.stringify(exit)}\n`), numbers, "and the worker reads them back");
 		assert.equal(exit.tokens.costRefused, 1, "the child's refusal, counted on the parent's line");
+	} finally {
+		await server.close();
+	}
+});
+
+test("issue #1055: a job at 70% of its turn limit after a tool turn reads the turn warning in its next request, once, and its exit line says so", { skip }, async () => {
+	// Four turns: 70% of 4 is 3, so the warning follows turn 3 and rides call 4, which the budget still allows.
+	const server = await chatServer({ replies: [{ toolCall: { name: "ls", arguments: { path: "." } } }, { toolCall: { name: "ls", arguments: { path: "." } } }, { toolCall: { name: "ls", arguments: { path: "." } } }, { content: "done" }] });
+	try {
+		const root = jobTree({ base: server.base });
+		const { code, exit, lines, stderr } = await runRealJob(root, { PI_MAX_TURNS: "4" });
+		assert.equal(code, 0, `${JSON.stringify(exit)}\n${stderr.slice(-2000)}`);
+		assert.equal(server.calls(), 4, "no call of its own");
+		const turnWarnings = server.bodies().map((body) => userTexts(body).filter((text) => text === LIMIT_WARNINGS[TURN_LIMIT]).length);
+		assert.deepEqual(turnWarnings, [0, 0, 0, 1], "after turn 3, before call 4");
+		assert.deepEqual(lines.filter((line) => line.event === "cost_warning").map(({ event, jobId, ...fields }) => fields), [{ limit: TURN_LIMIT, settled: 3, threshold: 3, cap: 4 }]);
+		assert.deepEqual([exit.turns, exit.tokens.turnsWarned, Object.hasOwn(exit.tokens, "timeWarned")], [4, 1, false], "no time limit was handed, so no timeWarned");
+		assert.equal(JSON.stringify(parseExitTokens(`${JSON.stringify(exit)}\n`)), JSON.stringify(exit.tokens), "the worker reads both back as written");
+	} finally {
+		await server.close();
+	}
+});
+
+test("issue #1055: a job the worker said was past 70% of its time limit reads the time warning after its first tool turn, and its exit line says so", { skip }, async () => {
+	const server = await chatServer({ replies: [{ toolCall: { name: "ls", arguments: { path: "." } } }, { content: "done" }] });
+	try {
+		const root = jobTree({ base: server.base });
+		// A ten-minute limit with 100 seconds left when the environment was built: 500 seconds had passed, past 70% (420).
+		const { code, exit, lines, stderr } = await runRealJob(root, { PI_JOB_MAX_MS: "600000", PI_JOB_LEFT_MS: "100000" });
+		assert.equal(code, 0, `${JSON.stringify(exit)}\n${stderr.slice(-2000)}`);
+		const [first, second] = server.bodies();
+		assert.equal(userTexts(first).includes(LIMIT_WARNINGS[TIME_LIMIT]), false);
+		assert.equal(userTexts(second).filter((text) => text === LIMIT_WARNINGS[TIME_LIMIT]).length, 1);
+		const warned = lines.filter((line) => line.event === "cost_warning");
+		assert.deepEqual(warned.map((line) => [line.limit, line.threshold, line.cap]), [[TIME_LIMIT, 420_000, 600_000]]);
+		assert.ok(warned[0].settled >= 500_000 && warned[0].settled < 600_000, "what had passed, plus this process's own clock");
+		assert.deepEqual([exit.tokens.turnsWarned, exit.tokens.timeWarned], [0, 1]);
+		assert.deepEqual(Object.keys(exit.tokens).slice(-2), ["turnsWarned", "timeWarned"], "the worker's TOKEN_KEYS order");
+		assert.equal(JSON.stringify(parseExitTokens(`${JSON.stringify(exit)}\n`)), JSON.stringify(exit.tokens));
+		// With most of the hour left the same job is not warned, and says so.
+		const calm = await runRealJob(jobTree({ base: server.base }), { PI_JOB_MAX_MS: "3600000", PI_JOB_LEFT_MS: "3590000" });
+		assert.equal(calm.code, 0, calm.stderr.slice(-2000));
+		assert.equal(calm.exit.tokens.timeWarned, 0);
+	} finally {
+		await server.close();
+	}
+});
+
+test("issue #1055: a broken time limit stops the job before anything spends, as a config error", { skip }, async () => {
+	const server = await chatServer({ replies: [{ content: "done" }] });
+	try {
+		const { code, exit } = await runRealJob(jobTree({ base: server.base }), { PI_JOB_MAX_MS: "600000", PI_JOB_LEFT_MS: "600001" });
+		assert.equal(code, 2);
+		assert.equal(exit.reason, "config");
+		assert.equal(server.calls(), 0, "refused before the first call");
 	} finally {
 		await server.close();
 	}

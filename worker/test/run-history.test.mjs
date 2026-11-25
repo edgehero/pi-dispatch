@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { createHmac, randomBytes } from "node:crypto";
 import { authenticExitLines, parseExitLoaded, AWAIT_INPUT_RUNNER_REASONS, EXCLUDE_RUNNER_REASONS, PROGRESS_RUNNER_REASONS, STEER_RUNNER_REASONS, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, RECORD_CORE_FIELDS, RECORD_TMP_MAX_AGE_MS, RECORD_TMP_RE, RUN_RECORD_VERSION, earlierFrom, recordOfThisJob, recordReadable, recordVerdict, recordVersionOf, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitCostRefusal, costRefusalOf, COST_REFUSAL_KEYS, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_COMPLETED_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
+import { FLOOR_COUNTERS } from "../src/dollar-budget.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { recordReasonEnum } from "./helpers/spec-enum.mjs";
@@ -414,7 +415,7 @@ test("the policy counters (issues #501, #502) survive the rebuild, in emission o
 
 test("issue #985's cap keys survive the rebuild after modelRefused, in the runner's order, numbers only, with or without a model list, and are no floor counters", () => {
 	const charged = { costChargedMicros: 1_160_000, costLiftedMicros: 900_000, costWaited: 7, costWarned: 1 };
-	assert.deepEqual(TOKEN_KEYS.slice(-4), Object.keys(charged), "the last four, after modelRefused");
+	assert.deepEqual(TOKEN_KEYS.slice(TOKEN_KEYS.indexOf("costChargedMicros"), TOKEN_KEYS.indexOf("costWarned") + 1), Object.keys(charged), "four in a row, after modelRefused");
 	const capped = { input: 1, output: 2, total: 3, cost: 0.26, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 4, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costUnreported: 0, costCapMicros: 2_000_000, costRefused: 1, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0 };
 	for (const tokens of [{ ...capped, ...charged }, { ...capped, modelRefused: 0, ...charged }]) {
 		const out = parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(tokens)}}`);
@@ -425,6 +426,23 @@ test("issue #985's cap keys survive the rebuild after modelRefused, in the runne
 	// The worker before them drops them: its list ends at modelRefused, and the rebuild keeps only listed keys.
 	const older = TOKEN_KEYS.slice(0, TOKEN_KEYS.indexOf("modelRefused") + 1);
 	assert.deepEqual(Object.keys(Object.fromEntries(older.filter((key) => Object.hasOwn({ ...capped, ...charged }, key)).map((key) => [key, 1]))).includes("costWarned"), false);
+});
+
+test("issue #1055's turnsWarned and timeWarned survive the rebuild last, after costWarned, under a cap or not, numbers only, and a worker before them drops them", () => {
+	assert.deepEqual(TOKEN_KEYS.slice(-3), ["costWarned", "turnsWarned", "timeWarned"], "the last two, after issue #985's keys");
+	const plain = { input: 1, output: 2, total: 3, cost: 0.01, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 2, unresolved: 0, unpriced: 0, turnsWarned: 1, timeWarned: 0 };
+	const capped = { input: 1, output: 2, total: 3, cost: 0.26, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 4, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costUnreported: 0, costCapMicros: 2_000_000, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0, costChargedMicros: 1, costLiftedMicros: 0, costWaited: 0, costWarned: 0, turnsWarned: 1 };
+	const fallback = { input: 1, output: 2, total: 3, cost: 0, metered: false, turnsWarned: 0 };
+	for (const tokens of [plain, capped, fallback]) {
+		const out = parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(tokens)}}`);
+		assert.equal(JSON.stringify(out), JSON.stringify(tokens), "byte-identical round trip, key order included");
+	}
+	const odd = parseExitTokens('{"event":"exit","tokens":{"total":1,"turnsWarned":true,"timeWarned":"1"}}');
+	assert.deepEqual([Object.hasOwn(odd, "turnsWarned"), Object.hasOwn(odd, "timeWarned")], [false, false], "numbers only");
+	// The worker before them drops them: its list ends at costWarned, and the rebuild keeps only listed keys.
+	const older = new Set(TOKEN_KEYS.slice(0, TOKEN_KEYS.indexOf("costWarned") + 1));
+	assert.equal(older.has("turnsWarned") || older.has("timeWarned"), false);
+	assert.equal(FLOOR_COUNTERS.includes("turnsWarned") || FLOOR_COUNTERS.includes("timeWarned"), false, "no settlement reads them");
 });
 
 test("costUnreported (issue #571) survives the rebuild after the child keys and before the policy counters, on a line with or without a cap", () => {

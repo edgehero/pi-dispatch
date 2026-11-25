@@ -924,7 +924,8 @@ Any trigger type can name the model its jobs run on, and how many turns a job ma
   54 models changed price, most of them on `openrouter` (42); on `anthropic`, `claude-sonnet-5-5`'s cache read
   halved. `anthropic/claude-sonnet-4-5` (and its dated id) now has a context window of 200k tokens, down from 1M.
 - `"model"` is that provider's model id. Case is kept as you wrote it.
-- `"maxTurns"` is a whole number of 1 or more.
+- `"maxTurns"` is a whole number of 1 or more. The job is warned once at 70% of it
+  ([the warnings before the limits](job-limits.md#warnings-before-the-limits)).
 
 Each one is optional. A field you leave out is not written into the job. The job then takes the value
 from the settings overlay, else from the environment (`PI_PROVIDER`, `PI_MODEL`, `PI_MAX_TURNS`), when it
@@ -1175,6 +1176,7 @@ watch's can set its own limits, in whole minutes:
 - `"stallTimeoutMinutes"` (0 to 43200, 0 for off): how long the AI may take no step, however busy the container is.
   Replaces `PI_JOB_STALL_MINUTES`, which is off by default.
 - `"maxMinutes"` (1 to 43200): a wall-clock ceiling. When the deployment sets `PI_JOB_MAX_MINUTES` too, the smaller wins.
+  The job is warned once at 70% of it ([the warnings before the limits](job-limits.md#warnings-before-the-limits)).
 
 A value that is not a whole number in range, a near miss of a name (`idleTimeout`, `max_minutes`), or one of these
 names under `on` is refused when the file loads. A file that uses one is stamped version 3, which an older release
@@ -1281,7 +1283,7 @@ dollar limit at all: only the account's quota and the job's turn and time limits
 - It never counts a call that can be billed. An API-key call, or a call on a connection with paid extra usage, is
   judged by the dollar cap alone, as before; the allowance can neither let one pass the cap nor stop one.
 - No deployment value stands behind it. Absent means no allowance. There is no panel or environment setting.
-- At 70% of it the run is warned once, as for the cap ([a warning before the cost cap](job-limits.md#a-warning-before-the-cost-cap)).
+- At 70% of it the run is warned once, as for the cap ([the warnings before the limits](job-limits.md#warnings-before-the-limits)).
 - It is counted per attempt, as the cap is: each container starts again at 0, so a durable run's recovery, or a retry
   of a local job, can spend a further allowance.
 - A watch rule refuses the field (`watch: unsupported run field`), as its jobs are built by name.

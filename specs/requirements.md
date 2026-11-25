@@ -124,6 +124,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   turns, and **at most `maxTurns * PI_RETRY_MAX` retry calls go uncounted by this exemption**, every one of them metered by the
   token budget (`REQ-TOKEN-ACCOUNTING-AND-CAPS`). Calls this budget never counted, before or after #449,
   stay uncounted: compaction and branch-summarisation calls, and a subagent session's turns (Scope above).
+- **The warning before it** (issue #1055): at the end of the turn this count reaches 70% of the maximum, rounded up,
+  the root session is told once, in a fixed sentence, to write its report now and, if its flow pushes, to commit and
+  push, and to start no new parallel work, by the same hook and rules as the cost cap's warning
+  (`DES-DOLLAR-RESERVE-AND-SETTLE`, THE TURN AND TIME WARNINGS); the exit line's `tokens.turnsWarned` says whether it
+  was queued. It reads this budget's own count, never pi's `turnIndex`, and changes nothing about when the budget
+  aborts. Acceptance: `image/runner/test/cost-warning.test.mjs` (a real session at a limit of 4 reads it before call 4)
+  and `cost-warning.integration.test.mjs` (the real runner).
 - **Why**: **pi has no max-turns, step-limit, or iteration cap of any kind.** The agent loop is a bare
   `while (true)` bounded only by an `AbortSignal`; the only control surface is `session.abort()`. The
   design document assumed pi provided this and listed it as "verify" — it does not, so we build it.
@@ -578,6 +585,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`PI_JOB_STALL_MINUTES=0`): activity alone keeps a regular job alive, even without a step for twelve hours or longer.
   An operator may enable a stall limit to bound endless activity for a particular workload. Explicit stall and maximum
   limits, Watch jobs' separate 30-minute ceiling, credential failure stops and legacy-image fallbacks stay effective.
+- **The warning before the ceiling** (issue #1055): a job with a wall-clock ceiling is told once, at a turn's end once
+  70% of the ceiling has passed (counted from the pickup, as the ceiling is), in a fixed sentence, to write its report
+  now and, if its flow pushes, to commit and push, by the cost cap warning's hook (`DES-DOLLAR-RESERVE-AND-SETTLE`); the
+  worker hands the runner the ceiling and what was left of it as two durations (`INT-CONTAINER-RUNTIME-CONTRACT`), and
+  only the worker's timer stops the job. The idle and stall limits and the 30-minute fallback have no warning.
+  Acceptance: `cost-warning.integration.test.mjs` (the real runner, told 500 of 600 seconds had passed, warns after its
+  first tool turn), `worker/test/wiring.test.mjs` (the reader the processor hands on, on its own clock),
+  `run-container-activity.test.mjs` and `env-allowlist.test.mjs` (the two variables, both or neither).
 - **Traces to**: `REQ-JOB-TIMEOUT-30M` (which it replaces once the worker half lands), `REQ-RUNNER-TURN-BUDGET`,
   `DES-JOB-ACTIVITY-WATCH`, `INT-JOB-ACTIVITY-FILE`
 - **Acceptance**: given a job whose tool sleeps in silence, it is stopped as `idle` at the idle limit though the tool never
@@ -10473,3 +10488,4 @@ instead of drifting.
 | 2026-11-24 (#971) | **`REQ-JOB-STATUS-COMMENTS` AMENDED**: an original polling label job that ended without completing (refused before spend, stopped, or failed for good) gets the fixed ended receipt after the queue's terminal transition and after the comment that says why, naming the job, its end and a catalog reason, and saying the label stays on and how to ask again. UNCHANGED, checked: the completion receipt, the Acceptance (the receipt is not the completion or failure comment it counts), the refusal net, and `REQ-LOCAL-JOB-VISIBILITY`. |
 | 2026-11-24 (#950) | **`REQ-JOB-STATUS-COMMENTS` AMENDED**: the worker's terminal comments gain `provider-stop-refusal`, the exit-2 stop of a run whose provider ended the reply with an explicit refusal of the request, which until now was an infrastructure exit the queue retried until its attempts ran out. Its fixed sentence says the model refused, that the same request is likely to be refused again and that partial work may exist; it never carries the provider's explanation, which the runner keeps off the exit line. A polled label job's ended receipt then reads `end=stopped reason=provider-stop-refusal`. UNCHANGED, checked: `REQ-OPERATOR-FAILURE-NOTIFICATION` (the hook already pages every member of `RUNNER_POLICY_REASONS`), `REQ-MODEL-POLICY`'s failover (an exit 2 is never retried, so it never fails over), and the refusal net's rules (it acts only on `budgetReserved: false`, and this stop reserved its budget). |
 | 2026-11-25 (#1076) | **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: a page view writes nothing, with one named exception left, signing in. The zero touch page's repair of a pending accounting entry and of a pending fix, on every view by anyone who opened the page (and on `/runs?touched=1`, which reads the same report), was the second, and is gone; the wire test now seeds one of each pending. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, one dated bullet: `zero-touch-settle`, an operator's confirmed action, records what the page once repaired, and the page says how many wait and who can settle them. **`REQ-ZERO-TOUCH-RATE` UNCHANGED, checked**: "an applied action whose telemetry cannot finish is repaired without repeating the action; until repaired its coverage is incomplete" holds as written, since it never said where the repair runs, and now the worker's daily sweep or a settle runs it. |
+| 2026-11-25 (#1055) | **`REQ-RUNNER-TURN-BUDGET` AMENDED**: NEW **The warning before it**: the root session is told once, at the end of the turn this budget's own count reaches 70% of the maximum, to report and push, by the cost cap warning's hook; `tokens.turnsWarned` says whether it was queued; when the budget aborts UNCHANGED, checked. **`REQ-JOB-ACTIVITY-LIMITS` AMENDED**: NEW **The warning before the ceiling**: a job with a wall-clock ceiling is told once at a turn's end past 70% of it, counted from the pickup, the worker handing the ceiling and what was left as two durations; the timer alone stops the job, and the idle and stall limits and the 30-minute fallback have no warning; the limits, their defaults and the backstop UNCHANGED, checked. `REQ-TOKEN-ACCOUNTING-AND-CAPS` UNCHANGED, checked: the cost cap's warning is as issue #985 left it. |

@@ -3496,3 +3496,15 @@ test("issue #1029: an auxiliary model's declared key is logged by provider and n
 	const shared = await run({ ...panel, provider: "openrouter", model: "deepseek/deepseek-chat", models: ["openrouter/deepseek/deepseek-chat", "openrouter/qwen/qwen3"], auxiliaryModels: ["openrouter/qwen/qwen3"], secrets: { OPENROUTER_API_KEY: "op://ci/or/key" } }, { OPENROUTER_API_KEY: "sk-or-aux-private" });
 	assert.deepEqual(shared.declared, [{ provider: "openrouter", name: "OPENROUTER_API_KEY" }]);
 });
+
+test("issue #1055: the job's ceiling reaches runContainer as index.mjs handed it, to an image whatever it declares, and a malformed one is none", async () => {
+	const left = () => 42_000;
+	const seen = [];
+	for (const [timeLimit, forwarded] of [[{ limitMs: 60_000, left }, true], [undefined, false], [null, false], [{ limitMs: 0, left }, false], [{ limitMs: 60_000.5, left }, false], [{ limitMs: 60_000, left: 42_000 }, false]]) {
+		const { deps: d } = deps({ imagePreflight: async () => ({ ok: true, capabilities: [] }), runContainer: async (ctx) => (seen.push(ctx), { code: 0, aborted: false }), ...(timeLimit !== undefined ? { timeLimit } : {}) });
+		assert.equal((await runJob(ghJob, d)).outcome, "completed");
+		const ctx = seen.at(-1);
+		assert.equal(Object.hasOwn(ctx, "timeLimit"), forwarded, JSON.stringify(timeLimit ?? null));
+		if (forwarded) assert.equal(ctx.timeLimit.left, left, "the reader itself, read when the environment is built");
+	}
+});
