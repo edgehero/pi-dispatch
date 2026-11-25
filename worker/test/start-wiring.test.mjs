@@ -2625,8 +2625,9 @@ test("the live-edit watchers are CLOSED with the worker that armed them", { skip
 		// UNREF'D IS NOT CLEANED UP: that handle holds an `rmSync`, and the shut-down canary below waits
 		// 600ms, so a leaked DAILY timer would be invisible here and real in production.
 		// 7 since issue #499's projects watch, registered by the same rule; 8 since issue #712's doctor runs; one more since
-		// issue #978's sandbox follow-up passes, which hold deletion work too.
-		assert.equal(captured.extraClosers.length, 13 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + one closer per armed watch + the sandbox follow-ups + the retention sweep + the doctor runs");
+		// issue #978's sandbox follow-up passes, which hold deletion work too; and one more since issue #942's artifacts
+		// channel, a subscription like the history reader's that must not outlive the worker.
+		assert.equal(captured.extraClosers.length, 14 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + artifacts channel + watch recovery drainer + answer draft drainer + the updates reconcile + one closer per armed watch + the sandbox follow-ups + the retention sweep + the doctor runs");
 
 		// `runStart` has already drained every closer. An operator edit now reaches a worker that is gone.
 		const before = bootLines.length;
@@ -3080,7 +3081,7 @@ test("PI_SWEEP_INTERVAL_HOURS=0 does not CONSTRUCT the sweep, so nothing it coul
 	assert.equal(constructions.length, 0, "the factory is never called at all");
 	// No watch files in this env, so the list is just the runtime queue and the registry. The point is
 	// the DELTA against the twin test below: the sweep contributes exactly one closer, or none at 0.
-	assert.equal(captured.extraClosers.length, 8 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the doctor runs (issue #712) + the sandbox follow-ups (issue #978, the boot sweep finishing), and nothing from the sweep");
+	assert.equal(captured.extraClosers.length, 9 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + artifacts channel + watch recovery drainer + answer draft drainer + the updates reconcile + the doctor runs (issue #712) + the sandbox follow-ups (issue #978, the boot sweep finishing), and nothing from the sweep");
 	assert.equal(logs.filter((l) => l.event === "retention_sweep").length, 0);
 	const started = logs.find((l) => l.event === "worker_started");
 	assert.equal(started.sweepIntervalHours, 0, "the boot line still SAYS the sweep is off, which is the one visible difference");
@@ -3105,7 +3106,7 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	// Issue #645: the host-lost sweep on every host; the checkpoint store's retention only where there is a store.
 	// Issue #1075: the held index's sweep after it, on the timer alone (boot runs no such pass).
 	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "touch_outbox", "zero_touch_outcomes", "sandbox", "artifacts", "session", "recovery_host_lost", "held_index"], "boot's own order (issue #920: the artifacts store beside the sandbox store; issue #1072: the zero touch outcome files beside the touch outbox), then the held index");
-	assert.equal(captured.extraClosers.length, 9 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the sandbox follow-ups + the sweep + the doctor runs (no watch files in this env)");
+	assert.equal(captured.extraClosers.length, 10 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + artifacts channel + watch recovery drainer + answer draft drainer + the updates reconcile + the sandbox follow-ups + the sweep + the doctor runs (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
 });
 
@@ -3285,7 +3286,7 @@ test("the default arms the doctor runs daily on the worker's own CLI and registe
 	const off = [];
 	const second = await runStart({ env: { PI_DOCTOR_INTERVAL_HOURS: "0" }, makeDoctorSpawner: (args) => (off.push(args), { start() {}, close: async () => {} }) });
 	assert.equal(off.length, 0, "at 0 the factory is never called: no timer, no closer, no child");
-	assert.equal(second.captured.extraClosers.length, 8 + await sandboxControlClosers(second.captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the sandbox follow-ups + the sweep");
+	assert.equal(second.captured.extraClosers.length, 9 + await sandboxControlClosers(second.captured), "runtimeQueue + registry + history reader + artifacts channel + watch recovery drainer + answer draft drainer + the updates reconcile + the sandbox follow-ups + the sweep");
 	assert.equal(second.logs.find((l) => l.event === "worker_started").doctorIntervalHours, 0);
 });
 
@@ -8111,6 +8112,36 @@ test("a label job's final failure posts its failure comment, then the ended rece
 	assert.equal(posted[1].split("\n")[0], "<!-- pi-dispatch-ended:v1 job=gh-poll-e1234 end=failed reason=container-infra-exit -->");
 });
 
+test("the worker serves its artifacts store on its own channel from boot, under its name, and shutdown closes it (#942)", { skip }, async () => {
+	const { readHostArtifactsManifest } = await import("../src/artifacts-channel.mjs");
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const store = tempDir("pi-artifacts-channel-wiring-");
+	mkdirSync(join(store, "gh-chan"), { recursive: true });
+	writeFileSync(join(store, "gh-chan", "manifest.json"), JSON.stringify({ v: 1, jobId: "gh-chan", createdAt: "2026-11-18T09:00:00.000Z", keepUntil: null, files: [{ name: "after.png", size: 2048, sha256: "a".repeat(64), type: "image/png", scrubbed: false }], dropped: {} }));
+	let served = null;
+	let missing = null;
+	await runStart({
+		// Retention 0, as in the comment's test below: the boot sweep must not take the fixed-date manifest.
+		env: { PI_LIVE_TRANSCRIPTS: "0", PI_ARTIFACTS_DIR: store, PI_ARTIFACTS_RETENTION_DAYS: "0", PI_WORKER_NAME: "art-chan-942" },
+		whileRunning: async ({ captured }) => {
+			// Started without being awaited, so boot never waits on it: ask until it has subscribed.
+			for (let i = 0; i < 20 && (served === null || served.error === "host-unavailable"); i++) {
+				served = await readHostArtifactsManifest({ redis: captured.redis, host: "art-chan-942", jobId: "gh-chan", timeoutMs: 500 });
+			}
+			missing = await readHostArtifactsManifest({ redis: captured.redis, host: "art-chan-942", jobId: "gh-none", timeoutMs: 2000 });
+		},
+	});
+	assert.deepEqual(served?.manifest?.files.map((f) => f.name), ["after.png"], "PI_ARTIFACTS_DIR's manifest, served on the channel of PI_WORKER_NAME");
+	assert.deepEqual(missing, { missing: true });
+	const redis = makeRedisClient(VALKEY_URL);
+	redis.on("error", () => {});
+	try {
+		assert.deepEqual(await readHostArtifactsManifest({ redis, host: "art-chan-942", jobId: "gh-chan", timeoutMs: 300 }), { error: "host-unavailable" }, "the shutdown's closers ended the subscription");
+	} finally {
+		redis.disconnect();
+	}
+});
+
 test("a final forge record with artifacts posts one harness comment with the kept names and the run page's link (#920)", { skip }, async () => {
 	const { InfraRetry } = await import("../src/processor.mjs");
 	const store = tempDir("pi-artifacts-wiring-");
@@ -8121,7 +8152,7 @@ test("a final forge record with artifacts posts one harness comment with the kep
 	const { recordRun } = await runStartWithRecords({
 		// Retention 0 keeps the store's runs forever: the boot sweep runs on the real clock, and judged against it the
 		// manifest's fixed `createdAt` expires once the clock drifts past 14 days (issue #284's class).
-		env: { PI_LIVE_TRANSCRIPTS: "0", PI_ARTIFACTS_DIR: store, PI_ARTIFACTS_RETENTION_DAYS: "0", PI_CONSOLE_PUBLIC_URL: "https://console.example.org" },
+		env: { PI_LIVE_TRANSCRIPTS: "0", PI_ARTIFACTS_DIR: store, PI_ARTIFACTS_RETENTION_DAYS: "0", PI_CONSOLE_PUBLIC_URL: "https://console.example.org", PI_WORKER_NAME: "art-worker" },
 		makeAuth: async () => ({ mintToken: async () => "tok-1", selfId: 1, source: "gh" }),
 		makeHost: () => host,
 	});
@@ -8138,7 +8169,8 @@ test("a final forge record with artifacts posts one harness comment with the kep
 	await settled();
 	assert.equal(posted.length, 1);
 	assert.deepEqual(posted[0].target, data.target);
-	assert.equal(posted[0].text, "pi-dispatch kept 1 file from job `gh-art` for its reviewer:\n- `after.png` (2 KB)\nOpen them on the run page: https://console.example.org/run?id=gh-art#p-artifacts");
+	// The link names this worker (issue #942), so the one console address finds the run on the host that kept its files.
+	assert.equal(posted[0].text, "pi-dispatch kept 1 file from job `gh-art` for its reviewer:\n- `after.png` (2 KB)\nOpen them on the run page: https://console.example.org/run?id=gh-art&historyHost=art-worker#p-artifacts");
 	// A record without artifacts, and a local job, post nothing.
 	recordRun({ job: { id: "gh-none", name: "github", data }, result: { outcome: "completed" }, startedAt: "a", endedAt: "b" });
 	recordRun({ job: { id: "local-1", name: "local", data: { kind: "local", folder: "/f", flow: "tidy" } }, result: { outcome: "completed", artifacts }, startedAt: "a", endedAt: "b" });

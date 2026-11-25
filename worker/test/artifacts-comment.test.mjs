@@ -30,6 +30,18 @@ test("the comment names each kept file and its size, each reason a file was not 
 	assert.equal(artifactsLink("https://c.example", "gh-1:r2"), "https://c.example/run?id=gh-1%3Ar2#p-artifacts");
 });
 
+test("the link names the worker that kept the files, so one console address finds the run on its host (#942)", () => {
+	assert.equal(artifactsLink("https://c.example", "gh-1:r2", "mac-mini-1"), "https://c.example/run?id=gh-1%3Ar2&historyHost=mac-mini-1#p-artifacts");
+	assert.equal(artifactsLink("https://c.example", "gh-1", "Box_2.lan"), "https://c.example/run?id=gh-1&historyHost=Box_2.lan#p-artifacts");
+	assert.equal(artifactsLink("https://c.example", "gh-1"), "https://c.example/run?id=gh-1#p-artifacts", "no name: no historyHost");
+	assert.equal(artifactsLink("https://c.example", "gh-1", null), "https://c.example/run?id=gh-1#p-artifacts");
+	for (const bad of ["", "-lead", "a b", "a&b=c", "x".repeat(65), "host/../x", 7]) {
+		assert.equal(artifactsLink("https://c.example", "gh-1", bad), "https://c.example/run?id=gh-1#p-artifacts", `outside the charset: ${bad}`);
+	}
+	assert.equal(artifactsLink(null, "gh-1", "mac-mini-1"), null, "no console address: no link, name or not");
+	assert.match(artifactsComment({ jobId: "gh-1", counts: COUNTS, storeDir: storeWith(MANIFEST), consoleUrl: "https://c.example", host: "mac-mini-1" }), /\nOpen them on the run page: https:\/\/c\.example\/run\?id=gh-1&historyHost=mac-mini-1#p-artifacts$/);
+});
+
 test("names come from this host's manifest only; without it the record's counts are said", () => {
 	const store = storeWith(MANIFEST);
 	assert.deepEqual(readArtifactsManifest(store, "gh-1").files.map((f) => f.name), ["after.png", "e2e-report.txt"]);

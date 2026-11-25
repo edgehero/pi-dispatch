@@ -919,6 +919,8 @@ const ARTIFACTS_KEPT = Object.freeze({
     keepUntil: new Date(NOW + 14 * 24 * HOUR).toISOString(),
   },
 });
+// Issue #942: a run whose two files mini2 kept, read from mini2 as `artifacts` answers in `state` (and `why`).
+const artifactsOnMini2 = (artifacts) => ({ rec: record({ jobId: "gh-pulse", host: "mini2", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { host: "mini2", counts: { kept: 2, bytes: 190_437, dropped: {} }, ...artifacts } });
 const RUN_CARD_STATES = {
   "run-live-armed.operator": () => runCard(LIVE_ARMED),
   // Issue #692: a run that stopped to ask, the page the READMEs open their second stage with. The question is the
@@ -964,8 +966,16 @@ const RUN_CARD_STATES = {
   "run-artifacts-kept.viewer": () => runCard({ ...ARTIFACTS_KEPT, role: "viewer" }),
   "run-artifacts-dropped.operator": () => runCard({ rec: record({ jobId: "gh-pulse", artifacts: { kept: 0, bytes: 0, dropped: { name: 1, secret: 1 } } }), artifacts: { state: "dropped", counts: { kept: 0, bytes: 0, dropped: { name: 1, secret: 1 } } } }),
   "run-artifacts-expired.operator": () => runCard({ rec: record({ jobId: "gh-pulse", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { state: "expired", counts: { kept: 2, bytes: 190_437, dropped: {} } } }),
-  "run-artifacts-elsewhere.operator": () => runCard({ rec: record({ jobId: "gh-pulse", host: "mini2", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { state: "elsewhere", host: "mini2", counts: { kept: 2, bytes: 190_437, dropped: {} } } }),
+  "run-artifacts-elsewhere.operator": () => runCard(artifactsOnMini2({ state: "elsewhere", why: "not-running" })),
   "run-artifacts-unreadable.operator": () => runCard({ rec: record({ jobId: "gh-pulse", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { state: "unreadable", counts: { kept: 2, bytes: 190_437, dropped: {} } } }),
+  // Issue #942: a run another host kept files for, as this console's read of that host answers: its manifest (the files
+  // linked to that host), none (its retention), one it cannot read, and each reason it could not be asked now.
+  "run-artifacts-kept-host.operator": () => runCard({ ...ARTIFACTS_KEPT, rec: { ...ARTIFACTS_KEPT.rec, host: "mini2" }, artifacts: { ...ARTIFACTS_KEPT.artifacts, host: "mini2" } }),
+  "run-artifacts-kept-host.viewer": () => runCard({ ...ARTIFACTS_KEPT, role: "viewer", rec: { ...ARTIFACTS_KEPT.rec, host: "mini2" }, artifacts: { ...ARTIFACTS_KEPT.artifacts, host: "mini2", keepUntil: null } }),
+  "run-artifacts-expired-host.operator": () => runCard(artifactsOnMini2({ state: "expired" })),
+  "run-artifacts-unreadable-host.operator": () => runCard(artifactsOnMini2({ state: "unreadable" })),
+  "run-artifacts-elsewhere-no-answer.operator": () => runCard(artifactsOnMini2({ state: "elsewhere", why: "no-answer" })),
+  "run-artifacts-elsewhere-busy.operator": () => runCard(artifactsOnMini2({ state: "elsewhere", why: "busy" })),
   // Issue #998: a run whose main model spent the key its trigger declared, named on the Model usage card, never a value.
   "run-credential-declared.operator": () => runCard({ rec: record({ jobId: "gh-pulse", usage: { piAi: "1.6.0", models: [{ provider: "anthropic", model: "claude-sonnet-5-5", calls: 4, input: 900, output: 300, cost: 0.11 }] }, mainCredential: { source: "run-secret", variable: "ANTHROPIC_API_KEY" } }) }),
 };

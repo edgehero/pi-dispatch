@@ -2,6 +2,7 @@ import { makeLocalEventStore, startLocalEventReconciler } from "./local-event-st
 import { makeLocalEventRuntime } from "./local-event-runtime.mjs";
 import { readLocalWorkspaceIdentity } from "./local-workspace.mjs";
 import { makeHistoryReader, serveHistory } from "./history-reader.mjs";
+import { serveArtifacts } from "./artifacts-channel.mjs";
 import { subscriptionRoutes } from "./subscription-runtime.mjs";
 import { configuredSubscriptions } from "./subscription-config.mjs";
 import { publishSubscriptionStatus } from "./subscription-status.mjs";
@@ -2188,7 +2189,7 @@ export async function startWorker(
 			// never the model (artifacts-comment.mjs). After the record, from the store's manifest; not awaited, and the
 			// adapter never throws. A local job has no forge item; its run page says it.
 			if (!retrying && record.artifacts && isForgeKind(job?.data?.kind)) {
-				const text = artifactsComment({ jobId: record.jobId, counts: record.artifacts, storeDir: config.artifactsDir, consoleUrl: config.consolePublicUrl, phrase: job.data.trigger?.matched?.phrase ?? null });
+				const text = artifactsComment({ jobId: record.jobId, counts: record.artifacts, storeDir: config.artifactsDir, consoleUrl: config.consolePublicUrl, host: config.workerName, phrase: job.data.trigger?.matched?.phrase ?? null });
 				if (text !== null) void comment(job.data, text);
 				else log("artifacts_comment_skipped", { jobId: record.jobId, reason: "phrase-collision" });
 			}
@@ -2982,6 +2983,14 @@ export async function startWorker(
 	serveHistory({ redis, host: config.workerName, reader: makeHistoryReader({ logsDir: config.logsDir }) }).then(async (service) => {
 		if (historyClosed) await service.close(); else historyService = service;
 	}).catch(() => log("history_reader_unavailable", {}));
+	// Issue #942: the same for a run's kept files, which a console on another host asks this host for by run and name
+	// (artifacts-channel.mjs). Its own subscription and request count, so a download never waits on history browsing.
+	let artifactsClosed = false;
+	let artifactsService = null;
+	extraClosers.push({ async close() { artifactsClosed = true; await artifactsService?.close(); } });
+	serveArtifacts({ redis, host: config.workerName, storeDir: config.artifactsDir }).then(async (service) => {
+		if (artifactsClosed) await service.close(); else artifactsService = service;
+	}).catch(() => log("artifacts_channel_unavailable", {}));
 	if (subscriptions) {
 		const publish = () => publishSubscriptionStatus(redis, config.workerName, subscriptions.runtime).catch(() => log("subscription_status_unavailable", {}));
 		await publish();

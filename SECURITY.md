@@ -416,6 +416,16 @@ The threat model, and what answers each part:
   impossible by construction; the CSP allows scripts only from the console's own files and no inline script; run text
   reaches a page only for the operator role and never in a list view; no response carries an
   `Access-Control-*` header.
+- **Files a forge job kept are agent-written bytes** (issues #920 and #942). The run page lists what a job left in
+  `/artifacts`, and `/api/artifact` serves each file to an operator or a viewer, never to an agent token. The name is
+  looked up in the run's manifest, never joined from the request; the file is opened without following a link and must
+  be the manifest's size; only the four image types and plain text are shown inline, everything else is an attachment;
+  and every answer carries a sandbox CSP under which the file can run, load and post nothing. A file another host kept
+  is fetched from that host over the deployment's Valkey, a piece at a time, under the same rules and one more: the
+  console holds the bytes to the size and sha256 of the manifest it asked that host for, and sends the last piece only
+  when both match, so a browser never receives a whole file that is not the manifest's (it sees a failed download).
+  That host looks the name up in its own manifest and never opens a path a request names, and the console keeps no
+  copy on its disk.
 - **The theme cookie is a preference, and the CSP is unchanged** (issue #737). The theme button keeps a person's
   choice in the cookie `pd_theme`, which is not a credential: it signs nobody in and opens nothing. The console reads
   it as a closed set (only an exact `light` or `dark` counts; anything else, or a second copy, means the system's
@@ -996,6 +1006,12 @@ Stated openly rather than discovered later:
     Only when that last read itself runs out of time (10 seconds) are the last lines and the end marker lost.
   - Set `PI_LIVE_TRANSCRIPTS=0` on every worker if transcript text must not reach Valkey; any value but `0`, `1` or
     empty refuses to boot, so a typo cannot read as off. Treat a Valkey backup as personal data either way.
+- **A Valkey credential can ask a host for the files its forge jobs kept** (issue #942). Each worker answers requests
+  on `artifacts:request:<its name>` with a run's manifest and the bytes of the files that manifest lists, one piece per
+  message, on a reply channel that any client of the same Valkey can subscribe to, as it can to the run history a host
+  serves and to the live transcripts. So anyone who holds the Valkey password and reaches its port can read every kept
+  file, as they can already read transcripts and job data. No key holds a file, so a Valkey backup holds none. The
+  files are what the job wrote: text cleaned of the job's secrets, images and other files kept as written.
 - **Run progress is advisory, and the agent can forge it.** Since #644 the worker reads where each running job is
   (the turn, the steps done and failed, the tool running, and on a trigger with `run.progress` the phase the agent
   names through its `report_progress` tool) from the same transcript file, which the agent can write. So an operator

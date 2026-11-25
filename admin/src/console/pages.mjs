@@ -1397,8 +1397,8 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   //   - the snapshot, then the views that take it: a view that read the snapshot again would wait for it twice, the
   //     stacked timeout issue #962 removed, so each is handed the one this load read (or the files, where it failed);
   //   - the trigger's skew check after the snapshot: it is asked about the snapshot's own waiting rows;
-  //   - a run's record, then all that is keyed on it: its children, progress, chat, actions, workspace and related
-  //     runs, and for a run refused before it started the snapshot and the runs' window its page draws;
+  //   - a run's record, then all that is keyed on it: its children, progress, chat, actions, workspace, artifacts and
+  //     related runs, and for a run refused before it started the snapshot and the runs' window its page draws;
   //   - the chat, then its answer check (inside `chatRead`: only a chat that can take a reply has one), then the reads
   //     of the run that continues it, which the chat names and whose record the related runs' read holds;
   //   - the pages of a search for children (`childrenOf`): each page's cursor comes from the page before it.
@@ -1413,18 +1413,29 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     if (name === "host" && typeof q.name === "string") data.hostName = q.name;
     await together([setupRead, modelsRead, secretsRead, connectionsRead, projectRead, triggerListRead, triggerDetailRead, parkedChecksRead]);
   };
-  const recordReads = async () => {
-    await runRead();
-    // Issue #920: what a forge job's /artifacts folder left, from this host's store (the manifest only, never a file).
+  // Issue #920: what a forge job's /artifacts folder left (the manifest only, never a file): this host's store, or since
+  // issue #942 the host that kept the files, asked over its artifacts channel. That read takes its bounds from `within`,
+  // so it ends in its own words (the host did not answer) inside the page's time. A live tick never asks another host
+  // (`ask: false`): it would ask every two seconds for as long as the page is open, and wait out a silent host each
+  // time. Where only another host could answer, the tick leaves the card out of its swap (`artifactsKept`), so the page
+  // keeps the card it drew; this host's store is read on every tick as before.
+  const artifactsRead = async () => {
     if (reads.includes("artifacts") && typeof deps.fleet?.artifacts === "function") {
       try {
-        data.artifacts = data.run?.record ? deps.fleet.artifacts(q.id, data.run.record) : null;
+        const got = data.run?.record ? await drawn(() => deps.fleet.artifacts(q.id, data.run.record, { within, ask: who?.live !== true })) : null;
+        if (got?.unasked === true) {
+          data.artifacts = null;
+          data.artifactsKept = true;
+        } else data.artifacts = got;
       } catch {
         data.artifacts = null;
       }
     }
+  };
+  const recordReads = async () => {
+    await runRead();
     await together([
-      childrenRead, progressRead, workspaceRead, refusedSnapshotRead, refusedWindowRead, runActionsRead,
+      childrenRead, progressRead, workspaceRead, refusedSnapshotRead, refusedWindowRead, runActionsRead, artifactsRead,
       async () => {
         await together([runChatRead, relatedRead]);
         // The live facts of a run with no record look the job up by its id, as the chat facts just did (issue #988):
@@ -1475,7 +1486,8 @@ function panelFragments(name, ctx) {
   const view = viewOf(name, ctx);
   const newer = name === "run" && fromNewerRelease(ctx?.data?.run?.record);
   const hidden = (id) => name === "run" && ((view.role !== "operator" && !RUN_VIEWER_PANELS.includes(id)) || (newer && !RUN_NEWER_PANELS.includes(id)));
-  return PAGE_PANELS[name].filter(([id]) => !(name === "host" && ctx?.data?.live === true && id === "p-hostcap")).map(([id, render]) => ({ id, fragment: hidden(id) ? html`` : render(view) }));
+  const kept = (id) => (name === "host" && ctx?.data?.live === true && id === "p-hostcap") || (name === "run" && ctx?.data?.artifactsKept === true && id === "p-artifacts");
+  return PAGE_PANELS[name].filter(([id]) => !kept(id)).map(([id, render]) => ({ id, fragment: hidden(id) ? html`` : render(view) }));
 }
 
 /**

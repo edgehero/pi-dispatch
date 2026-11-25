@@ -173,7 +173,7 @@ test("the words of a failed read and the sentences that are never the pill's are
     "logs dir unreadable \\([A-Z_-]+\\)",
     "Its list of running jobs could not be read",
     "The runtime's CPU reserve could not be read\\.",
-    "The \\d+ files? this run kept could not be read here\\.",
+    "The \\d+ files? this run kept could not be read (?:here|on [A-Za-z0-9._-]+)\\.",
     "\\(its data could not be read\\)",
     "The console could not read the deployment's data; this is the page as it was last seen\\.",
     "The retained workspace list is unreadable or was not published by this worker\\.",
