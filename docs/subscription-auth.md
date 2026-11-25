@@ -201,6 +201,9 @@ logout finished, but", on stderr. After `auth trial`, the line adds that the gra
 when the grant's write itself was sent and got no answer, since Valkey may have run it; when Valkey stopped answering
 before that write, the grant was not asked for and nothing is said of it.
 
+A deployment setting `auth` cannot use (a `PI_GLOBAL_PI_DIR` that does not exist, say) ends it with the same
+`error:` line every other `pi-dispatch` command prints for it, exit 2: fix that setting and run the command again.
+
 The worker adapter requests `http://127.0.0.1:1455/auth/callback` and listens on
 `127.0.0.1:1455`. When the browser runs on another machine, establish a separate callback tunnel first:
 

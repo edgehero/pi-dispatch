@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import { loadConfig } from "./config.mjs";
+import { EXIT_POLICY } from "./exit-code.mjs";
 import { configuredSubscriptions } from "./subscription-config.mjs";
 import { subscriptionIdentity } from "./subscription-runtime.mjs";
 import { makeRedisClient, urlShown, VALKEY_COMMAND_TIMEOUT_MS } from "./connection.mjs";
@@ -144,6 +145,13 @@ export async function runAuth(args, { env = process.env, write = (value) => proc
 			valkeyFailed = true;
 			writeErr(`${line}\n`);
 			return 1;
+		}
+		// Issue #1046: a configuration error loadConfig names (`piDispatchConfig`), a PI_GLOBAL_PI_DIR that does not exist
+		// say, is said as every other verb says it (cli.mjs `entryExitCode`), a determinate refusal. "auth-unavailable" hid
+		// the cause, and its advice was to run the command that had just been run.
+		if (error?.piDispatchConfig === true) {
+			writeErr(`error: ${error.message}\n`);
+			return EXIT_POLICY;
 		}
 		const code = typeof error?.code === "string" && /^(?:auth|subscription)-[a-z-]+$/.test(error.code) ? error.code : "auth-unavailable";
 		writeErr(`Subscription authentication: ${code}. Run auth status on the connection owner host.\n`);

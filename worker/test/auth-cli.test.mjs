@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runAuth, authSelectAnswer } from "../src/auth-cli.mjs";
+import { configError, loadConfig } from "../src/config.mjs";
+import { EXIT_POLICY } from "../src/exit-code.mjs";
 import { loadNativeAnthropicAuth } from "../src/community-auth-helper.mjs";
 import { OPENAI_LOGIN_INSTRUCTIONS } from "../src/oauth-openai.mjs";
 
@@ -18,6 +20,26 @@ test("host login is real lifecycle dispatch, while its output contains only safe
 	assert.deepEqual(calls, [["login", "claude"], ["quit"]]);
 	assert.doesNotMatch(output.join(""), /private-token|private-group|generation/);
 	assert.match(output.join(""), /claude/);
+});
+test("issue #1046: a configuration error is said by its own words and exits as a refusal, not as auth-unavailable", async () => {
+	for (const args of [["status"], ["usage", "claude"], ["login", "claude"]]) {
+		const { options, calls, output } = fixture();
+		options.configFn = () => { throw configError("PI_GLOBAL_PI_DIR does not exist: /nonexistent-pi-dir"); };
+		assert.equal(await runAuth(args, options), EXIT_POLICY, args.join(" "));
+		assert.equal(output.join(""), "error: PI_GLOBAL_PI_DIR does not exist: /nonexistent-pi-dir\n", args.join(" "));
+		assert.deepEqual(calls, [], "nothing ran and no Valkey client was made");
+	}
+	// The real reader: a missing PI_GLOBAL_PI_DIR is the tagged error this path keys on, never a bare filesystem code.
+	const { options, output } = fixture();
+	options.configFn = loadConfig;
+	const env = { PI_GLOBAL_PI_DIR: "/nonexistent-pi-dir-1046", PI_AUTH_CONNECTIONS_FILE: "/policy.json" };
+	assert.equal(await runAuth(["status"], { ...options, env }), EXIT_POLICY);
+	assert.match(output.join(""), /^error: PI_GLOBAL_PI_DIR does not exist: \/nonexistent-pi-dir-1046\n$/);
+	// An untagged error keeps the old line.
+	const untagged = fixture();
+	untagged.options.configFn = () => { throw new Error("boom"); };
+	assert.equal(await runAuth(["status"], untagged.options), 2);
+	assert.equal(untagged.output.join(""), "Subscription authentication: auth-unavailable. Run auth status on the connection owner host.\n");
 });
 test("only the explicit host trial command supplies person authority and the read state version", async () => {
 	const { options, calls } = fixture();
