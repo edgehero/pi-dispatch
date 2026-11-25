@@ -40,8 +40,8 @@ Each guide keeps the notes about its own feature. [The last sections](#notes-kep
    sets in jobs itself ([job limits](job-limits.md)). Then plan to rebuild every job image you derived from ours on
    the 5.3.0 image: until it is rebuilt, its jobs keep the 30-minute limit and their credentials are not renewed
    ([the 5.3.0 rows](#530)). The console moves to `http://pi-dispatch.localhost:4790/`, so each browser signs in once more.
-9. **Before the release with the turn and time warnings**, the same check for `PI_JOB_MAX_MS` and `PI_JOB_LEFT_MS`, which
-   that release sets in jobs itself ([the row](#unreleased-warnings-before-the-turn-and-time-limits-1055)).
+9. **Before 5.4.3**, the same check for `PI_JOB_MAX_MS` and `PI_JOB_LEFT_MS`, which 5.4.3 sets in jobs itself
+   ([the row](#warnings-before-the-turn-and-time-limits-1055)).
 
 ## The order
 
@@ -312,7 +312,7 @@ queued: an older BullMQ need not read what a newer one wrote. The release notes 
 On Docker's `cgroupfs` driver (Docker Desktop, OrbStack), the worker keeps the
 [CPU reserve](multi-host.md#the-cpu-reserve-across-all-jobs) through short helper containers. Up to 5.4.2 they had no
 name, and when the daemon was too slow to start one within 15 seconds the worker gave up on it and the container
-stayed in `created` for good, so a slow daemon collected them (issue #978). The next release names every helper
+stayed in `created` for good, so a slow daemon collected them (issue #978). 5.4.3 names every helper
 (`pi-dispatch-cpu-reserve-<8 hex digits>`, labelled `pi.dispatch.helper=cpu-reserve`; doctor's has `-doctor-` before
 the digits and its own process id after them, so no two doctors share one), so at most one is ever left per name, and
 it is removed before the next try, and the worker waits longer between tries while the daemon stays slow. A doctor the
@@ -335,7 +335,7 @@ label), never the running worker's own. It logs `cpu_reserve_leftovers_removed` 
 could not remove, left for being too young and kept for not matching: for every pass that removed something, and once
 each for a pass that was cut short, could not remove one, or kept some.
 
-On a host that stays on 5.4.x for now, list them:
+On a host that stays on 5.4.2 or earlier for now, list them:
 
 ```sh
 docker ps -a --filter status=created --no-trunc --format '{{.ID}} {{.CreatedAt}} {{.Command}}' | grep '/p/cpu.max'
@@ -444,7 +444,9 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
-### Unreleased: a pi child on a subscription holds an admission of its own (#1098)
+### 5.4.3
+
+#### A pi child on a subscription holds an admission of its own (#1098)
 
 A job image from this release lets a separate pi process that the job starts, a staged package's own child among them,
 use the job's subscription through an admission of its own, which the child meter the image loads first in every pi
@@ -460,7 +462,7 @@ child runs, as the job's runner does. Before, such a child's first call was refu
 
 See [subscription authentication](subscription-auth.md#supported-jobs-and-visibility).
 
-### Unreleased: a subagent on a subscription (#946)
+#### A subagent on a subscription (#946)
 
 A job image from this release runs a subscription job's role child inside the runner, on the subscription it admitted,
 with pi's built-in tools and the job's skills but no extension tools. Before, the child was a separate pi process, which
@@ -474,7 +476,7 @@ the subscription refused, and the job stopped at its first child call.
 
 See [model roles on a subscription](model-roles.md#on-a-subscription).
 
-### Unreleased: pi 1.6.1 and its decision models (#1094)
+#### pi 1.6.1 and its decision models (#1094)
 
 | Stored state | What changes and how to move it |
 |---|---|
@@ -485,7 +487,7 @@ See [model roles on a subscription](model-roles.md#on-a-subscription).
 
 See [watch decisions](watch-decisions.md#which-decision-models).
 
-### Unreleased: another host's artifacts on any console (#942)
+#### Another host's artifacts on any console (#942)
 
 A console now shows and serves the files a forge job kept on another host, by asking that host over the deployment's
 Valkey (the artifacts channel), so the link in the job's comment works on whichever console it names. The files stay
@@ -499,7 +501,7 @@ in `PI_ARTIFACTS_DIR` on the host that ran the job, under that host's retention.
 
 See [a run's artifacts](console.md#a-runs-artifacts).
 
-### Unreleased: weights in a random model pool (#996)
+#### Weights in a random model pool (#996)
 
 | Stored state | What changes and how to move it |
 |---|---|
@@ -510,7 +512,7 @@ See [a run's artifacts](console.md#a-runs-artifacts).
 
 See [weighting the pool](triggers.md#weighting-the-pool).
 
-### Unreleased: which key a run spent (#998)
+#### Which key a run spent (#998)
 
 | Stored state | What changes and how to move it |
 |---|---|
@@ -518,7 +520,7 @@ See [weighting the pool](triggers.md#weighting-the-pool).
 
 See [which key a run spent](console.md#which-key-a-run-spent).
 
-### Unreleased: declared keys for the answer and grouping models (#1013)
+#### Declared keys for the answer and grouping models (#1013)
 
 | Stored state | What changes and how to move it |
 |---|---|
@@ -528,7 +530,7 @@ See [which key a run spent](console.md#which-key-a-run-spent).
 
 See [a key of the rule's own](answer-rules.md#a-key-of-the-rules-own) and [secrets](secrets.md).
 
-### Unreleased: quota reserve (#1008)
+#### Quota reserve (#1008)
 
 | Stored state | What changes and how to move it |
 |---|---|
@@ -538,7 +540,7 @@ See [a key of the rule's own](answer-rules.md#a-key-of-the-rules-own) and [secre
 
 See [the quota reserve](subscription-auth.md#quota-reserve).
 
-### Unreleased: a local command trigger that keeps no sandbox (#1023)
+#### A local command trigger that keeps no sandbox (#1023)
 
 | Stored state | What changes and how to move it |
 |---|---|
@@ -546,7 +548,7 @@ See [the quota reserve](subscription-auth.md#quota-reserve).
 
 See [keeping no sandbox](triggers.md#keeping-no-sandbox-for-a-local-command).
 
-### Unreleased: poller heartbeat (#970)
+#### Poller heartbeat (#970)
 
 | Stored state | What changes and how to move it |
 |---|---|
@@ -555,7 +557,7 @@ See [keeping no sandbox](triggers.md#keeping-no-sandbox-for-a-local-command).
 
 See [is it running](polling.md#is-it-running).
 
-### Unreleased: the cost cap counts billed calls only (#1008)
+#### The cost cap counts billed calls only (#1008)
 
 | Stored state | What changes and how to move it |
 |---|---|
@@ -571,7 +573,7 @@ See [is it running](polling.md#is-it-running).
 
 See [what the cap counts](costs.md#what-the-cap-counts) and [a subscription allowance](triggers.md#a-subscription-allowance-per-job).
 
-### Unreleased: waiting under the cost cap (#985)
+#### Waiting under the cost cap (#985)
 
 | Stored state | What changes and how to move it |
 |---|---|
@@ -581,7 +583,7 @@ See [what the cap counts](costs.md#what-the-cap-counts) and [a subscription allo
 
 See [reasons.md](reasons.md#cost-cap) and [what the cap charges](costs.md#what-the-cap-charges).
 
-### Unreleased: ended receipts for label jobs (#971)
+#### Ended receipts for label jobs (#971)
 
 Workers now post a fixed receipt, marked `pi-dispatch-ended:v1`, on a polled GitHub label job that was refused, stopped
 or failed for good, after the comment that says why. It names the job, how it ended and the reason. Run records, job
@@ -589,7 +591,7 @@ data, queue keys and the completion receipt are unchanged; no migration, backup 
 needed. Older workers post none, so upgrade every worker. Jobs that ended before the upgrade get no receipt and are not
 backfilled. See [ended receipts](github.md#ended-receipts).
 
-### Unreleased: refusals before start say why (#969)
+#### Refusals before start say why (#969)
 
 Workers now post a comment for every forge job refused before anything was spent whose refusal had no comment of its
 own: the reason's explanation from [reasons.md](reasons.md), word for word. Before this, a refusal at the model
@@ -599,7 +601,7 @@ and a label job's requester waited for a job that would never come. Run records,
 label are unchanged; no migration, backup path or older-state detector is needed. An older worker keeps refusing these
 in silence, so upgrade every worker for the comments to appear. See [when another event starts a job](triggers.md#when-another-event-starts-a-job).
 
-### Unreleased: the Zero touch page settles nothing by itself (#1076)
+#### The Zero touch page settles nothing by itself (#1076)
 
 Opening the console's Zero touch page, or the touched runs list, no longer writes to Valkey. Before, each view settled
 the accounting an earlier write had left unfinished (an action whose touch was not recorded, a fix whose completion
@@ -609,7 +611,7 @@ queue keys and the accounting keys are unchanged; no migration, backup path or o
 console keeps settling on a view. After upgrading, open the Zero touch page once as an operator and settle anything it
 says is waiting. See [Zero touch](zero-touch.md).
 
-### Unreleased: the Zero touch fix history keeps its retention (#1072)
+#### The Zero touch fix history keeps its retention (#1072)
 
 | Stored state | What changes and how to move it |
 |---|---|
@@ -619,7 +621,7 @@ says is waiting. See [Zero touch](zero-touch.md).
 
 See [Zero touch](zero-touch.md).
 
-### Unreleased: the Zero touch fix history records how a change ended (#1072)
+#### The Zero touch fix history records how a change ended (#1072)
 
 | Stored state | What changes and how to move it |
 |---|---|
@@ -629,7 +631,7 @@ See [Zero touch](zero-touch.md).
 
 See [Zero touch](zero-touch.md#fix-a-recurring-cause).
 
-### Unreleased: warnings before the turn and time limits (#1055)
+#### Warnings before the turn and time limits (#1055)
 
 A job is now told once, at 70% of its turn limit (`run.maxTurns`) and at 70% of its time limit (`run.maxMinutes`,
 `PI_JOB_MAX_MINUTES`), to write its report and, if its flow pushes, to commit and push, as it already was at 70% of its
@@ -644,7 +646,7 @@ cost cap ([job limits](job-limits.md#warnings-before-the-limits)).
 
 See [reasons.md](reasons.md#max-minutes) and [runner-policy](reasons.md#runner-policy) for the stops themselves.
 
-### Unreleased: a provider's refusal stop is not retried (#950)
+#### A provider's refusal stop is not retried (#950)
 
 A job image from this release exits 2 as `provider-stop-refusal` when the AI provider ends the reply with an explicit
 refusal (Anthropic's `refusal` stop reason, read from pi-ai or from the Claude subscription adapter). Before, the run
@@ -659,7 +661,7 @@ exited 1 and the queue ran the whole paid job again. The worker gives the stop i
 
 See [reasons.md](reasons.md#provider-stop-refusal).
 
-### Unreleased: the worker sweeps the held-jobs index (#1075)
+#### The worker sweeps the held-jobs index (#1075)
 
 Workers now remove the stale entries of the held-jobs index (`wait:held`, the jobs held on `run.waitFor`) on their
 retention sweep, every `PI_SWEEP_INTERVAL_HOURS` (not at boot, and not at all at `0`). An entry is stale when its job's
@@ -670,7 +672,7 @@ and the hold records are unchanged; no migration, backup path or older-state det
 so one upgraded worker sweeps it for the whole fleet. An older panel or `/dispatch status` still prunes as before. See
 [watching and cancelling](wait-for.md#watching-and-cancelling).
 
-### Unreleased: a receipt for every write in the audit log (#1072)
+#### A receipt for every write in the audit log (#1072)
 
 Every write that lands now appends a `write-applied` row to the console audit log after its `ok` row, on the same
 ticket, for a person and the `/dispatch` panel as for an agent, whose writes had one already. The audit page reads a
