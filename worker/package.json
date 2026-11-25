@@ -68,6 +68,7 @@
     "./held-replies": "./src/held-replies.mjs",
     "./live-transcript": "./src/live-transcript.mjs",
     "./history-reader": "./src/history-reader.mjs",
+    "./artifacts-channel": "./src/artifacts-channel.mjs",
     "./run-progress": "./src/run-progress.mjs",
     "./reserve-estimate": "./src/reserve-estimate.mjs",
     "./endpoint-status": "./src/endpoint-status.mjs",

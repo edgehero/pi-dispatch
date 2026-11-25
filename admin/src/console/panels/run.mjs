@@ -1275,9 +1275,12 @@ export function runViewer(view) {
 /** The states the Artifacts panel draws, in docs/console.md's order (console-doc-tables.test.mjs holds the table). */
 export const ARTIFACT_STATES = Object.freeze(["kept", "dropped", "expired", "elsewhere", "unreadable"]);
 
-/** A file's own address on this console: the route looks the name up in the run's manifest and serves only that. */
-export function artifactHref(jobId, name) {
-  return `/api/artifact?id=${encodeURIComponent(jobId)}&name=${encodeURIComponent(name)}`;
+/**
+ * A file's own address on this console: the route looks the name up in the run's manifest and serves only that. `host`
+ * only for a file another host keeps (issue #942), which the route then asks that host for.
+ */
+export function artifactHref(jobId, name, host = null) {
+  return `/api/artifact?id=${encodeURIComponent(jobId)}&name=${encodeURIComponent(name)}${typeof host === "string" ? `&host=${encodeURIComponent(host)}` : ""}`;
 }
 
 /** One line per drop reason that happened, in the closed list's order. */
@@ -1288,10 +1291,11 @@ function droppedLines(dropped) {
 }
 
 /**
- * What a forge job left in /artifacts (issue #920, `REQ-FORGE-JOB-ARTIFACTS`): the files this host keeps, each served by
- * `/api/artifact` (an image drawn small and opened whole, text opened as text, anything else downloaded), what was not
- * kept and why, or why the files cannot be shown here. Shown to viewers too (`RUN_VIEWER_PANELS`): the evidence is for a
- * pull request's reviewer, who is often one. Nothing at all for a run that kept and dropped nothing.
+ * What a forge job left in /artifacts (issue #920, `REQ-FORGE-JOB-ARTIFACTS`): the files this host keeps, or since issue
+ * #942 the host that ran the job keeps, each served by `/api/artifact` (an image drawn small and opened whole, text
+ * opened as text, anything else downloaded), what was not kept and why, or why the files cannot be shown here. Shown to
+ * viewers too (`RUN_VIEWER_PANELS`): the evidence is for a pull request's reviewer, who is often one. Nothing at all for
+ * a run that kept and dropped nothing.
  */
 export function runArtifacts(view) {
   // Not `withRun`: that draws the card whatever its body says, and a run with nothing kept must draw no card at all.
@@ -1301,15 +1305,28 @@ export function runArtifacts(view) {
   return titled("Artifacts", artifactsBody(r, a));
 }
 
+/**
+ * Why another host's files cannot be shown now (issue #942), by the reader's `why`: each says what is known and what
+ * brings them back. A `why` this console does not know says only that they were not fetched.
+ */
+function elsewhereWhy(host, why) {
+  if (why === "not-running") return html`${host} is not running now; its files show here once it runs again, until its retention removes them.`;
+  if (why === "no-answer") return html`${host} did not answer in time, or runs an earlier version that cannot send files; reload to ask again.`;
+  if (why === "busy") return html`${host} is busy sending other files; reload to ask again.`;
+  return html`They could not be fetched from ${host}; reload to ask again.`;
+}
+
 function artifactsBody(r, a) {
   const kept = a.counts?.kept ?? 0;
+  // The host that keeps the files, where it is not this console's (issue #942): the reader names it then alone.
+  const host = typeof a.host === "string" && a.host !== "" ? a.host : null;
   if (a.state === "dropped") return html`<p>This run kept no file.</p>${droppedLines(a.counts?.dropped)}`;
-  if (a.state === "expired") return html`<p>The ${count(kept)} ${kept === 1 ? "file" : "files"} this run kept (${artifactSizeText(a.counts?.bytes)}) were removed after this host's retention (PI_ARTIFACTS_RETENTION_DAYS).</p>${droppedLines(a.counts?.dropped)}`;
-  if (a.state === "elsewhere") return html`<p>Kept on ${a.host}: ${count(kept)} ${kept === 1 ? "file" : "files"}, ${artifactSizeText(a.counts?.bytes)}. This console reads only its own host's files, so open this run on the console of ${a.host}.</p>${droppedLines(a.counts?.dropped)}`;
-  if (a.state === "unreadable") return html`<p>The ${count(kept)} ${kept === 1 ? "file" : "files"} this run kept could not be read here.</p>`;
+  if (a.state === "expired") return html`<p>The ${count(kept)} ${kept === 1 ? "file" : "files"} this run kept (${artifactSizeText(a.counts?.bytes)}) were removed after ${host === null ? "this host" : host}'s retention (PI_ARTIFACTS_RETENTION_DAYS).</p>${droppedLines(a.counts?.dropped)}`;
+  if (a.state === "elsewhere") return html`<p>Kept on ${a.host}: ${count(kept)} ${kept === 1 ? "file" : "files"}, ${artifactSizeText(a.counts?.bytes)}. ${elsewhereWhy(a.host, a.why)}</p>${droppedLines(a.counts?.dropped)}`;
+  if (a.state === "unreadable") return html`<p>The ${count(kept)} ${kept === 1 ? "file" : "files"} this run kept could not be read ${host === null ? "here" : html`on ${host}`}.</p>`;
   const files = Array.isArray(a.files) ? a.files : [];
   const rows = files.map((f) => {
-    const href = artifactHref(r.jobId, f.name);
+    const href = artifactHref(r.jobId, f.name, host);
     const image = f.type.startsWith("image/");
     const text = f.type === "text/plain";
     // A download for anything that is neither an image nor text: the route sends it as an attachment too.
@@ -1320,7 +1337,8 @@ function artifactsBody(r, a) {
       image ? "image" : text ? (f.scrubbed ? "text, cleaned of the job's secrets" : "text") : "download",
     ];
   });
-  return html`${ui.tbl({ label: "Files this run kept", heads: ["File", "Size", "Kind"], rows, stack: true })}${droppedLines(a.dropped)}${a.keepUntil ? html`<p class="note">Kept until ${timeHtml(msOf(a.keepUntil))}.</p>` : html`<p class="note">Kept until this host's retention removes them.</p>`}`;
+  const where = host === null ? "" : html` on ${host}`;
+  return html`${ui.tbl({ label: "Files this run kept", heads: ["File", "Size", "Kind"], rows, stack: true })}${droppedLines(a.dropped)}${a.keepUntil ? html`<p class="note">Kept${where} until ${timeHtml(msOf(a.keepUntil))}.</p>` : html`<p class="note">Kept${where} until ${host === null ? "this host" : host}'s retention removes them.</p>`}`;
 }
 
 /** Only exact retained points are selectable; ids carry no transcript text into the page. */

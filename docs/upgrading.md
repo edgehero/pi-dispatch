@@ -170,6 +170,7 @@ for what an older receiver queued, and run those jobs again.
 | An older worker, a watch trigger whose `run.secrets` holds its investigation's or its `decide` model's provider's own API key | A worker from before a watch job could declare a key refuses every job of that trigger before it spends: `secret-name-reserved`, or `provider-unconfigured` where it holds no key of its own for that provider. Nothing is stored differently, so nothing moves | Upgrade every worker before a watch rule relies on it ([secrets.md](secrets.md#the-provider-key-as-a-run-secret)) |
 | An older worker or receiver, an answer rule or the `zeroTouch` block with `secrets` or `secretsProfile` | The fields need triggers file version 12, so an older worker or receiver refuses to load such a file and keeps the triggers it had on a live edit. A newer worker hands a draft or grouping job its declared keys at pickup; nothing is queued with them, so no job data version moves. A draft or grouping already queued when its rule or the block gains or changes either field ends as `config-changed` (`question-group-config-changed`) and buys nothing | Upgrade every worker, receiver and console host before a rule or the block declares a key; declare its profile on every worker that runs drafts or groupings |
 | A quota reserve, a host that owns a Claude connection and runs an older worker | A worker from before the reserve reads no `PI_QUOTA_RESERVE_PERCENT` and starts every job on the connections it owns, however full a window is; only that host's jobs are held or not, since jobs on a connection run only on its owner. `run.quotaReserve` is read by the owner's worker from its own triggers file, so no receiver or poller needs it, and every older loader drops it and loads the file | Upgrade every host that owns a Claude connection, set the reserve there, and give it the triggers file ([subscription-auth.md](subscription-auth.md#quota-reserve)) |
+| A newer console, a run whose files an older worker kept | A worker from before issue #942 does not answer the console's request for a run's files, so the run page's Artifacts card says that host did not answer in time or runs an earlier version, and its files open only on a console that runs on that host. Nothing is stored differently, so nothing moves | Upgrade every worker, then reload the run page ([a run's artifacts](console.md#a-runs-artifacts)) |
 | A newer worker, an older receiver | The receiver drops a `run` field it does not know; the worker refuses such a job before it spends (`trigger-skew`, `wait-skew`) when it can read the triggers file | Receivers right after the workers, in the same `npm install`; run refused jobs again |
 | A receiver older than the triggers file | From 5.0.0 on, a receiver refuses a triggers file whose `version` is above what it reads. It does not start on one, and a forge does not send again what it misses while it is down. On a live edit it keeps the triggers it had, so a delivery still matches those and queues its job without what the file now adds. A worker that reads the added field refuses that job (`trigger-skew`) where it can read the file | Upgrade every receiver before any trigger uses a field that needs version 2 ([what a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out)) |
 | A worker older than the settings file, `pause-windows.json` or `triggers.json` | From 5.0.0 on, the worker defers jobs as `newer-release` ("Queued or configured by a newer pi-dispatch: waits for this host's upgrade") and looks again every ten minutes. A 4.x worker ignores `version` and drops what it does not know | Of these, only `triggers.json` needs more than version 1, for a trigger that leaves something out ([what a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out)). Doctor's `fleet.store-versions` names the hosts ([multi-host.md](multi-host.md#what-the-panel-and-doctor-show-you)) |
@@ -440,6 +441,20 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 ## What each release changed in stored state
 
 Release numbers come from the git tags.
+
+### Unreleased: another host's artifacts on any console (#942)
+
+A console now shows and serves the files a forge job kept on another host, by asking that host over the deployment's
+Valkey (the artifacts channel), so the link in the job's comment works on whichever console it names. The files stay
+in `PI_ARTIFACTS_DIR` on the host that ran the job, under that host's retention.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| `PI_ARTIFACTS_DIR`, run records, job data | Unchanged. Each worker reads its store as before, and answers for it on the channel. |
+| Valkey | No key. Two pub/sub channel names, `artifacts:request:<host>` and `artifacts:reply:<id>`, carry the requests and the replies and keep nothing ([backup.md](backup.md)). |
+| Mixed versions | A host shows its files on another host's console only once it runs this release: an older worker does not answer, and the card says the host did not answer in time or runs an earlier version. The console imports the channel from `@edgehero/pi-dispatch`, so install the console's and the worker's packages of the same release together, as [step 4](#before-you-start) says. |
+
+See [a run's artifacts](console.md#a-runs-artifacts).
 
 ### Unreleased: weights in a random model pool (#996)
 

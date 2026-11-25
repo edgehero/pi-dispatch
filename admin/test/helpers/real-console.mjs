@@ -130,7 +130,7 @@ export const NOT_THE_PILLS = [
   [/logs dir unreadable \([A-Z_-]+\)/g, "the capacity report's own note on this host's run files, read with that card once when the page is drawn"],
   [/Its list of running jobs could not be read/g, "what a host published about itself, which no read of the console's changes"],
   [/The runtime's CPU reserve could not be read\./g, "what a host published about itself"],
-  [/The \d+ files? this run kept could not be read here\./g, "another host's files, which this host's store cannot read"],
+  [/The \d+ files? this run kept could not be read (?:here|on [A-Za-z0-9._-]+)\./g, "a store of a run's kept files, this host's or (issue #942) the one of the host that kept them, which it could not read: no read of the console's own"],
   [/\(its data could not be read\)/g, "one job's data in an action's preview, which the preview read and says"],
   [/The console could not read the deployment's data; this is the page as it was last seen\./g, "the live stream's own banner, in every page and hidden until the stream says a read failed"],
   [/The retained workspace list is unreadable or was not published by this worker\./g, "what a host published about itself"],
@@ -140,7 +140,7 @@ export const NOT_THE_PILLS = [
   [/The host's running-job list is unreadable\./g, "what a host published about itself: its list of running jobs"],
   [/CPU reserve [^.]{0,60}?: unreadable/g, "what a host published about itself: its runtime's CPU reserve"],
   [/Published doctor observations are incomplete or stale\./g, "what the hosts published: a doctor run that does not cover a step, or is old"],
-  [/\b(?!rows\b)[\w.@-]+ did not answer in time/g, "a run's own record: an MCP server of the job that did not answer the job"],
+  [/\b(?!rows\b)[\w.@-]+ did not answer in time/g, "a run's own record: an MCP server of the job that did not answer the job; or (issue #942) the host that keeps a run's files, which did not answer its request for them"],
   [/Result unreadable|CPU budget unreadable|running jobs unreadable/g, "the labels of the three sentences above, on a host's row"],
   [/The registered shell list is incomplete: at least \d+ more(?: and \d+ unreadable registrations?)?\./g, "a list that was read and is full, or holds a registration that does not parse: not a read that failed"],
 ];

@@ -10,17 +10,27 @@
  * are left out and only the counts are said, so the bot's own comment can never look like a request (the status comment's
  * guard, `statusTextMayMatch`, for the same reason).
  *
- * The link is `PI_CONSOLE_PUBLIC_URL` plus the run page and the card's anchor. Without that setting the comment names the
- * job and says to open it on the console, which is true and links nowhere: fail open, and say which.
+ * The link is `PI_CONSOLE_PUBLIC_URL` plus the run page, this host's name as `historyHost` and the card's anchor. The one
+ * console address works for every host of a fleet (issue #942): the name finds the run's record on this host after the
+ * runs mirror dropped it, and that console asks this host for the files over the artifacts channel
+ * (`artifacts-channel.mjs`). Without that setting the comment names the job and says to open it on the console, which
+ * is true and links nowhere: fail open, and say which.
  */
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { ARTIFACT_DROP_REASONS, ARTIFACT_DROP_TEXT, ARTIFACTS_MANIFEST, ARTIFACTS_MANIFEST_MAX_BYTES, artifactRunDirOf, artifactSizeText, artifactsManifestOf } from "./artifacts-record.mjs";
 
-/** The run page's address on a console a reviewer can reach, or null without one. */
-export function artifactsLink(consoleUrl, jobId) {
+/** A worker's name as the run page's `historyHost` takes it (`PI_WORKER_NAME`'s charset). */
+const HOST_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/**
+ * The run page's address on a console a reviewer can reach, or null without one. `host`, the name of the worker that
+ * kept the files, is added as `historyHost` when it is a worker's name and left out otherwise.
+ */
+export function artifactsLink(consoleUrl, jobId, host = null) {
 	if (typeof consoleUrl !== "string" || consoleUrl === "") return null;
-	return `${consoleUrl}/run?id=${encodeURIComponent(jobId)}#p-artifacts`;
+	const from = typeof host === "string" && HOST_RE.test(host) ? `&historyHost=${encodeURIComponent(host)}` : "";
+	return `${consoleUrl}/run?id=${encodeURIComponent(jobId)}${from}#p-artifacts`;
 }
 
 /** The run's manifest from the store, or null (missing, unreadable, another job's, or not a manifest). Never throws. */
@@ -42,9 +52,10 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 /**
  * The comment's text for run `jobId`: from its manifest when this host keeps one (names and sizes), else from the record's
- * counts alone. `withNames` false leaves the names out. Null when there is nothing to say.
+ * counts alone. `withNames` false leaves the names out. `host` is this worker's name, for the link. Null when there is
+ * nothing to say.
  */
-export function artifactsCommentText({ jobId, counts, manifest = null, consoleUrl = null, withNames = true }) {
+export function artifactsCommentText({ jobId, counts, manifest = null, consoleUrl = null, host = null, withNames = true }) {
 	const files = Array.isArray(manifest?.files) ? manifest.files : [];
 	const kept = manifest ? files.length : counts?.kept ?? 0;
 	const dropped = manifest ? manifest.dropped : counts?.dropped ?? {};
@@ -56,7 +67,7 @@ export function artifactsCommentText({ jobId, counts, manifest = null, consoleUr
 	if (withNames && files.length > 0) for (const f of files) lines.push(`- \`${f.name}\` (${artifactSizeText(f.size)})`);
 	else if (kept > 0) lines.push(`- ${plural(kept, "file", "files")}, ${artifactSizeText(counts?.bytes ?? files.reduce((n, f) => n + f.size, 0))} in all`);
 	for (const r of reasons) lines.push(`${plural(dropped[r], "file was", "files were")} not kept: ${ARTIFACT_DROP_TEXT[r]}.`);
-	const link = artifactsLink(consoleUrl, jobId);
+	const link = artifactsLink(consoleUrl, jobId, host);
 	if (kept > 0) lines.push(link !== null ? `Open them on the run page: ${link}` : `Open them on the console's page for job \`${jobId}\`.`);
 	return lines.join("\n");
 }
@@ -70,11 +81,11 @@ export function textMayMatchPhrase(phrase, text) {
  * The comment for a run whose record says it kept or dropped files, or null: with names, without them when they could
  * spell the trigger's phrase, and none at all when even the counts could (then the record and the run page say it).
  */
-export function artifactsComment({ jobId, counts, storeDir, consoleUrl = null, phrase = null, fs = nodeFs }) {
+export function artifactsComment({ jobId, counts, storeDir, consoleUrl = null, host = null, phrase = null, fs = nodeFs }) {
 	const manifest = readArtifactsManifest(storeDir, jobId, { fs });
-	const named = artifactsCommentText({ jobId, counts, manifest, consoleUrl });
+	const named = artifactsCommentText({ jobId, counts, manifest, consoleUrl, host });
 	if (named === null) return null;
 	if (!textMayMatchPhrase(phrase, named)) return named;
-	const bare = artifactsCommentText({ jobId, counts, manifest, consoleUrl, withNames: false });
+	const bare = artifactsCommentText({ jobId, counts, manifest, consoleUrl, host, withNames: false });
 	return bare !== null && !textMayMatchPhrase(phrase, bare) ? bare : null;
 }

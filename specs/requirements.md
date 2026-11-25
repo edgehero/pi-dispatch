@@ -697,6 +697,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   which holds numbers and closed tokens only. The job shall be told of the folder only where it has one. Once a forge
   run's outcome is final, the worker shall say on its issue or pull request what was kept and dropped, and link the run
   page (`REQ-JOB-STATUS-COMMENTS`, issue #920 part 3).
+- **AMENDED 2026-11-25 (#942), one console address for the whole fleet**: the files shall stay on the host that kept
+  them, under its retention, and any console of the deployment shall show and serve them by asking that host
+  (`INT-ARTIFACTS-CHANNEL`), so the comment's link works whichever console it names; no file shall pass through Valkey
+  whole, and no key shall hold its bytes. This host's store shall still be read first. The card's `elsewhere` state
+  shall stay for a host that cannot be asked now, and shall say why: it is not running, it did not answer in time (or
+  runs an earlier version), or it is busy. Tests: `admin/test/console-artifacts.test.mjs`,
+  `worker/test/artifacts-channel.test.mjs`.
 - **Why**: a job that tests more than code (it starts an application with a virtual display, runs an end to end suite,
   talks to a test device) proves its result with files, and without a home for them a reviewer reads only the job's
   own sentence that it passed, while the evidence sits in a folder on the worker host that is swept within a day.
@@ -711,7 +718,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   read. Tests: `worker/test/artifacts.test.mjs`, `worker/test/artifacts-processor.test.mjs`,
   `worker/test/run-container.test.mjs`, `image/runner/test/loader.test.mjs`, `image/runner/test/guardrails-files.test.mjs`.
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-RETRY-INFRA-ONLY`, `INT-ARTIFACTS-STORE-CONTRACT`,
-  `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `DES-FORGE-JOB-ARTIFACTS`, `REQ-GRAPHICAL-JOB-CHECK`.
+  `INT-ARTIFACTS-CHANNEL`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `DES-FORGE-JOB-ARTIFACTS`,
+  `REQ-GRAPHICAL-JOB-CHECK`.
 
 ## REQ-JOB-STATUS-COMMENTS
 
@@ -1681,6 +1689,16 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-CONSOLE-SECURITY
 
+- **AMENDED 2026-11-25 (#942), another host's artifacts**: a file a forge job kept on another host shall be served by
+  any console of the deployment with every guarantee a file of this host's has (an operator or a viewer, never an agent
+  token, refused before anything is read or asked; the name looked up in a manifest and never joined from the request;
+  no link followed; the size the manifest's; inline only for the four image types and plain text; `ARTIFACT_CSP` on
+  every answer), and one more: the headers, type and length shall come only from the manifest the console asked that
+  host for and validated, and the bytes shall be held to that manifest's size and sha256 before the answer completes,
+  so a browser never receives a whole file that is not the manifest's. `host` in the request shall be one worker name,
+  live in the registry and not this host's, and a host shall be asked only where this host's store does not hold the
+  run or the file. Each refusal before the headers shall be a fixed sentence naming nothing from the request; a read
+  shall stay unaudited; nothing shall be kept on the console's disk. Tests: `admin/test/console-artifacts.test.mjs`.
 - **AMENDED 2026-11-14 (#882, part 7), the console on the local network, opt-in**: given `PI_CONSOLE_LAN=1` (off by
   default; any other value but unset refuses `serve`, as does a `PI_CONSOLE_LAN_PORT` that is not a whole number from
   1 to 65535), `serve` keeps its loopback listener as (a) says and adds a SECOND listener on the host's first
@@ -1801,7 +1819,8 @@ writes retain their existing interactive confirmation. This adds no unattended p
   free run text (BullMQ `failedReason`) and the audit log to the operator role alone; and, since #643, shall show a
   run's live transcript to the operator role alone, escaped, and only on the run page; and, since #920, shall serve the
   files a forge job kept (`REQ-FORGE-JOB-ARTIFACTS`) to a signed-in operator OR VIEWER, never an agent token, only from
-  this host's store and only a name its manifest lists, each under a sandboxed policy of its own that allows no script,
+  this host's store or, since #942, from the store of the host that kept them, its bytes held to that manifest's size
+  and sha256, and only a name its manifest lists, each under a sandboxed policy of its own that allows no script,
   load or form, inline only for the four image types and plain text and as an attachment otherwise, the first
   agent-written bytes a viewer may open, bounded by what was kept: text cleaned of the job's secrets, a binary holding
   one dropped; and, since 2026-10-18 (insights
@@ -10053,6 +10072,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-25 (#942) | **`REQ-FORGE-JOB-ARTIFACTS` AMENDED**, a dated bullet: one console address works for the whole fleet, the files staying on the host that kept them under its retention, read from that host over its artifacts channel with this host's store first, no file passing through Valkey whole and no key holding its bytes, and `elsewhere` kept for a host that cannot be asked now, saying why. **`REQ-CONSOLE-SECURITY` AMENDED**, a dated bullet and the #920 clause of the Statement: another host's file holds every guarantee of this host's, plus headers from the validated manifest alone and its bytes held to that manifest's size and sha256 before the answer completes; `host` one live worker name, never this host's; fixed refusal sentences; reads unaudited, nothing kept on the console's disk. **Code evidence**: admin/src/console/artifact-api.mjs -> getArtifact, HOST_ARTIFACT_REFUSALS; admin/src/read-model.mjs -> artifacts, hostArtifactFile; admin/src/console/panels/run.mjs -> artifactsBody; admin/test/console-artifacts.test.mjs. |
 | 2026-11-25 (#998) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (c): the run page's Model usage card gains a Credential row from the record's `mainCredential` (the declared key named by its variable and by what declared it, the host's key, the host's pi login, a subscription connection, no key), the card shown for that row alone on a run with no usage ledger, nothing for a record without the field, on an operator's page (a viewer's draws no such card); `/api/run` names the variable to an operator alone. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: a dated bullet, `dispatch_runs` gives the source word alone, never the variable's name, and the agent projection of `/api/run` the same. UNCHANGED, checked: `REQ-TRIGGER-SECRETS` (the rule that decides which key a job spends; the record now says which it did), `REQ-DURABLE-RUN-HISTORY` (one additive record key, `v` stays 1). **Code evidence**: worker/src/run-history.mjs -> recordedMainCredential, buildRecord; admin/src/console/panels/run.mjs -> mainCredentialText, runModels; admin/src/console/run-api.mjs -> safeRunFields; admin/src/agent-read.mjs -> agentReadProjection; admin/src/read-model.mjs -> modelRunRecord. |
 | 2026-11-25 (#1013) | **`REQ-TRIGGER-SECRETS` AMENDED**, its acceptance, by a dated paragraph after #1029's: an answer rule and the top-level `zeroTouch` block declare their models' provider keys in `secrets` and `secretsProfile` of their own, judged at load by the code that judges `run.secrets` and refused for any name that is not a provider's API-key variable the worker admits (an OAuth or bearer variable, a host-authenticated provider's, a typo or an unrelated name), by pi's generated data-only key table, at triggers file version 12; the job builders keep, at pickup, the names a provider of that job reads (a grouping job's main model being the settings' provider) and withhold the rest by name (`declared_key_withheld`); each kept key is then the main or the decision or grouping model's only credential on the exclusive rule, unchanged (no host fallback, an empty value refused before spend, forwarded names, host-authenticated and subscription-bound providers refused); a draft or grouping queued before such an edit ends as `config-changed`; doctor's own lines, the Connections card and the answer rules page name them, never a reference. **`REQ-PARKED-ANSWERER` AMENDED**: the rule's optional `secrets` and `secretsProfile`, and the draft job holds no other credential. UNCHANGED, checked: the reason enum (no new token), the job data version (answer-draft and grouping jobs are built at pickup and stay unversioned), `REQ-WATCH-DECISION-STEP`, `REQ-SUBSCRIPTION-AUTHENTICATION` (a bound provider is never declared), `REQ-ZERO-TOUCH-RATE`. **Code evidence**: worker/src/triggers.mjs -> validateDeclaredKeys, DECLARABLE_PROVIDER_KEYS, undeclarableReason, validateSecrets, validateSecretsProfile, TRIGGERS_BLOCK_VALUE_VERSIONS, TRIGGERS_FILE_VERSION; worker/src/provider-key-names.mjs (generated); worker/src/answerer.mjs -> validateAnswerRules; worker/src/question-groups.mjs -> validateZeroTouchConfig; worker/src/answerer-runtime.mjs -> declaredKeyFields, makeAnswerDraftRuntime; worker/src/question-group-runtime.mjs -> makeQuestionGroupRuntime; worker/src/env-allowlist.mjs -> declaredProviderKey; worker/src/start.mjs; worker/src/doctor.mjs -> triggerSecretProviderChecks, readTriggerFacts; admin/src/provider-inventory.mjs -> declaredKeyTriggers, declaredKeysView; admin/src/console/panels/provider-keys.mjs -> declaredLine; admin/src/answerer-data.mjs; admin/src/console/panels/answerer.mjs -> answererRules. |
 | 2026-11-25 (#996) | **`REQ-MODEL-POLICY` AMENDED**, the random initial choice bullet: a pool's optional `weights` (an exact candidate to a whole number from 1 to 100, a candidate not named weighing 1, set by hand in the triggers file) make each eligible candidate's initial probability its weight over the eligible weights, a candidate that cannot run at pickup leaving that draw with the others keeping their relative shares, and a replacement after a subscription limit choosing within the drawn class by that class's weights; doctor, the trigger's page and Models show each candidate's share of the whole pool; a weight-only edit refuses no queued run. UNCHANGED, checked: `REQ-ADMIN-VIA-PI-EXTENSION` (no model-callable tool may set `run.modelSelection`, its weights included), `REQ-OPERATOR-CONSOLE-ACTIONS` (`CARD_FIELDS` unchanged: the pool editor sends `modelSelection` whole), `REQ-TOKEN-ACCOUNTING-AND-CAPS` (a weighted draw bills its own class under the same cap rule as an unweighted one). **Code evidence**: worker/src/model-ref.mjs -> modelSelectionProblem, modelSelectionShares; worker/src/model-selection.mjs -> weightedModels, selectRandomModelJob; worker/src/doctor.mjs -> weightedPoolChecks; admin/src/trigger-gets-view.mjs -> modelRow; admin/src/models-view.mjs -> modelsViewOf |
