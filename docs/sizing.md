@@ -200,7 +200,9 @@ first applies. Doctor says which one binds on this machine. On a small machine t
 must fit the CPU budget beside what already runs, even on an idle machine.
 
 **A job waits** when its size could fit this machine but does not fit right now. It goes back to the queue, asks
-again about every nine seconds, keeps its place in line, and is never dropped or billed while it waits.
+again about every nine seconds, keeps its place in line, and is never dropped or billed while it waits. The worker's
+log says `host_budget_deferred` with its `why` when the wait starts, again only if the `why` changes, and
+`host_budget_ended` when the job starts, with how many times it was put back (`deferrals`) and `waitedMs`.
 
 **A job is refused** when its size can never fit: larger than the budget (`job-size-exceeds-host`), or larger than its
 project's `hostShare` of it (`job-size-exceeds-share`). It is refused before anything is spent, no container starts,
