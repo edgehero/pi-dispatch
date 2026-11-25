@@ -40,7 +40,12 @@ export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 3
 			if (privateUndo) tx.set(`${prefix}private:${fix.id}`, JSON.stringify(privateUndo), "PX", ttl, "NX");
 			// The entries whose records expired with the retention go in the same transaction (issue #1072): the readers skip
 			// them by their score already, and a console from before that skip counts them as missing rows until they go.
-			tx.zadd(`${prefix}index`, fix.at, fix.id); tx.zremrangebyscore(`${prefix}index`, "-inf", `(${now() - ttl}`); tx.zremrangebyrank(`${prefix}index`, 0, -5001); tx.pexpire(`${prefix}index`, ttl);
+			// The entry is added NX, after that trim. A second stage of the same id finds its record there and keeps it (the
+			// SET is NX too), with the expiry counted from the first stage; a ZADD that moved the score forward made the
+			// entry outlive that record inside the read window, a missing row again. The trim comes first so that an old
+			// entry of an id whose record expired is gone before the NX: left, it would keep the new record's entry at its
+			// old score, and the trim behind it would then remove that entry and leave the new record out of the index.
+			tx.zremrangebyscore(`${prefix}index`, "-inf", `(${now() - ttl}`); tx.zadd(`${prefix}index`, "NX", fix.at, fix.id); tx.zremrangebyrank(`${prefix}index`, 0, -5001); tx.pexpire(`${prefix}index`, ttl);
 			const result = await bounded(tx.exec());
 			if (!Array.isArray(result) || result.some(row => row[0])) throw new Error("fix metadata unavailable");
 			return { ok: true, fix };

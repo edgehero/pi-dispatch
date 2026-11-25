@@ -132,7 +132,7 @@ test("a fix's record keeps the expiry its stage gave it, and the history reads a
 	const redis = makeRedisClient(url), prefix = `test-fixes-${randomBytes(8).toString("hex")}:`;
 	let t = nowMs;
 	const store = makeZeroTouchFixStore({ redis, prefix, now: () => t, retentionDays: 30 });
-	const ttl = 30 * 86400000;
+	const ttl = 30 * 86400000, DAY_MS = 86400000;
 	const meta = id => `${prefix}meta:${id}`;
 	const value = (runId, extra = {}) => ({ kind: "config", runId, scopeId, reason: "secret-unresolved", ...extra });
 	try {
@@ -195,5 +195,26 @@ test("a fix's record keeps the expiry its stage gave it, and the history reads a
 		assert.deepEqual(await redis.zrange(`${prefix}index`, 0, -1), [fresh.fix.id], "the add trimmed every entry past the retention");
 		snapshot = await store.publicSnapshot();
 		assert.deepEqual([snapshot.fixes.map(fix => fix.id), snapshot.partial], [[fresh.fix.id], false]);
+
+		// The same id staged twice: the second stage finds the record and keeps it, with the expiry counted from the first,
+		// and the entry keeps the first stage's time with it. Moved forward, the entry outlived the record by a day inside
+		// the read window, and the history read as incomplete again.
+		const first = t;
+		const once = await store.stage(value("twice"), { identity: "twice" });
+		t += DAY_MS;
+		const again = await store.stage(value("twice", { at: t }), { identity: "twice" });
+		assert.equal(again.fix.id, once.fix.id);
+		assert.equal(Number(await redis.zscore(`${prefix}index`, once.fix.id)), first, "the entry keeps the first stage's time");
+		assert.equal(JSON.parse(await redis.get(meta(once.fix.id))).at, first, "and the record is the first stage's");
+		t = first + ttl + 1;
+		await redis.del(meta(once.fix.id));
+		snapshot = await store.publicSnapshot();
+		assert.deepEqual([snapshot.partial, snapshot.pendingCount], [false, 0], "the record expired with its retention: no missing row");
+		// An id whose record expired and whose entry is still there is staged again: the old entry goes first, and the new
+		// record gets an entry of its own time, never one at the old score that the same trim would then remove.
+		await redis.zadd(`${prefix}index`, first, once.fix.id);
+		const renewed = await store.stage(value("twice"), { identity: "twice" });
+		assert.equal(Number(await redis.zscore(`${prefix}index`, renewed.fix.id)), t, "a new record has its own entry");
+		assert.equal((await store.publicSnapshot()).pendingCount, 1);
 	} finally { const keys = await redis.keys(`${prefix}*`); if (keys.length) await redis.del(...keys); await redis.quit(); }
 });

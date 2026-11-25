@@ -19883,7 +19883,8 @@ file is the last problem, after every one the card orders. No golden draws it: t
   silently become zero, and repairing one never repeats a cancellation, configuration write or paid run.
   AMENDED 2026-11-25 (#1072): the fix history tells a row that expired from a row that is missing by its age alone. A
   fix's record keeps the expiry its stage gave it (a mark is `SET ... KEEPTTL XX`), so its index entry's score, the
-  stage's time, says when the record ends; an add trims the entries past the retention, and the readers skip every
+  stage's time, says when the record ends (the entry is added `NX`, after the trim, so a second stage of the same id
+  moves neither); an add trims the entries past the retention, and the readers skip every
   entry older than the retention less an hour of clock skew (`INT-ZERO-TOUCH-FIXES`). A record inside that window
   that is gone or does not read is still a missing row, which keeps the page's "incomplete" for what it is meant for.
   REJECTED: recording each entry's last write beside it in the same transaction and judging an entry expired only
