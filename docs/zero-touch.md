@@ -77,9 +77,16 @@ Capture is opt-in. Add a reviewed `zeroTouch` section beside `triggers` in the d
 Use a typed classifier model available to the pinned runtime, with explicit finite input pricing, zero output
 pricing and a known context window. The configured cap must cover its conservative full-context input bound. The
 ordinary deployment text model remains the primary model for admission; no text-agent session executes. Configure
-both providers' normal credentials and declared endpoints as appropriate: the host's environment or pi's `auth.json`,
-since these settings carry no `run.secrets` and a key a trigger declares as a run secret does not reach a grouping job.
-No new credential is stored in this file.
+both providers' normal credentials and declared endpoints as appropriate: the host's environment or pi's `auth.json`.
+A key a trigger declares in its `run.secrets` does not reach a grouping job. To give the grouping job keys of its own,
+add `secrets` (and `secretsProfile`) to this section as on a trigger: a provider's API-key variable mapped to a
+reference your resolver reads, never the key itself. A name that is not a provider's API-key variable (an OAuth or
+bearer variable, a typo, an unrelated variable) is refused when the file loads. The job receives the keys its
+classifier's provider or the deployment's default provider (its primary model's, known only when the job starts)
+reads; the worker withholds another provider's key and logs `declared_key_withheld`. A declared key is that model's
+only key: the host's key for that provider never reaches the job, and an empty value refuses it before anything
+spends. The file needs triggers file version 12, and a grouping queued before a change to these fields is refused as
+`question-group-config-changed`. The rules are those of [secrets](secrets.md).
 
 After capture, **Group question** previews the classifier and cap. Confirm queues an ordinary budgeted job. Page
 loads make no provider calls. The container gets only frozen private input, no Valkey credential or writable forge

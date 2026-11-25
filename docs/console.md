@@ -1633,8 +1633,10 @@ it; a watch rule takes no role), a random candidate or a fallback the trigger ma
 model or an auxiliary model, a cron trigger by its id and any other, a watch rule included, by its row, with the
 variable's name and never a value ([the provider key as a run secret](secrets.md#the-provider-key-as-a-run-secret)).
 A trigger that reaches the slot only through its `decide` or auxiliary model says so ("for its decide model", "for its
-auxiliary model"). Every call their jobs make to that provider spends that key instead of this host's credential, so
-a slot can read Not set while they spend. Where this host refuses those jobs before they spend, because the row is a managed subscription or this host's
+auxiliary model"). After the triggers it names an answer rule (by its id) or the `zeroTouch` section whose own
+`secrets` declare the variable ([a key of the rule's own](answer-rules.md#a-key-of-the-rules-own)), with "for its
+decision model" or "for its grouping model" where only that model runs on the provider. Every call their jobs make to
+that provider spends that key instead of this host's credential, so a slot can read Not set while they spend. Where this host refuses those jobs before they spend, because the row is a managed subscription or this host's
 `PI_FORWARD_ENV` names the variable, the line says that instead. A line under the list says once that another host
 refuses them where its own forward list or bindings do, which no host publishes to the console, and, when it applies,
 that the projects file or a `PI_MODEL` line could not be read, which widens or leaves out what the lines say.

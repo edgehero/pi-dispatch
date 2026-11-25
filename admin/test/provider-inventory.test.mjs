@@ -404,3 +404,27 @@ test("issue #1029: a watch rule's classifier is a provider the inventory lists, 
   assert.deepEqual(view.declaredKeys, [{ key: "OPENROUTER_API_KEY", triggers: [{ index: 0, cron: null, via: "decide" }], more: 0, forwarded: false }]);
   assert.ok(!JSON.stringify(view).includes(SECRET));
 });
+
+test("issue #1013: an answer rule and the zeroTouch block that declare a slot's variable are named under it, by their models' providers, and each model's provider has a row", () => {
+  const rule = (id, model, decisionModel, secrets) => ({ id, projects: [id], categories: ["how-to"], confidence: 0.9, mode: "draft", flow: "answer", model, decisionModel, maxCostUsd: "0.10", secrets });
+  const document = { version: 12, triggers: [cron("own", { provider: "openai", model: "gpt-5", secrets: { OPENAI_API_KEY: SECRET } })], answerRules: [
+    rule("help", "openai/gpt-5-mini", "openrouter/typesafe/jev-1.13", { OPENAI_API_KEY: SECRET, OPENROUTER_API_KEY: SECRET, GROQ_API_KEY: SECRET }),
+    rule("same", "deepseek/one", "deepseek/two", { DEEPSEEK_API_KEY: SECRET }),
+    rule("plain", "mistral/m", "mistral/m", undefined),
+  ], zeroTouch: { capture: true, model: "openrouter/typesafe/jev-1.13", maxCostUsd: "0.05", secrets: { ANTHROPIC_API_KEY: SECRET, OPENROUTER_API_KEY: SECRET } } };
+  const view = fixture({ document }).read();
+  assert.equal(view.state, "ready");
+  // The default provider (anthropic) is the grouping job's main model; a rule whose two models share a slot is named once,
+  // as its main model's; a key no model of the block runs on (GROQ) and a rule with no declaration are named nowhere.
+  assert.deepEqual(view.declaredKeys, [
+    { key: "ANTHROPIC_API_KEY", triggers: [], more: 0, forwarded: false, holders: [{ zeroTouch: true }] },
+    { key: "DEEPSEEK_API_KEY", triggers: [], more: 0, forwarded: false, holders: [{ rule: "same" }] },
+    { key: "OPENAI_API_KEY", triggers: [{ index: 0, cron: "own" }], more: 0, forwarded: false, holders: [{ rule: "help" }] },
+    { key: "OPENROUTER_API_KEY", triggers: [], more: 0, forwarded: false, holders: [{ rule: "help", via: "decision" }, { zeroTouch: true, via: "grouping" }] },
+  ]);
+  assert.ok(view.rows.some(row => row.provider === "openrouter") && view.rows.some(row => row.provider === "deepseek"), "each declaring model's provider has a row to be named under");
+  assert.equal(view.rows.some(row => row.provider === "mistral"), false, "a rule that declares nothing adds no row");
+  assert.ok(!JSON.stringify(view).includes(SECRET));
+  // The rebuild keeps only well formed holders, each once.
+  assert.deepEqual(declaredKeysView({ declaredKeys: [{ key: "OPENAI_API_KEY", triggers: [], holders: [{ rule: "help" }, { rule: "help", via: "decision" }, { rule: "Bad Id" }, { zeroTouch: true, via: "decide" }, { zeroTouch: true }, {}] }] }).slots.get("OPENAI_API_KEY").holders, [{ rule: "help" }, { zeroTouch: true }]);
+});

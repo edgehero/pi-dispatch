@@ -31,6 +31,21 @@ test("operator group name write preserves all unrelated fields and is refused af
   assert.match(applyZeroTouchFilePlan({ plan: stale.plan, paths }).invalid, /changed/);
   assert.equal(JSON.parse(readFileSync(paths.triggersPath)).zeroTouch.names[groupId], "Package manager");
 });
+test("a group name save keeps the zeroTouch block's declared provider keys and the version they need, and a grouping plan is bound to them (issue #1013)", () => {
+  const { paths, doc } = fixture();
+  const keyed = { ...config, model: "openai/omni-moderation-latest", secrets: { OPENAI_API_KEY: "op://ci/openai" }, secretsProfile: "vault" };
+  writeFileSync(paths.triggersPath, JSON.stringify({ version: 12, ...doc, zeroTouch: keyed }));
+  const built = planZeroTouchName({ params: { groupId, name: "Package manager" }, paths });
+  assert.ok(built.plan, JSON.stringify(built));
+  assert.ok(built.plan.afterText.startsWith('{\n  "version": 12,\n'), built.plan.afterText);
+  assert.equal(applyZeroTouchFilePlan({ plan: built.plan, paths }).ok, true);
+  const written = JSON.parse(readFileSync(paths.triggersPath));
+  assert.deepEqual(written.zeroTouch, { ...keyed, confidence: 0.9, names: { [groupId]: "Package manager" } });
+  // The grouping plan's configuration digest covers the declaration, so a queued grouping meets a changed one as config-changed.
+  const meta = { runId: "source", status: "unassigned", digest: "c".repeat(64) };
+  const digestOf = (block) => planZeroTouchGroup({ params: { runId: "source" }, config: block, meta }).plan.configDigest;
+  assert.notEqual(digestOf(written.zeroTouch), digestOf({ ...written.zeroTouch, secrets: { OPENAI_API_KEY: "op://ci/other" } }));
+});
 test("instruction preview writes the exact sentence and safe Undo restores absence", () => {
   const { paths, sourceRecord, group, binding } = fixture();
   const params = { runId: "source", groupId, index: 0, sentence: "Use pnpm in this repository." };

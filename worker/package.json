@@ -49,6 +49,7 @@
     "./setup-host-entry": "./src/setup-host-entry.mjs",
     "./setup-lock": "./src/setup-lock.mjs",
     "./provider-key": "./src/provider-key.mjs",
+    "./provider-key-names": "./src/provider-key-names.mjs",
     ".": "./src/index.mjs",
     "./config": "./src/config.mjs",
     "./job-limit-rules": "./src/job-limit-rules.mjs",

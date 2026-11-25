@@ -11,6 +11,7 @@ import { planStandingAnswerAdd, applyStandingAnswerAdd, planAnswerDraftDrop } fr
 import { boundedClient, CONFIRM_READ_TIMEOUT_MS, refusedByValkey, unconfirmedWrite, valkeyRead, within } from "./job-actions.mjs";
 import { writeTracking } from "./read-model.mjs";
 import { fileCaseOfError } from "./file-case.mjs";
+import { providerKeyNames } from "./provider-key-names.mjs";
 
 /** What a read that ran out of time answers inside the service, told apart from every value a store returns. */
 const READ_LATE = Symbol("read-late");
@@ -134,8 +135,12 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
           config = { triggers: [], answerRules: [], standingAnswers: [] };
         }
         const standing = (config.standingAnswers ?? []).map(answer => ({ ...answer, used: rows.filter(r => r.sources?.some(s => s.kind === "standing" && s.id === answerStandingSource(answer).id)).length }));
+        // Issue #1013: a rule's declared provider keys by name only (`secretNames`). Their references are the address of
+        // the operator's credentials in their manager, kept out of every display as `run.secrets`' are. `secretsNotPassed`
+        // are the names neither of the rule's models' providers reads, which the worker's draft builder withholds (pi's
+        // generated table, the one the worker reads), so the page does not call them the draft's keys.
         const selected = RUN_RE.test(runId ?? "") ? await currentDraft(store, rows.find(row => row.draftRunId === runId)?.runId ?? runId, config) : null;
-        return { state: snapshot.state, partial: Boolean(snapshot.partial), rows, rules: (config.answerRules ?? []).map(rule => ({ ...rule, stats: answererStats(rows.filter(row => row.ruleId === rule.id), now()) })), standing, stats: answererStats(rows, now()), ...(selected ? { privateDraft: selected.draft, privateDraftProblem: selected.problem } : {}) };
+        return { state: snapshot.state, partial: Boolean(snapshot.partial), rows, rules: (config.answerRules ?? []).map(({ secrets, ...rule }) => ({ ...rule, ...(secrets ? { secretNames: Object.keys(secrets), secretsNotPassed: Object.keys(secrets).filter(name => ![rule.model, rule.decisionModel].some(ref => providerKeyNames(ref.slice(0, ref.indexOf("/"))).includes(name))) } : {}), stats: answererStats(rows.filter(row => row.ruleId === rule.id), now()) })), standing, stats: answererStats(rows, now()), ...(selected ? { privateDraft: selected.draft, privateDraftProblem: selected.problem } : {}) };
       }, { timed: true, storeMs: typeof left === "function" ? left(ANSWER_STORE_MS) : null });
     },
     async privateDraft(runId) { return RUN_RE.test(runId ?? "") ? using(async store => (await currentDraft(store, runId)).draft, { timed: true }) : null; },

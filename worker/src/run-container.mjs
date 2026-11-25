@@ -230,7 +230,8 @@ export function makeRunContainer({
 	// `mainCredential` (issue #967) is the processor's: the name of the run secret it admitted as the main provider's
 	// credential, so buildContainerEnv writes that value as the credential and reads no host key for the provider. Off the
 	// call bag, never off `job`, for `secrets`' reason. Null (every job that declares none) builds the env as before.
-	// `secondaryCredential` (issue #997) is the same for the role model's provider (a watch rule's `decide` model).
+	// `secondaryCredential` (issue #997) is the same for the role model's provider (a watch rule's `decide` model and, since
+	// issue #1013, an answer draft's decision model or a grouping job's classifier).
 	const attempt = async function runContainer({ job, token, prepared, checkSecretFilesPlacement = null, secrets = {}, mainCredential = null, secondaryCredential = null, secretFiles = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, privateEndpoints = [], size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null, timeLimit = null }, counted = NOT_COUNTED) {
 		// Issue #1023: this run's report that its container is up. Never a throw: it runs inside the child's listeners.
 		const containerUp = () => {
