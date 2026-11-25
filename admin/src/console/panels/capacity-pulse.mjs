@@ -46,6 +46,12 @@ export function capacityWindow(v) {
   return html`${c?.window ? note(html`From ${timeHtml(c.window.fromMs)} to ${timeHtml(c.window.toMs)}. Each bar is ${c.window.bucketMs / 3_600_000} hour${c.window.bucketMs === 3_600_000 ? "" : "s"}.`) : null}${ui.banner({ status: "attention", title: "Jobs only", body: "A machine busy with other work reads as idle. These numbers count pi-dispatch jobs, not the machine." })}`;
 }
 
+/**
+ * One host's chart, drawn against `now`: the instant the report was assembled at (the payload's `nowMs`, issue #1073),
+ * the end of the window its buckets were read over. Not the page's own instant: one read before the assembly's drew a
+ * bar whose window ends after it with part of the bar missing (a first load after a start showed it), and a cached
+ * report is up to its window older than the page, whose axis then ran past what was read and drew that time as no data.
+ */
 function chart(host, c, tips, now) {
   const lay = layoutCapacityChart(host, { ...c.window, nowMs: now, width: 1000, height: 144 });
   const x = (value) => `${number(value / lay.width * 100)}%`;
@@ -90,7 +96,7 @@ export function capacityHosts(v, tips = []) {
     return html`<article class="card" id="p-cap-${host.name}"><div class="card__head"><h2 class="card__title">${host.name}</h2>${detail}</div><div class="card__body">
       ${f ? html`<div class="cp-trio"><span><b>${f.busy}</b> busy</span><span><b>${f.idle}</b> idle</span><span class="cp-trio__0"><b>${f.missing ?? "0%"}</b> no data</span></div>` : note(host.notShared ?? "No history here.")}
       ${f?.missing ? note("Busy and idle are shares of covered time; no data is a share of the whole window.") : null}
-      ${chart(host, c, tips, v.now)}
+      ${chart(host, c, tips, Number.isFinite(v.data?.insights?.nowMs) ? v.data.insights.nowMs : v.now)}
       ${f ? html`<div class="cp-facts">${ui.facts([["Jobs at once", `average ${f.avg}, peak ${f.peak}${f.slots === null ? "" : ` of ${f.slots}`}`], ["Promised", [f.memory, f.cpu].filter(Boolean).join(", ") || "unknown"], ["Wait for a slot", f.wait ?? "No run recorded one"]], { cols: 1 })}${ui.facts([["Full", f.full === null ? "unknown" : `${f.full} of the time`], ["CPU used", f.cpuUsed ?? "unknown"], ["Projects by run time", f.projects.length ? f.projects.join(", ") : "No project recorded"]], { cols: 1 })}</div>` : null}
       ${host.truncated ? ui.banner({ status: "attention", title: "History truncated", body: html`History starts at ${timeHtml(host.fromMs)}. Earlier time is drawn as no data, never as idle.`, sm: true }) : null}
       ${(host.caveats ?? []).map((text) => html`<p class="sp-note cp-caveat">${text}</p>`)}${host.notes ? note(host.notes) : null}

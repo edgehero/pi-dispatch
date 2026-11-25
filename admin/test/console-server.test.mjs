@@ -834,7 +834,8 @@ test("a viewer is refused an operator page 403, and gets every viewer page", asy
 
 test("the session's role reaches the page read: a viewer's /insights?paths=full asks the assembly for folder names only", async () => {
   const asked = [];
-  const pageDeps = { insights: async (window, opts) => (asked.push(opts), {}), now: T0 };
+  // The load's deadline rides beside the boundaries (issue #1073): a function, held apart from them here.
+  const pageDeps = { insights: async (window, { within, ...opts }) => (assert.equal(typeof within, "function"), asked.push(opts), {}), now: T0 };
   const c = await start({ pageDeps, pages: { ...fakePages(), loadPageData: realPages.loadPageData } });
   for (const [token, want] of [[VIEW_TOKEN, false], [OP_TOKEN, true]]) {
     const { cookie } = await c.login(token);

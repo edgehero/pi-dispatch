@@ -560,6 +560,17 @@ exited 1 and the queue ran the whole paid job again. The worker gives the stop i
 
 See [reasons.md](reasons.md#provider-stop-refusal).
 
+### Unreleased: the worker sweeps the held-jobs index (#1075)
+
+Workers now remove the stale entries of the held-jobs index (`wait:held`, the jobs held on `run.waitFor`) on their
+retention sweep, every `PI_SWEEP_INTERVAL_HOURS` (not at boot, and not at all at `0`). An entry is stale when its job's
+hold record is gone or has no start time; before, only the `/dispatch` panel and `/dispatch status` removed one, so a
+deployment run from the tools and the web console grew the index until `dispatch_waits` said its list was not
+`complete`. The panel and `/dispatch status` now remove through the same one step as the sweep. The key, its members
+and the hold records are unchanged; no migration, backup path or older-state detector is needed. The index is shared,
+so one upgraded worker sweeps it for the whole fleet. An older panel or `/dispatch status` still prunes as before. See
+[watching and cancelling](wait-for.md#watching-and-cancelling).
+
 ### 5.4.2
 
 #### Completed label-job receipts (#920)
