@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
  * Real-Valkey check of the registry reader's three PTTL fields (issue #737, host-registry.mjs `readLiveHosts`): a row
@@ -179,4 +182,100 @@ test("through a real Valkey, a sound row read by a user without HGETALL is answe
 		limited.disconnect();
 		await w.redis.call("ACL", "DELUSER", user).catch(() => {});
 	}
+});
+
+test("through a real Valkey frozen at boot, a host's history subscription times out, is tried again after the thaw and answers a history read, with no restart (#1096)", { skip, timeout: 20_000 }, async (t) => {
+	const { freezingProxy } = await import("./helpers/freezing-proxy.mjs");
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const { makeHistoryReader, readHostHistory, serveHistory } = await import("../src/history-reader.mjs");
+	const { keepServing } = await import("../src/keep-serving.mjs");
+	// Channels, not keys: nothing is written, and the host name's unique tail keeps this test's channel its own.
+	const host = uniqueHost("history");
+	const logsDir = tempDir("hr-history-");
+	const endedAt = Date.now() - 60_000;
+	writeFileSync(join(logsDir, "gh-1096.json"), JSON.stringify({ jobId: "gh-1096", v: 1, project: "web", host, outcome: "completed", startedAt: new Date(endedAt - 60_000).toISOString(), endedAt: new Date(endedAt).toISOString() }));
+	const proxy = await freezingProxy(url);
+	const via = makeRedisClient(proxy.url, { disconnectTimeoutMs: 0 });
+	via.on("error", () => {});
+	const direct = makeRedisClient(url, { disconnectTimeoutMs: 0 });
+	const lines = [];
+	let keeper = null;
+	t.after(async () => {
+		await keeper?.close();
+		via.disconnect();
+		direct.disconnect();
+		proxy.close();
+	});
+	assert.equal(await via.ping(), "PONG", "the worker's own client is up before Valkey stops answering");
+	proxy.freeze();
+	// As boot wires it, with a short subscribe bound and short waits so the test takes no minute.
+	keeper = keepServing({
+		start: () => serveHistory({ redis: via, host, reader: makeHistoryReader({ logsDir }), timeoutMs: 300 }),
+		log: (event, fields) => lines.push([event, fields]),
+		unavailable: "history_reader_unavailable",
+		recovered: "history_reader_recovered",
+		sleep: (_ms, signal) => new Promise((resolve) => { const timer = setTimeout(() => resolve(!signal.aborted), 100); signal.addEventListener("abort", () => { clearTimeout(timer); resolve(false); }, { once: true }); }),
+	});
+	const until = async (what, done) => {
+		for (let turn = 0; turn < 150 && !done(); turn++) await sleep(20);
+		assert.ok(done(), what);
+	};
+	await until("the first subscription timed out while Valkey was frozen", () => lines.length > 0);
+	assert.deepEqual(lines, [["history_reader_unavailable", {}]]);
+	const query = { start: endedAt - 3_600_000, end: endedAt + 3_600_000, project: null };
+	assert.deepEqual(await readHostHistory({ redis: direct, host, query, timeoutMs: 300 }), { error: "host-unavailable" }, "the premise: no one answers on the channel yet");
+	proxy.thaw();
+	await until("a later try subscribed after the thaw", () => lines.length > 1);
+	assert.equal(lines.length, 2, JSON.stringify(lines));
+	assert.equal(lines[1][0], "history_reader_recovered");
+	assert.ok(lines[1][1].failedAttempts >= 1, JSON.stringify(lines[1]));
+	const page = await readHostHistory({ redis: direct, host, query });
+	assert.deepEqual(page.runs?.map((run) => run.jobId), ["gh-1096"], `answered without a restart: ${JSON.stringify(page)}`);
+});
+
+test("through a real Valkey frozen at boot, a host's artifacts subscription times out, is tried again after the thaw and serves a run's manifest, with no restart (#1096)", { skip, timeout: 20_000 }, async (t) => {
+	const { freezingProxy } = await import("./helpers/freezing-proxy.mjs");
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const { readHostArtifactsManifest, serveArtifacts } = await import("../src/artifacts-channel.mjs");
+	const { keepServing } = await import("../src/keep-serving.mjs");
+	// Channels, not keys, as above: the host name's unique tail keeps this test's channel its own.
+	const host = uniqueHost("artifacts");
+	const storeDir = tempDir("hr-artifacts-");
+	mkdirSync(join(storeDir, "gh-1096"), { recursive: true });
+	writeFileSync(join(storeDir, "gh-1096", "manifest.json"), JSON.stringify({ v: 1, jobId: "gh-1096", createdAt: new Date(Date.now() - 60_000).toISOString(), keepUntil: null, files: [{ name: "after.png", size: 2048, sha256: "a".repeat(64), type: "image/png", scrubbed: false }], dropped: {} }));
+	const proxy = await freezingProxy(url);
+	const via = makeRedisClient(proxy.url, { disconnectTimeoutMs: 0 });
+	via.on("error", () => {});
+	const direct = makeRedisClient(url, { disconnectTimeoutMs: 0 });
+	const lines = [];
+	let keeper = null;
+	t.after(async () => {
+		await keeper?.close();
+		via.disconnect();
+		direct.disconnect();
+		proxy.close();
+	});
+	assert.equal(await via.ping(), "PONG", "the worker's own client is up before Valkey stops answering");
+	proxy.freeze();
+	keeper = keepServing({
+		start: () => serveArtifacts({ redis: via, host, storeDir, timeoutMs: 300 }),
+		log: (event, fields) => lines.push([event, fields]),
+		unavailable: "artifacts_channel_unavailable",
+		recovered: "artifacts_channel_recovered",
+		sleep: (_ms, signal) => new Promise((resolve) => { const timer = setTimeout(() => resolve(!signal.aborted), 100); signal.addEventListener("abort", () => { clearTimeout(timer); resolve(false); }, { once: true }); }),
+	});
+	const until = async (what, done) => {
+		for (let turn = 0; turn < 150 && !done(); turn++) await sleep(20);
+		assert.ok(done(), what);
+	};
+	await until("the first subscription timed out while Valkey was frozen", () => lines.length > 0);
+	assert.deepEqual(lines, [["artifacts_channel_unavailable", {}]]);
+	assert.deepEqual(await readHostArtifactsManifest({ redis: direct, host, jobId: "gh-1096", timeoutMs: 300 }), { error: "host-unavailable" }, "the premise: no one answers on the channel yet");
+	proxy.thaw();
+	await until("a later try subscribed after the thaw", () => lines.length > 1);
+	assert.equal(lines.length, 2, JSON.stringify(lines));
+	assert.equal(lines[1][0], "artifacts_channel_recovered");
+	assert.ok(lines[1][1].failedAttempts >= 1, JSON.stringify(lines[1]));
+	const served = await readHostArtifactsManifest({ redis: direct, host, jobId: "gh-1096" });
+	assert.deepEqual(served.manifest?.files.map((file) => file.name), ["after.png"], `served without a restart: ${JSON.stringify(served)}`);
 });

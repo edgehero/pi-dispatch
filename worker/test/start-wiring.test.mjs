@@ -144,7 +144,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeSweepFollowUps, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchFs, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, execDockerBounded, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, makeRunMirror, makePortfolioSnapshot, finishModelAttempt, durable = {} } = {}) {
+async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeSweepFollowUps, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchFs, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, execDockerBounded, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, makeRunMirror, makePortfolioSnapshot, finishModelAttempt, serveHistory, serveArtifacts, keepServing, durable = {} } = {}) {
 	// Every real socket in this helper must use the injected test service, including callers that only override other settings.
 	env = { VALKEY_URL, ...env };
 	const secretsResolverCalls = [];
@@ -292,6 +292,9 @@ async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorS
 			makeHost,
 			createWorkerFn,
 			...(makeCpuReserve ? { makeCpuReserve } : {}),
+			...(serveHistory ? { serveHistory } : {}),
+			...(serveArtifacts ? { serveArtifacts } : {}),
+			...(keepServing ? { keepServing } : {}),
 			...(execDockerBounded ? { execDockerBounded } : {}),
 			makeReaper: reaper,
 			makeLogSink: logSink,
@@ -8176,4 +8179,92 @@ test("a final forge record with artifacts posts one harness comment with the kep
 	recordRun({ job: { id: "local-1", name: "local", data: { kind: "local", folder: "/f", flow: "tidy" } }, result: { outcome: "completed", artifacts }, startedAt: "a", endedAt: "b" });
 	await settled();
 	assert.equal(posted.length, 1);
+});
+
+test("the history channel's subscription that fails at boot is tried again while the worker runs, boot never waits on it, and its one closer closes what held, once (#1096)", { skip }, async () => {
+	const { keepServing: realKeepServing } = await import("../src/keep-serving.mjs");
+	const tries = [];
+	const closes = [];
+	let failFirst;
+	const firstAnswer = new Promise((resolve) => { failFirst = resolve; });
+	// The real serveHistory's contract: a failed try has closed its own reader, and a held one closes its reader on close.
+	const serveHistory = async ({ host, reader }) => {
+		tries.push(host);
+		if (tries.length === 1) {
+			await firstAnswer;
+			await reader.close();
+			throw new Error("history subscription timed out");
+		}
+		return { close: async () => { closes.push(host); await reader.close(); } };
+	};
+	const waits = [];
+	const keepServing = (options) => realKeepServing({ ...options, sleep: async (ms) => { waits.push(ms); return true; } });
+	let closers;
+	const out = await runStart({
+		env: { PI_WORKER_NAME: "history-retry-worker", PI_SWEEP_INTERVAL_HOURS: "0" },
+		serveHistory,
+		keepServing,
+		whileRunning: async ({ captured }) => {
+			assert.equal(tries.length, 1, "boot went on while its first subscription was still pending");
+			closers = captured.extraClosers.length;
+			failFirst();
+			for (let turn = 0; turn < 100 && tries.length < 2; turn++) await new Promise((resolve) => setImmediate(resolve));
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.equal(tries.length, 2, "tried again, without a restart");
+			assert.equal(captured.extraClosers.length, closers, "no closer added for the retry");
+		},
+	});
+	assert.deepEqual(tries, ["history-retry-worker", "history-retry-worker"]);
+	assert.deepEqual(waits, [5_000], "the first wait of the backoff");
+	const lines = out.logsNow().filter((line) => line.event?.startsWith("history_reader_")).map(({ event, failedAttempts, waitedSeconds }) => [event, failedAttempts, waitedSeconds]);
+	assert.equal(lines.length, 2, JSON.stringify(lines));
+	assert.deepEqual(lines[0], ["history_reader_unavailable", undefined, undefined]);
+	assert.equal(lines[1][0], "history_reader_recovered");
+	assert.equal(lines[1][1], 1);
+	assert.ok(Number.isSafeInteger(lines[1][2]) && lines[1][2] >= 0);
+	assert.deepEqual(closes, ["history-retry-worker"], "the harness's shutdown closed what held, once");
+});
+
+test("the artifacts channel's subscription that fails at boot is tried again while the worker runs, beside the history channel's, and its one closer closes what held, once (#1096)", { skip }, async () => {
+	const { keepServing: realKeepServing } = await import("../src/keep-serving.mjs");
+	const store = tempDir("pi-artifacts-retry-wiring-");
+	const tries = [];
+	const closes = [];
+	let failFirst;
+	const firstAnswer = new Promise((resolve) => { failFirst = resolve; });
+	const serveArtifacts = async ({ host, storeDir }) => {
+		tries.push([host, storeDir]);
+		if (tries.length === 1) {
+			await firstAnswer;
+			throw new Error("artifacts subscription timed out");
+		}
+		return { close: async () => { closes.push(host); } };
+	};
+	const waits = [];
+	const keepServing = (options) => realKeepServing({ ...options, sleep: async (ms) => { waits.push(ms); return true; } });
+	let closers;
+	const out = await runStart({
+		env: { PI_WORKER_NAME: "artifacts-retry-worker", PI_ARTIFACTS_DIR: store, PI_ARTIFACTS_RETENTION_DAYS: "0", PI_SWEEP_INTERVAL_HOURS: "0" },
+		serveArtifacts,
+		keepServing,
+		whileRunning: async ({ captured }) => {
+			assert.equal(tries.length, 1, "boot went on while its first subscription was still pending");
+			closers = captured.extraClosers.length;
+			failFirst();
+			for (let turn = 0; turn < 100 && tries.length < 2; turn++) await new Promise((resolve) => setImmediate(resolve));
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.equal(tries.length, 2, "tried again, without a restart");
+			assert.equal(captured.extraClosers.length, closers, "no closer added for the retry");
+		},
+	});
+	assert.deepEqual(tries, [["artifacts-retry-worker", store], ["artifacts-retry-worker", store]], "each try serves the store under the worker's name");
+	assert.deepEqual(waits, [5_000], "the first wait of the backoff, and the history channel, which held, waited for nothing");
+	const lines = out.logsNow().filter((line) => line.event?.startsWith("artifacts_channel_")).map(({ event, failedAttempts, waitedSeconds }) => [event, failedAttempts, waitedSeconds]);
+	assert.equal(lines.length, 2, JSON.stringify(lines));
+	assert.deepEqual(lines[0], ["artifacts_channel_unavailable", undefined, undefined]);
+	assert.equal(lines[1][0], "artifacts_channel_recovered");
+	assert.equal(lines[1][1], 1);
+	assert.ok(Number.isSafeInteger(lines[1][2]) && lines[1][2] >= 0);
+	assert.deepEqual(out.logsNow().filter((line) => line.event?.startsWith("history_reader_")), [], "the history channel says nothing of the other's failure");
+	assert.deepEqual(closes, ["artifacts-retry-worker"], "the harness's shutdown closed what held, once");
 });

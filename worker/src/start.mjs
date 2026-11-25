@@ -3,6 +3,7 @@ import { makeLocalEventRuntime } from "./local-event-runtime.mjs";
 import { readLocalWorkspaceIdentity } from "./local-workspace.mjs";
 import { makeHistoryReader, serveHistory } from "./history-reader.mjs";
 import { serveArtifacts } from "./artifacts-channel.mjs";
+import { keepServing } from "./keep-serving.mjs";
 import { subscriptionRoutes } from "./subscription-runtime.mjs";
 import { configuredSubscriptions } from "./subscription-config.mjs";
 import { publishSubscriptionStatus } from "./subscription-status.mjs";
@@ -1004,6 +1005,11 @@ export async function startWorker(
 		makeScopeClaimSweeper: makeScopeClaimSweeperFn = makeScopeClaimSweeper,
 		makeClaimSweeper: makeClaimSweeperFn = makeClaimSweeper,
 		makeHostRegistry: makeHostRegistryFn = makeHostRegistry,
+		// Issue #1096: the history and artifacts channels' subscriptions and their retries, seams so a wiring test fails a
+		// subscription at boot and sees it held on a later try, with no real wait.
+		serveHistory: serveHistoryFn = serveHistory,
+		serveArtifacts: serveArtifactsFn = serveArtifacts,
+		keepServing: keepServingFn = keepServing,
 		makeEgressPreflight: makeEgressPreflightFn = makeEgressPreflight,
 		// Which docker endpoint this host's CLI resolves (issue #278). A seam because the real one spawns the
 		// docker CLI, and a wiring test must decide what it answers.
@@ -2976,21 +2982,14 @@ export async function startWorker(
 	// a spread, a freeze, a snapshot inside `createWorker` -- un-registers the watchers in SILENCE and puts
 	// issue #295 back. Append only: two tests pin `[0]` as the runtime queue and `[1]` as the registry.
 	const extraClosers = [runtimeQueue, registry, ...(cronQueue === runtimeQueue ? [] : [cronQueue])];
-	// Archive reads are independent of paid jobs; a failed subscription must not delay worker boot.
-	let historyClosed = false;
-	let historyService = null;
-	extraClosers.push({ async close() { historyClosed = true; await historyService?.close(); } });
-	serveHistory({ redis, host: config.workerName, reader: makeHistoryReader({ logsDir: config.logsDir }) }).then(async (service) => {
-		if (historyClosed) await service.close(); else historyService = service;
-	}).catch(() => log("history_reader_unavailable", {}));
+	// Archive reads are independent of paid jobs; a failed subscription must not delay worker boot. Issue #1096: nor may it
+	// end them for good. It is tried again on a bounded backoff for as long as the worker runs (keep-serving.mjs), each try
+	// with a reader of its own, since a failed one closes its reader; one closer stops the retries or closes what held.
+	extraClosers.push(keepServingFn({ start: () => serveHistoryFn({ redis, host: config.workerName, reader: makeHistoryReader({ logsDir: config.logsDir }) }), log, unavailable: "history_reader_unavailable", recovered: "history_reader_recovered" }));
 	// Issue #942: the same for a run's kept files, which a console on another host asks this host for by run and name
-	// (artifacts-channel.mjs). Its own subscription and request count, so a download never waits on history browsing.
-	let artifactsClosed = false;
-	let artifactsService = null;
-	extraClosers.push({ async close() { artifactsClosed = true; await artifactsService?.close(); } });
-	serveArtifacts({ redis, host: config.workerName, storeDir: config.artifactsDir }).then(async (service) => {
-		if (artifactsClosed) await service.close(); else artifactsService = service;
-	}).catch(() => log("artifacts_channel_unavailable", {}));
+	// (artifacts-channel.mjs). Its own subscription and request count, so a download never waits on history browsing, and
+	// (issue #1096) its own retries and lines, so neither channel's failure holds the other's back.
+	extraClosers.push(keepServingFn({ start: () => serveArtifactsFn({ redis, host: config.workerName, storeDir: config.artifactsDir }), log, unavailable: "artifacts_channel_unavailable", recovered: "artifacts_channel_recovered" }));
 	if (subscriptions) {
 		const publish = () => publishSubscriptionStatus(redis, config.workerName, subscriptions.runtime).catch(() => log("subscription_status_unavailable", {}));
 		await publish();
