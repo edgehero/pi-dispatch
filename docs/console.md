@@ -1000,15 +1000,26 @@ With no worker online the line is never All clear, and starts with "No worker on
 them." (which then stands in for "Nothing needs you."). On a deployment that has never run a job the line says how
 many steps stand before the first one ([First run](#first-run)), and when Valkey cannot be read, that it could not be
 and the next refresh tries again. The console keeps running while Valkey is down, restarts, stops answering or is refused,
-started that way or not, and within about 30 seconds of Valkey answering its pages read it again, with no restart of the
-console. A page is drawn within about 8 seconds whatever Valkey does: its load asks Valkey for 6 seconds in all, and
-what did not answer by then is said as in any outage, beside what the deployment's files hold (the Insights pages keep
-the bounds of their own reads and can take longer). A page's reads go out together, so a Valkey that is slow and still
-answers is read as before: a page takes its longest chain of reads, and only a chain that is itself longer than those
-6 seconds is cut. While Valkey stays down, a page says "not known" for what it could not read and still shows what the
+started that way or not, and within about 10 seconds of Valkey answering its pages read it again, with no restart of the
+console. A read that could not be made is kept about 5 seconds and then made again, where one that answered is kept for
+its own while (up to 30 seconds): a page stops saying a read failed soon after Valkey is back, and during an outage each
+of the heavier reads is still made at most once in those 5 seconds. A page is drawn within about 8 seconds whatever
+Valkey does, the Insights pages too: its load asks Valkey for 6 seconds in all, and what did not answer by then is said
+as in any outage, beside what the deployment's files hold. A page's reads go out together, so a Valkey that is slow and
+still answers is read as before: a page takes its longest chain of reads, and only a chain that is itself longer than
+those 6 seconds is cut. While Valkey stays down, a page says "not known" for what it could not read and still shows what the
 deployment's files hold: a host page says the hosts could not be read rather than that the host has gone, Set up counts
 the steps it could not judge as not known, Triggers lists the file's rules without their next fires, Configuration shows
-its files read-only, and Parked and Sandboxes show no count of what they did not read. A page that could not read the
+its files read-only, its two secret cards counted from the files too, Connections shows the triggers, the MCP servers
+and the staged packages the files hold and says the hosts' doctor results and the subscription status are not known,
+and Parked and Sandboxes show no count of what they did not read. Runs lists what the fleet's run mirror holds where
+this host's own run files could not be listed, and says that this host's runs the mirror does not hold are missing.
+A page that could not read the deployment says why, in the words of the cause: "Valkey could not be read" where
+nothing answered; "Valkey answered this page's read with WRONGTYPE" where Valkey answered with an error, with what
+that code means and, for a key of another type or a permission, what an operator has to put right first (with no
+"try again", which waiting would not make true); "This page could not read the deployment in time" where the page's
+deadline cut a read of a Valkey that may be answering; and "This console failed while it read the deployment" where
+the console's own code failed, which is not Valkey's doing, and whose cause the console's log names. A page that could not read the
 deployment offers no change, with one exception, the kill switch: Fleet and the overview's Hosts card still show an
 operator **Pause the fleet** and **Resume the fleet** under their sentence, with "The kill switch works without a read:
 a pause reaches every queue it finds, and its answer names them." A Valkey that stopped answering is when the fleet has
@@ -1033,7 +1044,9 @@ newest 1,000 runs, when it holds fewer); otherwise it is "at least", and Trigger
 spend are lower bounds: ..."). The three pages count the same runs for a trigger, each over its own window. A refused run's page says its host has no
 live registry row, published no doctor result or has no queue listed where the hosts were read and that is so, and
 "could not be read" only of what was not read. Where the registry answered before and does not now, it says "not
-read this time: the host registry could not be read", and shows no beat's age for a row that is as last seen. Fleet says the hosts could not
+read this time: the host registry could not be read", and shows no beat's age for a row that is as last seen. In the
+same case Fleet and a venue's page say the hosts are as the registry was last read, and a venue no host blessed then is
+"no host when the registry was last read", never "no live host". Fleet says the hosts could not
 be read rather than that none is registered, and with the overview it says the running jobs are not known rather than
 that nothing is running; a schedule's stalls it did not read are "not known". When only some hosts' rows answered in
 time, the pages say the host registry was read in part rather than that it could not be read: a host whose row did not
@@ -1641,8 +1654,10 @@ it; a watch rule takes no role), a random candidate or a fallback the trigger ma
 model or an auxiliary model, a cron trigger by its id and any other, a watch rule included, by its row, with the
 variable's name and never a value ([the provider key as a run secret](secrets.md#the-provider-key-as-a-run-secret)).
 A trigger that reaches the slot only through its `decide` or auxiliary model says so ("for its decide model", "for its
-auxiliary model"). Every call their jobs make to that provider spends that key instead of this host's credential, so
-a slot can read Not set while they spend. Where this host refuses those jobs before they spend, because the row is a managed subscription or this host's
+auxiliary model"). After the triggers it names an answer rule (by its id) or the `zeroTouch` section whose own
+`secrets` declare the variable ([a key of the rule's own](answer-rules.md#a-key-of-the-rules-own)), with "for its
+decision model" or "for its grouping model" where only that model runs on the provider. Every call their jobs make to
+that provider spends that key instead of this host's credential, so a slot can read Not set while they spend. Where this host refuses those jobs before they spend, because the row is a managed subscription or this host's
 `PI_FORWARD_ENV` names the variable, the line says that instead. A line under the list says once that another host
 refuses them where its own forward list or bindings do, which no host publishes to the console, and, when it applies,
 that the projects file or a `PI_MODEL` line could not be read, which widens or leaves out what the lines say.
@@ -1747,7 +1762,8 @@ because the question is the run's own words, which only a run page's transcript 
 later run on the same issue exists, because an answer is a new delivery on that issue. "The same issue" ignores the case
 of the repository path and leading zeros in the number. Until that later run ends it has no record, so the console also
 looks in the queue: a park with a run queued or running on its issue is **being answered**, its card links that run, and
-it gets no answer form. The console reads the queue for this at most every 15 seconds while something is parked, up to
+it gets no answer form. The console reads the queue for this at most every 15 seconds while something is parked (a look
+that could not be read is made again after 5), up to
 10,000 queued and running jobs in all (it reads each job's kind and issue, never its text). When that look cannot see
 everything, the card says so and the park gets no answer form, as the run page's Chat panel draws none: a queue too deep
 to check says so ("answer it on the forge, or wait until the queue is shorter"), because on such a queue an answer
@@ -1957,6 +1973,19 @@ run page is a live page: its panels and transcript share one connection and one 
 
 The `/dispatch` panel's running rows show the same, with the phase name clipped.
 
+### Which key a run spent
+
+A run's **Model usage** card has a **Credential** row: where its main model got its key. "the trigger's declared key
+OPENAI_API_KEY" is a key the trigger named in `run.secrets` (an answer draft says "the answer rule's", a question grouping
+"the zeroTouch block's"), "the host's key" a key in the worker's environment, "the host's pi login" a key from pi's
+`auth.json` on the host, "a subscription connection" a connection's access, and "no key (keyless)" a keyless endpoint
+([secrets](secrets.md#the-provider-key-as-a-run-secret)). It names the variable and never its value. The row is on an
+operator's run page; a viewer's run page draws no Model usage card, as it draws no Cost or Secrets panel. `/api/run`
+carries it as `mainCredential`: to an operator with the variable's name, to a viewer and an agent token as the word alone,
+since neither is shown a secret's name; `dispatch_runs` gives the word alone. A run refused before its container
+started, one whose container never started (the runtime's never-started exit, with nothing spent), and one an earlier
+release recorded, show no row.
+
 ### A run's artifacts
 
 A forge job may leave files in `/artifacts` (a screenshot of what it ran, a test report, a log), and the worker keeps
@@ -2052,7 +2081,7 @@ The same filters can be written in the query string. Each one is matched exactly
 | `repo` | repository, such as `acme/web` |
 | `kind` | forge: `github`, `gitlab`, `forgejo`, `azure`, or `local` |
 | `flow` | flow name |
-| `trigger` | trigger: its position in the triggers file, counted from 0 (the list shows it as "row 1" for 0), a schedule's id, or `event:forge:id` for a local event command |
+| `trigger` | trigger: a forge trigger by its position in the triggers file, counted from 0, with its forge and type (`3:github:label`, which the list shows as "row 4, github label"), a schedule's id, or `event:forge:id` for a local event command. A position alone (`3`, from a link written before) matches every run of whatever trigger held that row, and the page says so |
 | `project` | project id |
 | `host` | worker name |
 | `backend` | venue, as the Venues panel on `/fleet` names it (a run recorded before venues were recorded counts as `local`) |
@@ -2178,7 +2207,8 @@ the fleet at most 10 seconds, as a held job's cancel does, then says the fleet d
 
 On the parked page, an operator can type an answer under a run that is waiting on an issue and send it. The page offers
 the answer box only where the console has checked, as it will before it queues anything, that it can build the answer
-(for the first 20 parked runs on the page, each check kept 15 seconds; the run page checks the rest): a park it cannot
+(for the first 20 parked runs on the page, each check kept 15 seconds, one that refused or could not be read 5; the run
+page checks the rest): a park it cannot
 answer from here (a pull request, expired data, a comment trigger that would not route a reply) says why under "This
 question cannot be answered here", and one whose check could not be read sends you to its run page, whose Chat panel
 takes the answer too. A viewer, and a read-only console, see the cards without a box. The console does not comment on
@@ -2260,7 +2290,8 @@ the copy would drop what it does not know) are refused by name; re-run either of
 release. A scheduled run is not refused for its data, since it is rebuilt from its trigger alone. The run's page
 offers the re-run only where these checks pass: for a run that cannot be re-run
 for one of them, or for a kind the console cannot re-run, the page says "Not offered for a re-run:" and the reason, in
-the same words the preview would give. The page asks the queue for the run's data at most every 15 seconds; when it
+the same words the preview would give. The page asks the queue for the run's data at most every 15 seconds (every 5
+while the check refuses or could not be read, so a fix is seen within seconds); when it
 cannot, it judges from the record alone, and then only says the data is gone once the run ended more than 8 days ago (a local run:
 a week and a day) or 31 days and a day ago (a forge run, or a recovery of either kind). It looks in the same queues the
 preview does, including the queue of a host that has stopped and left the host registry, and looks for the fleet's
@@ -2897,7 +2928,7 @@ newer one could not say, that run and why. A row with nothing to quote reads "No
 
 | Row | What a person changes | What it shows and leaves |
 |---|---|---|
-| Model | `provider`, `model`, `maxCostUsd`, `maxSubscriptionUsd`, `models`, `fallbackModels`, `modelSelection` | Blank uses the deployment's, and where the deployment has no amount for the cap, a blank cap means no cap of its own. The subscription allowance (issue #1008) is the trigger's alone, the list price its subscription calls may use, so a blank one means no allowance, and removing or raising it is said as a widening. The pickers offer the catalog's priced models for the providers in use, and anything else can be typed, for the preview to judge. |
+| Model | `provider`, `model`, `maxCostUsd`, `maxSubscriptionUsd`, `models`, `fallbackModels`, `modelSelection` | Blank uses the deployment's, and where the deployment has no amount for the cap, a blank cap means no cap of its own. The subscription allowance (issue #1008) is the trigger's alone, the list price its subscription calls may use, so a blank one means no allowance, and removing or raising it is said as a widening. The pickers offer the catalog's priced models for the providers in use, and anything else can be typed, for the preview to judge. A random pool's [weights](triggers.md#weighting-the-pool) (issue #996) are set by hand in the file: the row names each candidate's share of the whole pool, where a pool without weights says each has an equal chance, and a pool edit keeps the weight of each candidate that stays, drops a removed one's and adds a candidate with none. |
 | Flow and skills | `flow` | Doctor's answer for each host, which cannot see a forge's repository, with a warning where it found the flow nowhere, and `run.skillsDir`, a folder on each host, set in the file. Each answer is for the triggers file as that host's last doctor run read it: after an edit to `run.flow`, `run.folder`, `run.skillsDir`, `run.packages` or `run.excludeExtensions`, or where that host's own triggers file differs, the host "answered for another version of the triggers file, so it is unknown there", and no warning stands on that answer. A later doctor run need not answer either: doctor publishes none for a spent one-shot or a file the worker refuses, and a host whose own triggers file differs answers for its own. Each published answer carries a short digest of those fields, which the page compares with its own reading of the file. A `run.command` is shown, set in the file. The picker is not the whole list: "It leaves out what is in a skills folder, or in a repository not on this host, and any other name can be typed." The skills it offers from the overlay and staged packages are those of the console's own host, so another host may hold different ones, which Doctor's answer shows. |
 | Extensions | `packages`, `excludeExtensions` | One switch for all the staged packages, then one per name, for each staged package and overlay extension a host publishes, with where it is, and a host that lacks it says so. Each row quotes what the newest run that loaded it brought, "as gh-9575 loaded it", also when it is switched off; one no run has loaded says what it brings is known once a run has loaded it, since hosts publish no counts of a package's contents, and an overlay entry has no manifest at all. Off leaves it out of these jobs by name: a package with its tools, skills, prompt templates and themes, an overlay extension before its code runs. A name means every extension of that name, so a package and an overlay entry of one name, or two versions on two hosts, are one row. Two names in the file that mean one entry (`git-guard` and `git-guard.ts`) are a row each, and each says the file also names the other. A name the file holds that no host shows keeps its row, so it can be turned back on, and turning the last one back on removes the key. Under `"packages": false` a package has no switch of its own, and one the file names stays listed, off. The repository's own are shown too, with no switch: merge-gated, changed in the repository. A new extension, or another version, goes through [Updates](#updates). |
 | MCP servers | `mcp` | A switch per server a host publishes, this host's overlay offers or the trigger names, with its transport, where it is, its exposure and its key by name, and which hosts have it, lack it, have it off or have not said. Where hosts define a server two ways, one it names reads "defined differently by host" and one it does not reads "not on for these jobs; turning it on would differ by host". `forge` is the job's own, in no overlay. |
@@ -3093,6 +3124,14 @@ per job start for a bundle. Only overlay resolvers must sit inside `PI_SECRET_RE
 A relative path is refused under its field. Every preview and refusal shortens resolver/root paths to their
 last folder. No response contains a secret reference, a value or a resolver's full path.
 
+With Valkey not answering, the page draws the declarations from the settings overlay, the triggers file, the projects
+file and the `.env`, read-only, and says what a run last received and which hosts serve a profile are not known. Where
+the settings overlay could not be read or does not load, a profile or bundle resolver the `.env` declares says whether
+the overlay declares it too is not known, and a name the `.env` does not declare is not called undeclared or missing:
+the overlay may declare it. An agent's view of this page shows what `dispatch_secrets` returns: names, sources, the
+roots' words, trigger rows, projects and variable counts, and says that a run's last resolve, the hosts that serve a
+profile and the variables' names are not in that view.
+
 Remove previews the settings diff and effect before its red confirm. Removing an overlay-only profile
 refuses future jobs naming it before spend; removing an env/overlay duplicate ends ambiguity and leaves
 the env resolver in use. It names the affected triggers. The script stays on disk; Undo tells you to declare
@@ -3176,6 +3215,14 @@ these extra file/lease reads.
 - **Staged packages:** exact package versions, receipt time and trigger opt-outs. Stage them using
   `pi-dispatch import-pi --with-packages`; the receipt does not record who staged them.
 
+With Valkey not answering, the page still shows what the deployment's files hold: the forges and the triggers that arm
+them, private endpoint grants, which triggers keep a status comment, the MCP servers and the staged packages. A banner
+says the host registry and doctor's records could not be read. The egress card says the hosts' doctor results could not
+be read, and Subscription authentication says "Subscription status not known" (it says "not published" only where the
+status was read and holds none). Models says the same of its subscription quota. The provider key card says a source of
+provider references "does not load" where a file that names them was read and is refused, and "could not be read" where
+nobody could read it.
+
 Viewers read fixes as sentences without commands to copy. `dispatch_connections` provides a safe agent read
 of names, hosts, receiver counts/times and key presence, with no credentials, references or full paths. See [Egress](egress.md) and
 [Notifications](notifications.md).
@@ -3225,6 +3272,8 @@ no button and a reason. This section moves from Capacity; Capacity keeps host ut
 
 The side column shows allocation weight/floor/share/current split, scoped limits, bundle facts and trigger
 activity. A viewer sees the chart and facts with no copy call, member form, size preview or Delete.
+With Valkey not answering, the page still reads the project from the projects file and its runs from this host's
+files: its counts and spend are "at least", the money held with the hosts is not known, and no form is drawn.
 `dispatch_projects` includes safe spend/share, size suggestions/calls and edit/delete refusal facts; project
 and sizing writes still require a person. See [Projects](projects.md).
 
@@ -3256,7 +3305,9 @@ console settles them with **Preview settling**, then **Confirm**: the preview li
 records each once and never runs an action again. Settling twice records nothing twice, and the worker's daily sweep
 also records unfinished touches on a host that shares the logs folder. A viewer, and an operator on a read-only
 console, see who can settle. An action interrupted before it said whether it ran stays unknown: a settle cannot prove
-it.
+it. A change the console knows was not made, whose refusal Valkey did not take, waits for the same settle (2026-11-25,
+#1072): "1 change that was not made is waiting to be settled". The settle closes it, and it is never listed as a fix,
+whatever bytes its file shows later ([Zero touch](zero-touch.md#fix-a-recurring-cause)).
 Ordinary record-field filters remain unchanged.
 
 
@@ -3324,7 +3375,7 @@ agents and read-only consoles receive no Edit, Adopt or canary-command controls.
 
 The host policy's `quotaWindows` preference chooses the Models monitoring focus for five-hour and seven-day account windows. Available or unknown unselected account rows are omitted from that card; known exhausted rows remain visible with a mandatory evidence note and still affect pickup. Scoped and other provider window types remain visible because they are not independently selectable. This display preference cannot disable a provider cooldown.
 
-The Subscription quota card shows account and application-bucket observations separately from dollar caps: their freshness, five-hour and seven-day windows, utilization, reset times, extra usage and explicit paid-overage policy. Unknown utilization and resets remain unknown; stale observations do not promise remaining capacity. Retained exhaustion still matters after its observation becomes stale. A resetless exhaustion offers a host trial command only to a writable operator, and a trial does not clear exhaustion or bypass other pickup gates. A connection whose adapter has no usage read (ChatGPT's) is offered no usage refresh, and the card says that its quota is known only from refusals and the automatic retest. Jobs using the same connection and application bucket share its quota. Quota observations cannot prove that separately linked connections belong to the same vendor account.
+The Subscription quota card shows account and application-bucket observations separately from dollar caps: their freshness, five-hour and seven-day windows, utilization, reset times, extra usage and explicit paid-overage policy. Unknown utilization and resets remain unknown; stale observations do not promise remaining capacity. Retained exhaustion still matters after its observation becomes stale. A resetless exhaustion offers a host trial command only to a writable operator, and a trial does not clear exhaustion or bypass other pickup gates. A connection whose adapter has no usage read (ChatGPT's) is offered no usage refresh, and the card says that its quota is known only from refusals and the automatic retest. Jobs using the same connection and application bucket share its quota. Quota observations cannot prove that separately linked connections belong to the same vendor account. With Valkey not answering, or its read of the hosts' status failing, the card says "Subscription status not known" rather than that nothing is published, and the page reads its settings overlay from the files the page's load already read.
 
 The model tool `dispatch_models` shares the reader but receives only bounded machine facts, not doctor prose,
 commands, paths, diffs or repository-agent definitions. Its `waiting` is null when the waiting jobs could not be read
@@ -3332,7 +3383,7 @@ commands, paths, diffs or repository-agent definitions. Its `waiting` is null wh
 says why. See [Model roles](model-roles.md),
 [Model failover](model-failover.md), [Proposals](model-proposals.md) and [Canaries](canary.md).
 
-Random model pools use the existing Model row: Fixed model, Ordered fallback or Random model pool. The pool has no primary or predicted next model. Models shows observed blockers; run details show the actual model and selection reason. Retry keeps the run's choice, while fresh Re-run chooses anew. Subscription-limit replacement follows the [random-pool rules](triggers.md#choosing-randomly-from-a-reviewed-pool).
+Random model pools use the existing Model row: Fixed model, Ordered fallback or Random model pool. The pool has no primary or predicted next model. Models shows observed blockers and, for a [weighted pool](triggers.md#weighting-the-pool), each candidate's share of the whole pool (`dispatch_models` gives a pool's `weighted` and each candidate's `share`, null without weights); run details show the actual model and selection reason. Retry keeps the run's choice, while fresh Re-run chooses anew. Subscription-limit replacement follows the [random-pool rules](triggers.md#choosing-randomly-from-a-reviewed-pool).
 
 Fleet host rows and the host page show queue consumer health separately from the heartbeat (#924): responding,
 stopped, stalled or unknown. The host page includes per-consumer state, last fetch and last job taken. An older

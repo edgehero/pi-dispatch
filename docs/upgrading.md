@@ -165,8 +165,10 @@ for what an older receiver queued, and run those jobs again.
 | A newer console, subscription bindings that differ between hosts, an older worker or an older job image | The console's trigger page and its paid previews read the bindings every live host publishes. A provider any host binds to a subscription without paid extra usage is taken as notional: its models skip the cap's first-call check, and a job that reaches only such models previews $0.00 in the dollar windows. A host whose own connections file does not bind that provider runs its calls on an API key under the cap, a worker from before issue #1008 never marks a connection notional, and an image from before it counts every subscription call against the cap, so on such a host the preview can say less than the host then reserves or refuses; the worker still checks every cap at pickup | Bind a provider the same way on every host that runs its jobs, and upgrade the workers and the image together |
 | A newer worker, an older job image, a trigger with `run.maxSubscriptionUsd` | The worker refuses each job of it before it spends, `job-image-subscription-allowance-unsupported`: that image's runner would ignore the allowance and run the job's subscription calls with no dollar limit | Upgrade the image before a trigger sets an allowance |
 | An older worker or receiver, a trigger with `run.maxSubscriptionUsd` | The field needs triggers file version 11, so an older receiver or worker refuses to load such a file, keeping the triggers it had on a live edit. A job of it is queued at job data version 12, which an older worker holds (`newer-release`) until a worker that reads it takes it, spending nothing. A service that dropped the field anyway is caught as `trigger-skew` by a newer worker that reads the triggers file | Upgrade every worker, receiver and console host before a trigger sets an allowance; the trigger's page refuses the edit while a live host reads less |
+| An older worker or receiver, a random pool with `weights` | A pool's weights need triggers file version 12, so an older receiver or worker refuses to load such a file, keeping the triggers it had on a live edit. A job of it is queued at job data version 13, which an older worker holds (`newer-release`) until a worker that reads it takes it, spending nothing. A pool without weights keeps versions 6 and 7 | Upgrade every worker, receiver and console host before a pool sets weights; the trigger's page refuses an edit that keeps them while a live host reads less ([weighting the pool](triggers.md#weighting-the-pool)) |
 | An older worker, a trigger with `run.auxiliaryModels` or a random pool, and `run.secrets` or a project bundle | A worker from before this change accepts an auxiliary model's `ANTHROPIC_OAUTH_TOKEN`, or a `github-copilot` or `google-vertex` auxiliary model's token, in `run.secrets` or a project bundle and gives that model the value, lets a bundle's `ANTHROPIC_API_KEY` replace the host's key for an `anthropic` auxiliary model, lets a host bearer or OAuth token outrank an auxiliary model's declared key, runs a declared key for an auxiliary provider bound to a subscription and drops it, and hands a pool candidate's API key from `run.secrets` or a project bundle to every draw, a subscription draw too, where a tool can spend it outside the cost meter. A newer worker refuses each of those bindings as `secret-name-reserved` before it spends, so after the upgrade a project bundle carrying any variable of an auxiliary model's provider refuses every job of a trigger that lists that model, and it keeps a pool's key out of draws that do not use it. Nothing is stored differently, so nothing moves | Upgrade every worker. Rename such a bundle variable in the secrets manager, or, for an API key a tool in the job reads under its usual name (`OPENAI_API_KEY` beside an `openai` auxiliary model), bind it in that trigger's own `run.secrets` instead: there it is that model's declared key and tools still see it. `pi-dispatch doctor` does not see this, since its bundle check judges the deployment's provider only: compare the variable names `pi-dispatch doctor --secrets` lists for each bundle with the providers in `run.auxiliaryModels` of the triggers in that bundle's project (`anthropic` reads `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_AUTH_TOKEN`) ([secrets.md](secrets.md#the-provider-key-as-a-run-secret)) |
 | An older worker, a watch trigger whose `run.secrets` holds its investigation's or its `decide` model's provider's own API key | A worker from before a watch job could declare a key refuses every job of that trigger before it spends: `secret-name-reserved`, or `provider-unconfigured` where it holds no key of its own for that provider. Nothing is stored differently, so nothing moves | Upgrade every worker before a watch rule relies on it ([secrets.md](secrets.md#the-provider-key-as-a-run-secret)) |
+| An older worker or receiver, an answer rule or the `zeroTouch` block with `secrets` or `secretsProfile` | The fields need triggers file version 12, so an older worker or receiver refuses to load such a file and keeps the triggers it had on a live edit. A newer worker hands a draft or grouping job its declared keys at pickup; nothing is queued with them, so no job data version moves. A draft or grouping already queued when its rule or the block gains or changes either field ends as `config-changed` (`question-group-config-changed`) and buys nothing | Upgrade every worker, receiver and console host before a rule or the block declares a key; declare its profile on every worker that runs drafts or groupings |
 | A quota reserve, a host that owns a Claude connection and runs an older worker | A worker from before the reserve reads no `PI_QUOTA_RESERVE_PERCENT` and starts every job on the connections it owns, however full a window is; only that host's jobs are held or not, since jobs on a connection run only on its owner. `run.quotaReserve` is read by the owner's worker from its own triggers file, so no receiver or poller needs it, and every older loader drops it and loads the file | Upgrade every host that owns a Claude connection, set the reserve there, and give it the triggers file ([subscription-auth.md](subscription-auth.md#quota-reserve)) |
 | A newer worker, an older receiver | The receiver drops a `run` field it does not know; the worker refuses such a job before it spends (`trigger-skew`, `wait-skew`) when it can read the triggers file | Receivers right after the workers, in the same `npm install`; run refused jobs again |
 | A receiver older than the triggers file | From 5.0.0 on, a receiver refuses a triggers file whose `version` is above what it reads. It does not start on one, and a forge does not send again what it misses while it is down. On a live edit it keeps the triggers it had, so a delivery still matches those and queues its job without what the file now adds. A worker that reads the added field refuses that job (`trigger-skew`) where it can read the file | Upgrade every receiver before any trigger uses a field that needs version 2 ([what a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out)) |
@@ -439,6 +441,35 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: weights in a random model pool (#996)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Triggers file `run.modelSelection.weights` | New optional key inside a random pool: an exact candidate to a whole number from 1 to 100. A file that uses it is stamped version 12 by the writers; a file without it keeps its bytes and version. |
+| Queued job data `modelSelection.weights` | New, at version 13, only on a job whose pool sets weights; every other job keeps its bytes and stamp. An older worker holds such a job (`newer-release`). |
+| Valkey `dispatch:model-selection:v1:<digest>`, run records | Unchanged. The stored choice and the run record's pool carry no weights, so a weight-only edit refuses no queued job, and nothing needs moving. |
+| Mixed versions | See the row on a random pool with `weights` in [mixed versions](#mixed-versions-what-is-safe). |
+
+See [weighting the pool](triggers.md#weighting-the-pool).
+
+### Unreleased: which key a run spent (#998)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Run record `mainCredential` | New, additive: where the run's main model got its credential, `{ source, variable? }` (`host-env`, `pi-login`, `subscription`, `run-secret` with the declared variable's name, or `keyless`; never a value), a conditional key before `v`. `v` stays 1 and an older record without it shows no Credential row. An older console leaves it off its run page and `/api/run`, but its `dispatch_runs` passes the field to an agent whole, the declared variable's name included (a name, never a value), until the console is upgraded with the worker. No migration or older-state detector is needed. |
+
+See [which key a run spent](console.md#which-key-a-run-spent).
+
+### Unreleased: declared keys for the answer and grouping models (#1013)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Triggers file `answerRules[].secrets`, `answerRules[].secretsProfile`, `zeroTouch.secrets`, `zeroTouch.secretsProfile` | New optional fields, the provider API keys an answer rule's models or the grouping job's models take, by reference. A file that uses one is stamped version 12 by the writers; a file without them keeps its bytes and version. A console save of a group name keeps the block's fields and its stamp. |
+| Queued answer-draft and grouping jobs | Unchanged and unversioned: each is built from its rule or the block when it starts, and carries the declared names from there. One queued before a rule or the block gains or changes either field ends as `config-changed` (`question-group-config-changed`), buying nothing. |
+| Mixed versions | See the row on answer rules and the `zeroTouch` block in [mixed versions](#mixed-versions-what-is-safe). |
+
+See [a key of the rule's own](answer-rules.md#a-key-of-the-rules-own) and [secrets](secrets.md).
+
 ### Unreleased: quota reserve (#1008)
 
 | Stored state | What changes and how to move it |
@@ -520,6 +551,26 @@ queue keys and the accounting keys are unchanged; no migration, backup path or o
 console keeps settling on a view. After upgrading, open the Zero touch page once as an operator and settle anything it
 says is waiting. See [Zero touch](zero-touch.md).
 
+### Unreleased: the Zero touch fix history keeps its retention (#1072)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Valkey `zero-touch:fixes:meta:<id>` | A settle, a refusal and an Undo now keep the expiry the record was given when its change was staged, where each gave it a new retention. Records written before keep the expiry they have. Nothing moves, and no older-state detector applies. |
+| Valkey `zero-touch:fixes:index` | Each new fix now also removes the entries older than the retention. The page no longer reads an entry past the retention, so a fix whose record expired is no longer counted as missing and the page stops saying "Fix history is incomplete" for it. Nothing moves: the entries already there are trimmed with the next fix. |
+| Mixed versions | An older console reads the whole index, so it says the history is incomplete whenever a fix's record has expired and no newer console has recorded a fix since. A settle or an Undo on an older console still gives the record a new retention; a newer console leaves such a fix out once its change is older than the retention. Upgrade every console. |
+
+See [Zero touch](zero-touch.md).
+
+### Unreleased: the Zero touch fix history records how a change ended (#1072)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| `<PI_LOGS_DIR>/zero-touch-outcomes/<fix id>.json` | New folder, written by the console: one small file per fix whose change ended while its accounting in Valkey was not yet written, holding only the outcome (`applied` or `refused`) and its time. The console removes it once Valkey answers, a settle removes it once it settles the fix, and the worker's sweep removes one older than the history's retention. Nothing to move or create; back it up with the rest of the logs folder ([backup](backup.md)). No older-state detector applies. |
+| Fixes staged before the upgrade | They have no such file, so a settle judges them by their file's bytes, as before. |
+| Mixed versions | An older console neither writes nor reads the folder, so a fix it settles is judged by its bytes. An older worker does not sweep the folder; the console and a settle still remove what they wrote. |
+
+See [Zero touch](zero-touch.md#fix-a-recurring-cause).
+
 ### Unreleased: warnings before the turn and time limits (#1055)
 
 A job is now told once, at 70% of its turn limit (`run.maxTurns`) and at 70% of its time limit (`run.maxMinutes`,
@@ -549,6 +600,17 @@ exited 1 and the queue ran the whole paid job again. The worker gives the stop i
 | Mixed versions | A job image older than this release still exits 1 on a refusal, which the queue retries as before: upgrade the image for the stop to take effect. A worker older than this release reads the new exit line as `runner-policy`, which is not retried either, with that reason's comment. Upgrade both in one window ([the order](#the-order)). |
 
 See [reasons.md](reasons.md#provider-stop-refusal).
+
+### Unreleased: the worker sweeps the held-jobs index (#1075)
+
+Workers now remove the stale entries of the held-jobs index (`wait:held`, the jobs held on `run.waitFor`) on their
+retention sweep, every `PI_SWEEP_INTERVAL_HOURS` (not at boot, and not at all at `0`). An entry is stale when its job's
+hold record is gone or has no start time; before, only the `/dispatch` panel and `/dispatch status` removed one, so a
+deployment run from the tools and the web console grew the index until `dispatch_waits` said its list was not
+`complete`. The panel and `/dispatch status` now remove through the same one step as the sweep. The key, its members
+and the hold records are unchanged; no migration, backup path or older-state detector is needed. The index is shared,
+so one upgraded worker sweeps it for the whole fleet. An older panel or `/dispatch status` still prunes as before. See
+[watching and cancelling](wait-for.md#watching-and-cancelling).
 
 ### 5.4.2
 
@@ -817,6 +879,8 @@ refusal reasons are described [above](#533-trigger-merge-permission); no existin
 
 ## Notes kept in each guide
 
+- [answer-rules.md](answer-rules.md#a-key-of-the-rules-own): every worker, receiver and console before a rule declares
+  a key.
 - [artifacts.md](artifacts.md#upgrading): the new store, the record's optional field, and the image's instruction file.
 - [backup.md](backup.md#a-key-or-a-file-from-a-newer-release): keys and files a newer release wrote, the `version` you
   may have added by hand, and [state from before #290](backup.md#upgrading-from-a-version-that-kept-state-in-the-os-temp-directory).

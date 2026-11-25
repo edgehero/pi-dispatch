@@ -401,3 +401,48 @@ test("a follow-up reap that throws is one scrubbed log line, never a rejection, 
 	assert.ok(!lines[0][1].reason.includes("hunter2"));
 	assert.equal(t.pending(SANDBOX_FOLLOWUP_DELAY_MS).length, 0);
 });
+
+// Issue #1075: the held index's sweep as one of the reapers, with the reaper start.mjs builds around `sweepHeld`.
+test("the held index's reaper: a close stops it between pages, and a Valkey fault is one held_index_reaper_skipped line (issue #1075)", async () => {
+	const { sweepHeld } = await import("../src/wait-state.mjs");
+	const members = Array.from({ length: 300 }, (_, i) => `gone-${i}`);
+	let release;
+	const gate = new Promise((r) => (release = r));
+	let pages = 0;
+	// A page that waits for the test on its second call, so the close lands mid-pass.
+	const redis = {
+		async sscan(_key, cursor) {
+			pages += 1;
+			if (pages === 2) await gate;
+			const from = Number(cursor);
+			return [from + 64 >= members.length ? "0" : String(from + 64), members.slice(from, from + 64)];
+		},
+		eval: async (_script, numKeys) => numKeys - 1,
+	};
+	const { lines, log } = logger();
+	const s = makeRetentionSweep({ reapers: [{ name: "held_index", reap: async (options) => void log("held_index_swept", await sweepHeld({ redis, stopped: options?.stopped })) }], intervalMs: 1000, log, ...timers() });
+	const sweeping = s.sweepOnce();
+	while (pages < 2) await new Promise((r) => setImmediate(r));
+	const closing = s.close();
+	release();
+	await closing;
+	await sweeping;
+	assert.equal(pages, 2, "no page after the close");
+	assert.deepEqual(lines.filter(([event]) => event === "held_index_swept"), [["held_index_swept", { looked: 128, removed: 128, more: true }]]);
+	// A Valkey that does not answer the walk: the pass is one line, scrubbed like every reaper's, and the sweep goes on.
+	const down = logger();
+	const failing = makeRetentionSweep({
+		reapers: [
+			{ name: "held_index", reap: async () => void (await sweepHeld({ redis: { sscan: async () => { throw new Error("connect ECONNREFUSED redis://worker:hunter2@127.0.0.1:6379"); } } })) },
+			{ name: "after", reap: () => down.log("after_ran", {}) },
+		],
+		intervalMs: 1000,
+		log: down.log,
+		...timers(),
+	});
+	await failing.sweepOnce();
+	const skipped = down.lines.find(([event]) => event === "held_index_reaper_skipped");
+	assert.ok(skipped, "said once, by the reaper's name");
+	assert.equal(skipped[1].reason.includes("hunter2"), false, "and scrubbed");
+	assert.ok(down.lines.some(([event]) => event === "after_ran"), "the reapers after it still ran");
+});

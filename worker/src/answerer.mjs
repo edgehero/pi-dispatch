@@ -37,13 +37,15 @@ export function answerStandingSource(answer) {
 }
 const fail = message => { throw new Error(message); };
 
-/** Only hand-authored rules can buy a draft. Unknown fields refuse instead of quietly dropping a bound. */
+/** Only hand-authored rules can buy a draft. Unknown fields refuse instead of quietly dropping a bound. `secrets` and
+ * `secretsProfile` (issue #1013) are the rule's declared provider keys, admitted here and judged by the triggers loader
+ * with the code that judges `run.secrets` (triggers.mjs `validateDeclaredKeys`). */
 export function validateAnswerRules(value) {
 	if (value === undefined) return [];
 	if (!Array.isArray(value) || value.length > 100) fail("answerRules must be an array of at most 100 reviewed rules");
 	const ids = new Set(), claimed = new Set();
 	for (const r of value) {
-		if (!only(r, ["id", "projects", "categories", "confidence", "mode", "flow", "model", "decisionModel", "maxCostUsd"]) || !ANSWER_ID_RE.test(r.id ?? "") || ids.has(r.id)) fail("answerRules requires unique rule ids and only declared fields");
+		if (!only(r, ["id", "projects", "categories", "confidence", "mode", "flow", "model", "decisionModel", "maxCostUsd", "secrets", "secretsProfile"]) || !ANSWER_ID_RE.test(r.id ?? "") || ids.has(r.id)) fail("answerRules requires unique rule ids and only declared fields");
 		if (!projects(r.projects) || r.projects.some(p => claimed.has(p))) fail("answerRules projects must be valid, unique and belong to at most one rule");
 		if (!Array.isArray(r.categories) || !r.categories.length || new Set(r.categories).size !== r.categories.length || r.categories.some(c => !ANSWER_CATEGORIES.includes(c))) fail("answerRules categories are convention, how-to and decided");
 		if (typeof r.confidence !== "number" || !Number.isFinite(r.confidence) || r.confidence <= 0.5 || r.confidence > 1) fail("answerRules confidence must be above 0.5 and at most 1");

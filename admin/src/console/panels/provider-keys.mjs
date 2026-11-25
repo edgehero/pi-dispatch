@@ -18,6 +18,11 @@ const guideId = provider => `provider-help-${provider}`;
 // through a role model says which, since its jobs run on another provider.
 const VIA = Object.freeze({ decide: " (for its decide model)", auxiliary: " (for its auxiliary model)" });
 const triggerLink = t => html`<a class="link" href="${`/config/trigger?index=${t.index}`}">${t.cron ? html`cron <span class="code pk-key">${t.cron}</span>` : `trigger ${t.index + 1}`}</a>${Object.hasOwn(VIA, t.via ?? "") ? VIA[t.via] : null}`;
+// Issue #1013: an answer rule by its id, the zeroTouch block by name, each with the role model it reaches the slot by alone.
+const HOLDER_VIA = Object.freeze({ decision: " (for its decision model)", grouping: " (for its grouping model)" });
+const holderName = h => html`${h.zeroTouch ? "the zeroTouch block" : html`answer rule <span class="code pk-key">${h.rule}</span>`}${Object.hasOwn(HOLDER_VIA, h.via ?? "") ? HOLDER_VIA[h.via] : null}`;
+// `listed`'s rule (words.mjs) over markup, so a link stays a link: "a", "a and b", "a, b and c".
+const listedHtml = parts => parts.map((part, n) => html`${n === 0 ? null : n === parts.length - 1 ? " and " : ", "}${part}`);
 
 /**
  * Issue #1000: the triggers that bring their own key for this slot (`declaredKeysView`), by name and the variable,
@@ -29,11 +34,17 @@ const triggerLink = t => html`<a class="link" href="${`/config/trigger?index=${t
  * subscription check comes first, so the declared name stays reserved) and a variable this host's PI_FORWARD_ENV names
  * (the operator's host value claims it); an unread forward list leaves that open, and the line says on what. Other
  * hosts decide that for themselves, which the card says once.
+ * Issue #1013: the answer rules and the zeroTouch block that declare the variable in their own `secrets` follow the
+ * triggers, the same way and on the same terms; a slot no trigger binds reads as before for them alone.
  */
 function declaredLine(item, own) {
   if (!own) return null;
-  const one = own.triggers.length + own.more === 1;
-  const who = html`${own.triggers.map((t, n) => html`${n ? ", " : null}${triggerLink(t)}`)}${own.more ? ` and ${own.more} more` : null} ${one ? "binds" : "bind"} <span class="code pk-key">${item.key}</span> in run.secrets`;
+  const holders = own.holders ?? [];
+  const bound = own.triggers.length + own.more;
+  const one = bound + holders.length === 1;
+  const binds = bound > 0 ? html`${listedHtml([...own.triggers.map(triggerLink), ...(own.more ? [`${own.more} more`] : [])])} ${bound === 1 ? "binds" : "bind"} <span class="code pk-key">${item.key}</span> in run.secrets` : null;
+  const declares = holders.length > 0 ? html`${listedHtml(holders.map(holderName))} ${holders.length === 1 ? "declares" : "declare"} ${binds ? "it" : html`<span class="code pk-key">${item.key}</span>`} in ${holders.length === 1 ? "its" : "their"} secrets` : null;
+  const who = binds && declares ? html`${binds}, and ${declares}` : binds ?? declares;
   const theirs = one ? "its" : "their";
   if (item.status === "managed") return html`<p class="pk-note" data-provider-declared="refused">${who}, but this host binds the provider to a subscription, so it refuses ${theirs} jobs before they spend.</p>`;
   if (own.forwarded === true) return html`<p class="pk-note" data-provider-declared="refused">${who}, but this host's PI_FORWARD_ENV names it too, so it refuses ${theirs} jobs before they spend.</p>`;

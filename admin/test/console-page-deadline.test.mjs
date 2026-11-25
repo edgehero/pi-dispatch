@@ -358,7 +358,7 @@ async function cutAgainstOutage(c, quiet, what) {
   // snapshot is what it cut.
   const cutShort = cut.calls.some((call) => quiet(call.name) && (kindOf(call.name) === "valkey" || (kindOf(call.name) === "bound" && call.handed < (BOUNDS[call.name][2] ?? BOUNDS[call.name][0]) && call.at + call.handed >= D)));
   assert.equal(deadlineSpent === true, cutShort, `${what}: marked as cut where a read was, or ended at the deadline on less than its own bound (back at ${cut.took} ms)`);
-  assert.equal(snapshotFailure, quiet("fleet.snapshot") && cut.calls.some((call) => call.name === "fleet.snapshot") ? "late" : undefined, `${what}: the snapshot's failure`);
+  assert.deepEqual(snapshotFailure, quiet("fleet.snapshot") && cut.calls.some((call) => call.name === "fleet.snapshot") ? { kind: "late" } : undefined, `${what}: the snapshot's failure`);
   assert.deepEqual(cut.logs, [], `${what}: nothing for the console's log`);
   assert.ok(!Object.hasOwn(outage.data, "deadlineSpent") && !Object.hasOwn(outage.data, "snapshotFailure"), `${what}: an outage is not a deadline`);
   return { cut, outage };
@@ -892,7 +892,7 @@ test("/config/connections past its deadline is drawn from the files: the real vi
   // Four publication reads of 2 to 2.5 s each, one after another: each has 1 ms.
   await time.advance(10);
   assert.ok(data !== null, "back ten milliseconds after the deadline, well inside the grace");
-  assert.deepEqual([data.snapshot, data.readFailed, data.snapshotFailure, data.deadlineSpent], [null, true, "late", true]);
+  assert.deepEqual([data.snapshot, data.readFailed, data.snapshotFailure, data.deadlineSpent], [null, true, { kind: "late" }, true]);
   assert.deepEqual(Object.fromEntries(Object.entries(seen).map(([name, opts]) => [name, opts.timeoutMs])), { endpointStatus: 1, receivers: 1, pollers: 1, hookRuns: 1 });
   const view = data.connections;
   assert.ok(view !== null, "not dropped whole");

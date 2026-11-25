@@ -162,6 +162,21 @@ test("doctor says nothing of a random pool in one billing class on this host, ca
 	assert.equal((await poolChecks({}, { candidates: ["anthropic/claude-sonnet-4-5", "anthropic/claude-haiku-4-5"] })).some((c) => MIXED.test(c.label)), false, "all subscription");
 });
 
+// Issue #996: a weighted pool's shares, of the whole pool and in whole percent; grouped by billing class where the pool mixes them.
+test("doctor names each candidate's share of a weighted pool, per billing class for a mixed pool, and says nothing new of a pool without weights (issue #996)", async () => {
+	const WEIGHTED = /its random pool is weighted/;
+	const TAIL = ". A candidate that cannot run at pickup leaves that draw, and the others keep their relative shares";
+	const weighted = { strategy: "random", candidates: mixedPool, weights: { [mixedPool[0]]: 3 } };
+	const mixedLines = (await poolChecks({ maxCostUsd: "2", modelSelection: weighted })).filter((c) => WEIGHTED.test(c.label));
+	assert.deepEqual(mixedLines, [{ ok: true, label: `label trigger #0: its random pool is weighted; each candidate's share of the pool, by billing class on this host: subscription 75% (anthropic/claude-sonnet-4-5 75%); API key 25% (openrouter/deepseek/deepseek-chat 25%)${TAIL}` }]);
+	const oneClass = (await poolChecks({ modelSelection: weighted }, { row: { ok: true, managed: false } })).filter((c) => WEIGHTED.test(c.label));
+	assert.deepEqual(oneClass, [{ ok: true, label: `label trigger #0: its random pool is weighted; each candidate's share of the pool: anthropic/claude-sonnet-4-5 75%, openrouter/deepseek/deepseek-chat 25%${TAIL}` }]);
+	const three = ["anthropic/claude-sonnet-4-5", "anthropic/claude-haiku-4-5", "openrouter/deepseek/deepseek-chat"];
+	const tiny = (await poolChecks({ maxCostUsd: "2", modelSelection: { strategy: "random", candidates: three, weights: { [three[0]]: 100, [three[2]]: 100 } } }, { candidates: three })).find((c) => WEIGHTED.test(c.label));
+	assert.match(tiny.label, /subscription 50% \(anthropic\/claude-sonnet-4-5 50%, anthropic\/claude-haiku-4-5 under 1%\); API key 50% \(openrouter\/deepseek\/deepseek-chat 50%\)/);
+	for (const run of [{ maxCostUsd: "2" }, {}]) assert.equal((await poolChecks(run)).some((c) => WEIGHTED.test(c.label) || /share/.test(c.label)), false, "a pool without weights says nothing new");
+});
+
 // Issue #1008: a trigger whose own run.maxCostUsd bounds nothing on this host, because every model it may call is on a
 // subscription connection without paid extra usage, whose calls are notional.
 const BOUNDS_NOTHING = /bounds nothing on this host/;

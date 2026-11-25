@@ -1,5 +1,5 @@
 import { recordedModelSelection } from "@edgehero/pi-dispatch/model-selection-record";
-import { recordedSecretFiles } from "@edgehero/pi-dispatch/run-history";
+import { recordedMainCredential, recordedSecretFiles } from "@edgehero/pi-dispatch/run-history";
 /** Model-facing reads are rebuilt before rendering or caching. New prose fields are withheld by default (#766). */
 import { basename } from "node:path";
 import { REASONS, SESSION_REASON_TEXT, PLAN_REASON_TEXT } from "@edgehero/pi-dispatch/reason-catalog";
@@ -54,6 +54,8 @@ export const AGENT_UNREAD_WORD = "unread";
 const CODED_LISTS = new Set(["unreadHosts", "pausedUnread", "listsUnread"]);
 const REPLY_CODE = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
 const replyCode = (value) => (typeof value === "string" && REPLY_CODE.test(value) ? value : null);
+/** The kinds a load marks its failed snapshot read with (`snapshotFailureOf`); "silent" is no mark. */
+const SNAPSHOT_FAILURES = new Set(["error", "late", "fault"]);
 
 export function agentReadProjection(value, key = "", depth = 0) {
   if (depth > 16 || value === undefined) return undefined;
@@ -61,9 +63,15 @@ export function agentReadProjection(value, key = "", depth = 0) {
     return Object.fromEntries(Object.entries(value).slice(0, 5000).filter(([name, code]) => ID.test(name) && typeof code === "string" && REPLY_CODE.test(code)));
   }
   if (key === "modelSelection") return recordedModelSelection(value);
+  // Issue #1073: why a page's snapshot read failed, so an agent's page words the cause as an operator's does: a closed
+  // kind and the reply's code, one word or null. It was dropped whole, and an agent's page said every cause as silence.
+  if (key === "snapshotFailure") return value !== null && typeof value === "object" && SNAPSHOT_FAILURES.has(value.kind) ? { kind: value.kind, code: replyCode(value.code) } : undefined;
   // Console APIs also project raw records, without passing through modelRunRecord first. Keep its count-only rule
   // here too, and preserve an already projected count without exposing a malformed map's reference values.
   if (key === "secretFiles") return Number.isSafeInteger(value) && value >= 0 && value <= 80 ? value : recordedSecretFiles(value)?.length;
+  // Issue #998: where a run's main credential came from, as its closed word alone: never the declared variable's name,
+  // as a model reads secret names as counts. `modelRunRecord` (dispatch_runs) keeps the same rule.
+  if (key === "mainCredential") { const c = recordedMainCredential(value); return c === null ? undefined : { source: c.source }; }
   if (value === null || typeof value === "boolean") return value;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value === "string") {
@@ -72,7 +80,13 @@ export function agentReadProjection(value, key = "", depth = 0) {
     // Issue #1035: beside `queuesMayBeShort` in a fleet pause's or resume's answer, the class of the error reply that
     // makes the list short for a cause waiting does not end. One of two closed words, anything else left out.
     if (key === "queuesShortLasting") return value === "key" || value === "permission" ? value : undefined;
-    if (key === "mirror") return value === "off" ? "off" : /unreachable/.test(value) ? "unreachable" : "bounded";
+    // The mirror's word (`mirror-words.mjs`): "truncated", a mirror that answered and holds more than the read's bound,
+    // is kept apart from "bounded", one read whole (issue #1073). Folded together, an agent's page called a cut history
+    // a whole one, where an operator's said that older runs may be missing.
+    if (key === "mirror") return value === "off" ? "off" : value === "truncated" ? "truncated" : /unreachable/.test(value) ? "unreachable" : "bounded";
+    // A host row's slot count (issue #1073), a whole number in a string as the registry keeps it: without it an agent's
+    // host page could not say how many slots are free, and said why it drew none.
+    if (key === "concurrency") return /^\d{1,6}$/.test(value) ? value : null;
     if (key === "folder" || ["scope", "members"].includes(key) && /^(?:\/|[A-Za-z]:[\\/])/.test(value)) { const name = basename(value); return ID.test(name) ? name : null; }
     if (/Usd$/.test(key) || key === "cap") return /^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(value) ? value : null;
     if (["model", "models", "fallbackModels", "auxiliaryModels"].includes(key)) return /^[A-Za-z0-9@~][A-Za-z0-9_./:@~+-]{0,299}$/.test(value) ? value : null;

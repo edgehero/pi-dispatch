@@ -789,6 +789,42 @@ test("the browser switches from ordered fallbacks to a pool in one preview body 
   assert.ok(!Object.hasOwn(body, "randomCandidates"));
 });
 
+// Issue #996: the page names a weighted pool's shares, and its pool editor keeps the weights of the candidates that stay.
+const WEIGHTED_RUN = Object.freeze({ kind: "github", flow: "fix", models: ["anthropic/claude-haiku-4-5", "openai/gpt-5", "anthropic/claude-sonnet-5-5"], modelSelection: { strategy: "random", candidates: ["anthropic/claude-haiku-4-5", "openai/gpt-5", "anthropic/claude-sonnet-5-5"], weights: { "anthropic/claude-haiku-4-5": 6, "anthropic/claude-sonnet-5-5": 3 } } });
+
+test("a weighted pool's page names each candidate's share of the pool, where a pool without weights says equal chance (issue #996)", async () => {
+  const weighted = textOf(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: WEIGHTED_RUN } }));
+  // A viewer reads the summary line, an operator the editor's hint.
+  assert.ok(textOf(await triggerGetsPage({ role: "viewer", entry: { ...GETS_ENTRY, run: WEIGHTED_RUN } })).includes("random choice from: anthropic/claude-haiku-4-5 60%, openai/gpt-5 10%, anthropic/claude-sonnet-5-5 30%"));
+  assert.ok(weighted.includes("Each eligible model's chance follows the weights set in the triggers file, as a share of the whole pool: anthropic/claude-haiku-4-5 60%, openai/gpt-5 10%, anthropic/claude-sonnet-5-5 30%. A model that cannot run at pickup leaves that draw, and the others keep their relative shares. A candidate taken off here loses its weight, and one added here weighs 1."));
+  assert.ok(!weighted.includes("equal chance"));
+  const { weights: _weights, ...unweighted } = WEIGHTED_RUN.modelSelection;
+  const plain = await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...WEIGHTED_RUN, modelSelection: unweighted } } });
+  assert.ok(textOf(plain).includes("Each eligible model has an equal chance. The allowed-model list still applies"));
+  assert.ok(!plain.includes("data-gets-weight") && !textOf(plain).includes("of the whole pool"), "a pool without weights draws as it always did");
+  assert.ok(textOf(await triggerGetsPage({ role: "viewer", entry: { ...GETS_ENTRY, run: { ...WEIGHTED_RUN, modelSelection: unweighted } } })).includes("random choice from: anthropic/claude-haiku-4-5, openai/gpt-5, anthropic/claude-sonnet-5-5 ·"));
+});
+
+test("the browser's pool edit keeps the weights of the candidates that stay, drops a removed one's, and adds one with none (issue #996)", async () => {
+  const w = runConsoleScript(CONSOLE_SCRIPT, await triggerGetsPage({ entry: { ...GETS_ENTRY, run: WEIGHTED_RUN } }));
+  const form = w.document.querySelector('form[data-action="trigger-environment-edit"]');
+  const chipOf = (ref) => [...form.querySelectorAll('[data-gets-list="randomCandidates"]')].find((chip) => chip.getAttribute("data-gets-value") === ref);
+  assert.equal(chipOf("anthropic/claude-sonnet-5-5").getAttribute("data-gets-weight"), "3");
+  assert.equal(chipOf("openai/gpt-5").hasAttribute("data-gets-weight"), false, "a candidate the weights leave out carries none");
+  chipOf("anthropic/claude-sonnet-5-5").checked = false;
+  const add = form.querySelector('[data-gets-add="randomCandidates"]');
+  add.value = "anthropic/claude-opus-5-5";
+  add.dispatchEvent(new Event("input", { bubbles: true }));
+  w.submit(form);
+  assert.deepEqual(w.fetch.calls.at(-1).body.modelSelection, { strategy: "random", candidates: ["anthropic/claude-haiku-4-5", "openai/gpt-5", "anthropic/claude-opus-5-5"], weights: { "anthropic/claude-haiku-4-5": 6 } });
+  // Every weighted candidate taken off leaves no weights key, since the file refuses an empty map.
+  const again = runConsoleScript(CONSOLE_SCRIPT, await triggerGetsPage({ entry: { ...GETS_ENTRY, run: WEIGHTED_RUN } }));
+  const form2 = again.document.querySelector('form[data-action="trigger-environment-edit"]');
+  for (const chip of form2.querySelectorAll('[data-gets-list="randomCandidates"][data-gets-weight]')) chip.checked = false;
+  again.submit(form2);
+  assert.deepEqual(again.fetch.calls.at(-1).body.modelSelection, { strategy: "random", candidates: ["openai/gpt-5"] });
+});
+
 test("agent reads retain only the closed random pool metadata, never host state or response prose", () => {
   const modelSelection = { strategy: "random", candidates: ["openai/gpt-5"], previous: "anthropic/claude-haiku-4-5", state: "PRIVATE_HOST_STATE", response: "PRIVATE_PROVIDER_RESPONSE" };
   assert.deepEqual(agentReadProjection({ modelSelection }), { modelSelection: { strategy: "random", candidates: ["openai/gpt-5"], previous: "anthropic/claude-haiku-4-5" } });

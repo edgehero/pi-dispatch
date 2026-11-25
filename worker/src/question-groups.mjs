@@ -13,10 +13,13 @@ const own = (value, keys) => object(value) && Object.keys(value).every((key) => 
 const safeWord = (value, max = 200) => typeof value === "string" && value.length <= max && /^[A-Za-z0-9._:/ @!#-]+$/.test(value);
 export const questionDigest = (value) => sha(JSON.stringify(value));
 
-/** No model-owned names or prompts live here. Names are operator-owned and never sent as classification criteria. */
+/** No model-owned names or prompts live here. Names are operator-owned and never sent as classification criteria.
+ * `secrets` and `secretsProfile` (issue #1013) are the block's declared provider keys, judged by the triggers loader with
+ * the code that judges `run.secrets` (triggers.mjs `validateDeclaredKeys`) and kept only when present, so the copy, and
+ * the configuration digest a queued grouping is bound to, are unchanged for a block without them. */
 export function validateZeroTouchConfig(value) {
 	if (value === undefined || value === null) return null;
-	if (!own(value, ["capture", "model", "maxCostUsd", "confidence", "names"]) || typeof value.capture !== "boolean") throw new Error("zeroTouch requires capture and only declared grouping settings");
+	if (!own(value, ["capture", "model", "maxCostUsd", "confidence", "names", "secrets", "secretsProfile"]) || typeof value.capture !== "boolean") throw new Error("zeroTouch requires capture and only declared grouping settings");
 	if (typeof value.model !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_./:@~+-]{1,128}$/.test(value.model)) throw new Error("zeroTouch.model requires an explicit provider/model");
 	if (typeof value.maxCostUsd !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(value.maxCostUsd) || !Number.isSafeInteger(Number(value.maxCostUsd) * 1e6)) throw new Error("zeroTouch.maxCostUsd must be a bounded dollar string");
 	const confidence = value.confidence ?? 0.9;
@@ -24,7 +27,7 @@ export function validateZeroTouchConfig(value) {
 	const names = value.names ?? {};
 	if (!object(names) || Object.keys(names).length > 1000) throw new Error("zeroTouch.names must hold at most 1000 human names");
 	for (const [id, name] of Object.entries(names)) if (!GROUP_ID_RE.test(id) || typeof name !== "string" || !name.trim() || [...name].length > 120 || /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(name)) throw new Error("zeroTouch group names must be human text of 1 to 120 characters without controls");
-	return { capture: value.capture, model: value.model, maxCostUsd: value.maxCostUsd, confidence, names: { ...names } };
+	return { capture: value.capture, model: value.model, maxCostUsd: value.maxCostUsd, confidence, names: { ...names }, ...(value.secrets !== undefined ? { secrets: object(value.secrets) ? { ...value.secrets } : value.secrets } : {}), ...(value.secretsProfile !== undefined ? { secretsProfile: value.secretsProfile } : {}) };
 }
 
 /** Redact before bounding; silently cutting before redaction can expose the head of a secret. */

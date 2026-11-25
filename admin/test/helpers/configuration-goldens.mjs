@@ -6,9 +6,9 @@ import { NOW } from "../../../launch/fixture-deployment.mjs";
 import { secretsView } from "../../src/secrets-view.mjs";
 import { readConnections } from "../../src/connections-view.mjs";
 import { loadPageData, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
-import { noSnapshotFleet } from "./no-snapshot.mjs";
+import { noSnapshotFleet, outagePaths } from "./no-snapshot.mjs";
 import { consoleProjectFixture } from "./console-project-fixture.mjs";
-import { projectSizeAction } from "../../src/project-view.mjs";
+import { projectSizeAction, readProjectView } from "../../src/project-view.mjs";
 import { projectLoadsOf } from "../../src/loaded-words.mjs";
 import { buildHookRun } from "@edgehero/pi-dispatch/hook-runs";
 
@@ -35,7 +35,12 @@ export function receiverFixture(now, { onlyUnauthorized = false, answered503 = f
   return { v: 1, name: "mini1", version: "4.3.1", startedAt: now - 60_000, at: now - 8000, port: 3000, bind: "all", forges, deliveries: observations.snapshot(), ageMs: 8000 };
 }
 
-export async function consoleConnectionsFixture(now, { problem = null, unread = false, change = () => {} } = {}) {
+/**
+ * `outage` (issue #1073): Connections over a Valkey that does not answer, as the console reads it: no snapshot, the file
+ * views the page's load read (`files`), and every publication read failing. The `.env`, the allowlist and the endpoint
+ * files are the fixture's, so what the page says of the files and of Valkey is the reader's own.
+ */
+export async function consoleConnectionsFixture(now, { problem = null, unread = false, change = () => {}, outage = false, files = null } = {}) {
   if (!Number.isFinite(now)) throw new TypeError("consoleConnectionsFixture needs the injected page clock");
   const env = { GITHUB_AUTH_SOURCE: "app", WEBHOOK_SECRET: "fixture-only", GITLAB_WEBHOOK_MODE: "signature", GITLAB_WEBHOOK_SECRET: "fixture-only", GITLAB_TOKEN: "fixture-only", RECEIVER_PORT: "3000", PI_WORKER_NAME: "build3", PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "fixture-only", PI_ON_FAILURE: "/srv/hooks/notify", PI_BACKENDS: "local,podman" };
   const checks = [{ id: "egress.proxy", level: "ok", label: "The egress proxy is running" }];
@@ -72,6 +77,12 @@ export async function consoleConnectionsFixture(now, { problem = null, unread = 
     document: () => ({ triggers: [] }),
   };
   change(snapshot, reads);
+  if (outage) {
+    const fail = async () => { throw new Error("Valkey does not answer"); };
+    Object.assign(reads, { slots: fail, endpointStatus: fail, receivers: fail, pollers: fail, hookRuns: fail });
+    reads.providerInventory = { ...reads.providerInventory, settings: () => ({ overlay: files?.settings?.overlay ?? {} }) };
+    return readConnections({ deploymentDir: "/srv/deployment", paths: {}, env: { RECEIVER_PORT: "4000" }, snapshot: null, files, now, redis: {}, reads });
+  }
   return readConnections({ deploymentDir: "/srv/deployment", paths: {}, env: { RECEIVER_PORT: "4000" }, snapshot, now, redis: {}, reads });
 }
 
@@ -85,15 +96,15 @@ export function secretFilesFixture() {
 }
 export const SECRET_FILES_ENV = Object.freeze({ PI_SECRET_PROFILES: "default:/opt/default", PI_SECRET_BUNDLES: "env-bundle:/opt/env-bundle:dotenv", PI_SECRET_RESOLVER_ROOTS: "/srv/resolvers" });
 
-async function draw(page, { role = "operator", readOnly = false, secrets = null, connections = undefined, project = null, status = 200, fleet = null, secretsFromFiles = false } = {}) {
-  const parsed = parsePageQuery(page, page === "project" ? "id=billing" : "");
+async function draw(page, { role = "operator", readOnly = false, secrets = null, connections = undefined, connectionsRead = null, project = null, projectRead = null, id = "billing", status = 200, fleet = null, secretsFromFiles = false } = {}) {
+  const parsed = parsePageQuery(page, page === "project" ? `id=${id}` : "");
   assert.ok(!parsed.refusal, `${page}: fixture query is valid`);
   const data = await loadPageData(page, parsed.query, {
     now: () => NOW, env: {}, fleet: fleet ?? { snapshot: async () => ({ parked: [] }), parkedCount: async () => 0 },
     secretsView: async (snapshot, files) => secretsFromFiles ? secretsView({ snapshot, files, env: SECRET_FILES_ENV, fs: { realpathSync: (path) => path } }) : secrets ?? consoleSecretsFixture(NOW),
-    connections: async () => connections === undefined ? await consoleConnectionsFixture(NOW) : connections,
+    connections: connectionsRead ?? (async () => connections === undefined ? await consoleConnectionsFixture(NOW) : connections),
     setup: () => ({ enabled: true, actions: ["setup-provider-key", "setup-provider-key-replace"] }),
-    projectView: async () => project ?? consoleProjectFixture(NOW),
+    projectView: projectRead ?? (async () => project ?? consoleProjectFixture(NOW)),
   }, { role, readOnly });
   const result = await renderPage(page, { session: { name: role === "viewer" ? "watcher" : "ops", role }, query: parsed.query, data, readOnly, theme: null });
   assert.equal(result.status, status, `${page}: the fixture's actual HTTP state`);
@@ -108,9 +119,20 @@ export const CONFIGURATION_DRAW = Object.freeze({
   // files; the secret cards, whose facts are Valkey's too, say they could not be read.
   "config-no-snapshot.operator": () => draw("config", { fleet: noSnapshotFleet() }),
   "config-no-snapshot.viewer": () => draw("config", { role: "viewer", fleet: noSnapshotFleet() }),
+  // Issue #1073: /config where the console's own code failed reading the deployment (an engine error, not Valkey): the
+  // cards say so, and that the console's log names the error, where they said Valkey could not be read.
+  "config-console-fault.operator": () => draw("config", { fleet: noSnapshotFleet({ snapshot: async () => { const row = null; return row.name; } }) }),
   // Issue #962: /config/secrets over a Valkey that does not answer. The declarations come from the files and the .env,
   // read-only; what a run last received and which hosts serve a profile are not known.
   "secrets-no-snapshot.operator": () => draw("secrets", { fleet: noSnapshotFleet({ fileViews: secretFilesFixture }), secretsFromFiles: true }),
+  // Issue #1073: the Secrets page over a settings overlay nobody could read: a profile and a bundle resolver the .env
+  // declares may be declared there too, and a bundle whose resolver the .env does not declare is not "missing".
+  "secrets-overlay-unread.operator": () => secret({ change: (s, e) => { s.settings = { path: "/srv/deployment/settings.json", invalid: "settings file unreadable (EACCES)" }; e.PI_SECRET_BUNDLES = ""; } }),
+  // Issue #1073: Connections over a Valkey that does not answer: the triggers, the overlay's MCP servers and the staged
+  // packages from the files, and what only Valkey holds (hosts, doctor, receivers, subscriptions) not known.
+  "connections-no-snapshot.operator": () => draw("connections", { fleet: noSnapshotFleet(), connectionsRead: (snapshot, { files } = {}) => consoleConnectionsFixture(NOW, { outage: true, files }) }),
+  // Issue #1073: a project's page over a Valkey that does not answer, read by the real project view over the outage's files.
+  "project-no-snapshot.operator": () => { const fleet = noSnapshotFleet(); return draw("project", { fleet, id: "web", projectRead: (id, snapshot, { within } = {}) => readProjectView({ id, snapshot, paths: outagePaths(), env: {}, deploymentDir: null, fleet, now: NOW, within }) }); },
   "secrets-populated.operator": () => secret({}),
   "secrets-populated.viewer": () => secret({}, "viewer"),
   "secrets-readonly.operator": () => secret({}, "operator", true),

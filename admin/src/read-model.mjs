@@ -1,6 +1,6 @@
 import { readConsumerStatus } from "@edgehero/pi-dispatch/consumer-status";
 import { consumerHealthOf } from "@edgehero/pi-dispatch/consumer-health";
-import { modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
+import { copyModelSelection, modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
 import { makeHistoryReader, readHostHistory, historyRow } from "@edgehero/pi-dispatch/history-reader";
 import { readSubscriptionStatus } from "@edgehero/pi-dispatch/subscription-status";
 import { readSandboxInventories } from "@edgehero/pi-dispatch/sandbox-inventory";
@@ -38,7 +38,7 @@ import { DEFAULT_VALKEY_URL, artifactsDirPath, logsDirPath, defaultSandboxDir, d
 import { JOB_IDLE_MINUTES_DEFAULT, JOB_STALL_MINUTES_DEFAULT } from "@edgehero/pi-dispatch/job-limit-rules";
 import { settingsFilePath, readOverlay, readOverlayDocument, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
-import { modelRolesTelemetryOf, approvalRecordOf, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedSecretFiles, recordedCheckpoints, recordedOpenshell, recordedPrivateEndpoints, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { modelRolesTelemetryOf, approvalRecordOf, recordedMainCredential, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedSecretFiles, recordedCheckpoints, recordedOpenshell, recordedPrivateEndpoints, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
 import { LOADED_BASE_SHA_RE } from "@edgehero/pi-dispatch/loaded-record";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
@@ -69,7 +69,7 @@ import { removeHeldJob, requestCancel, withdrawCancel } from "@edgehero/pi-dispa
 import { makeRunBudgetLedger } from "@edgehero/pi-dispatch/run-budget-ledger";
 import { RECOVERY_CAP, recoveryJobId, runIdOf } from "@edgehero/pi-dispatch/recovery-queue";
 import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES, isOpen as steerIsOpen, listInboxPublic } from "@edgehero/pi-dispatch/steer-inbox";
-import { HELD_SET, jobKey, WAIT_ANSWER_PREFIX, WAIT_ANSWERS, WAIT_PROFILE_FIELD_RE } from "@edgehero/pi-dispatch/wait-state";
+import { HELD_SET, jobKey, pruneHeld, WAIT_ANSWER_PREFIX, WAIT_ANSWERS, WAIT_PROFILE_FIELD_RE } from "@edgehero/pi-dispatch/wait-state";
 // Why a waiting job waits (issue #737): the worker's closed vocabulary and the rules each field of its record is held to,
 // from the leaf the worker writes with, so the reader and the writer cannot drift on the key, a field or a bucket.
 import { DEFER_BUCKETS, DEFER_FIELDS, DEFER_HOST_RE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, WAITING_DUE_GRACE_MS, deferKey, parseDefer, recordMatchesDue } from "@edgehero/pi-dispatch/defer-reasons";
@@ -115,7 +115,7 @@ import { PACKAGES_SUBDIR, STAGE_MANIFEST, readStageManifest, readStagedSkills } 
 import { selectEntries, keepOnlyDeclaredSkills } from "@edgehero/pi-dispatch/materialize";
 import { FORGES, RUN_KINDS, isForgeKind, semanticItemOfId } from "@edgehero/pi-dispatch/forges";
 import { hasControls, scrubControls } from "./panel.mjs";
-import { RUN_MODEL_RE, RUN_PROVIDER_RE, parseRunFilter, runMatches, runVenueOf, triggerValueOf } from "./run-filter.mjs";
+import { RUN_MODEL_RE, RUN_PROVIDER_RE, parseRunFilter, runMatches, runVenueOf, triggerFilterValueOf, triggerValueOf } from "./run-filter.mjs";
 import { recordMatchesTrigger } from "./trigger-match.mjs";
 // The two pure text scanners live in graph-model.mjs (the pure side of the graph feature); this module
 // supplies them bytes, never the other way around -- the dependency points read-model -> graph-model.
@@ -347,9 +347,9 @@ function parseNonNegInt(raw, fallback) {
  * `readOnly` (issue #1036, default false) makes it write NOTHING: its queues are built without BullMQ's meta write
  * (`makeQueue`'s `metaWrite: false`) and its registry read prunes no stale member. For `dispatch_status`, which is
  * described to a model as read-only. `/dispatch status` and the setup wizard's probe are a person's and keep the
- * default: they prune as they read. Who else does depends on the index, and for one of them nobody else does
- * (`INT-HOST-REGISTRY-CONTRACT`, "WHO PRUNES": a `host:live` member, the worker and the receiver at times, the CLI and
- * doctor; a `wait:held` member, no service at all), so no read may depend on a prune.
+ * default: they prune as they read. Who else does depends on the index (`INT-HOST-REGISTRY-CONTRACT`, "WHO PRUNES": a
+ * `host:live` member, the worker and the receiver at times, the CLI and doctor; a `wait:held` member, the worker's
+ * retention sweep alone, on its timer, since issue #1075, and nobody else before it), so no read may depend on a prune.
  */
 export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500, readOnly = false } = {}) {
   let queue;
@@ -2748,7 +2748,9 @@ const HELD_HYDRATE_MAX = 200;
  * 2,000 stale members beside 4 real holds answered no hold at all, on every read. The walk now goes on past a stale
  * member, a page at a time, until it holds `HELD_HYDRATE_MAX` real holds, has looked at every member, or has looked at
  * this many. Past this bound the read says it is not whole (`truncated`), which then means: members remain that
- * nobody looked at, so a hold may be missing from the list.
+ * nobody looked at, so a hold may be missing from the list. Since issue #1075 the worker's retention sweep prunes the
+ * index too (`sweepHeld`, every PI_SWEEP_INTERVAL_HOURS), and the walk stays: a read must still not depend on a prune
+ * (the sweep can be off, and a crowd can grow between two passes).
  */
 export const HELD_LOOK_MAX = 2_000;
 
@@ -2942,9 +2944,10 @@ export function resolveWorkerCount({ hosts, workerCount }) {
  *
  * `prune` (issue #1036, default true): a member with no hash is stale and is removed in passing, which is what keeps an
  * index a set cannot expire from only growing. False skips it the same and writes nothing, for `dispatch_waits`, which
- * is described to a model as read-only; `/dispatch status` keeps the default and prunes. No service prunes this
- * index, so a read must not depend on one: either way the walk goes on past a stale member, to `HELD_LOOK_MAX`
- * members looked at (`walkHeldIndex`), and the real holds are listed whatever stale members sit before them.
+ * is described to a model as read-only; `/dispatch status` keeps the default and prunes. The worker's retention
+ * sweep prunes it too since issue #1075, on its timer alone, so a read must still not depend on a prune: either way
+ * the walk goes on past a stale member, to `HELD_LOOK_MAX` members looked at (`walkHeldIndex`), and the real holds
+ * are listed whatever stale members sit before them.
  */
 export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now(), prune = true } = {}) {
   let redis;
@@ -2961,9 +2964,11 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
             const h = await redis.hgetall(jobKey(jobId));
             // A member with no hash is STALE: the hash expired or the hold was released without the index
             // being updated. The reader prunes it, which is what makes an index safe here at all -- a set
-            // cannot expire its own members, so the alternative is a set that only grows.
+            // cannot expire its own members, so the alternative is a set that only grows. Through the worker's
+            // one prune script (issue #1075), which looks at the hash again in the step that removes: a separate
+            // SREM removed a member whose hold was written between this HGETALL and it.
             if (!h || !h.since) {
-              if (prune) await redis.srem(HELD_SET, jobId).catch(() => {});
+              if (prune) await pruneHeld(redis, [jobId]).catch(() => {});
               return null;
             }
             const since = Number(h.since);
@@ -3489,13 +3494,17 @@ export function scanRunRecords({ logsDir, sinceMs, nowMs = Date.now(), fs = node
  * Read-only and bounded like the fleet's own window. `{ records, partial }`, and it never rejects: a side that cannot
  * be read, or a mirror with more in the window than the bound, says `partial`, so a caller can say a run may be missing
  * rather than present what it has as the whole. A missing record fails toward another canary, never toward an Adopt.
+ * `unread: true` beside `partial` (issue #1073) when a side could not be read, where a mirror cut at its bound is
+ * partial alone: a cache keeps the first only `FAILED_READ_KEEP_MS`, since reading it again may answer whole.
  */
 export async function scanFleetRunRecords({ redis = null, logsDir, sinceMs, nowMs = Date.now(), fs = nodeFs, limit = WIDE_RUNS, timeoutMs = FLEET_READ_TIMEOUT_MS } = {}) {
   const local = scanRunRecords({ logsDir, sinceMs, nowMs, fs });
   const { runs, degraded } = await readMirroredRuns(redis, { limit, sinceMs, prune: false, now: () => nowMs, timeoutMs });
+  const unread = !Array.isArray(local) || degraded.startsWith("unreachable");
   return {
     records: mergeRuns(Array.isArray(local) ? local : [], runs.map(shownRecord), { limit: Infinity }),
-    partial: !Array.isArray(local) || degraded === "truncated" || degraded.startsWith("unreachable"),
+    partial: unread || degraded === "truncated",
+    ...(unread ? { unread: true } : {}),
   };
 }
 
@@ -4066,7 +4075,8 @@ export function normalizeTriggerForDisplay(entry) {
     // a dollar amount, the operator's own words, never a value a job chose. Spread only when present, so a trigger
     // that sets neither keeps exactly its keys.
     ...(Array.isArray(run.models) && run.models.length > 0 && run.models.every((m) => typeof m === "string") && { models: [...run.models] }),
-    ...(run.modelSelection != null && modelSelectionProblem(run.modelSelection) === null && { modelSelection: { strategy: "random", candidates: [...run.modelSelection.candidates] } }),
+    // A pool's weights (issue #996) ride with it, `copyModelSelection`'s rule: the page shows each candidate's share.
+    ...(run.modelSelection != null && modelSelectionProblem(run.modelSelection) === null && { modelSelection: copyModelSelection(run.modelSelection) }),
     ...(Array.isArray(run.fallbackModels) && run.fallbackModels.length > 0 && run.fallbackModels.every((m) => typeof m === "string") && { fallbackModels: [...run.fallbackModels] }),
     ...(Array.isArray(run.auxiliaryModels) && run.auxiliaryModels.length > 0 && run.auxiliaryModels.every((m) => typeof m === "string") && { auxiliaryModels: [...run.auxiliaryModels] }),
     ...((typeof run.maxCostUsd === "string" || typeof run.maxCostUsd === "number") && { maxCostUsd: String(run.maxCostUsd) }),
@@ -4974,10 +4984,11 @@ async function heldJobs(redis, { prune = true } = {}) {
       try {
         const h = await redis.hgetall(`wait:job:${jobId}`);
         if (!h || !h.since) {
-          // Stale index member: prune as we go, which is what makes an index safe when a SET cannot expire. Not on a
-          // read-only reader (the console's): the row is skipped the same and left for the panel or `/dispatch status`,
-          // the only two that prune this index.
-          if (prune) await redis.srem("wait:held", jobId).catch(() => {});
+          // Stale index member: prune as we go, which is what makes an index safe when a SET cannot expire, through the
+          // worker's one prune script (`readHeldJobs` says why not a bare SREM). Not on a read-only reader (the
+          // console's): the row is skipped the same and left for the panel, `/dispatch status` and the worker's
+          // retention sweep (issue #1075).
+          if (prune) await pruneHeld(redis, [jobId]).catch(() => {});
           return null;
         }
         const since = Number(h.since);
@@ -5005,6 +5016,22 @@ async function heldJobs(redis, { prune = true } = {}) {
  * run index below (issue #641) is cached for the same span and the same reason.
  */
 const DOLLAR_RECORDS_TTL_MS = 15_000;
+
+/**
+ * How long a cache of the console's keeps an answer that says a read failed, or one a deadline cut, where it keeps a
+ * good answer longer (issue #1073): about 5 seconds, counted from when the failed answer came, and never longer than a
+ * good one is kept. The wide run window (15 s), the doctor results (15 s), the parked runs' pending-answer scan (15 s),
+ * the run page's park and action checks (15 s), and the console's `cachedFor` and `cachedPerWindow` (30 s: the Insights
+ * assembly, the updates page's run history, a trigger's run history and the hosts' doctor runs) each kept such an
+ * answer for their whole window, so a page went on saying a read failed for up to 30 seconds after Valkey answered.
+ * Not dropped at once: an outage would then run each of those reads once per refresh for as long as it lasts, the
+ * load the windows exist to spare. With the floor, a read that fails is made at most once per floor, and a page reads
+ * whole again within about 5 seconds of the read answering. The waiting read keeps both answers `WAITING_TTL_MS`,
+ * which is this floor already. One named exception keeps longer: a keyspace scan that read nothing while the registry
+ * answered keeps `WAITING_DISCOVERY_TTL_MS`, since asking again does not end a keyspace too big for the bound or a SCAN
+ * Valkey refuses.
+ */
+export const FAILED_READ_KEEP_MS = 5_000;
 
 /**
  * A registry row as the snapshot carries it (issue #596 phase 3, issue #599 phase 3): the budget pair and what its jobs
@@ -5612,7 +5639,11 @@ export function createFleetReader(
   // instant the cache runs out, and each would otherwise make its own mirror read of WIDE_RUNS runs. Cleared when it
   // settles, so a read that failed is retried by the next caller, never handed out again.
   let wideRead = null;
-  // The last pending-answer scan for the parked rows (issue #647), `{ at, key, got }`, reused for DOLLAR_RECORDS_TTL_MS.
+  // Until when the wide window is kept (issue #1073): DOLLAR_RECORDS_TTL_MS from the read's start for a window both
+  // sides answered, and FAILED_READ_KEEP_MS from its answer for one that is `partial` (a side not read), never longer.
+  let wideUntil = 0;
+  // The last pending-answer scan for the parked rows (issue #647), `{ at, key, got, until }`, reused for
+  // DOLLAR_RECORDS_TTL_MS, and an unreachable one for FAILED_READ_KEEP_MS (issue #1073).
   let parkedPending = null;
   // The wide window from this host's records (`local`, the index's answer) and the mirror's (`readMirroredRuns`').
   const wideOf = (at, local, { runs: fromMirror, degraded }) => {
@@ -5628,11 +5659,13 @@ export function createFleetReader(
   };
   const wideRuns = async () => {
     const at = nowFn();
-    if (wide && at >= wide.at && at - wide.at < DOLLAR_RECORDS_TTL_MS) return wide;
+    if (wide && at >= wide.at && at < wideUntil) return wide;
     if (wideRead !== null) return wideRead;
     const read = (async () => {
       const local = localIndex.records();
-      wide = wideOf(at, local, await readMirroredRuns(redis, { limit: WIDE_RUNS, prune: false, timeoutMs: FLEET_READ_TIMEOUT_MS }));
+      const got = wideOf(at, local, await readMirroredRuns(redis, { limit: WIDE_RUNS, prune: false, timeoutMs: FLEET_READ_TIMEOUT_MS }));
+      wideUntil = got.partial === null ? at + DOLLAR_RECORDS_TTL_MS : Math.min(at + DOLLAR_RECORDS_TTL_MS, nowFn() + FAILED_READ_KEEP_MS);
+      wide = got;
       return wide;
     })();
     // Cleared in the first reaction to the read, on either outcome, before any waiting caller resumes. What the callers
@@ -5652,13 +5685,14 @@ export function createFleetReader(
 
   // The published doctor results (issue #712, `INT-DOCTOR-RESULTS-KEY`), `{ at, got }`, read at most once per
   // DOLLAR_RECORDS_TTL_MS: a host publishes once a day, so a per-second MGET would be load for nothing. Read for the
-  // index's hosts and the live ones, pruning only where this reader may write.
+  // index's hosts and the live ones, pruning only where this reader may write. One that could not be read is kept for
+  // FAILED_READ_KEEP_MS from its answer (issue #1073), never the whole window.
   let doctorRead = null;
   const doctorResults = async () => {
     const at = nowFn();
-    if (doctorRead && at >= doctorRead.at && at - doctorRead.at < DOLLAR_RECORDS_TTL_MS) return doctorRead.got;
+    if (doctorRead && at >= doctorRead.at && at < doctorRead.until) return doctorRead.got;
     const got = await readDoctorResultsFn(redis, { names: lastHosts.map((h) => h?.name).filter((n) => typeof n === "string"), prune, now: nowFn, timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((err) => ({ unreachable: err?.message ?? String(err) }));
-    doctorRead = { at, got };
+    doctorRead = { at, got, until: got?.unreachable ? Math.min(at + DOLLAR_RECORDS_TTL_MS, nowFn() + FAILED_READ_KEEP_MS) : at + DOLLAR_RECORDS_TTL_MS };
     return got;
   };
 
@@ -5844,6 +5878,12 @@ export function createFleetReader(
   // `queuesShort: true` beside the read (issue #963) when the queues it read may not be every queue that exists: the
   // registry was not read this call (`fleetDegraded`) or the keyspace discovery behind the set was not whole. Judged per
   // call over a copy, never on the kept read, since two calls inside one window can see the registry differently.
+  // `registryUnread` is the caller's own registry read (issue #1073 names the two): `waiting()` hands its `fleetRead`
+  // view's word and the snapshot its `registry`'s, each taken from the read that named `queues`. The default, the
+  // reader's variable, is there for a caller that passes none, and no caller does: the variable is the last registry
+  // read of ANY call, so a snapshot that waited on its run history while another call read the registry would be
+  // judged by that other read. The kill switch's `blind` (`poolSet`) is taken from its own discovery for the same
+  // reason, and reads the variable only where that discovery read nothing itself.
   let waitingCache = null;
   const waitingOf = async (queues, projects, triggers, fresh = false, registryUnread = fleetDegraded !== null) => {
     const registry = [...new Set(queues.map((q) => q?.name).filter((n) => typeof n === "string"))];
@@ -6146,9 +6186,9 @@ export function createFleetReader(
       // read as the job's id, false (the scan saw everything and found none), or null (unknown: partial or unreadable).
       if (fold.parked.length > 0) {
         const parkKey = fold.parked.map((p) => `${p.kind}\u0000${p.target}\u0000${p.jobId}`).join("\n");
-        if (!parkedPending || parkedPending.key !== parkKey || nowMs < parkedPending.at || nowMs - parkedPending.at >= DOLLAR_RECORDS_TTL_MS) {
+        if (!parkedPending || parkedPending.key !== parkKey || nowMs < parkedPending.at || nowMs >= parkedPending.until) {
           const got = await readPendingOnTargets({ queues, targets: fold.parked.map((p) => ({ kind: p.kind, target: p.target, runId: typeof p.jobId === "string" ? p.jobId : null })), timeoutMs: FLEET_READ_TIMEOUT_MS });
-          parkedPending = { at: nowMs, key: parkKey, got };
+          parkedPending = { at: nowMs, key: parkKey, got, until: got?.unreachable ? Math.min(nowMs + DOLLAR_RECORDS_TTL_MS, nowFn() + FAILED_READ_KEEP_MS) : nowMs + DOLLAR_RECORDS_TTL_MS };
         }
         const got = parkedPending.got;
         for (const p of fold.parked) {
@@ -6310,18 +6350,28 @@ export function createFleetReader(
      * what the files hold rather than draw them as empty. Not the trigger instructions or tasks (an overlay's alone),
      * and nothing a file cannot answer (the scoped counters, the event statuses, a secret profile's hosts). Each reader
      * is the one `snapshot()` calls and never throws: a file it cannot read is its own `{ unreadable }` or `{ invalid }`.
+     *
+     * The secret profiles and bundles (issue #1073) are the snapshot's two views over these same files and the
+     * deployment's environment, with no run and no host: what the files declare and bind, which `/config`'s two secret
+     * cards count. A profile's hosts are said as not read (`hostsUnreadable`), never as none.
      */
     fileViews() {
+      const triggers = readTriggersWithInstructions({ triggersPath: paths.triggersPath }).view;
+      const projects = readProjects({ projectsPath: paths.projectsFile });
+      const settings = readSettingsView({ settingsFile: paths.settingsFile });
+      const env = dollarEnvFn() ?? {};
       return {
-        triggers: readTriggersWithInstructions({ triggersPath: paths.triggersPath }).view,
-        projects: readProjects({ projectsPath: paths.projectsFile }),
-        settings: readSettingsView({ settingsFile: paths.settingsFile }),
+        triggers,
+        projects,
+        settings,
         scopedLimits: readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath }),
         pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
         stagedPackages: readStagedPackages({ globalPiDir: paths.globalPiDir }),
         overlayMcp: readOverlayMcpView({ globalPiDir: paths.globalPiDir }),
         schedulerStallMax: paths.schedulerStallMax,
         envelopeSet: typeof paths.envelopeFile === "string" && paths.envelopeFile !== "",
+        secretBundles: secretBundlesView({ triggers, settings, env, projects, runs: [], fs }),
+        secretProfiles: secretProfilesView({ triggers, settings, env, projects, runs: [], hosts: null, hostsUnreadable: true, fs }),
       };
     },
     /**
@@ -7036,18 +7086,22 @@ const outcomeCounts = () => Object.fromEntries([...OUTCOME_KEYS, "other"].map((k
 /** Code-unit order, so two reads of one window list the same values in the same order whatever the host's locale. */
 const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
-/** A trigger's values in reading order: the triggers-file positions by number ("row 2" before "row 10"), then the scheduler ids. */
+/**
+ * A trigger's values in reading order: the triggers-file positions by number ("row 2" before "row 10"), a position with
+ * its identity (`<row>:<forge>:<type>`, issue #1073) by its number too, then the scheduler ids.
+ */
 function byTriggerValue(a, b) {
-  const an = /^\d+$/.test(a);
-  const bn = /^\d+$/.test(b);
-  if (an && bn) return Number(a) - Number(b);
-  return an ? -1 : bn ? 1 : byText(a, b);
+  const rowOf = (v) => /^(\d+)(?::|$)/.exec(v)?.[1];
+  const an = rowOf(a);
+  const bn = rowOf(b);
+  if (an !== undefined && bn !== undefined) return Number(an) - Number(bn) || byText(a, b);
+  return an !== undefined ? -1 : bn !== undefined ? 1 : byText(a, b);
 }
 
 /** A record's value of a listed field, as the runs filter matches it (`runMatches`), or null. */
 function windowValueOf(field, r) {
   if (field === "backend") return runVenueOf(r);
-  if (field === "trigger") return triggerValueOf(r);
+  if (field === "trigger") return triggerFilterValueOf(r);
   if (field === "reason") return recordReason(r);
   const v = r?.[field];
   return typeof v === "string" && v !== "" ? v : null;
@@ -7189,7 +7243,10 @@ export const WAITING_DISCOVERY_TTL_MS = 60_000;
  */
 export const LOOKUP_TOLD_MAX = 256;
 
-/** How long the fleet reader keeps one `readWaiting` for the same queues (`createFleetReader`'s `waiting`). */
+/**
+ * How long the fleet reader keeps one `readWaiting` for the same queues (`createFleetReader`'s `waiting`), whatever it
+ * answered: already the floor a failed read is kept for (`FAILED_READ_KEEP_MS`, issue #1073), so it is not shortened.
+ */
 export const WAITING_TTL_MS = 5_000;
 
 /** The BullMQ states of a job that has not started: the four lists `readWaiting` reads, in its order. */
@@ -7718,9 +7775,10 @@ const RUNS_PAGE_BATCH = 200;
 
 /**
  * One page of the merged run history, newest first (issue #641): `{ runs, next, mirror, truncated, examined }`, or
- * `{ refusal }` for a cursor or limit it will not take, or `{ runs: [], next: null, mirror, unreachable }` when this
- * host's logs directory is unreadable (the `mergedRunsOn` posture: the mirror cannot stand in for this host's own
- * history).
+ * `{ refusal }` for a cursor or limit it will not take. When this host's logs directory is unreadable the page is the
+ * mirror's alone, with `unreachable` beside it (issue #1073): the mirror cannot stand in for this host's own history,
+ * so every caller treats such a page as incomplete, and a page says what is missing. With no client to ask the mirror
+ * it is `{ runs: [], next: null, mirror: "off", unreachable }`, as before.
  *
  * THE CURSOR IS A SCORE, NOT AN OFFSET. `before` (millis, exclusive) is the instant of the last run the previous page
  * showed, so a run that lands while an operator pages lands ABOVE every cursor already handed out and moves nothing: an
@@ -7748,8 +7806,13 @@ export async function readRunsPage(redis, { logsDir, before = null, limit = 50, 
   const bound = before === null || before === undefined ? null : before;
   const index = localIndex ?? makeLocalRunIndex({ logsDir, fs, now });
   const read = index.records();
-  if (!Array.isArray(read?.records)) return { runs: [], next: null, mirror: "off", ...read };
-  const local = bound === null ? read.records : read.records.filter((r) => runAt(r) < bound);
+  // This host's files unreadable (issue #1073): the mirror is still asked, and the page is what it holds, with the
+  // reader's `unreachable` beside it so a caller says this host's part is missing. It answered no run and a mirror it
+  // never asked, which left a fleet whose mirror holds every host's runs with an empty history.
+  const localUnread = Array.isArray(read?.records) ? null : { unreachable: read?.unreachable ?? "this host's run files could not be read" };
+  if (localUnread !== null && !redis) return { runs: [], next: null, mirror: "off", ...localUnread };
+  const records = localUnread === null ? read.records : [];
+  const local = bound === null ? records : records.filter((r) => runAt(r) < bound);
 
   let mirror = redis ? null : "off";
   let mirrored = [];
@@ -7808,7 +7871,7 @@ export async function readRunsPage(redis, { logsDir, before = null, limit = 50, 
         const exists = await withTimeout(Promise.resolve().then(() => redis.exists(RUNS_INDEX)).catch(() => null), timeoutMs, null);
         if (exists === 0) mirror = "off";
       }
-      return { runs, next, mirror: mirror ?? "off", truncated, examined };
+      return { runs, next, mirror: mirror ?? "off", truncated, examined, ...(localUnread ?? {}) };
     }
   }
 }
@@ -9149,8 +9212,9 @@ export function modelRunRecord(record, { list = false } = {}) {
   const hasRoles = Object.hasOwn(record, "modelRole") || Object.hasOwn(record, "modelRoles");
   const hasFailover = Object.hasOwn(record, "modelWhy") || Object.hasOwn(record, "providerFailure");
   const freeReason = Object.hasOwn(record, "reason") && record.reason !== null && recordReason(record) === null;
-  if (!hasSecretFiles && !hasBundle && !hasLoaded && !hasOpenshell && !hasProfile && !freeReason && !hasFailover && !hasRoles) return record;
-  const { secretFiles: _secretFiles, modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, loaded: _loaded, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, ...rest } = record;
+  const hasCredential = Object.hasOwn(record, "mainCredential");
+  if (!hasSecretFiles && !hasBundle && !hasLoaded && !hasOpenshell && !hasProfile && !freeReason && !hasFailover && !hasRoles && !hasCredential) return record;
+  const { secretFiles: _secretFiles, modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, loaded: _loaded, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, mainCredential: _credential, ...rest } = record;
   const out = { ...rest };
   if (hasSecretFiles) {
     const files = recordedSecretFiles(record.secretFiles);
@@ -9183,6 +9247,12 @@ export function modelRunRecord(record, { list = false } = {}) {
   if (hasProfile) {
     const name = recordSecretsProfile(record);
     if (name !== null) out.secretsProfile = name;
+  }
+  // Issue #998: where the main model's credential came from, the closed word alone, never the declared variable's name:
+  // a model reads secret names as counts (`secretFiles` above), so it reads "run-secret" and not which one.
+  if (hasCredential) {
+    const credential = recordedMainCredential(record.mainCredential);
+    if (credential !== null) out.mainCredential = { source: credential.source };
   }
   return out;
 }

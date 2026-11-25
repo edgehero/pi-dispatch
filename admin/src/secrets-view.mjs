@@ -65,6 +65,10 @@ export function secretsView({ snapshot = null, files = null, env = {}, fs = node
   const projects = held?.projects ?? null;
   const overlayProfiles = settings?.overlay?.secretProfiles ?? {};
   const overlayBundles = overlayBundleProfiles(settings);
+  // Issue #1073: a settings overlay that gave none (could not be read, or does not load) may declare any profile or bundle
+  // resolver. Then nothing here says a name is declared nowhere: not "undeclared" as a refusal, not a bundle's resolver
+  // "missing" (`overlay-unread` in its place), and a name the .env declares may be declared twice for all this view knows.
+  const overlayRead = fileUnreadWord("settings", settings) === null;
   // With no snapshot the registry was not read: said as unreadable, so no row reads "no live host advertises it".
   // Read in part (issue #1062): the rows it read, said as read in part, a host whose row did not answer left out.
   const fleetPart = snapshot !== null && Boolean(snapshot?.queue?.fleetDegraded) && snapshot?.queue?.registryReadInPart === true;
@@ -77,7 +81,7 @@ export function secretsView({ snapshot = null, files = null, env = {}, fs = node
   const rootsSeen = typeof env.PI_SECRET_RESOLVER_ROOTS === "string";
   const rootsState = (path) => { try { return resolverRootsStatus(path, env, fs).status; } catch { return "unresolved"; } };
   const rows = (profileFacts?.profiles ?? []).filter((p) => named(p.name)).map((p) => {
-    const refused = fromEnv.malformed || profileCollisions.length > 0 || ["outside", "empty"].includes(p.roots) || (p.source === "undeclared" && profileFacts.envSeen === true);
+    const refused = fromEnv.malformed || profileCollisions.length > 0 || ["outside", "empty"].includes(p.roots) || (p.source === "undeclared" && profileFacts.envSeen === true && overlayRead);
     const ownTriggers = (triggers?.triggers ?? []).filter((t) => indices(p.triggers).includes(t.index));
     return { name: p.name, source: ["env", "overlay", "ambiguous", "undeclared"].includes(p.source) ? p.source : "unknown", roots: ["inside", "outside", "empty", "unseen", "unresolved"].includes(p.roots) ? p.roots : null, triggers: indices(p.triggers), triggersMore: p.triggersMore ?? 0, projects: (p.projects ?? []).filter(named), projectsMore: p.projectsMore ?? 0, anyRepo: p.anyRepo === true, uses: ownTriggers.map((t) => ({ trigger: t.index, variables: Number.isSafeInteger(t.secrets) && t.secrets >= 0 ? t.secrets : null, project: t.type === "cron" && Array.isArray(projects?.projects) && typeof t.folder === "string" ? projectOf({ kind: "local", folder: t.folder }, projects.projects) : null, anyRepo: t.type !== "cron" })), last: safeLast(p.last), hosts: (p.hosts ?? []).filter(named), hostsUnknown: p.hostsUnknown ?? 0, refused, inOverlay: Object.hasOwn(overlayProfiles, p.name), cron: ownTriggers.map((t) => nextOf(t, snapshot)).filter(Boolean) };
   });
@@ -89,7 +93,7 @@ export function secretsView({ snapshot = null, files = null, env = {}, fs = node
   });
   const bindings = (bundleFacts?.bundles ?? []).filter((b) => named(b.id)).map((b) => {
     const resolver = resolvers.find((r) => r.name === b.profile);
-    const declared = bundleEnv.malformed ? "env-malformed" : bundleCollisions.length > 0 ? "ambiguous" : resolver?.source === "env" ? "env" : resolver?.roots === "outside" || resolver?.roots === "empty" ? "overlay-outside-roots" : resolver ? "overlay" : typeof env.PI_SECRET_BUNDLES === "string" ? "missing" : "unseen";
+    const declared = bundleEnv.malformed ? "env-malformed" : bundleCollisions.length > 0 ? "ambiguous" : resolver?.source === "env" ? "env" : resolver?.roots === "outside" || resolver?.roots === "empty" ? "overlay-outside-roots" : resolver ? "overlay" : !overlayRead ? "overlay-unread" : typeof env.PI_SECRET_BUNDLES === "string" ? "missing" : "unseen";
     return { id: b.id, project: named(b.project) ? b.project : null, profile: named(b.profile) ? b.profile : null, format: resolver?.format ?? b.format ?? null, declared, roots: resolver?.roots ?? null, rootsSeen, projectKnown: b.projectKnown, forkReviews: b.forkReviews === true, endpoints: (b.endpoints ?? []).filter((e) => typeof e.name === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(e.name)).map((e) => ({ name: e.name, host: typeof e.host === "string" && /^[A-Za-z0-9.:[\]-]+$/.test(e.host) ? e.host : null })), optedOut: indices(b.optedOut), last: safeLast(b.last, true), refused: ["env-malformed", "ambiguous", "overlay-outside-roots", "missing"].includes(declared) };
   });
   const problems = [];
@@ -97,7 +101,7 @@ export function secretsView({ snapshot = null, files = null, env = {}, fs = node
   for (const [kind, malformed] of [["PI_SECRET_PROFILES", fromEnv.malformed], ["PI_SECRET_BUNDLES", bundleEnv.malformed]]) if (malformed) add(0, `malformed-${kind}`, `${kind} does not parse`, "The worker does not start while this declaration does not parse.", `Correct ${kind} in the deployment's .env and restart the worker.`);
   for (const [kind, collisions] of [["profile", profileCollisions], ["bundle", bundleCollisions]]) for (const name of collisions) add(1, `ambiguous-${kind}-${name}`, `Refused: ${name} is declared twice`, `It is in ${kind === "profile" ? "PI_SECRET_PROFILES" : "PI_SECRET_BUNDLES"} and the settings overlay, so the worker refuses every ${kind === "profile" ? "secrets" : "bundled"} job until no name is declared in both.`, "Remove it from one source.", { action: `secret-${kind}-remove`, name });
   if (rootsSeen && roots.length === 0) add(2, "empty-roots", "The resolver roots are set and empty", "The worker refuses every resolver the settings overlay declares.", "Set PI_SECRET_RESOLVER_ROOTS to the directories that hold the resolvers.");
-  for (const p of rows) if (p.source === "undeclared" && profileFacts?.envSeen === true) add(3, `missing-profile-${p.name}`, `Refused: profile ${p.name} is not declared`, "Its triggers cannot resolve their secrets before a container starts.", "Declare its resolver in the .env or settings overlay."); else if (p.roots === "outside") add(3, `outside-profile-${p.name}`, `Refused: ${p.name} is outside the resolver roots`, "The worker refuses every job naming this resolver.", "Put its resolver inside PI_SECRET_RESOLVER_ROOTS or correct the roots.");
+  for (const p of rows) if (p.source === "undeclared" && profileFacts?.envSeen === true && overlayRead) add(3, `missing-profile-${p.name}`, `Refused: profile ${p.name} is not declared`, "Its triggers cannot resolve their secrets before a container starts.", "Declare its resolver in the .env or settings overlay."); else if (p.roots === "outside") add(3, `outside-profile-${p.name}`, `Refused: ${p.name} is outside the resolver roots`, "The worker refuses every job naming this resolver.", "Put its resolver inside PI_SECRET_RESOLVER_ROOTS or correct the roots.");
   for (const r of resolvers) if (r.roots === "outside") add(3, `outside-bundle-${r.name}`, `Refused: bundle resolver ${r.name} is outside the roots`, "The worker refuses this resolver's bundled jobs.", "Put its resolver inside PI_SECRET_RESOLVER_ROOTS or correct the roots.");
   for (const b of bindings) if (b.declared === "missing") add(3, `missing-bundle-${b.id}`, `Refused: bundle ${b.id} has no declared resolver`, "Its project's bundled jobs are refused before they spend.", `Declare bundle resolver ${b.profile}.`);
   if (profileFacts?.hostsUnreadable !== true && profileFacts?.hostsReadInPart !== true && Number.isInteger(profileFacts?.hostsSeen)) for (const p of rows) if (!p.refused && p.triggers.length > 0 && p.hosts.length === 0 && p.hostsUnknown === 0) add(4, `unserved-${p.name}`, `No live host advertises ${p.name}`, "No live host in the registry advertises this profile.", "Check the worker's resolver declaration and its published capabilities.");
@@ -110,11 +114,19 @@ export function secretsView({ snapshot = null, files = null, env = {}, fs = node
  * Model reads may reason about names and counts, never the manager's variable names or host paths. `available` is what
  * it was: the snapshot was read. A view drawn from the files alone holds no run and no host fact, and this read's
  * `variables` and `problems` would then state what was not read.
+ *
+ * `filesKnown`, `settingsKnown` and `triggersKnown` (issue #1073): whether the declarations were read at all (from the
+ * snapshot or, with none, from the files), and whether the settings overlay and the triggers file were among them. With `available` false and `filesKnown` true
+ * the names are the files' and nothing of a run or a host is; with `settingsKnown` false a profile or a bundle resolver
+ * the `.env` declares may be declared in the overlay too, and one it does not may be declared there, so its `source`
+ * is `unknown`, never `undeclared`.
  */
 export function modelSecrets(view) {
-  const profiles = (view?.profiles ?? []).map(({ name, source, roots, triggers, projects, anyRepo, uses, refused }) => ({ name, source, roots, triggers, projects, anyRepo, uses: uses ?? [], refused }));
+  const overlayKnown = view?.settingsKnown !== false;
+  const sourceOf = (source) => (!overlayKnown && source === "undeclared" ? "unknown" : source);
+  const profiles = (view?.profiles ?? []).map(({ name, source, roots, triggers, projects, anyRepo, uses, refused }) => ({ name, source: sourceOf(source), roots, triggers, projects, anyRepo, uses: uses ?? [], refused }));
   const ids = [...new Set([...(view?.projectIds ?? []), ...(view?.bundles ?? []).map((b) => b.project).filter(Boolean)])];
-  return { available: view?.fleetKnown === true, problems: (view?.problems ?? []).map(({ key, title }) => ({ key, title })), profiles, bundleResolvers: (view?.bundleResolvers ?? []).map(({ name, source, format, refused }) => ({ name, source, format, refused })), projects: ids.map((project) => {
+  return { available: view?.fleetKnown === true, filesKnown: view?.filesKnown === true, settingsKnown: view?.filesKnown === true && overlayKnown, triggersKnown: view?.filesKnown === true && view?.triggersKnown !== false, problems: (view?.problems ?? []).map(({ key, title }) => ({ key, title })), profiles, bundleResolvers: (view?.bundleResolvers ?? []).map(({ name, source, format, refused }) => ({ name, source, format, refused })), projects: ids.map((project) => {
     const b = view?.bundles?.find((row) => row.project === project);
     return { project, bundle: b?.id ?? null, profile: b?.profile ?? null, declared: b?.declared ?? null, variables: b?.last?.variables?.length ?? null, forkReviews: b?.forkReviews === true, optedOut: b?.optedOut ?? [], profiles: profiles.flatMap((p) => p.uses.filter((u) => u.project === project || u.anyRepo).map((u) => ({ profile: p.name, trigger: u.trigger, variables: u.variables, anyRepo: u.anyRepo }))) };
   }) };

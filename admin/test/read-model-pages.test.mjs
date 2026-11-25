@@ -12,7 +12,7 @@ import { overviewHosts, overviewNeeds } from "../src/console/panels/overview.mjs
 import { killSwitchUnreadForms, pausedStateUnknown } from "../src/console/panels/common.mjs";
 import { KILL_SWITCH_UNREAD_TEXT, queueErrorsLine, queueErrorsOf } from "../src/words.mjs";
 import { queueSwitchErrored, queueSwitchUnconfirmed } from "../src/read-model.mjs";
-import { LOOKUP_TOLD_MAX, REFUSALS_TOP, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUNS_WINDOW_PROJECTS_MAX, RUNS_WINDOW_VALUES_MAX, SWITCH_PREVIEW_QUEUES_MAX, SWITCH_SCAN_INCOMPLETE, UNREAD_HOSTS_MAX, WAITING_DISCOVERY_TTL_MS, WAITING_QUEUES_MAX, createFleetReader, fleetQueuesOn, listRunsMerged, readHeldJobs, readHosts, readQueueState, readSchedulers, replyCodeOf, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
+import { FAILED_READ_KEEP_MS, LOOKUP_TOLD_MAX, REFUSALS_TOP, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUNS_WINDOW_PROJECTS_MAX, RUNS_WINDOW_VALUES_MAX, SWITCH_PREVIEW_QUEUES_MAX, SWITCH_SCAN_INCOMPLETE, UNREAD_HOSTS_MAX, WAITING_DISCOVERY_TTL_MS, WAITING_QUEUES_MAX, createFleetReader, fleetQueuesOn, listRunsMerged, readHeldJobs, readHosts, readQueueState, readSchedulers, replyCodeOf, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
 import { spawnSync } from "node:child_process";
 import { parseRunFilter, runMatches, RUN_FILTER_FIELDS, RUN_OUTCOME_VALUES, runVenueOf, triggerValueOf } from "../src/run-filter.mjs";
 import { OUTCOME_KEYS } from "../src/words.mjs";
@@ -1186,7 +1186,8 @@ test("the one-shot readers write nothing when asked to: no meta write, no pruned
     const schedulers = await readSchedulers({ url, makeQueueFn: queues(handed), parseConnectionFn: () => ({}), redisFn: () => redis, now: () => AT, ...flag });
     assert.deepEqual([Array.isArray(schedulers), handed[0], handed[1], redis.wrote], [true, opts, { ...opts, name: "pi-jobs@hosta" }, pruned], `readSchedulers, readOnly ${readOnly}`);
   }
-  for (const [prune, wrote] of [[false, []], [true, ["srem wait:held stale-held"]], [undefined, ["srem wait:held stale-held"]]]) {
+  // The held index is pruned through the worker's script since issue #1075, which removes by the same rule in one step.
+  for (const [prune, wrote] of [[false, []], [true, ["eval wait:held"]], [undefined, ["eval wait:held"]]]) {
     const redis = client();
     const held = await readHeldJobs({ url, redisFn: () => redis, ...(prune === undefined ? {} : { prune }) });
     assert.deepEqual([held.rows, redis.wrote], [[], wrote], `readHeldJobs, prune ${prune}`);
@@ -1739,6 +1740,52 @@ test("createFleetReader: runsWindow runs on the reader's clock: the window moves
   assert.deepEqual([w.at, w.byOutcome.failed, w.byOutcome.completed], [now, 0, 1], "a millisecond later it has left");
 });
 
+test("createFleetReader: the wide run window, the doctor results and the parked runs' pending scan keep an answer that failed for the short floor, and a good one for their 15 s (#1073)", async () => {
+  // Each kept a failure as long as a good answer, so a page said a read failed for up to 15 s after Valkey answered.
+  const logsDir = tempDir("pd-1073-floor-");
+  writeLocal(logsDir, rec("gh-p1", AT - 5 * MIN, { reason: "awaiting-input" }));
+  let now = AT;
+  let down = true;
+  const redis = emptyRedis();
+  const zrev = redis.zrevrangebyscore;
+  // Only the wide window asks the mirror for WIDE_RUNS (1000) runs; the dashboard's own list asks for fewer.
+  let wide = 0;
+  redis.zrevrangebyscore = async (...args) => {
+    if (args[5] === 1000) wide += 1;
+    if (down) throw new Error("Command timed out");
+    return zrev(...args);
+  };
+  let doctors = 0;
+  let scans = 0;
+  const queue = (c, opts) => ({ ...quietQueue()(c, opts), async getJobs() { scans += 1; if (down) throw new Error("Command timed out"); return []; } });
+  const reader = fleetOf(logsDir, redis, { seams: { nowFn: () => now, makeQueueFn: queue, readDoctorResultsFn: async () => ((doctors += 1), down ? { unreachable: "Command timed out" } : { hosts: [], more: 0 }) } });
+  try {
+    const counts = () => [wide, doctors, scans > 0];
+    const first = await reader.snapshot();
+    assert.deepEqual([Boolean(first.parkedUnreachable), Boolean(first.doctor.unreachable), first.parked.map((p) => p.answering)], [true, true, [null]], "in the outage: each says it was not read");
+    assert.deepEqual(counts(), [1, 1, true]);
+    scans = 0;
+    now += FAILED_READ_KEEP_MS - 1;
+    await reader.snapshot();
+    assert.deepEqual(counts(), [1, 1, false], "inside the floor each failure is reused: one read per floor in an outage");
+    // Valkey answers again: past the floor each is read again, and is whole.
+    down = false;
+    now += 1;
+    const whole = await reader.snapshot();
+    assert.deepEqual([whole.parkedUnreachable, Boolean(whole.doctor.unreachable), whole.parked.map((p) => p.answering)], [null, false, [false]]);
+    assert.deepEqual(counts(), [2, 2, true]);
+    scans = 0;
+    now += 15_000 - 1;
+    await reader.snapshot();
+    assert.deepEqual(counts(), [2, 2, false], "a good answer keeps its 15 s");
+    now += 1;
+    await reader.snapshot();
+    assert.deepEqual(counts(), [3, 3, true]);
+  } finally {
+    await reader.dispose();
+  }
+});
+
 test("createFleetReader: runsWindow is a floor when the wide window ends inside the day, partial when a side was not read, and null when it cannot be read (#737)", async () => {
   const full = tempDir("pd-737-window-floor-");
   for (let i = 0; i < 1000; i += 1) writeLocal(full, rec(`r${i}`, AT - i * MIN));
@@ -1981,7 +2028,7 @@ test("without a snapshot Fleet and the overview's Hosts card offer Pause and Res
   for (const snapshot of [null, undefined]) {
     const bar = String(fleetBar(panelView(snapshot)));
     const hosts = String(overviewHosts(panelView(snapshot)));
-    assert.ok(bar.includes("<p>The deployment's Valkey could not be read. The next refresh tries again.</p>"), bar);
+    assert.ok(bar.includes("<p>The deployment&#39;s Valkey could not be read. The next refresh tries again.</p>"), bar);
     assert.ok(hosts.includes("<h2>Hosts</h2>") && hosts.includes(KILL_SWITCH_UNREAD_TEXT), hosts);
     for (const out of [bar, hosts]) {
       assert.deepEqual(switchForms(out), ["fleet-pause", "fleet-resume"], out);

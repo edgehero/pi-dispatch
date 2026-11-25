@@ -24,6 +24,20 @@ test("live random pool is reread every pickup and only order-insensitive equalit
 	assert.deepEqual(f.check(job), refused);
 });
 
+// Issue #996: weights decide the draw, never authority. A queued job keeps the weights it was queued with, and an edit of the
+// file's weights alone refuses none.
+test("a weight-only edit refuses no queued job: the pickup rereads the pool's candidates, never its weights", () => {
+	const weighted = { ...modelSelection, weights: { [modelSelection.candidates[0]]: 3 } };
+	const f = fixture({ ...entry, run: { ...entry.run, modelSelection: weighted } });
+	f.doc().version = 12;
+	for (const queued of [weighted, modelSelection, { ...modelSelection, weights: { [modelSelection.candidates[1]]: 100 } }]) assert.deepEqual(f.check({ ...job, modelSelection: queued }), { ok: true }, JSON.stringify(queued));
+	f.doc().triggers[0].run.modelSelection.weights = { [modelSelection.candidates[1]]: 7 };
+	assert.deepEqual(f.check({ ...job, modelSelection: weighted }), { ok: true });
+	delete f.doc().triggers[0].run.modelSelection.weights;
+	assert.deepEqual(f.check({ ...job, modelSelection: weighted }), { ok: true });
+	assert.deepEqual(f.check({ ...job, modelSelection: { ...weighted, weights: {} } }), refused, "a queued pool that is not valid is still refused");
+});
+
 test("removing or replacing the identified trigger and removing its random policy revoke queued permission", () => {
 	for (const mutate of [(f) => { f.doc().triggers = []; }, (f) => { f.doc().triggers[0].run.flow = "other"; }, (f) => { delete f.doc().triggers[0].run.modelSelection; }, (f) => { f.doc().triggers[0].on.any = ["pi:other"]; }]) {
 		const f = fixture(); mutate(f); assert.deepEqual(f.check(job), refused);

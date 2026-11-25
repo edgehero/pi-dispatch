@@ -5369,6 +5369,30 @@ test("doctor: a watch rule's decide model takes its provider's API key from run.
 	assert.match(forwarded.find((c) => !c.ok && /variable pi reads for/.test(c.label))?.label ?? "", clash);
 });
 
+test("doctor: an answer rule's and the zeroTouch block's declared keys are said by name, a key of a provider none of their models runs on is a warning, and their profile must be declared (#1013)", { skip: skipNoPi }, async () => {
+	const answerRule = (secrets, more = {}) => ({ id: "help", projects: ["web"], categories: ["how-to"], confidence: 0.9, mode: "draft", flow: "answer", model: "openai/gpt-5-mini", decisionModel: "anthropic/claude-haiku-4-5", maxCostUsd: "0.10", secrets, ...more });
+	const keyFile = (doc) => {
+		const path = join(tempDir("pi-triggers-declared-keys-"), "triggers.json");
+		writeFileSync(path, JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [], ...doc }));
+		return path;
+	};
+	const env = { PI_PROVIDER: "openrouter", PI_MODEL: "deepseek/deepseek-chat", OPENROUTER_API_KEY: "sk-x", PI_SECRET_PROFILES: "default:/opt/pi/resolve.sh" };
+	const zeroTouch = { capture: true, model: "openai/omni-moderation-latest", maxCostUsd: "0.05", secrets: { OPENROUTER_API_KEY: "op://ci/or", GROQ_API_KEY: "op://ci/groq" } };
+	const checks = await collectChecks({ ...env, PI_TRIGGERS_FILE: keyFile({ answerRules: [answerRule({ OPENAI_API_KEY: "op://ci/openai", ANTHROPIC_API_KEY: "op://ci/anthropic" })], zeroTouch }) }, secretsSeams());
+	assert.equal(checks.find((c) => /secret\(s\) an answer rule or the zeroTouch block declares are the API key/.test(c.label))?.label, '3 secret(s) an answer rule or the zeroTouch block declares are the API key of a provider its jobs run on, so each replaces this host\'s credential for that provider: answer rule "help": OPENAI_API_KEY (openai, on its drafts); answer rule "help": ANTHROPIC_API_KEY (anthropic, its decision model, on its drafts); zeroTouch: OPENROUTER_API_KEY (openrouter, on its grouping jobs)');
+	const withheld = checks.find((c) => /so the worker does not pass them/.test(c.label));
+	assert.deepEqual([withheld?.ok, withheld?.warn], [false, true]);
+	assert.match(withheld.label, /^1 secret\(s\) an answer rule or the zeroTouch block declares are the API key of a provider no model of it runs on here, so the worker does not pass them to its jobs: zeroTouch: GROQ_API_KEY \(its models run on openrouter and openai; not passed on its grouping jobs\)$/);
+	assert.equal(checks.find((c) => /bind secrets, and every profile they name is declared/.test(c.label))?.label, 'answer rule "help" and zeroTouch bind secrets, and every profile they name is declared');
+	assert.equal(checks.some((c) => /^No trigger binds a variable pi reads/.test(c.label)), false, "no trigger line where no trigger binds a secret");
+	// A profile nobody declared fails, as a trigger's does; a decision provider bound to a subscription here refuses the key.
+	const profiled = await collectChecks({ ...env, PI_TRIGGERS_FILE: keyFile({ answerRules: [answerRule({ OPENAI_API_KEY: "op://ci/openai" }, { secretsProfile: "vault" })] }) }, secretsSeams());
+	assert.equal(profiled.find((c) => /named profile\(s\) are not declared/.test(c.label))?.label, 'answer rule "help" binds secrets, but 1 named profile(s) are not declared: vault');
+	const subscriptionFactory = () => ({ auth: { async check(provider) { return provider === "anthropic" ? { ok: true, managed: true, provider: "anthropic", connectionId: "claude" } : { ok: true, managed: false }; } } });
+	const bound = await collectChecks({ ...env, PI_AUTH_CONNECTIONS_FILE: "/srv/pi/connections.json", PI_TRIGGERS_FILE: keyFile({ answerRules: [answerRule({ ANTHROPIC_API_KEY: "op://ci/anthropic" })] }) }, { ...secretsSeams(), subscriptionFactory });
+	assert.match(bound.find((c) => !c.ok && !c.warn && /an answer rule or the zeroTouch block declares bind a variable/.test(c.label))?.label ?? "", /answer rule "help": ANTHROPIC_API_KEY \(anthropic, its decision model; refused on its drafts\)$/);
+});
+
 test("doctor: a provider bound to a subscription here keeps its API-key variable reserved, as the worker's gate does (#967)", { skip: skipNoPi }, async () => {
 	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh", PI_AUTH_CONNECTIONS_FILE: "/srv/pi/connections.json", PI_TRIGGERS_FILE: providerSecretsFile([{ provider: "openai", model: "gpt-5", secrets: { OPENAI_API_KEY: "op://ci/openai" } }]) };
 	const subscriptionFactory = () => ({ auth: { async check(provider) { return provider === "openai" ? { ok: true, managed: true, provider: "openai", connectionId: "chatgpt" } : { ok: true, managed: false }; } } });

@@ -230,3 +230,22 @@ test("a run says whether the warnings at 70% of its turn and time limits were qu
   assert.doesNotMatch(String(runResources(older)), /Time warning/);
   for (const bad of [true, "1", 2, -1]) assert.doesNotMatch(String(runSummary(run({ turnsWarned: bad }))), /Turn warning/, `${bad}: only 0 or 1 is said`);
 });
+
+test("issue #998: the Model usage card says where the main model's credential came from, a declared key by its name and by what declared it, and nothing for a record without it", () => {
+  const usage = { v: 1, truncated: 0, models: [{ provider: "openai", model: "gpt-5-mini", calls: 2, input: 10, output: 5, cost: 0.01 }] };
+  const row = (over) => /<dt>Credential<\/dt><dd>([^<]*)<\/dd>/.exec(String(runModels(view({ run: { record: record({ outcome: "completed", reason: null, usage, ...over }) } }))))?.[1] ?? null;
+  assert.equal(row({ mainCredential: { source: "run-secret", variable: "OPENAI_API_KEY" } }), "the trigger&#39;s declared key OPENAI_API_KEY");
+  assert.equal(row({ purpose: "answer-draft", mainCredential: { source: "run-secret", variable: "OPENAI_API_KEY" } }), "the answer rule&#39;s declared key OPENAI_API_KEY");
+  assert.equal(row({ purpose: "zero-touch-grouping", mainCredential: { source: "run-secret", variable: "OPENAI_API_KEY" } }), "the zeroTouch block&#39;s declared key OPENAI_API_KEY");
+  assert.equal(row({ mainCredential: { source: "host-env" } }), "the host&#39;s key");
+  assert.equal(row({ mainCredential: { source: "pi-login" } }), "the host&#39;s pi login");
+  assert.equal(row({ mainCredential: { source: "subscription" } }), "a subscription connection");
+  assert.equal(row({ mainCredential: { source: "keyless" } }), "no key (keyless)");
+  // A word the worker never writes, a value where a name goes, and an older record: no row, or no name.
+  assert.equal(row({ mainCredential: { source: "vault" } }), null);
+  assert.equal(row({ mainCredential: { source: "run-secret", variable: "sk-proj-private" } }), "the trigger&#39;s declared key");
+  assert.equal(row({}), null);
+  // A run with no usage ledger still says it.
+  assert.match(String(runModels(view({ run: { record: record({ outcome: "failed", reason: null, usage: null, mainCredential: { source: "host-env" } }) } }))), /<dt>Credential<\/dt><dd>the host&#39;s key<\/dd>/);
+  assert.equal(String(runModels(view({ run: { record: record({ outcome: "failed", reason: null, usage: null }) } }))), "", "nothing to say, no card, as before");
+});

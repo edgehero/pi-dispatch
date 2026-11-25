@@ -11,8 +11,8 @@ Write rules by hand in the deployment’s `triggers.json`. The console shows the
 No model tool accepts either `answerRules` or `standingAnswers`, including nested or alternate spellings.
 This template uses placeholder model identities; replace both with explicit installed models, including a
 classifier-capable decision model with declared cost. No provider key belongs in this file. Both models take the
-host's credentials: an answer rule has no `run.secrets`, so a key a trigger declares as a run secret does not reach an
-answer draft.
+host's credentials unless the rule names its own key by reference ([below](#a-key-of-the-rules-own)); a key a trigger
+declares in its `run.secrets` never reaches an answer draft.
 
 ```json
 {
@@ -72,3 +72,35 @@ low confidence, disallowed categories and changed configuration. The private sto
 capped at 90 days even on keep-forever deployments. A pending scheduling failure can retry; a determinate pass
 does not buy another job. The image must declare `answerDraft`; older images refuse before spend. Draft helpers
 have ordinary metered run records but do not supersede the parked workload or inflate Zero touch counts.
+
+## A key of the rule's own
+
+A rule may bring its models' provider keys, as a trigger does in `run.secrets` ([secrets](secrets.md)): `secrets`
+maps a provider's API-key variable to a reference your resolver reads, and `secretsProfile` names the resolver, as on
+a trigger. The file then needs triggers file version 12, which the console's writers stamp.
+
+```json
+"secrets": { "OPENAI_API_KEY": "op://ci/openai/key", "ANTHROPIC_API_KEY": "op://ci/anthropic/key" },
+"secretsProfile": "vault"
+```
+
+- **Only API-key variables.** A name follows the rules of `run.secrets`, and must be the API-key variable of a
+  provider pi knows. Anything else is refused when the file loads, naming the rule and the variable: an OAuth or
+  bearer variable (`ANTHROPIC_OAUTH_TOKEN`, `..._AUTH_TOKEN`), a variable of a provider that needs host
+  authentication, and a name no model could take, such as `DATABASE_URL` or the typo `OPENAI_APIKEY` (the refusal
+  names `OPENAI_API_KEY`). Such a name would otherwise leave the model it was meant for on this host's key.
+- **Only the draft's own providers.** The draft job receives a key only when its model's provider or its decision
+  model's provider reads it. The key of another provider (an `anthropic` key on a rule whose models are both `openai`)
+  is withheld, nothing is resolved for it, and the worker logs `declared_key_withheld` with the rule and the names;
+  `pi-dispatch doctor` warns about it, and the rule's page lists it as not passed.
+- **The declared key is the only key.** The host's key for that provider never reaches the job. An empty value, or one
+  the resolver cannot give, refuses the draft before anything spends; the host's key does not stand in for it. A name
+  on `PI_FORWARD_ENV`, a provider that needs host authentication, and a provider bound to a subscription on this host
+  refuse the draft before it spends, as they refuse a trigger's job (`secret-name-reserved`, or
+  `provider-unconfigured` on a host with no credential of its own for that provider).
+- **The profile must be declared on every worker that runs drafts.** A draft job goes to whichever worker takes it,
+  so a profile only one host declares refuses the draft as `secret-profile-unknown` on another.
+- **Adding or changing it ends drafts in flight.** The rule's configuration digest covers its keys, so a draft queued
+  before the change passes as `config-changed` and buys nothing.
+- **Upgrade every worker, receiver and console first.** An older one refuses a version 12 file and keeps the triggers
+  it had ([upgrading](upgrading.md)).

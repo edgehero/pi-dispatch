@@ -180,7 +180,8 @@ test("loads pass role/project/view boundaries and windowed run-set what-if witho
   const calls = [];
   const deps = {
     now: () => NOW,
-    insights: async (...args) => (calls.push(args), {}),
+    // The load's deadline rides beside the boundaries (issue #1073): a function, held apart from them here.
+    insights: async (window, { within, ...opts }) => (assert.equal(typeof within, "function"), calls.push([window, opts]), {}),
     whatIf: async (q) => (calls.push(q), {}),
     fleet: {},
   };

@@ -38,7 +38,7 @@ import { triggerOn, triggerRuns, triggerRun, triggerEdit, triggerTrust, triggerK
 import { triggerGets, triggerGetsHow } from "./panels/trigger-gets.mjs";
 import { readTriggerGetsEntry } from "../trigger-gets-view.mjs";
 import { configNavigation, configFiles, configUnset, configDescription } from "./panels/config.mjs";
-import { secretsView } from "../secrets-view.mjs";
+import { modelSecrets, secretsView } from "../secrets-view.mjs";
 import { secretsHeadline, secretsProblems, secretsProfiles, secretsBundles, secretsAdd, secretsHelp } from "./panels/secrets.mjs";
 import { updatesDescription, updatesHosts, updatesHow, updatesJobs, updatesProblems, updatesRecent } from "./panels/updates.mjs";
 import { DEVICES_WORDS, devicesEndAll, devicesList, devicesThis } from "./panels/devices.mjs";
@@ -800,8 +800,8 @@ async function together(reads) {
  *   - `fleet`: a `createFleetReader` instance (`snapshot`, `runsPage`, `runById`, and `parkedCount` for the screens that
  *     read no snapshot). `snapshot()` is called at most once, asked for the waiting jobs only by a screen that draws
  *     them (`PAGE_READS`' `waiting`).
- *   - `insights(window, { fullPaths })`: the assembled insights payload for a window (the caller caches it: it is the
- *     expensive read). `fullPaths` is true only for an operator's `paths=full`.
+ *   - `insights(window, { fullPaths, within })`: the assembled insights payload for a window (the caller caches it: it is the
+ *     expensive read). `fullPaths` is true only for an operator's `paths=full`; `within` is this load's deadline's.
  *   - `whatIf({ model, flow })` (optional): the what-if answer (`whatif.mjs`'s reader, cached and bounded by the caller).
  *   - `pricedModels()` (optional): the priced catalog's `provider/id` strings, for the what-if form's suggestions.
  *   - `audit({ limit, before })`: `readConsoleAudit` bound to the deployment's logs directory.
@@ -843,10 +843,12 @@ async function together(reads) {
  *     drawn for a Valkey that did not answer: `asked` throws into the read's own catch, and `askedOr` answers what a
  *     read with no catch answers when it could not read. A cut read is never worded as a fault of this console.
  *
- * A load the deadline cut says so (`data.deadlineSpent`), and `data.snapshotFailure` is "late" where the snapshot is
+ * A load the deadline cut says so (`data.deadlineSpent`), and `data.snapshotFailure` is `{ kind: "late" }` where the snapshot is
  * what it cut. A Valkey that is slow and still answers inside the deadline is cut nowhere. Not timed: what reads
- * files alone (the audit log, the secrets view, the editor's hints), synchronous work, and the Insights pages'
- * assembly, which is mostly a fold over the run records and whose Valkey reads keep the bounds they have inside it.
+ * files alone (the audit log, the secrets view, the editor's hints) and synchronous work, the Insights pages' folds
+ * over the run records among it. The Insights assembly's Valkey reads are under the deadline since issue #1073: they
+ * are made together and each is handed `within` (`assembleInsightsView`), so an assembly ends with its own words for a
+ * read that did not answer, as a `drawn` read does, and is awaited whole.
  *
  * THE READS START TOGETHER (issue #988, with issue #987's sums). One deadline over reads made one after another has a
  * cost of its own: a Valkey that is slow and still answers pays its delay once per read, so a page of thirty reads
@@ -866,18 +868,6 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // Issue #737: the deployment the console serves, by its folder's last part (`cli.mjs`'s `pageDeps.deployment`), for
   // the first run's checklist; null where the caller passes none.
   const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
-  // The Insights assembly is started here, before anything else of the load is set up, and awaited where the page
-  // reads it. It reads the clock for its own window as it starts, and its charts are drawn against `now` above: with
-  // work between the two readings a capacity bar whose window ends a millisecond after the page's instant is drawn as
-  // one with part of it missing, which a first load after a start then showed. The console's cache starts an assembly
-  // one turn of the microtask queue after it is asked for (`cachedPerWindow`), so that turn is given at once: the
-  // assembly has read its clock before this load goes on.
-  const insightsStarted = PAGE_READS[name].includes("insights")
-    ? (async () => deps.insights(q.range ?? INSIGHTS_DEFAULT_RANGE, { fullPaths: q.paths === "full" && who?.role === "operator", project: q.project ?? null, role: who?.role ?? "viewer", view: name === "insights" ? "spend" : name.slice("insights-".length) }))()
-    : null;
-  // Its rejection is taken where the page awaits it; until then it must not be one nobody handles.
-  insightsStarted?.catch(() => {});
-  if (insightsStarted !== null) await null;
   // This load's deadline, and the ways a read runs under it (see above). `cut` marks the load; `within` is the
   // deadline's, remembering whether it handed out less than a read's own bound, which with a deadline that has passed
   // by the time that read's view returns says the view was cut too.
@@ -892,10 +882,37 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     if (ms < ownMs) shortened = true;
     return ms;
   };
+  // The Insights assembly is started here, before anything else of the load is set up, and awaited where the page
+  // reads it. Its Valkey reads are made together and each is handed its own bound or what is left of this load's
+  // deadline (`within`, issue #1073), so a Valkey that does not answer holds the page one bound and not the sum of five.
+  // Its folds over the run records are not timed, as on every page. Its charts are drawn against the instant it was
+  // assembled at (`nowMs`, which it carries), never this load's `now`: a cached assembly is up to its window older than
+  // the load that draws it, and a capacity bar whose window ends after the instant it is drawn against was drawn with
+  // part of it missing.
+  const insightsStarted = PAGE_READS[name].includes("insights")
+    ? (async () => deps.insights(q.range ?? INSIGHTS_DEFAULT_RANGE, { fullPaths: q.paths === "full" && who?.role === "operator", project: q.project ?? null, role: who?.role ?? "viewer", view: name === "insights" ? "spend" : name.slice("insights-".length), within }))()
+    : null;
+  // Its rejection is taken where the page awaits it; until then it must not be one nobody handles.
+  insightsStarted?.catch(() => {});
   const drawn = async (read) => {
     const got = await deadline.settle(read, passed, { grace: true });
     if (shortened && deadline.spent()) cut();
     return got;
+  };
+  // Why the snapshot read failed (issue #1073): `snapshotFailureOf`'s mark, kept on the data, and a fault of the
+  // console's own code logged by its error's name and where it was thrown, never its message.
+  const snapshotFailed = (err) => {
+    const failure = snapshotFailureOf(err);
+    if (failure === null) return;
+    data.snapshotFailure = failure;
+    if (failure.kind === "fault") {
+      const line = `console: the ${name} page's read of the deployment failed in the console (${faultWhere(err)})`;
+      // Once a minute for one line: an open page reloads every two seconds, and a fault fails each of them alike.
+      if (Number.isFinite(FAULTS_LOGGED.get(line)) && now - FAULTS_LOGGED.get(line) < FAULT_LOG_EVERY_MS && now >= FAULTS_LOGGED.get(line)) return;
+      FAULTS_LOGGED.set(line, now);
+      if (FAULTS_LOGGED.size > 64) FAULTS_LOGGED.delete(FAULTS_LOGGED.keys().next().value);
+      try { deps.log?.(line); } catch { /* a log that cannot be written fails no page */ }
+    }
   };
   // The run history under the deadline: this host's files and the fleet's mirror, the mirror within the bound the
   // reader is handed, so past the deadline the reader still answers, with this host's part and the mirror not reached.
@@ -1041,8 +1058,8 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
         data.readFailed = true;
         // Issue #988: the read did not fail, the page's deadline cut it (or had passed before it could be made); or
         // Valkey answered it, with an error. Either way a page's sentence must not say Valkey could not be read.
-        if (err instanceof PageDeadlinePassed) data.snapshotFailure = "late";
-        else if (repliedWithError(err)) data.snapshotFailure = "error";
+        // Issue #1073: with the reply's code, and a fault of the console's own code said as one, in its log too.
+        snapshotFailed(err);
         // Issue #844: what the deployment's files hold needs no Valkey, so a page still draws it rather than an empty
         // list. Absent where the reader has none or it throws: a panel then says the fact could not be read.
         try { if (typeof deps.fleet?.fileViews === "function") data.files = deps.fleet.fileViews() ?? null; } catch { data.files = null; }
@@ -1078,7 +1095,9 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   };
   const modelsRead = async () => {
     if (reads.includes("models")) {
-      try { data.models = typeof deps.modelsView === "function" ? await drawn(() => deps.modelsView(data.snapshot, { within })) : null; }
+      // Issue #1073: with no snapshot the view is handed the file views too, so the files it reads are the ones this
+      // load read (`data.files`, set where the snapshot failed).
+      try { data.models = typeof deps.modelsView === "function" ? await drawn(() => deps.modelsView(data.snapshot, { within, files: data.files ?? null })) : null; }
       catch { data.models = null; }
     }
   };
@@ -1091,7 +1110,8 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   };
   const connectionsRead = async () => {
     if (reads.includes("connections")) {
-      try { data.connections = typeof deps.connections === "function" ? await drawn(() => deps.connections(data.snapshot, { within })) : null; }
+      // Issue #1073: with no snapshot the triggers, the overlay, its MCP servers and the staged packages come from the files.
+      try { data.connections = typeof deps.connections === "function" ? await drawn(() => deps.connections(data.snapshot, { within, files: data.files ?? null })) : null; }
       catch { data.connections = null; }
     }
   };
@@ -1330,7 +1350,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   };
   const refusedSnapshotRead = async () => {
     if (name === "run" && data.run?.record && refusedBeforeStart(data.run.record)) {
-      try { data.snapshot = await asked(() => deps.fleet.snapshot()); } catch (err) { data.snapshot = null; if (err instanceof PageDeadlinePassed) data.snapshotFailure = "late"; else if (repliedWithError(err)) data.snapshotFailure = "error"; }
+      try { data.snapshot = await asked(() => deps.fleet.snapshot()); } catch (err) { data.snapshot = null; snapshotFailed(err); }
     }
   };
   const refusedWindowRead = async () => {
@@ -1442,8 +1462,16 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // places from it read two keys it was never handed as two reads that failed: an agent's unknown run id answered
   // 503 where an operator's answers 404.
   if (name === "run") data.runPlaces = runPlaces(runPlacesOf(data));
-  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "run" ? { runPlaces: data.runPlaces } : {}), ...(name === "host" && typeof data.hostName === "string" ? { hostName: data.hostName } : {}), ...(name === "setup" ? { setup: setupFacts(data.setup, { role: "agent" }) } : {}), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}) } : data;
+  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "run" ? { runPlaces: data.runPlaces } : {}), ...(name === "host" && typeof data.hostName === "string" ? { hostName: data.hostName } : {}), ...(name === "setup" ? { setup: setupFacts(data.setup, { role: "agent" }) } : {}), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}), ...(name === "secrets" ? { secrets: agentSecretsOf(data.secrets) } : {}) } : data;
 }
+
+/**
+ * An agent's copy of the Secrets page's view (issue #1073): the projection `dispatch_secrets` returns (`modelSecrets`),
+ * marked as an agent's so the page draws it as such, or null where the view itself was not read. The agent's copy of the
+ * data drops `secrets` whole (`agentReadProjection`), so the page said the declarations could not be read on a healthy
+ * deployment; the projection holds no variable name, path, root, reference or run.
+ */
+const agentSecretsOf = (view) => (view !== null && typeof view === "object" ? { agent: true, ...modelSecrets(view) } : null);
 
 // ---- drawing ---------------------------------------------------------------------------------------------------------
 
@@ -1538,6 +1566,41 @@ function oneReading(fs, path) {
  * did not answer, and not a deadline.
  */
 const repliedWithError = (err) => err?.name === "ReplyError" || /^(?:WRONGTYPE|ERR|NOAUTH|NOPERM|LOADING|MISCONF|READONLY|BUSY|OOM)\b/.test(String(err?.message ?? ""));
+
+/**
+ * The engine's own errors: what a fault in the console's code throws (a property of null, a call of what is not a
+ * function), and no client of Valkey throws for a Valkey that did not answer or answered with an error.
+ */
+const CONSOLE_FAULTS = new Set(["TypeError", "ReferenceError", "RangeError", "SyntaxError", "EvalError", "URIError"]);
+/** When each fault's log line was last written (the load's clock), so one fault is logged once a minute, not per load. */
+const FAULTS_LOGGED = new Map();
+const FAULT_LOG_EVERY_MS = 60_000;
+
+/**
+ * Why a snapshot read failed, as a page's data keeps it (issue #1073): `{ kind: "late" }` for a read the page's
+ * deadline cut, `{ kind: "error", code }` for a reply Valkey answered with an error (its code, the reply's first word,
+ * null where it has none), `{ kind: "fault" }` for an engine error of the console's own code, or null for every other
+ * failure: a Valkey that did not answer, which a page says when no mark is set. It was "late" and "error" alone, so a
+ * console fault was said as a Valkey that could not be read, and an error named no code.
+ */
+export function snapshotFailureOf(err) {
+  if (err instanceof PageDeadlinePassed) return { kind: "late" };
+  if (repliedWithError(err)) return { kind: "error", code: /^([A-Z][A-Z0-9_]{0,31})(?=\s|$)/.exec(String(err?.message ?? ""))?.[1] ?? null };
+  if (CONSOLE_FAULTS.has(err?.name) || CONSOLE_FAULTS.has(err?.constructor?.name)) return { kind: "fault" };
+  return null;
+}
+
+/**
+ * A fault's name and where it was thrown, for the console's log: the error's class and its first stack frame cut to
+ * the function and the file's last part ("TypeError at readHosts (read-model.mjs:812)"). Never the message, which can
+ * hold a value read from a file or a key.
+ */
+function faultWhere(err) {
+  const name = CONSOLE_FAULTS.has(err?.name) ? err.name : "Error";
+  const frame = String(err?.stack ?? "").split("\n").find((line) => /^\s+at /.test(line)) ?? "";
+  const m = /^\s+at (?:(?:async )?([\w$.<>[\] ]{1,80}) \()?(?:file:\/\/)?[^()]*?([\w.-]{1,80}):(\d{1,7}):\d{1,7}\)?$/.exec(frame);
+  return m ? `${name} at ${m[1] ? `${m[1].trim()} (${m[2]}:${m[3]})` : `${m[2]}:${m[3]}`}` : name;
+}
 
 function runPlacesOf(data) {
   const run = data?.readFailed === true && !data?.run?.record ? { unreadable: RUN_RECORD_UNREAD } : data?.run;

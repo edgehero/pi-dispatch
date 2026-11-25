@@ -764,10 +764,10 @@ const SETUP_PARTIAL_DOCTOR = Object.freeze([
  * The overview over `snapshot`, as serve draws it for `session` with the stream open (the pill Live): the deployment
  * its folder's last part, as `cli.mjs` passes it.
  */
-async function overviewLive(snapshot, { session = OPERATOR, query = "" } = {}) {
+async function overviewLive(snapshot, { session = OPERATOR, query = "", fleet = null } = {}) {
   const parsed = parsePageQuery("overview", query);
   assert.ok(parsed.query, parsed.refusal);
-  const data = await loadPageData("overview", parsed.query, { fleet: { snapshot: async () => snapshot }, now: () => NOW, deployment: { folder: "pi-dispatch" } });
+  const data = await loadPageData("overview", parsed.query, { fleet: fleet ?? { snapshot: async () => snapshot }, now: () => NOW, deployment: { folder: "pi-dispatch" } }, fleet ? { role: session.role } : {});
   const ctx = { query: parsed.query, session: { name: session.name, role: session.role }, data, readOnly: false, theme: null, flash: null, maxStreams: MAX_STREAMS };
   const page = await renderPage("overview", ctx);
   assert.equal(page.status, 200);
@@ -966,6 +966,8 @@ const RUN_CARD_STATES = {
   "run-artifacts-expired.operator": () => runCard({ rec: record({ jobId: "gh-pulse", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { state: "expired", counts: { kept: 2, bytes: 190_437, dropped: {} } } }),
   "run-artifacts-elsewhere.operator": () => runCard({ rec: record({ jobId: "gh-pulse", host: "mini2", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { state: "elsewhere", host: "mini2", counts: { kept: 2, bytes: 190_437, dropped: {} } } }),
   "run-artifacts-unreadable.operator": () => runCard({ rec: record({ jobId: "gh-pulse", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { state: "unreadable", counts: { kept: 2, bytes: 190_437, dropped: {} } } }),
+  // Issue #998: a run whose main model spent the key its trigger declared, named on the Model usage card, never a value.
+  "run-credential-declared.operator": () => runCard({ rec: record({ jobId: "gh-pulse", usage: { piAi: "1.6.0", models: [{ provider: "anthropic", model: "claude-sonnet-5-5", calls: 4, input: 900, output: 300, cost: 0.11 }] }, mainCredential: { source: "run-secret", variable: "ANTHROPIC_API_KEY" } }) }),
 };
 export const RUN_PANEL_STATES = Object.freeze(Object.keys(RUN_CARD_STATES));
 
@@ -1154,6 +1156,12 @@ const DRAW = {
   // Issue #962: the active jobs could not be read. Running, the headline and the timeline say so; no 0, no "nothing is
   // running".
   "overview-running-unread.operator": async () => overviewLive(overviewSnapshot({ active: [], activeUnreachable: true })),
+  // Issue #1073: the overview over a Valkey that does not answer, the real reader over the outage's files: no snapshot,
+  // and the kill switch's two forms the one change it offers (issue #1035).
+  "overview-no-snapshot.operator": async () => overviewLive(null, { fleet: noSnapshotFleet({}, { pinned: false }) }),
+  // Issue #1073: the same page where Valkey ANSWERED the snapshot's read with an error: its code and class, and no
+  // "try again" over a cause that waiting does not end.
+  "overview-snapshot-error.operator": async () => overviewLive(null, { fleet: noSnapshotFleet({ snapshot: async () => { throw Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }); } }, { pinned: false }) }),
   // RunsScreen's footer, one state each: the fleet's run mirror off or partly read, the history read cut, the history
   // not read at all, nothing matching, and a reason token this console has no words for.
   "runs-mirror-off.operator": async () => runsLive({ page: { runs: RUNS_PAGE_RUNS, mirror: "off", next: null } }),

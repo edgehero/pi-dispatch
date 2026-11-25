@@ -286,7 +286,8 @@ test("the console hands the models view the page's snapshot as it is: no default
   // undefined the caller with no snapshot (the canary sample), which the view then reads for itself.
   const cli = readFileSync(new URL("../src/console/cli.mjs", import.meta.url), "utf8");
   // The page's deadline rides beside it (issue #988), with no default either: a caller with none leaves each read its bound.
-  assert.match(cli, /const modelsView = m\.modelsView \? \(snapshot, \{ within \} = \{\}\) => m\.modelsView\.readModelsView\(\{[^}]*\bsnapshot, fleet\b[^}]*\bwithin \}\)/);
+  // The file views too (issue #1073), null where the page has none: the snapshot that failed is still null.
+  assert.match(cli, /const modelsView = m\.modelsView \? \(snapshot, \{ within, files = null \} = \{\}\) => m\.modelsView\.readModelsView\(\{[^}]*\bsnapshot, files, fleet\b[^}]*\bwithin \}\)/);
   assert.match(cli, /\(await modelsView\?\.\(\)\)\?\.canaries/, "the canary sample gives none");
 });
 

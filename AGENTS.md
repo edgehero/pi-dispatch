@@ -330,11 +330,12 @@ and merges it.
   - If `worker/test/pi-derived.test.mjs` is red, run `node .github/scripts/pi-derived.mjs --write` on the branch and
     commit the result. It prints the catalog hosts added and removed: **a new host widens the cost guard**, so check
     which output field pi sends there.
-  - If `admin/test/provider-key-names.test.mjs` is red, read the new pinned pi-ai artifact's
+  - If `worker/test/provider-key-names.test.mjs` is red, read the new pinned pi-ai artifact's
     `dist/env-api-keys.js` and the worker's `providerKeyCandidates` before running
-    `node .github/scripts/provider-key-names.mjs --write`. The console's generated data-only table carries that
+    `node .github/scripts/provider-key-names.mjs --write`. The generated data-only table
+    (`worker/src/provider-key-names.mjs`, which the triggers loader reads and the console re-exports) carries that
     whole-file source hash and every provider's candidate order, so re-generation follows verification, never
-    replaces it. Keep provider SDKs out of the console; its bundle guard checks that boundary.
+    replaces it. Keep provider SDKs out of the loader and the console; the console's bundle guard checks that boundary.
   - If `worker/test/store-versions-files.test.mjs` is red because `EXCLUDABLE_TOOL_NAMES` gained a tool, add a
     `TRIGGER_RUN_VALUE_VERSIONS.excludeTools` rule answering 2 for a trigger that excludes it: an older loader refuses
     such a file as broken.

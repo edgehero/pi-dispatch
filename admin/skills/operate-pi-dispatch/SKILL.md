@@ -52,8 +52,8 @@ A read tool writes nothing to Valkey: it creates no queue key and prunes no stal
   not permission to execute a person-only step.
 - `dispatch_triggers`: indices, configured execution facts, cron stalls and one-shot disarmed state. Indices are
   zero-based inputs even where the console labels the same entry as row one.
-- `dispatch_models`: roles by scope, effective fallbacks, price eligibility, cooldowns, model windows, typed proposals
-  and retained canary comparisons. Missing evidence is unknown. A role edit or adoption belongs to a person on the
+- `dispatch_models`: roles by scope, effective fallbacks, price eligibility, cooldowns, model windows, typed proposals,
+  random pools with a weighted pool's shares, and retained canary comparisons. Missing evidence is unknown. A role edit or adoption belongs to a person on the
   Models page; no model tool can change the map or launch a canary.
 - `dispatch_pauses`: pause windows and their indices.
 - `dispatch_limits`: scoped limits, indices and observed use.
@@ -126,7 +126,7 @@ not read by the committed repository opt-in. Every worker start still passes its
 ## Person-only fields and operations
 
 Never set, clear or bypass these through a model tool, including alternate spellings:
-`run.models`, `run.fallbackModels`, `run.modelSelection`, `run.maxCostUsd`, `run.maxSubscriptionUsd`, `run.mcp`, `run.secretBundle`, `modelRoles`,
+`run.models`, `run.fallbackModels`, `run.modelSelection` (its `weights` included), `run.maxCostUsd`, `run.maxSubscriptionUsd`, `run.mcp`, `run.secretBundle`, `modelRoles`,
 `run.command`, `run.instructions`, `run.skillsDir`, `run.awaitInput`, `run.image`, `run.resume`, `run.packages`,
 `run.excludeTools`, `run.excludeExtensions`, `run.excludeExtensionTools`, `run.secrets`, `run.secretsProfile`, `run.replicas`, `run.portfolio`, `run.waitFor`,
 `on.disarmed`, `answerRules`, `standingAnswers`, `secretBundles`, `secretProfiles`.

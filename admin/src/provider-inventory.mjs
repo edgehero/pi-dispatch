@@ -16,6 +16,9 @@ import { PROVIDER_KEY_NAMES } from "./provider-key-names.mjs";
 export const PROVIDER_KEY_REASONS = Object.freeze({
   "env-unreadable": "Credential metadata could not be read safely. Inspect the deployment on its host.",
   "references-unreadable": "Some provider references could not be read. This list may be incomplete.",
+  // Issue #1073: a source of references that was read and is refused (the triggers file or the allowed-models list does
+  // not load, or PI_TRIGGERS_FILE names no file), apart from one nobody could read: one sentence said both.
+  "references-refused": "A source of provider references does not load. This list may be incomplete.",
   "settings-unreadable": "Provider settings could not be verified. Inspect the deployment settings on the host.",
   "policy-unreadable": "The managed connection policy could not be verified. Use its host instructions.",
   "source-shadowed": "Another host credential source takes precedence. Review it on the host before saving.",
@@ -38,6 +41,11 @@ export const PROVIDER_SLOT_ALIASES = Object.freeze(Object.fromEntries([...new Se
 export const DECLARED_KEY_TRIGGERS_MAX = 16;
 /** Issue #1029: the role models a trigger may reach a slot by alone, a watch rule's classifier or an auxiliary model. */
 export const DECLARED_KEY_VIA = Object.freeze(["decide", "auxiliary"]);
+/** Issue #1013: the role models an answer rule or the zeroTouch block may reach a slot by alone, the answer decision
+ * model or the grouping classifier. */
+export const DECLARED_KEY_HOLDER_VIA = Object.freeze(["decision", "grouping"]);
+/** An answer rule's id as its loader admits it (answerer.mjs `ANSWER_ID_RE`), restated for this leaf's DTO check. */
+const ANSWER_RULE_ID = /^[a-z][a-z0-9_-]{0,63}$/;
 /** Issue #1000: where the own-key lines are incomplete or wider than the workers' answer, each said once on the card. */
 export const DECLARED_KEY_NOTES = Object.freeze({
   "projects-unread": "The projects file could not be read, so a model role is resolved in every project the triggers file names, and a trigger may be listed under a provider its jobs never run on.",
@@ -102,8 +110,13 @@ function metadataBytes(path, fs, uid, max = 1_048_576) {
  * scope the triggers file names, which can list a trigger under a provider its jobs never run on, and says so, rather
  * than hiding a key the file binds. `defaultModel` null is a PI_MODEL line that could not be read with no model in the
  * overlay: with model roles declared, the default may itself be a role, so a trigger naming no model is not judged.
+ *
+ * Issue #1013: `holders`, beside the slots, is the same answer for each answer rule (`answerRules`) and the `zeroTouch`
+ * block whose `secrets` declare a slot's variable, `Map<slot, [{ rule } | { zeroTouch: true }, with via?]>`: an answer
+ * rule's model and decision model (`via: "decision"`), and the zeroTouch block's grouping model (`via: "grouping"`) and
+ * the deployment default its grouping job runs on as its main model. The worker's job builders pass a job no other name.
  */
-export function declaredKeyTriggers(triggers, { defaultProvider = null, defaultModel = null, envList = null, modelRoles = {}, projects = [], resolveFolder, managed = () => false } = {}) {
+export function declaredKeyTriggers(triggers, { defaultProvider = null, defaultModel = null, envList = null, modelRoles = {}, projects = [], resolveFolder, managed = () => false, answerRules = [], zeroTouch = null } = {}) {
   const roles = modelRoles !== null && typeof modelRoles === "object" ? modelRoles : {};
   const withRoles = Object.keys(roles).length > 0;
   const list = Array.isArray(triggers) ? triggers : [];
@@ -183,7 +196,23 @@ export function declaredKeyTriggers(triggers, { defaultProvider = null, defaultM
     }
   }
   for (const rows of slots.values()) rows.sort((a, b) => a.index - b.index);
-  return { slots, notes: [...notes] };
+  const holders = new Map();
+  const hold = (secrets, entry, refs) => {
+    if (secrets === null || typeof secrets !== "object") return;
+    for (const [provider, via] of refs) {
+      if (typeof provider !== "string" || needsHostAuthentication(provider)) continue;
+      const key = providerCanonicalKey(provider);
+      if (!key || !Object.hasOwn(secrets, key)) continue;
+      if (!holders.has(key)) holders.set(key, []);
+      // A rule whose two models share a slot is named once, as its main model's where either is.
+      const held = holders.get(key).find(h => h.rule === entry.rule && h.zeroTouch === entry.zeroTouch);
+      if (held) { if (via === null) delete held.via; continue; }
+      holders.get(key).push({ ...entry, ...(via ? { via } : {}) });
+    }
+  };
+  for (const rule of Array.isArray(answerRules) ? answerRules : []) hold(rule?.secrets, { rule: rule.id }, [[splitModelEntry(rule.model)?.provider, null], [splitModelEntry(rule.decisionModel)?.provider, "decision"]]);
+  if (zeroTouch !== null && typeof zeroTouch === "object") hold(zeroTouch.secrets, { zeroTouch: true }, [[defaultProvider, null], [splitModelEntry(zeroTouch.model)?.provider, "grouping"]]);
+  return { slots, holders, notes: [...notes] };
 }
 
 /** A cron trigger's `on.id` as the loader admits it, the name doctor gives the trigger, or null. */
@@ -194,7 +223,8 @@ const cronId = value => typeof value === "string" && value.length <= CRON_ID_MAX
  * provider slot with trigger positions and cron ids only, at most `DECLARED_KEY_TRIGGERS_MAX` of them (the rest counted),
  * each with the role model it reaches the slot by alone (`via`, issue #1029, one of `DECLARED_KEY_VIA`, absent for an
  * attempt's main model), and whether this host's PI_FORWARD_ENV names the variable (`forwarded`, null when it could not
- * be read).
+ * be read). Issue #1013: and `holders`, only where there are any, the answer rules (by id) and the zeroTouch block that
+ * declare the slot's variable, each with `via` from `DECLARED_KEY_HOLDER_VIA` where only its role model reaches it.
  */
 export function declaredKeysView(raw) {
   const slots = new Map();
@@ -202,9 +232,14 @@ export function declaredKeysView(raw) {
     if (typeof row?.key !== "string" || !Object.hasOwn(PROVIDER_SLOT_ALIASES, row.key) || slots.has(row.key)) continue;
     const seen = new Set();
     const triggers = (Array.isArray(row.triggers) ? row.triggers : []).filter(t => Number.isSafeInteger(t?.index) && t.index >= 0 && !seen.has(t.index) && seen.add(t.index)).map(t => ({ index: t.index, cron: cronId(t.cron), ...(DECLARED_KEY_VIA.includes(t.via) ? { via: t.via } : {}) })).sort((a, b) => a.index - b.index);
-    if (triggers.length === 0) continue;
+    // Each named once: an answer rule by its id, the zeroTouch block by a name no rule id can take (ids are lower case).
+    // Not capped like the triggers: the loader admits at most 100 answer rules and one block.
+    const held = new Set();
+    const holderId = h => (h?.zeroTouch === true ? "zeroTouch" : typeof h?.rule === "string" && ANSWER_RULE_ID.test(h.rule) ? h.rule : null);
+    const holders = (Array.isArray(row.holders) ? row.holders : []).filter(h => holderId(h) !== null && !held.has(holderId(h)) && held.add(holderId(h))).map(h => ({ ...(h.zeroTouch === true ? { zeroTouch: true } : { rule: h.rule }), ...(DECLARED_KEY_HOLDER_VIA.includes(h.via) ? { via: h.via } : {}) }));
+    if (triggers.length === 0 && holders.length === 0) continue;
     const more = Number.isSafeInteger(row.more) && row.more >= 0 ? row.more : 0;
-    slots.set(row.key, { triggers: triggers.slice(0, DECLARED_KEY_TRIGGERS_MAX), more: more + Math.max(0, triggers.length - DECLARED_KEY_TRIGGERS_MAX), forwarded: typeof row.forwarded === "boolean" ? row.forwarded : null });
+    slots.set(row.key, { triggers: triggers.slice(0, DECLARED_KEY_TRIGGERS_MAX), more: more + Math.max(0, triggers.length - DECLARED_KEY_TRIGGERS_MAX), forwarded: typeof row.forwarded === "boolean" ? row.forwarded : null, ...(holders.length > 0 ? { holders } : {}) });
   }
   const notes = [...new Set((Array.isArray(raw?.declaredNotes) ? raw.declaredNotes : []).filter(note => typeof note === "string" && Object.hasOwn(DECLARED_KEY_NOTES, note)))];
   return { slots, notes };
@@ -246,6 +281,7 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
   const model = (entry, why) => { const ref = splitModelEntry(entry); if (!ref) throw Error("invalid model reference"); use(ref.provider, why); };
   const keys = ["PI_PROVIDER", "PI_SETTINGS_FILE", "PI_ALLOWED_MODELS", "PI_TRIGGERS_FILE", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_FROM_PI"];
   const allVariables = [...new Set(Object.values(PROVIDER_KEY_NAMES).flat())];
+  // `referencesUnknown` is "unreadable" (a file nobody could read) or "refused" (one read and refused); the first wins.
   let configured = {}, file = {}, environmentUnknown = false, referencesUnknown = false, policyUnknown = false, configurationUnknown = false, defaultProvider = null, defaultModel = null, envList = null, declared = { slots: new Map(), notes: [] }, declaredInput = null;
   try {
     const got = (reads.environment ?? deploymentServiceEnv)({ env: {}, dir: root, keys: [...keys, ...allVariables], fs, platform, uid });
@@ -268,19 +304,25 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
     defaultModel = overlay?.overlay?.model ?? (ownKeyEnv?.unread.has("PI_MODEL") === false ? ownKeyEnv.value("PI_MODEL") ?? DEFAULT_MODEL : null);
     use(defaultProvider, "default");
   } catch { configurationUnknown = true; defaultProvider = null; }
+  const referencesFailed = (fileCase) => { if (referencesUnknown !== "unreadable") referencesUnknown = fileCase; };
   try {
     const list = allowedModelsFrom(configured) ?? null;
     for (const entry of list ?? []) model(entry, "allowed-model");
     envList = list;
-  } catch { referencesUnknown = true; }
+  } catch { referencesFailed("refused"); }
   try {
     // Paths captured at console startup can name an obsolete file after a host edit.
     // Match the worker/receiver rule: unset defaults here, explicit empty remains invalid.
     const path = configured.PI_TRIGGERS_FILE === "" ? "" : resolve(root, configured.PI_TRIGGERS_FILE ?? "triggers.json");
-    const raw = reads.document ? reads.document(path) : metadataBytes(path, fs, uid);
+    // A read that threw is a file nobody could read (an errno, or metadata this reader will not trust); a parse that
+    // threw is one that was read and is refused (issue #1073).
+    let raw;
+    try { raw = reads.document ? reads.document(path) : metadataBytes(path, fs, uid); }
+    catch (error) { throw Object.assign(new Error("unreadable"), { fileCase: "unreadable", cause: error }); }
     // A triggers file that does not exist is an empty document (issue #988): no trigger names a provider, which is a
     // read's answer and leaves the list whole. It was "Some provider references could not be read." A setting that
-    // names no file at all (explicit empty) is not that: which file the workers run is then not known.
+    // names no file at all (explicit empty) is not that: which file the workers run is then not known, a setting the
+    // worker refuses, so it does not load.
     if (raw === null && path === "") throw Error();
     const doc = raw === null ? { triggers: [], modelRoles: {} } : parseTriggersDocument(typeof raw === "string" ? raw : JSON.stringify(raw), path);
     for (const row of doc.triggers) {
@@ -296,10 +338,14 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
       model(typeof role === "string" ? role : role.model, "role");
       if (typeof role !== "string") for (const entry of role.fallbackModels ?? []) model(entry, "fallback");
     }
+    // Issue #1013: an answer rule or the zeroTouch block that declares a key needs a row for each of its models' providers,
+    // so the card can name it under the slot its key replaces, as a watch rule's classifier has one above.
+    for (const rule of doc.answerRules ?? []) if (rule.secrets) for (const entry of [rule.model, rule.decisionModel]) model(entry, "trigger");
+    if (doc.zeroTouch?.secrets) model(doc.zeroTouch.model, "trigger");
     // Issue #1000: only from the file the deployment names. With its .env unread, PI_TRIGGERS_FILE is not known, and the
     // default file read above may not be the one the workers run, so no trigger is said to bring a key from it.
     if (!environmentUnknown) declaredInput = doc;
-  } catch { referencesUnknown = true; }
+  } catch (error) { referencesFailed(error?.fileCase === "unreadable" ? "unreadable" : "refused"); }
   let bindings = {};
   if (configured.PI_AUTH_CONNECTIONS_FILE) {
     try {
@@ -312,8 +358,8 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
   }
   // After the bindings, for doctor's fallback fence; an unread policy fences nothing, and every row reads unknown then.
   try {
-    if (declaredInput) declared = declaredKeyTriggers(declaredInput.triggers, { defaultProvider, defaultModel, envList, modelRoles: declaredInput.modelRoles, projects: Object.keys(declaredInput.modelRoles).length > 0 ? ownKeyProjects(ownKeyEnv, { root, fs, uid, reads }) : [], managed: provider => Object.hasOwn(bindings, provider) });
-  } catch { referencesUnknown = true; }
+    if (declaredInput) declared = declaredKeyTriggers(declaredInput.triggers, { defaultProvider, defaultModel, envList, modelRoles: declaredInput.modelRoles, projects: Object.keys(declaredInput.modelRoles).length > 0 ? ownKeyProjects(ownKeyEnv, { root, fs, uid, reads }) : [], managed: provider => Object.hasOwn(bindings, provider), answerRules: declaredInput.answerRules ?? [], zeroTouch: declaredInput.zeroTouch ?? null });
+  } catch { referencesFailed("unreadable"); }
   for (const [provider, candidates] of Object.entries(PROVIDER_KEY_NAMES)) if (candidates.some(key => present(file, key) || definedCredential(env, key))) use(provider, "configured");
   const grouped = new Map();
   for (const [provider, usage] of references) {
@@ -332,7 +378,7 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
     const special = !row.key || needsHostAuthentication(row.provider);
     const status = environmentUnknown || policyUnknown || configurationUnknown ? "unknown" : managed ? "managed" : shadowed ? "shadowed" : special ? "unsupported" : hasKey ? "configured" : "missing";
     const source = status === "unknown" ? "unknown" : managed ? "managed" : shadowed ? "shadowed" : special ? "special" : hasKey ? "deployment-env" : "missing";
-    const reason = environmentUnknown ? "env-unreadable" : configurationUnknown ? "settings-unreadable" : policyUnknown ? "policy-unreadable" : managed ? "managed-binding" : shadowed ? "source-shadowed" : special ? known(row.provider) ? "special-auth" : "custom-provider" : !hasKey && configured.PI_AUTH_FROM_PI !== "0" ? "pi-fallback-possible" : referencesUnknown ? "references-unreadable" : null;
+    const reason = environmentUnknown ? "env-unreadable" : configurationUnknown ? "settings-unreadable" : policyUnknown ? "policy-unreadable" : managed ? "managed-binding" : shadowed ? "source-shadowed" : special ? known(row.provider) ? "special-auth" : "custom-provider" : !hasKey && configured.PI_AUTH_FROM_PI !== "0" ? "pi-fallback-possible" : referencesUnknown === "refused" ? "references-refused" : referencesUnknown ? "references-unreadable" : null;
     return { ...row, usage: USAGE.filter(why => row.usage.has(why)), present: hasKey, source, status, mode: ["configured", "missing"].includes(status) ? hasKey ? "replace" : "add" : null, reason };
   }).sort((a, b) => (b.usage.includes("default") - a.usage.includes("default")) || a.provider.localeCompare(b.provider));
   const choices = Object.keys(PROVIDER_KEY_NAMES).map(provider => ({ provider, key: providerCanonicalKey(provider), providers: providerCanonicalKey(provider) ? [...PROVIDER_SLOT_ALIASES[providerCanonicalKey(provider)]] : [provider], mode: "add", supported: Boolean(providerCanonicalKey(provider)) && !needsHostAuthentication(provider) }));
@@ -342,7 +388,8 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
   // `forwarded` is this host's PI_FORWARD_ENV naming the slot's variable, which makes this host refuse those jobs; null
   // when its line cannot be read.
   const forward = ownKeyEnv && !ownKeyEnv.unread.has("PI_FORWARD_ENV") ? (ownKeyEnv.value("PI_FORWARD_ENV") ?? "").split(",").map(name => name.trim()).filter(Boolean) : null;
-  const declaredKeys = [...declared.slots].sort(([a], [b]) => a.localeCompare(b)).map(([key, triggers]) => ({ key, triggers, forwarded: forward === null ? null : forward.includes(key) }));
+  const holders = declared.holders ?? new Map();
+  const declaredKeys = [...new Set([...declared.slots.keys(), ...holders.keys()])].sort((a, b) => a.localeCompare(b)).map(key => ({ key, triggers: declared.slots.get(key) ?? [], ...(holders.has(key) ? { holders: holders.get(key) } : {}), forwarded: forward === null ? null : forward.includes(key) }));
   // An unread forward list is said once, so no line reads as spent where this host may refuse it.
   const view = declaredKeysView({ declaredKeys, declaredNotes: [...declared.notes, ...(forward === null && declaredKeys.length > 0 ? ["forward-unread"] : [])] });
   return { ...inventory, declaredKeys: [...view.slots].map(([key, row]) => ({ key, ...row })), declaredNotes: view.notes };

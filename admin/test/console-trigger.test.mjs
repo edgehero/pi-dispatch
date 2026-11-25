@@ -44,7 +44,7 @@ test("unread scheduler health and counters stay unknown and incomplete skew coun
  const view={query:{index:0},role:"viewer",data:{snapshot:{triggers:{triggers:[trigger]}},triggerDetail:{trigger,cron:{scheduler:null,next:null,overdueMs:null,stalls:null,stallLimit:3},skewed:[{jobId:"gh-1",field:"recover"}],skewIncomplete:true}}};
  const kinds=String(triggerKinds(view)),change=String(triggerChange(view));
  assert.match(kinds,/unknown|unavailable/);assert.doesNotMatch(kinds,/on time|stalls\s+0/);
- assert.match(change,/At least 1 jobs/);assert.match(change,/incomplete/);assert.match(change,/\/run\?id=gh-1/);assert.match(change,/recover/);
+ assert.match(change,/At least 1 job in view/);assert.doesNotMatch(change,/1 jobs/);assert.match(change,/incomplete/);assert.match(change,/\/run\?id=gh-1/);assert.match(change,/recover/);
 });
 test("unloaded trigger files show the newest named doctor result and never fabricate empty queue or skew facts",async()=>{
  const { triggerGolden } = await import("./helpers/trigger-goldens.mjs");

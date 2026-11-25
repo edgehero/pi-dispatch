@@ -46,8 +46,17 @@ function commands(view, row, quotaOnly) {
 
 const partial = data => data.connections.length && data.partial ? ui.banner({ status: "attention", sm: true, title: "Partial subscription observations", body: data.truncated ? "The display limit was reached. Additional connection records are not shown; missing observations are unknown." : "Some host observations are missing or incomplete. Published facts remain visible; missing observations are unknown." }) : null;
 
+/**
+ * Over a status that was not read (issue #1073, the view's `unread`: no snapshot, or the status read failed): what the
+ * hosts publish is not known, which is not a host that published nothing. "Not published" is kept for a status that
+ * was read and holds no connection.
+ */
+export const SUBSCRIPTION_UNREAD_TITLE = "Subscription status not known";
+export const SUBSCRIPTION_UNREAD_TEXT = "The hosts' published subscription status could not be read, so no credential or quota inference is made here. Reload to try again.";
+
 function empty(view) {
   if (view.state === "ready" && !view.partial) return html`<p>No subscription connection is configured.</p>`;
+  if (view.unread === true) return html`<p>${ui.badge("idle", SUBSCRIPTION_UNREAD_TITLE)}</p><p class="sa-note">${SUBSCRIPTION_UNREAD_TEXT}</p>`;
   return html`<p>${ui.badge("idle", "Subscription status not published")}</p><p class="sa-note">No credential or quota inference can be made from missing host observations.</p>`;
 }
 

@@ -2641,7 +2641,7 @@ test("a switch read that Valkey answered with an error for one queue names it: t
     assert.equal(own.status, 400, own.text);
     assert.equal(own.json().error, queueErroredRefusal("pi-jobs@hostb", "WRONGTYPE"));
   }
-  assert.equal(queueErroredRefusal("pi-jobs@hostb", "WRONGTYPE"), "pi-jobs@hostb could not be read: Valkey answered its read with an error (WRONGTYPE), so whether it is paused is not known here; nothing was changed");
+  assert.equal(queueErroredRefusal("pi-jobs@hostb", "WRONGTYPE"), "pi-jobs@hostb could not be read: Valkey answers bull:pi-jobs@hostb:meta with WRONGTYPE, so whether it is paused is not known here. Remove or repair that key first; nothing was changed");
   // Another queue's preview goes on, and its switch is made.
   const other = await c.both("queue-pause", { queue: "pi-jobs" });
   assert.equal(other.confirm.status, 200, other.confirm.text);
@@ -2759,11 +2759,11 @@ test("a queue whose paused flag was read and whose counts alone Valkey answers w
     // where it was not.
     const c = await start({ paths, a: { fleet: { snapshot: (opts) => reader.snapshot(opts), pauseQueue: async () => ({ ok: true }) }, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
     const counts = await c.act("queue-resume", { queue: "pi-jobs@hostb" });
-    assert.deepEqual([counts.status, counts.json().error], [400, "the counts of pi-jobs@hostb could not be read: Valkey answered that read with an error (ERR). It is paused, and what the switch would change there is not known here; nothing was changed"]);
+    assert.deepEqual([counts.status, counts.json().error], [400, "the counts of pi-jobs@hostb could not be read: Valkey answers the read of its counts with ERR. It is paused, and what the switch would change there is not known here; nothing was changed"]);
     const running = await c.act("queue-pause", { queue: "pi-jobs@hostd" });
-    assert.equal(running.json().error, "the counts of pi-jobs@hostd could not be read: Valkey answered that read with an error (WRONGTYPE). It is running, and what the switch would change there is not known here; nothing was changed");
+    assert.equal(running.json().error, "the counts of pi-jobs@hostd could not be read: Valkey answers the read of its counts with WRONGTYPE. It is running, and what the switch would change there is not known here. Waiting does not change that; nothing was changed");
     const flag = await c.act("queue-resume", { queue: "pi-jobs@hostc" });
-    assert.equal(flag.json().error, "pi-jobs@hostc could not be read: Valkey answered its read with an error (WRONGTYPE), so whether it is paused is not known here; nothing was changed");
+    assert.equal(flag.json().error, "pi-jobs@hostc could not be read: Valkey answers bull:pi-jobs@hostc:meta with WRONGTYPE, so whether it is paused is not known here. Remove or repair that key first; nothing was changed");
   } finally {
     await reader.dispose();
   }
@@ -4961,10 +4961,19 @@ test("what the tracking of a fix could not take back is logged with its cause, a
     failing = null;
     assert.equal(refused.status, 409, refused.text);
     assert.deepEqual(await states(), ["pending"]);
-    // The page says what is so of it: its file does not show it, so no settle records it. It said "Reload to retry".
+    // Issue #1072: the console knew the change was not made, and recorded so on its disk before the refusal it could not
+    // write. The page says a settle closes it; nothing is open.
+    const outcomes = join(paths.logsDir, "zero-touch-outcomes");
     let page = await service.read({ days: 30 });
-    assert.deepEqual([page.fixesPartial, page.fixesOpen, page.fixesOpenDays, page.fixes.length, page.waiting.fixes], [true, 1, 30, 0, 0]);
+    assert.deepEqual([page.fixesPartial, page.fixesOpen, page.fixes.length, page.waiting.fixes, page.waiting.refused], [true, 0, 0, 0, 1]);
     assert.deepEqual(logged.splice(0), [["zero_touch_fix_reject_pending", { cause: "Error: fix-store-timeout" }]]);
+    // A row with no outcome recorded (staged before that release, or by a console that stopped before it knew) is said as
+    // what is so of it: its file does not show it, so no settle records it. It said "Reload to retry".
+    const [recorded] = readdirSync(outcomes);
+    assert.deepEqual(JSON.parse(read(join(outcomes, recorded))), { v: 1, outcome: "refused", at: T0 });
+    rmSync(join(outcomes, recorded));
+    page = await service.read({ days: 30 });
+    assert.deepEqual([page.fixesPartial, page.fixesOpen, page.fixesOpenDays, page.fixes.length, page.waiting.fixes, page.waiting.refused], [true, 1, 30, 0, 0, 0]);
     // Only a proof that ran to its end says so (issue #1076: the page proves and never commits). One that failed has
     // looked at nothing, a reload does retry it, and the page keeps "Reload to retry": the same row was reported as one
     // no reload settles.
@@ -5151,7 +5160,7 @@ test("a settle records what an earlier write left pending, and only an operator'
     const c = await start({ paths, a: { zeroTouch: service } });
     const census = async () => [readdirSync(dir).length, await f.redis.hlen("touch:pending"), JSON.parse(await f.redis.get(`zero-touch:fixes:meta:${(await f.redis.zrange("zero-touch:fixes:index", 0, -1))[0]}`)).state];
     const page = await service.read({ days: 30 });
-    assert.deepEqual(page.waiting, { touches: 1, unknown: 0, fixes: 1 });
+    assert.deepEqual(page.waiting, { touches: 1, unknown: 0, fixes: 1, refused: 0 });
     // The window collapsed on the unresolved action alone (the runs were read, with no mirror beside them): the page
     // says it waits for a settle, where it said "could not be read".
     assert.deepEqual([page.state, page.unresolvedOnly, zeroTouchView(page, { role: "operator", nowMs: T0 }).state], ["unavailable", true, "waiting"]);
@@ -5174,7 +5183,7 @@ test("a settle records what an earlier write left pending, and only an operator'
     assert.deepEqual(await census(), [0, 0, "applied"]);
     assert.equal((await touches.read()).events.length, 1);
     const settledPage = await service.read({ days: 30 });
-    assert.deepEqual([settledPage.unresolvedOnly, settledPage.waiting, settledPage.fixes.length, settledPage.fixesPartial], [undefined, { touches: 0, unknown: 0, fixes: 0 }, 1, false]);
+    assert.deepEqual([settledPage.unresolvedOnly, settledPage.waiting, settledPage.fixes.length, settledPage.fixesPartial], [undefined, { touches: 0, unknown: 0, fixes: 0, refused: 0 }, 1, false]);
     // A touch Valkey does not take at the settle stays for the next one, and the banner says what is left.
     const later = await lost.begin({ runId: "gh-rerun", cause: "rerun", at: T0 - 500, nonce: "two" });
     await lost.applied(later);
@@ -5185,6 +5194,86 @@ test("a settle records what an earlier write left pending, and only an operator'
     assert.equal(left.status, 200, left.text);
     assert.match(left.json().change.summary, /^Settled the pending Zero touch accounting, but 1 touch could not be recorded: Valkey did not take it\. Settle again once Valkey answers/);
     assert.equal(readdirSync(dir).length, 1);
+    assert.deepEqual(logged, []);
+  } finally { await f.done(); }
+});
+
+test("a fix's outcome the console knew settles its row whatever its file reads later: a lost commit is committed after the file moved on, a lost refusal is refused when the same bytes are written later (#1072)", live, async () => {
+  const f = await freshValkey();
+  try {
+    const { paths } = deployment(URL13);
+    let t = T0;
+    const now = () => t;
+    const record = buildRecord({ job: { id: "gh-refusal", data: { kind: "github", repo: "acme/web", target: { type: "issue", number: 42 }, trigger: { matched: { index: 0, type: "label" } } } }, result: { outcome: "policy", reason: "secret-unresolved" }, startedAt: new Date(T0 - 2000).toISOString(), endedAt: new Date(T0 - 1000).toISOString() });
+    record.touchScopeId = "a".repeat(64);
+    makeRecordWriter({ logsDir: paths.logsDir })(record);
+    // The real stores over a real Valkey, on a client whose writes of a fix's mark get no answer while `silent` is set:
+    // the commit or the refusal that follows a change. Its stage is a transaction and is not touched.
+    let silent = false;
+    const logged = [];
+    const redisFn = (url, options) => {
+      const real = makeRedisClient(url, options);
+      return new Proxy(real, { get(target, name) {
+        const value = Reflect.get(target, name);
+        if (typeof value !== "function") return value;
+        return name === "set" ? (...args) => (silent && String(args[0]).startsWith("zero-touch:fixes:meta:") ? Promise.reject(new Error("fix-store-timeout")) : value.apply(target, args)) : value.bind(target);
+      } });
+    };
+    const service = makeZeroTouchService({ paths, now, redisFn, log: (event, detail) => logged.push([event, detail]) });
+    const c = await start({ paths, a: { zeroTouch: service } });
+    const outcomes = join(paths.logsDir, "zero-touch-outcomes");
+    const files = () => (existsSync(outcomes) ? readdirSync(outcomes) : []).map((name) => JSON.parse(read(join(outcomes, name))).outcome).sort();
+    const rows = async () => {
+      const ids = await f.redis.zrevrange("zero-touch:fixes:index", 0, -1);
+      return Promise.all(ids.reverse().map(async (id) => ({ id, ...JSON.parse(await f.redis.get(`zero-touch:fixes:meta:${id}`)), proof: JSON.parse(await f.redis.get(`zero-touch:fixes:private:${id}`)) })));
+    };
+    const base = read(paths.settingsFile);
+    const change = (value) => ({ key: "maxTurns", value, becauseRun: "gh-refusal" });
+
+    // A change that landed and whose commit Valkey did not answer: its outcome is on the console's disk.
+    silent = true;
+    const made = await c.both("setting-set", change("35"));
+    silent = false;
+    assert.deepEqual([made.confirm.status, made.confirm.json().warning], [200, "tracking-incomplete"], made.confirm.text);
+    assert.deepEqual(files(), ["applied"]);
+    assert.deepEqual(logged.splice(0), [["zero_touch_fix_pending", { cause: "Error: fix-store-timeout" }]]);
+    // Someone changes the file again by hand: its bytes no longer show the change, and the byte rule alone left it open.
+    writeFileSync(paths.settingsFile, base);
+    t += 60_000;
+
+    // A change refused (the file moved between its preview and its confirm) whose refusal Valkey did not answer.
+    const p = await c.act("setting-set", change("36"));
+    assert.equal(p.status, 200, p.text);
+    writeFileSync(paths.settingsFile, `${JSON.stringify({ maxTurns: 31, maxCostUsd: "2" }, null, 2)}\n`);
+    silent = true;
+    const refused = await c.confirm("setting-set", p.json().ticket);
+    silent = false;
+    assert.equal(refused.status, 409, refused.text);
+    assert.deepEqual(files(), ["applied", "refused"]);
+    assert.deepEqual(logged.splice(0), [["zero_touch_fix_reject_pending", { cause: "Error: fix-store-timeout" }]]);
+    // And later the same change is made again, from the same file: the refused row's bytes are now the file's.
+    writeFileSync(paths.settingsFile, base);
+    t += 60_000;
+    const again = await c.both("setting-set", change("36"));
+    assert.equal(again.confirm.status, 200, again.confirm.text);
+    const [lost, cut, remade] = await rows();
+    assert.deepEqual([lost.state, cut.state, remade.state], ["pending", "pending", "applied"]);
+    assert.equal(cut.proof.afterDigest, sha256(read(paths.settingsFile)), "the refused change's bytes are in the file: the byte rule would commit it as a second fix");
+    assert.notEqual(lost.proof.afterDigest, sha256(read(paths.settingsFile)), "the lost commit's bytes are not: the byte rule would leave it open");
+    assert.deepEqual(files(), ["applied", "refused"], "the change made again wrote its outcome and removed it once its commit was answered");
+
+    // The page says what a settle does with each: one fix waits, one change that was not made waits, nothing is open.
+    const page = await service.read({ days: 30 });
+    assert.deepEqual([page.waiting.fixes, page.waiting.refused, page.fixesOpen, page.fixes.length], [1, 1, 0, 1]);
+    const settle = await c.act("zero-touch-settle", {});
+    assert.equal(settle.status, 200, settle.text);
+    assert.deepEqual(settle.json().summary.slice(1), ["1 fix whose change landed and whose accounting did not finish: each is listed under Fixes that worked.", "1 change that was not made and whose accounting did not finish: each is closed, and none is listed as a fix."]);
+    const settled = await c.confirm("zero-touch-settle", settle.json().ticket);
+    assert.equal(settled.status, 200, settled.text);
+    assert.deepEqual((await rows()).map((row) => row.state), ["applied", "refused", "applied"]);
+    assert.deepEqual(files(), [], "a settle removes the outcome of every row it settled");
+    const after = await service.read({ days: 30 });
+    assert.deepEqual([after.waiting.fixes, after.waiting.refused, after.fixesOpen, after.fixes.length, after.fixesPartial], [0, 0, 0, 2, false], "two fixes, never three");
     assert.deepEqual(logged, []);
   } finally { await f.done(); }
 });
@@ -5246,6 +5335,11 @@ test("a fix's stage that Valkey answered with one command's error says its row m
     const rows = await f.redis.keys("zero-touch:fixes:meta:*");
     assert.equal(rows.length, 1, "the row was written all the same");
     assert.equal(JSON.parse(await f.redis.get(rows[0])).state, "pending");
+    // Issue #1072: the change was not made, which the console knows, so it recorded that under the row's own id: a
+    // settle that finds the row refuses it, whatever its file reads by then.
+    const id = rows[0].slice("zero-touch:fixes:meta:".length);
+    assert.deepEqual(readdirSync(join(paths.logsDir, "zero-touch-outcomes")), [`${id}.json`]);
+    assert.equal(JSON.parse(read(join(paths.logsDir, "zero-touch-outcomes", `${id}.json`))).outcome, "refused");
   } finally { await f.done(); }
 });
 

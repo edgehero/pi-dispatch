@@ -10,9 +10,10 @@
  *                        version floor, whose history this host's files are       -> off
  *   "unreachable (why)"  it did not answer                                        -> unread
  *
- * An agent's copy of the data (`agentReadProjection`) carries three words: "off", "unreachable", and "bounded" for a
- * mirror that answered, "ok" and "truncated" alike, so "bounded" is read here. Any other word is one this build does
- * not know, and is taken as unread: a reader that cannot tell must not say the history was read.
+ * An agent's copy of the data (`agentReadProjection`) carries four words: "off", "unreachable", "truncated", and
+ * "bounded" for a mirror that answered and was read whole ("ok"), so "bounded" is read here. It carried three, with
+ * "truncated" folded into "bounded", until issue #1073. Any other word is one this build does not know, and is taken as
+ * unread: a reader that cannot tell must not say the history was read.
  *
  * Each reader had its own test of the word (`!== "ok"`, `startsWith("unreachable")`, a list of two, a list of three),
  * so an operator and an agent could be told different things of the same mirror, and "truncated" was unread to one

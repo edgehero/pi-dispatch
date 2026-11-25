@@ -2555,6 +2555,44 @@ test("a random pool cannot grant its own authority when both allowed-model ceili
   assert.ok(allowed.plan, JSON.stringify(allowed));
 });
 
+// ---- issue #996: a weighted pool through the card, and the version gate through the new value rules -------------------------
+
+const WEIGHTED = Object.freeze({ strategy: "random", candidates: [HAIKU, SONNET, OPUS], weights: { [HAIKU]: 3, [OPUS]: 2 } });
+const weightedDoc = () => ({ version: 12, triggers: [cron, comment({ models: [HAIKU, SONNET, OPUS], modelSelection: WEIGHTED })] });
+
+test("a pool edit that keeps a weighted candidate needs the triggers file at 12 and the job data at 13, and a live host that reads less refuses it (#996)", async () => {
+  // What the browser sends once OPUS is taken off: the candidates that stay, and the weight of the one weighted candidate that stays.
+  const change = { modelSelection: { strategy: "random", candidates: [HAIKU, SONNET], weights: { [HAIKU]: 3 } } };
+  for (const [hosts, refused] of [[[{ name: "old1", triggersVersion: "11", jobDataVersion: "12" }], /^This change needs the triggers file at version 12 and the job data at version 13\. old1 reads less, and would hold every job this file touches\. Upgrade that host first\.$/], [[{ name: "mini1", triggersVersion: "12", jobDataVersion: "12" }], /needs the triggers file at version 12 and the job data at version 13\. mini1 reads less/], [[{ name: "silent" }], /silent publishes no version/]]) {
+    const f = fixture({ doc: weightedDoc(), deps: { readHosts: async () => ({ hosts }) } });
+    const before = f.read();
+    const out = await f.service.preview(ask(f, change), operator);
+    assert.equal(out.status, 409, JSON.stringify(out));
+    assert.match(out.refusal, refused);
+    assert.equal(f.read(), before);
+  }
+  const f = fixture({ doc: weightedDoc(), deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "12", jobDataVersion: "13" }] }) } });
+  const out = await f.service.preview(ask(f, change), operator);
+  assert.ok(out.plan, JSON.stringify(out));
+  assert.deepEqual(out.plan.need, { triggersVersion: 12, jobDataVersion: 13 });
+  assert.ok(out.summary.includes(`Random selection: one eligible model from ${HAIKU}, ${SONNET}, weighted to these shares of the pool: ${HAIKU} 75%, ${SONNET} 25%, chosen once per new run. No primary or fallback order applies.`), JSON.stringify(out.summary));
+  assert.deepEqual(await f.service.apply(out, operator), { ok: true });
+  const after = JSON.parse(f.read());
+  assert.equal(after.version, 12);
+  assert.deepEqual(after.triggers[1].run.modelSelection, change.modelSelection);
+});
+
+test("a pool edit that takes off every weighted candidate drops the weights, and the file and its jobs need no more than before weights (#996)", async () => {
+  const f = fixture({ doc: weightedDoc(), deps: { readHosts: async () => ({ hosts: [{ name: "old1", triggersVersion: "11", jobDataVersion: "12" }] }) } });
+  const out = await f.service.preview(ask(f, { modelSelection: { strategy: "random", candidates: [SONNET] } }), operator);
+  assert.ok(out.plan, JSON.stringify(out));
+  assert.deepEqual(out.plan.need, { triggersVersion: 6, jobDataVersion: 7 });
+  assert.ok(out.summary.includes(`Random selection: one eligible model from ${SONNET}, chosen once per new run. No primary or fallback order applies.`), JSON.stringify(out.summary));
+  assert.ok(out.summary.includes("The file no longer needs version 12, so this write takes the stamp off."), JSON.stringify(out.summary));
+  assert.deepEqual(await f.service.apply(out, operator), { ok: true });
+  assert.deepEqual(JSON.parse(f.read()).triggers[1].run.modelSelection, { strategy: "random", candidates: [SONNET] });
+});
+
 // ---- issue #1008: the subscription allowance on the card ----------------------------------------------------------------
 
 /** A live host that reads the allowance: the triggers file at 11 and the job data at 12. */

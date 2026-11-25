@@ -36,8 +36,13 @@ export async function readConfigTool(kind, { paths, env = {}, deploymentDir, now
   try {
     let snapshot = null;
     try { snapshot = await fleet.snapshot(kind === "projects" ? { waiting: true } : {}); } catch { /* The file facts remain readable. */ }
-    if (kind === "secrets") return modelSecrets((reads.secrets ?? secretsView)({ snapshot, env }));
-    if (kind === "connections") return modelConnections(await (reads.connections ?? readConnections)({ paths, env, deploymentDir, snapshot, now }));
+    // Issue #1073: with no snapshot the declarations are still the files' (`fileViews`, no Valkey read), as the console's
+    // pages draw them: `available` stays false, and `filesKnown` says the names were read. A reader whose file views throw
+    // leaves both unread, as before.
+    let files = null;
+    if (snapshot === null && kind !== "projects") { try { files = typeof fleet.fileViews === "function" ? fleet.fileViews() ?? null : null; } catch { files = null; } }
+    if (kind === "secrets") return modelSecrets((reads.secrets ?? secretsView)({ snapshot, files, env }));
+    if (kind === "connections") return modelConnections(await (reads.connections ?? readConnections)({ paths, env, deploymentDir, snapshot, files, now }));
     const p = declared;
     const sl = (reads.limits ?? readScopedLimits)({ scopedLimitsPath: paths.scopedLimitsPath });
     const limits = sl?.limits ?? [];

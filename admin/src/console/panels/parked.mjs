@@ -37,8 +37,8 @@ import { forgeLinkOf } from "../../read-model.mjs";
 import { capitalised } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
-import { RUN_ID_RE, ageText, canAct, count } from "./common.mjs";
-import { OVERVIEW_LINKS, OVERVIEW_UNREAD_TEXT } from "./overview.mjs";
+import { RUN_ID_RE, ageText, canAct, count, snapshotMissingText } from "./common.mjs";
+import { OVERVIEW_LINKS } from "./overview.mjs";
 
 // ---- the sentences -----------------------------------------------------------------------------------------------------
 
@@ -181,7 +181,7 @@ export function parkedQuestions(view) {
   const prepared = answererParked(view, { manualAnswer: (row, i) => answerOf(row, i, view) });
   if (prepared !== null) return prepared;
   const s = view?.data?.snapshot ?? null;
-  const unread = s === null ? OVERVIEW_UNREAD_TEXT : typeof s.parkedUnreachable === "string" && s.parkedUnreachable !== "" ? parkedUnreadText(s.parkedUnreachable) : null;
+  const unread = s === null ? snapshotMissingText(view) : typeof s.parkedUnreachable === "string" && s.parkedUnreachable !== "" ? parkedUnreadText(s.parkedUnreachable) : null;
   const rows = s !== null && unread === null && Array.isArray(s.parked) ? s.parked : [];
   const approvals = rows.filter((p) => p.reason === "awaiting-approval").length;
   const tabs = ui.tabs([{ label: approvals > 0 ? "Questions and approvals" : "Questions", count: unread === null ? rows.length : null, href: hrefTo(view, "parked"), current: true }], { label: "Parked" });
