@@ -73,19 +73,35 @@
 	"@aws-sdk/core/dist-es/submodules/httpAuthSchemes/aws_sdk/resolveAwsSdkSigV4AConfig.js": {
 		"entVariableSelector(env) { if (env.AWS_": 1
 	},
-	"@aws-sdk/credential-provider-node/dist-cjs/index.js": {
+	"@aws-sdk/credential-provider-node@3.972.82/dist-cjs/index.js": {
 		"der-imds'); if (process.env[ENV_CMDS_RELATIVE_URI] || process.": 1,
 		"DS_RELATIVE_URI] || process.env[ENV_CMDS_FULL_URI]) {": 1,
 		"e = init.profile ?? process.env[ENV_PROFILE]; if": 1,
 		"CredentialsAreSet = process.env[ENV_KEY] && process.": 1,
 		"ess.env[ENV_KEY] && process.env[ENV_SECRET];": 1
 	},
-	"@aws-sdk/credential-provider-node/dist-es/defaultProvider.js": {
+	"@aws-sdk/credential-provider-node@3.972.82/dist-es/defaultProvider.js": {
 		"e = init.profile ?? process.env[ENV_PROFILE]; if": 1,
 		"CredentialsAreSet = process.env[ENV_KEY] && process.": 1,
 		"ess.env[ENV_KEY] && process.env[ENV_SECRET];": 1
 	},
-	"@aws-sdk/credential-provider-node/dist-es/remoteProvider.js": {
+	"@aws-sdk/credential-provider-node@3.972.82/dist-es/remoteProvider.js": {
+		"der-imds\"); if (process.env[ENV_CMDS_RELATIVE_URI] || process.": 1,
+		"DS_RELATIVE_URI] || process.env[ENV_CMDS_FULL_URI]) {": 1
+	},
+	"@aws-sdk/credential-provider-node@3.972.84/dist-cjs/index.js": {
+		"der-imds'); if (process.env[ENV_CMDS_RELATIVE_URI] || process.": 1,
+		"DS_RELATIVE_URI] || process.env[ENV_CMDS_FULL_URI]) {": 1,
+		"e = init.profile ?? process.env[ENV_PROFILE]; if": 1,
+		"CredentialsAreSet = process.env[ENV_KEY] && process.": 1,
+		"ess.env[ENV_KEY] && process.env[ENV_SECRET];": 1
+	},
+	"@aws-sdk/credential-provider-node@3.972.84/dist-es/defaultProvider.js": {
+		"e = init.profile ?? process.env[ENV_PROFILE]; if": 1,
+		"CredentialsAreSet = process.env[ENV_KEY] && process.": 1,
+		"ess.env[ENV_KEY] && process.env[ENV_SECRET];": 1
+	},
+	"@aws-sdk/credential-provider-node@3.972.84/dist-es/remoteProvider.js": {
 		"der-imds\"); if (process.env[ENV_CMDS_RELATIVE_URI] || process.": 1,
 		"DS_RELATIVE_URI] || process.env[ENV_CMDS_FULL_URI]) {": 1
 	},
@@ -627,6 +643,20 @@
 	"@smithy/core/dist-es/submodules/retry/middleware-retry/configurations.js": {
 		"tVariableSelector: (env) => { const val": 1,
 		"tVariableSelector: (env) => env[ENV_RETRY_MODE]": 1
+	},
+	"@smithy/credential-provider-imds/dist-cjs/index.js": {
+		"tVariableSelector: (env) => env[ENV_ENDPOINT_NA": 1,
+		"tVariableSelector: (env) => env[ENV_ENDPOINT_MO": 1,
+		"tVariableSelector: (env) => {": 1
+	},
+	"@smithy/credential-provider-imds/dist-es/config/EndpointConfigOptions.js": {
+		"tVariableSelector: (env) => env[ENV_ENDPOINT_NA": 1
+	},
+	"@smithy/credential-provider-imds/dist-es/config/EndpointModeConfigOptions.js": {
+		"tVariableSelector: (env) => env[ENV_ENDPOINT_MO": 1
+	},
+	"@smithy/credential-provider-imds/dist-es/fromInstanceMetadata.js": {
+		"tVariableSelector: (env) => {": 1
 	},
 	"debug/src/common.js": {
 		"function setup(env) { createDebug.debug =": 1,

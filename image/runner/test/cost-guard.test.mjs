@@ -134,10 +134,15 @@ test("callCostBound: reasoning raises the output to the model's cap; classify is
 });
 
 test("callCostBound: openai-decisions (pi 1.1.0) is input only, tiered, and counts each classifier image at OpenAI's ceiling", () => {
-	// gpt-6-luna as the pinned catalog files it: input 0.1, 0.2 above 272k, output 0.
-	const luna = { id: "gpt-6-luna", api: "openai-decisions", provider: "openai", baseUrl: "https://api.openai.com/v1", input: ["text", "image"], cost: { input: 0.1, output: 0, cacheRead: 0, cacheWrite: 0, tiers: [{ inputTokensAbove: 272_000, input: 0.2, output: 0, cacheRead: 0, cacheWrite: 0 }] } };
+	// gpt-6-luna as the pinned catalog files it: input 0.1, 0.2 above 272k, output 0. pi 1.6.1 prices cache reads and
+	// writes at the input rate of each table; the bound takes the dearest of the three, so the number does not move.
+	const luna = { id: "gpt-6-luna", api: "openai-decisions", provider: "openai", baseUrl: "https://api.openai.com/v1", input: ["text", "image"], cost: { input: 0.1, output: 0, cacheRead: 0.1, cacheWrite: 0.1, tiers: [{ inputTokensAbove: 272_000, input: 0.2, output: 0, cacheRead: 0.2, cacheWrite: 0.2 }] } };
 	assert.equal(callCostBound("classify", luna, inputOf(10_000), {}, NO_ENV), Math.ceil(10_000 * 0.1));
 	assert.equal(callCostBound("classify", luna, inputOf(300_000), {}, NO_ENV), Math.ceil(300_000 * 0.2), "the tier above 272k");
+	// pi 1.6.1's GitHub Copilot gpt-6-luna-decisions: the same api and the same table, on Copilot's host.
+	const copilotLuna = { ...luna, id: "gpt-6-luna-decisions", provider: "github-copilot", baseUrl: "https://api.individual.githubcopilot.com" };
+	assert.equal(callCostBound("classify", copilotLuna, inputOf(10_000), {}, NO_ENV), Math.ceil(10_000 * 0.1));
+	assert.equal(callCostBound("classify", copilotLuna, inputOf(300_000), {}, NO_ENV), Math.ceil(300_000 * 0.2), "the tier above 272k");
 	// A classify context carries its images at the top level; each counts at the api's ceiling even under an id no family names.
 	const image = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
 	const context = { state: { pr: 1 }, images: [image, image], questions: { ok: { type: "bool", instructions: "ok?", criteria: {} } } };

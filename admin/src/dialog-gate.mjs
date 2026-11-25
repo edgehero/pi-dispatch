@@ -36,9 +36,12 @@ export function gateDialogs(ctx) {
    *
    * THE PLAIN-OBJECT BRANCH IS DEFENSIVE AND CURRENTLY UNREACHABLE, recorded rather than left for the next
    * reader to re-derive: at this pin `select` takes `(title, options: string[])` and the only object any
-   * dialog receives is `{ signal?, timeout? }`, which carries no strings. Removing the branch therefore
-   * changes nothing observable and no test can see it. It stays because the shape of these signatures is
-   * pi's, not ours, and a future option bag with a label in it would otherwise arrive raw.
+   * dialog receives is `{ signal?, timeout?, blockedKind? }`. pi 1.6.1 added `blockedKind`, a word from a closed
+   * set ("permission", "question", "auth"), which the per-line scrub leaves as it is; this extension passes
+   * none, because pi's defaults ("permission" for a confirm, "question" for a select or an input) already say
+   * what each of its dialogs waits for. Removing the branch therefore changes nothing observable and no test can
+   * see it. It stays because the shape of these signatures is pi's, not ours, and a future option bag with a
+   * label in it would otherwise arrive raw.
    */
   const clean = (v) => {
     if (typeof v === "string") return scrubControlsPerLine(v);

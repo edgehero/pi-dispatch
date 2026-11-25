@@ -152,19 +152,19 @@ test("pi's own ModelRuntime composes samplingParamsByThinkingLevel from models[]
 	writeFileSync(modelsPath, JSON.stringify({
 		providers: {
 			lab: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "k", models: [{ id: "q", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, maxTokens: 64, compat: { maxTokensField: "max_tokens" }, samplingParamsByThinkingLevel: { high: { max_tokens: 100000 } } }] },
-			groq: { modelOverrides: { "llama-3.1-8b-instant": { samplingParamsByThinkingLevel: { low: { model: "llama-3.3-70b-versatile" } } } } },
+			groq: { modelOverrides: { "openai/gpt-oss-20b": { samplingParamsByThinkingLevel: { low: { model: "openai/gpt-oss-120b" } } } } },
 		},
 	}));
 	const runtime = await createJobModelRuntime({ ModelRuntime: mod.ModelRuntime, agentDir, modelsPath });
 	const defined = runtime.getModel("lab", "q");
-	const overridden = runtime.getModel("groq", "llama-3.1-8b-instant");
+	const overridden = runtime.getModel("groq", "openai/gpt-oss-20b");
 	assert.deepEqual(defined?.samplingParamsByThinkingLevel, { high: { max_tokens: 100000 } }, "a models[] entry's levels reach the composed model");
-	assert.deepEqual(overridden?.samplingParamsByThinkingLevel, { low: { model: "llama-3.3-70b-versatile" } }, "a modelOverrides entry's levels reach the composed builtin model");
+	assert.deepEqual(overridden?.samplingParamsByThinkingLevel, { low: { model: "openai/gpt-oss-120b" } }, "a modelOverrides entry's levels reach the composed builtin model");
 	// The cost guard bounds the defined model's output by the level's max_tokens, not its own 64.
 	assert.equal(callCostBound("streamSimple", defined, "", {}, {}), (2 + BOUND_OVERHEAD_TOKENS) * 1 + 100000 * 2);
 	// The model guard refuses the overridden model under a list that names it: a level routes to another model.
 	const { createModelGuard } = await import("../src/usage-meter.mjs");
-	const guard = createModelGuard({ allowedModels: [{ provider: "groq", model: "llama-3.1-8b-instant" }] });
+	const guard = createModelGuard({ allowedModels: [{ provider: "groq", model: "openai/gpt-oss-20b" }] });
 	assert.equal(guard.admit({ method: "streamSimple", model: overridden, args: [{}, {}] }), "model-not-allowed");
 	assert.equal(guard.admit({ method: "streamSimple", model: { ...overridden, samplingParamsByThinkingLevel: undefined }, args: [{}, {}] }), null, "the same model without the level passes");
 });
@@ -1229,9 +1229,10 @@ test("each driven pi-ai chat family's credential refusal lands in its expected e
 	// Renamed KnownImagesApi -> KnownImageApi by 0.99.1, which also added the classifier apis. Neither kind
 	// returns an AssistantMessage (generateImages and classify answer AssistantImages / ClassifierResult), so
 	// neither can be the terminal the runner classifies; both are pinned so a new one is looked at. pi 1.1.0 added
-	// openai-decisions: a `classify` export only, answering a ClassifierResult like the others.
+	// openai-decisions and pi 1.6.1 added pi-decision (Radius's decision models): each a `classify` export only,
+	// answering a ClassifierResult like the others.
 	assert.match(types, /export type KnownImageApi = "openrouter-images";/, "the image api set moved -- re-check whether any of it can end a chat turn");
-	assert.match(types, /export type KnownClassifierApi = "typesafe-system-one" \| "cloudflare-workers-ai-system-one" \| "llama-cpp-classify" \| "openai-decisions";/, "the classifier api set moved -- re-check whether any of it can end a chat turn");
+	assert.match(types, /export type KnownClassifierApi = "typesafe-system-one" \| "cloudflare-workers-ai-system-one" \| "llama-cpp-classify" \| "openai-decisions" \| "pi-decision";/, "the classifier api set moved -- re-check whether any of it can end a chat turn");
 });
 
 /**
@@ -1740,11 +1741,18 @@ test("PRICED_APIS is exactly the set of pi-ai api modules that reach calculateCo
 	for (const file of readdirSync(dataDir).filter((name) => name.endsWith(".json"))) {
 		for (const key of Object.keys(JSON.parse(readFileSync(join(dataDir, file), "utf8")))) catalogApis.add(key);
 	}
-	const served = [...reaches].filter((name) => existsSync(join(apiDir, `${name}.lazy.js`)) && new RegExp(`"\\./${name}\\.(?:js|ts)"`).test(readFileSync(join(apiDir, `${name}.lazy.js`), "utf8"))).sort();
+	const lazy = [...reaches].filter((name) => existsSync(join(apiDir, `${name}.lazy.js`)) && new RegExp(`"\\./${name}\\.(?:js|ts)"`).test(readFileSync(join(apiDir, `${name}.lazy.js`), "utf8")));
+	const served = lazy.filter((name) => catalogApis.has(name)).sort();
 	assert.deepEqual(served, [...PRICED_APIS], "the priced apis moved -- update PRICED_APIS, the bound refuses everything else under a cap");
 	for (const api of PRICED_APIS) assert.ok(catalogApis.has(api), `${api} is not an api id the catalog files models under`);
+	// pi 1.6.1's pi-decision (Radius's decision models) reaches calculateCost and has a loader, but the catalog files
+	// no model under it: Radius lists its decision models from its gateway at run time. It is not priced, for the reason
+	// pi-messages is not: its usage comes from the server, which reports the cost or the token counts the price is
+	// applied to, so the table bounds nothing the server could not exceed. A catalog that starts filing models under it
+	// lands in `served` above and fails, which is the prompt to decide it again.
+	assert.deepEqual(lazy.filter((name) => !catalogApis.has(name)).sort(), ["pi-decision"], "an api that prices but files no catalog model -- decide whether the bound can price it");
 	// And the ones that do NOT price from the table, by name, so the refusal of each is a decision on record.
-	for (const api of ["pi-messages", "openrouter-images", "llama-cpp-classify"]) assert.ok(!PRICED_APIS.includes(api) && modules.includes(api), api);
+	for (const api of ["pi-messages", "pi-decision", "openrouter-images", "llama-cpp-classify"]) assert.ok(!PRICED_APIS.includes(api) && modules.includes(api), api);
 });
 
 test("calculateCost: one table per call, the highest tier the input passes, and a 1h write at 2 x that table's input", { skip }, () => {
@@ -1804,8 +1812,8 @@ test("what else picks the model that answers, as the model guard reads it (issue
 	const hooked = modules.filter((name) => /await options\??\.onPayload\?\.\((?:params|payload|commandInput|body), model\)/.test(readFileSync(join(apiDir, name), "utf8"))).sort();
 	assert.deepEqual(hooked, ["anthropic-messages.js", "azure-openai-responses.js", "bedrock-converse-stream.js", "classifier-shared.js", "google-generative-ai.js", "google-vertex.js", "llama-cpp-classify.js", "mistral-conversations.js", "openai-codex-responses.js", "openai-completions.js", "openai-responses.js", "openrouter-images.js", "pi-messages.js"]);
 	// pi 1.1.0: the System One classifiers and openai-decisions send through classifier-shared's postClassifierRequest,
-	// the one place their onPayload is called.
-	for (const file of ["system-one-shared.js", "openai-decisions.js"]) {
+	// the one place their onPayload is called. pi 1.6.1's pi-decision does too.
+	for (const file of ["system-one-shared.js", "openai-decisions.js", "pi-decision.js"]) {
 		assert.match(nestedPiAi("api", file), /import \{[^}]*\bpostClassifierRequest\b[^}]*\} from "\.\/classifier-shared\.js";/, file);
 		assert.doesNotMatch(nestedPiAi("api", file), /requestFetch|globalThis\.fetch/, `${file} sends a request of its own`);
 	}

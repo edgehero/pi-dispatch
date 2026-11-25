@@ -874,6 +874,11 @@ There is no implicit fallback to Radius organization budgets. API-key use withou
 its existing behavior; Radius OAuth credentials are still refused. Supporting a bounded Radius call
 requires verified billing, routing and input/output-limit guarantees beyond a few successful probes.
 
+**Radius's decision models are refused for the same reason.** pi 1.6.1 reaches them through a protocol of their
+own, `pi-decision`, whose server reports the cost, or the token counts the price is applied to. A watch `decide`, an
+answer rule's decision model and the question grouping model always run under a cap, so none of them can use a
+Radius decision model, and a codemode `models.classify()` call on one is refused when the job has a cap.
+
 ## Honest limits
 
 - A `pi` child process that the runner could not meter makes its run a **floor**, and so does a run that

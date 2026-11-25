@@ -325,7 +325,10 @@ accepts the paid confirmation, so use it only when you intend to queue the job.
 
 The fork gets its own branch, pull request, session and budget accounting. The original attempt stays intact. Model
 choices follow the current trigger and deployment policy; thinking levels are accepted only where the chosen model
-supports them. A fork may itself be forked later.
+supports them. Since pi 1.6.1 that excludes `off` on the Claude 5.5 models served through Amazon Bedrock, GitHub
+Copilot, Cloudflare AI Gateway and Vercel AI Gateway: pi would run such a request at the model's lowest level, so a
+fork asking for `off` there is refused as `thinking-level-unsupported` rather than charged for thinking it did not
+ask for. A fork may itself be forked later.
 
 Only listed positions are available. Before the first user message means restart from the source's original base.
 Other positions require a retained workspace snapshot paired with that exact transcript point; an older transcript

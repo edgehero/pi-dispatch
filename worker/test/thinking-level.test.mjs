@@ -32,3 +32,16 @@ test("unknown models and unrecognized levels cannot silently become a default", 
 	assert.equal(thinkingLevelAllowed({ provider, model: "missing", thinkingLevel: "high" }, { builtinModel }), false);
 	assert.equal(thinkingLevelAllowed({ provider, model: id, thinkingLevel: "unlimited" }, { builtinModel }), false);
 });
+
+test("a fork that asks for off where pi 1.6.1 raises off to its lowest level is refused, never upgraded to a paid level", () => {
+	// pi 1.6.1 maps `off` to null on the Claude 5.5 routes of Bedrock, Copilot, Cloudflare AI Gateway and Vercel AI
+	// Gateway (Anthropic's own route already did), and a session asked for `off` there runs at the lowest level the model
+	// has. A fork's operator asked for no thinking: running it with some would spend more than was chosen, so the check
+	// refuses it and `minimal` stays open.
+	for (const [routeProvider, model] of [["amazon-bedrock", "us.anthropic.claude-sonnet-5-5"], ["github-copilot", "claude-sonnet-5.5"], ["cloudflare-ai-gateway", "claude-opus-5-5"], ["vercel-ai-gateway", "anthropic/claude-opus-5.5"]]) {
+		assert.ok(builtinModel(routeProvider, model), `${routeProvider}/${model} is in the pinned catalog`);
+		assert.equal(thinkingLevelAllowed({ provider: routeProvider, model, thinkingLevel: "off" }, { builtinModel }), false, `${routeProvider}/${model} off`);
+		assert.equal(thinkingLevelAllowed({ provider: routeProvider, model, thinkingLevel: "minimal" }, { builtinModel }), true, `${routeProvider}/${model} minimal`);
+	}
+	assert.equal(thinkingLevelAllowed({ provider: "anthropic", model: "claude-haiku-4-5", thinkingLevel: "off" }, { builtinModel }), true, "a model that maps no level still has off");
+});
