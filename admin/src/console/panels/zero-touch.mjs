@@ -196,9 +196,14 @@ export function zeroTouchFixes(view) {
   // does not show it, so nothing settles it, and "Reload to retry" was untrue of it. Nothing is promised of making the
   // change again: a settle commits such a row once its file shows it, whoever wrote that. One whose file does show it
   // waits for a settle (issue #1076), since the page's read no longer commits it: said with the action.
+  // A change this host knows was not made, whose refusal Valkey did not take (issue #1072), waits for a settle too: it
+  // closes the row, which is then never read as a fix, whatever bytes its file shows later. One action for both.
   const one = m.fixesOpen === 1;
   const ready = m.waiting.fixes;
-  const waitingFixes = ready > 0 ? html`<p class="zt-note" role="status">${plural(ready, "fix", "fixes")} ${ready === 1 ? "is" : "are"} waiting to be settled: ${ready === 1 ? "its change landed and its" : "their changes landed and their"} accounting did not finish. Until then ${ready === 1 ? "it is" : "they are"} not listed here.</p>${settle(view)}` : null;
+  const refused = m.waiting.refused;
+  const readyLine = ready > 0 ? html`<p class="zt-note" role="status">${plural(ready, "fix", "fixes")} ${ready === 1 ? "is" : "are"} waiting to be settled: ${ready === 1 ? "its change landed and its" : "their changes landed and their"} accounting did not finish. Until then ${ready === 1 ? "it is" : "they are"} not listed here.</p>` : null;
+  const refusedLine = refused > 0 ? html`<p class="zt-note" role="status">${plural(refused, "change")} that ${refused === 1 ? "was" : "were"} not made ${refused === 1 ? "is" : "are"} waiting to be settled: ${refused === 1 ? "its" : "their"} accounting did not finish. A settle closes ${refused === 1 ? "it" : "them"}, and ${refused === 1 ? "it is" : "they are"} never listed as a fix.</p>` : null;
+  const waitingFixes = readyLine || refusedLine ? html`${readyLine}${refusedLine}${settle(view)}` : null;
   const open = m.fixesOpen > 0 ? html`<p class="zt-note" role="status">Fix history is incomplete: the accounting of ${plural(m.fixesOpen, "change")} did not finish and ${one ? "its file does not show it" : "their files do not show them"}, so no settle records ${one ? "it" : "them"}. Left alone, ${one ? "its record ends" : "their records end"} by ${one ? "itself" : "themselves"}${m.fixesOpenDays > 0 ? ` within ${plural(m.fixesOpenDays, "day")} of the attempt` : ""}. Missing changes are not evidence that no fix was made.</p>` : null;
   const incomplete = !m.fixesPartial ? null : waitingFixes || open ? html`${waitingFixes}${open}`
     : html`<p class="zt-note" role="status">Fix history is incomplete. Reload to retry; missing changes are not evidence that no fix was made.</p>`;

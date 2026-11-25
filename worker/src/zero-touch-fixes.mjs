@@ -4,6 +4,13 @@ import { REASONS } from "./reason-catalog.mjs";
 export const FIX_KINDS = Object.freeze(["instructions", "config"]);
 const DAY = 86400000;
 const idOf = value => createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 32);
+/**
+ * The id `add` gives a fix, known before its stage is answered (issue #1072): a stage that Valkey did not answer may
+ * still land, and the console records that its change was not made under this id, so a settle can refuse the row.
+ */
+export const fixIdOf = (value, identity = null) => idOf(identity ?? value);
+/** How long a fix's record lives: the history's retention, 365 days when it is kept forever, and never longer. */
+export const fixHistoryRetentionMs = retentionDays => Math.min(Number(retentionDays) > 0 ? Number(retentionDays) : 365, 365) * DAY;
 export function validFix(value) {
 	return value && Object.keys(value).every(key => ["id", "kind", "at", "runId", "scopeId", "project", "groupId", "reason", "triggerIndex", "undoneAt", "state"].includes(key)) && /^[a-f0-9]{32}$/.test(value.id) && FIX_KINDS.includes(value.kind) && (value.state === undefined || ["pending", "applied", "refused"].includes(value.state)) && Number.isSafeInteger(value.at) && value.at >= 0 && QUESTION_RUN_RE.test(value.runId) && QUESTION_SCOPE_RE.test(value.scopeId) && (value.project === null || typeof value.project === "string" && /^[a-z][a-z0-9_-]{0,63}$/.test(value.project)) && ((GROUP_ID_RE.test(value.groupId ?? "") && value.reason === null) || (value.groupId === null && Object.hasOwn(REASONS, value.reason))) && (value.triggerIndex === null || Number.isSafeInteger(value.triggerIndex) && value.triggerIndex >= 0) && (value.undoneAt === undefined || Number.isSafeInteger(value.undoneAt) && value.undoneAt >= value.at);
 }
@@ -19,7 +26,7 @@ export const FIX_CLOCK_SKEW_MS = 3_600_000;
 export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 30, prefix = "zero-touch:fixes:" } = {}) {
 	const bounded = promise => { let timer; return Promise.race([Promise.resolve(promise), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("fix-store-timeout")), 2000); })]).finally(() => clearTimeout(timer)); };
 	const command = (method, ...args) => bounded(redis[method](...args));
-	const ttl = Math.min(Number(retentionDays) > 0 ? Number(retentionDays) : 365, 365) * DAY;
+	const ttl = fixHistoryRetentionMs(retentionDays);
 	// The oldest entry a reader reads (issue #1072). A fix's record expires with the retention counted from its stage
 	// (a mark keeps that expiry, below), and its index entry's score is the stage's time, so an entry older than this is
 	// one whose record has expired or is about to: it is left out, never counted as a missing row. Before, the readers
@@ -31,9 +38,18 @@ export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 3
 	// gave the record a new retention its index entry did not have, and XX writes nothing once the record has expired,
 	// where a SET recreated it. Answers whether it wrote. The read before it is not atomic with it, as before.
 	const mark = async (id, fix) => await command("set", `${prefix}meta:${id}`, JSON.stringify(fix), "KEEPTTL", "XX") === "OK";
+	// The private Undo/proof record, or null for one that is gone or not one of the two shapes.
+	async function readUndo(id) {
+		const body = await command("get", `${prefix}private:${id}`);
+		let undo; try { if (typeof body !== "string" || Buffer.byteLength(body) > 8192) return null; undo = JSON.parse(body); } catch { return null; }
+		if (!undo) return null;
+		const instructionProof = Object.keys(undo).sort().join() === "after,before,index,triggerDigest" && Number.isSafeInteger(undo.index) && (undo.before === null || typeof undo.before === "string") && typeof undo.after === "string" && /^[a-f0-9]{64}$/.test(undo.triggerDigest ?? "");
+		const fileProof = Object.keys(undo).sort().join() === "afterDigest,file" && typeof undo.file === "string" && undo.file.length <= 4096 && !/[\u0000-\u001f]/u.test(undo.file) && /^[a-f0-9]{64}$/.test(undo.afterDigest ?? "");
+		return instructionProof || fileProof ? undo : null;
+	}
 	return {
 		async add(value, { privateUndo = null, identity = null, pending = false } = {}) {
-			const fix = { id: idOf(identity ?? value), kind: value.kind, at: value.at ?? now(), runId: value.runId, scopeId: value.scopeId, project: value.project ?? null, groupId: value.groupId ?? null, reason: value.reason ?? null, triggerIndex: value.triggerIndex ?? null, state: pending ? "pending" : "applied" };
+			const fix = { id: fixIdOf(value, identity), kind: value.kind, at: value.at ?? now(), runId: value.runId, scopeId: value.scopeId, project: value.project ?? null, groupId: value.groupId ?? null, reason: value.reason ?? null, triggerIndex: value.triggerIndex ?? null, state: pending ? "pending" : "applied" };
 			if (!validFix(fix)) return { invalid: "the fix has no validated source cause" };
 			const tx = redis.multi();
 			tx.set(`${prefix}meta:${fix.id}`, JSON.stringify(fix), "PX", ttl, "NX");
@@ -56,13 +72,8 @@ export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 3
 			let fix; try { if (typeof raw !== "string" || raw.length > 2048) return null; fix = JSON.parse(raw); } catch { return null; }
 			if (!validFix(fix)) return null;
 			if (!includeUndo) return fix;
-			const body = await command("get", `${prefix}private:${id}`);
-			let undo; try { if (typeof body !== "string" || Buffer.byteLength(body) > 8192) return null; undo = JSON.parse(body); } catch { return null; }
-			if (!undo) return null;
-			const instructionProof = Object.keys(undo).sort().join() === "after,before,index,triggerDigest" && Number.isSafeInteger(undo.index) && (undo.before === null || typeof undo.before === "string") && typeof undo.after === "string" && /^[a-f0-9]{64}$/.test(undo.triggerDigest ?? "");
-			const fileProof = Object.keys(undo).sort().join() === "afterDigest,file" && typeof undo.file === "string" && undo.file.length <= 4096 && !/[\u0000-\u001f]/u.test(undo.file) && /^[a-f0-9]{64}$/.test(undo.afterDigest ?? "");
-			if (!instructionProof && !fileProof) return null;
-			return { ...fix, undo };
+			const undo = await readUndo(id);
+			return undo ? { ...fix, undo } : null;
 		},
 		async publicSnapshot({ sinceMs = 0 } = {}) {
 			try {
@@ -82,41 +93,58 @@ export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 3
 			return mark(id, { ...fix, state: "refused" });
 		},
 		/**
-		 * The pending fixes whose change provably landed: the file the change wrote still has the digest it wrote, or the
-		 * trigger the instruction changed still hashes as it did. Reads only (issue #1076): the Zero touch page says what a
-		 * settle would commit, and `repair` commits exactly these. `{ ready }` holds their ids. A row whose proof cannot be
-		 * read stays out, never replayed; a store that does not answer throws.
+		 * What a settle would do with the pending fixes, by reads alone (issue #1076): the Zero touch page says it, and
+		 * `repair` does exactly it. A store that does not answer throws.
+		 *
+		 * The outcome first (issue #1072). `outcomeOf(id)` is what the console recorded when it knew how the change ended
+		 * and could not write the row's mark (`zero-touch-outcomes.mjs`): `applied` puts the row in `ready`, `refused` in
+		 * `refused`, whatever the bytes say now, so a refused change whose bytes are written later is never read as a fix.
+		 * A row with no outcome keeps the byte rule: `ready` when the file the change wrote still has the digest it wrote,
+		 * or the trigger the instruction changed still hashes as it did; a row whose proof cannot be read stays out, never
+		 * replayed. `closed` holds the rows that no longer read pending and still have an outcome, whose file a settle
+		 * removes: their mark landed after all.
 		 */
-		async settleable({ readTrigger, readFile } = {}) {
-			const ready = [];
-			if (typeof readTrigger !== "function" && typeof readFile !== "function") return { ready };
+		async settleable({ readTrigger, readFile, outcomeOf } = {}) {
+			const ready = [], refused = [], closed = [];
+			if (typeof readTrigger !== "function" && typeof readFile !== "function" && typeof outcomeOf !== "function") return { ready, refused, closed };
+			const outcome = id => { try { const known = typeof outcomeOf === "function" ? outcomeOf(id) : null; return known === "applied" || known === "refused" ? known : null; } catch { return null; } };
 			const ids = await command("zrevrangebyscore", `${prefix}index`, "+inf", oldestRead(), "LIMIT", 0, 5000);
 			for (const id of ids) {
-				const fix = await this.read(id, { includeUndo: true });
-				if (!fix || fix.state !== "pending") continue;
+				const fix = await this.read(id);
+				if (!fix) continue;
+				const known = outcome(id);
+				if (fix.state !== "pending") { if (known) closed.push(id); continue; }
+				if (known === "applied") { ready.push(id); continue; }
+				if (known === "refused") { refused.push(id); continue; }
+				const undo = await readUndo(id);
+				if (!undo) continue;
 				try {
-					if (fix.undo.file && typeof readFile === "function") {
+					if (undo.file && typeof readFile === "function") {
 						// The caller owns the configuration path allowlist. A peer-written path cannot choose a read here.
-						const bytes = await readFile(fix.undo.file);
-						if ((typeof bytes === "string" || Buffer.isBuffer(bytes)) && createHash("sha256").update(bytes).digest("hex") === fix.undo.afterDigest) ready.push(id);
+						const bytes = await readFile(undo.file);
+						if ((typeof bytes === "string" || Buffer.isBuffer(bytes)) && createHash("sha256").update(bytes).digest("hex") === undo.afterDigest) ready.push(id);
 					} else if (typeof readTrigger === "function") {
-						const current = await readTrigger(fix.undo.index);
-						if (current && createHash("sha256").update(JSON.stringify(current)).digest("hex") === fix.undo.triggerDigest) ready.push(id);
+						const current = await readTrigger(undo.index);
+						if (current && createHash("sha256").update(JSON.stringify(current)).digest("hex") === undo.triggerDigest) ready.push(id);
 					}
 				} catch { /* An unprovable outcome remains pending, never replayed. */ }
 			}
-			return { ready };
+			return { ready, refused, closed };
 		},
 		/**
-		 * Commits what `settleable` proves, one row at a time. A commit the store does not answer throws, after the rows
-		 * before it were committed, so a caller can say the settle may have landed in part; settling again is safe, since a
-		 * committed row is no longer pending.
+		 * Commits `ready` and refuses `refused`, as `settleable` finds them, one row at a time. A mark the store does not
+		 * answer throws, after the rows before it were marked, so a caller can say the settle may have landed in part;
+		 * settling again is safe, since a marked row is no longer pending. `forget(id)` is called for each row whose mark
+		 * was answered and for each `closed` row, first: the console removes the outcome file there.
 		 */
 		async repair(readers = {}) {
-			const { ready } = await this.settleable(readers);
-			let settled = 0;
-			for (const id of ready) if (await this.commit(id)) settled++;
-			return { settled };
+			const { ready, refused, closed } = await this.settleable(readers);
+			const forget = id => { try { if (typeof readers.forget === "function") readers.forget(id); } catch { /* the file stays for the next settle */ } };
+			for (const id of closed) forget(id);
+			let settled = 0, rejected = 0;
+			for (const id of ready) { if (await this.commit(id)) settled++; forget(id); }
+			for (const id of refused) { if (await this.reject(id)) rejected++; forget(id); }
+			return { settled, refused: rejected };
 		},
 		async markUndone(id, at = now()) {
 			const fix = await this.read(id); if (!fix || fix.undoneAt) return false;
