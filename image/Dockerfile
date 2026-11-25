@@ -473,7 +473,16 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # a subscription job with no dollar limit at all, so the worker refuses that pairing pre-spend (its `subscriptionAllowance`
 # capability row, reason job-image-subscription-allowance-unsupported). verify-image.sh runs the baked runner's own
 # allowance offline (image/runner/test/fixtures/subscription-allowance-smoke.mjs) and a real job given a malformed value.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary,idleWatch,credentialRefresh,subscriptionLease,mergePolicy,secretFiles,subscriptionAllowance"
+# `subscriptionRoles` (issue #946) tells the worker this runner runs a subscription job's role child inside itself, on the
+# runtime it admitted and sealed, where an older one starts it as a separate pi process, which holds the token but not the
+# admission, so its first call stopped the whole job. The worker refuses a subscription job with a role map on an image
+# without it pre-spend (its `subscriptionRoles` capability row, reason job-image-subscription-roles-unsupported).
+# verify-image.sh proves it offline twice (image/runner/test/fixtures/subscription-roles-smoke.mjs): the baked run-job.mjs
+# itself, started as the worker starts it, on an OpenAI subscription with a role map and every request answered in the
+# process (the parent's subagent call is answered by an in-process child, metered as a second session, and the job
+# completes, with no separate process); and the baked guards, meter, role tool, in-process child and loader on a sealed
+# stand-in Anthropic adapter (the same call is refused by name before the seal).
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary,idleWatch,credentialRefresh,subscriptionLease,mergePolicy,secretFiles,subscriptionAllowance,subscriptionRoles"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it

@@ -163,6 +163,8 @@ for what an older receiver queued, and run those jobs again.
 | An older worker, a newer job image, a subscription connection | A worker from before issue #1008 never marks a connection, so the image counts every subscription call against the cap and the windows charge it, as before | Upgrade the workers to stop counting them |
 | Workers of different releases on one Valkey, subscription jobs | A worker from issue #1008 on reserves nothing for a job whose every model is on a subscription without paid extra usage and settles a mixed job's billed part only; an older worker reserves the cap and charges the whole metered cost. On one set of dollar windows the two charge differently until every worker is upgraded | Finish the window |
 | A newer console, subscription bindings that differ between hosts, an older worker or an older job image | The console's trigger page and its paid previews read the bindings every live host publishes. A provider any host binds to a subscription without paid extra usage is taken as notional: its models skip the cap's first-call check, and a job that reaches only such models previews $0.00 in the dollar windows. A host whose own connections file does not bind that provider runs its calls on an API key under the cap, a worker from before issue #1008 never marks a connection notional, and an image from before it counts every subscription call against the cap, so on such a host the preview can say less than the host then reserves or refuses; the worker still checks every cap at pickup | Bind a provider the same way on every host that runs its jobs, and upgrade the workers and the image together |
+| A newer worker, an older job image, a subscription job with a role map | The worker refuses each such job before it spends, `job-image-subscription-roles-unsupported`: that image's runner would start the role child as a separate pi process, which the subscription refuses, and the whole job would stop at the first child call. It refuses one whose role map holds only API-key models too, which would run there, since the worker does not tell the two apart | Upgrade the image before a subscription trigger's scope gets a role map |
+| An older worker, a newer job image, a subscription job with a role map | The job runs and its role child runs inside the runner, as with a newer worker. An older worker does not know the refusal `subscription-child-unsupported`, so the record of a run that has one keeps none of its role refusals | Upgrade the workers to keep them |
 | A newer worker, an older job image, a trigger with `run.maxSubscriptionUsd` | The worker refuses each job of it before it spends, `job-image-subscription-allowance-unsupported`: that image's runner would ignore the allowance and run the job's subscription calls with no dollar limit | Upgrade the image before a trigger sets an allowance |
 | An older worker or receiver, a trigger with `run.maxSubscriptionUsd` | The field needs triggers file version 11, so an older receiver or worker refuses to load such a file, keeping the triggers it had on a live edit. A job of it is queued at job data version 12, which an older worker holds (`newer-release`) until a worker that reads it takes it, spending nothing. A service that dropped the field anyway is caught as `trigger-skew` by a newer worker that reads the triggers file | Upgrade every worker, receiver and console host before a trigger sets an allowance; the trigger's page refuses the edit while a live host reads less |
 | An older worker or receiver, a random pool with `weights` | A pool's weights need triggers file version 12, so an older receiver or worker refuses to load such a file, keeping the triggers it had on a live edit. A job of it is queued at job data version 13, which an older worker holds (`newer-release`) until a worker that reads it takes it, spending nothing. A pool without weights keeps versions 6 and 7 | Upgrade every worker, receiver and console host before a pool sets weights; the trigger's page refuses an edit that keeps them while a live host reads less ([weighting the pool](triggers.md#weighting-the-pool)) |
@@ -441,6 +443,20 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 ## What each release changed in stored state
 
 Release numbers come from the git tags.
+
+### Unreleased: a subagent on a subscription (#946)
+
+A job image from this release runs a subscription job's role child inside the runner, on the subscription it admitted,
+with pi's built-in tools and the job's skills but no extension tools. Before, the child was a separate pi process, which
+the subscription refused, and the job stopped at its first child call.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Image capability `subscriptionRoles` | New: the runner runs a subscription job's role child inside itself. A worker from this release refuses a subscription job with a role map on an image without it, before it spends (`job-image-subscription-roles-unsupported`). |
+| Run record `modelRoles.refusals[].reason`, reason `job-image-subscription-roles-unsupported` | New, additive: `subscription-child-unsupported`, a role child on the subscription that the runner could not run inside itself, refused before it started; and the image refusal. `v` stays 1. An older reader shows the new run reason as its token, and keeps none of a run's role refusals when one of them is the new one. No migration or older-state detector is needed. |
+| Mixed versions | See the two rows on a subscription job with a role map in [mixed versions](#mixed-versions-what-is-safe): ship the image and the workers together. |
+
+See [model roles on a subscription](model-roles.md#on-a-subscription).
 
 ### Unreleased: pi 1.6.1 and its decision models (#1094)
 

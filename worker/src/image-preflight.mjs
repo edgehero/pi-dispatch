@@ -46,7 +46,7 @@ export function resolveJobImage(job, defaultImage) {
  *                            CAPABILITY_GATES row (replicaUnsupported, commandUnsupported,
  *                            excludeToolsUnsupported, loadExclusionsUnsupported, modelPolicyUnsupported, costCapUnsupported, mcpUnsupported,
  *                            forgeMcpUnsupported, awaitInputUnsupported, progressUnsupported, recoverUnsupported,
- *                            steerUnsupported, subscriptionAllowanceUnsupported)
+ *                            steerUnsupported, subscriptionAllowanceUnsupported, subscriptionRolesUnsupported)
  *                            => POLICY
  *
  * A non-zero `docker image inspect` is AMBIGUOUS -- an absent image and an unreachable daemon both exit 1 --
@@ -362,6 +362,19 @@ export const CAPABILITY_GATES = Object.freeze([	// REQ-REPLICA-RUNS: an image bu
 		reason: "job-image-subscription-allowance-unsupported",
 		event: "refused_image_subscription_allowance_unsupported",
 		comment: (image, declared) => `Refused: the job image "${image}" does not declare the subscription allowance (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would ignore the trigger's run.maxSubscriptionUsd and run this job's subscription calls with no dollar limit at all. Rebuild the image from a version that has this feature. Not run.`,
+	}),
+	// Issue #946: a runner that predates it starts a subscription job's role child as a separate pi process, which holds the
+	// access token but not the runner's admission, so the child's first call is refused and the whole job stops as
+	// model-not-allowed, after the parent has spent. Needed by a job with a role map that holds a subscription (the
+	// `subscriptionAuthRequired` the pickup already works out), on no other: an API-key job's children are pi processes on
+	// every image. Last, so a job that also lacks an older feature is refused for that one, as before.
+	Object.freeze({
+		token: "subscriptionRoles",
+		needed: (job, { subscriptionAuthRequired = false } = {}) => subscriptionAuthRequired === true && job?.modelRoles !== undefined,
+		result: "subscriptionRolesUnsupported",
+		reason: "job-image-subscription-roles-unsupported",
+		event: "refused_image_subscription_roles_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare subscription role children (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would start this job's subagent as a separate pi process, which the subscription refuses, and the job would stop at the first child call. Rebuild the image from a version that has this feature. Not run.`,
 	}),
 ]);
 

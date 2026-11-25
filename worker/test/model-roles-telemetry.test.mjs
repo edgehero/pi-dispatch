@@ -10,6 +10,9 @@ test("role telemetry reconstructs only hashes and closed refusal reasons", () =>
 	assert.deepEqual(parseExitModelRoles(line({ ...telemetry, attacker: "private", refusals: [{ ...telemetry.refusals[0], name: "private" }] })), telemetry);
 	for (const value of [null, {}, { refusals: [{ agentHash: "private", reason: "unknown-role" }] }, { refusals: [{ agentHash: "a".repeat(64), reason: "private" }] }, { refusals: Array(9).fill(telemetry.refusals[0]) }]) assert.equal(modelRolesTelemetryOf(value), null);
 	assert.equal(parseExitModelRoles(line(telemetry) + "\n" + line({})), null, "decisive line does not resurrect old diagnostics");
+	// Issue #946: a subscription child the runner could not run inside itself is a closed reason like the others.
+	const subscription = { refusals: [{ agentHash: "b".repeat(64), reason: "subscription-child-unsupported" }] };
+	assert.deepEqual(parseExitModelRoles(line(subscription)), subscription);
 });
 
 test("role telemetry reaches the log sink only on a verified signed line", async () => {

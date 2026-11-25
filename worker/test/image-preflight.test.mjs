@@ -339,7 +339,7 @@ test("Podman's bare-hex image id is published in docker's sha256: spelling, and 
 // --- the capability gates are ONE table (issues #501, #502) ---
 
 test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), costCap (#501), mcp, forgeMcp, awaitInput (#625), reportProgress (#644), recover (#645), steer (#646), sandboxLayout (#683) and observableRunner (#730), each keyed once, each free for a job without its feature", async () => {
-	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput", "reportProgress", "recover", "steer", "sandboxLayout", "observableRunner", "fork", "approvalGates", "modelFailover", "modelRoles", "watch", "questionGrouping", "answerDraft", "subscriptionAuth", "loadExclusions", "packageCanary", "mergePolicy", "secretFiles", "subscriptionAllowance"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
+	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput", "reportProgress", "recover", "steer", "sandboxLayout", "observableRunner", "fork", "approvalGates", "modelFailover", "modelRoles", "watch", "questionGrouping", "answerDraft", "subscriptionAuth", "loadExclusions", "packageCanary", "mergePolicy", "secretFiles", "subscriptionAllowance", "subscriptionRoles"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
 	for (const key of ["token", "result", "reason", "event"]) {
 		assert.equal(new Set(CAPABILITY_GATES.map((gate) => gate[key])).size, CAPABILITY_GATES.length, `${key} is unique per row`);
 	}
@@ -389,6 +389,26 @@ test("loadExclusions (#800): either field needs it, and so does a tool exclusion
 	const said = row.comment("img", "is absent");
 	assert.ok(said.includes("does not declare support for this job's exclusions") && said.includes("so its runner would not honour them"), said);
 	assert.doesNotMatch(said, /role child|run\.exclude/);
+});
+
+test("subscriptionRoles (#946): a subscription job with a role map needs it; one without a map, and an API-key job with one, never do", async () => {
+	const label = (caps) => `sha256:abc${FIELD_SEP}1.6.0${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
+	const row = CAPABILITY_GATES.find((gate) => gate.token === "subscriptionRoles");
+	assert.deepEqual([row.result, row.reason, row.event], ["subscriptionRolesUnsupported", "job-image-subscription-roles-unsupported", "refused_image_subscription_roles_unsupported"]);
+	assert.equal(CAPABILITY_GATES.at(-1), row, "last, so a job lacking an older feature is refused for that one as before");
+	// An image with every other row's token: only this row can refuse.
+	const declared = CAPABILITY_GATES.filter((gate) => gate !== row).map((gate) => gate.token);
+	const older = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label(declared.join(","))) });
+	const roles = { kind: "github", modelRoles: { checker: "anthropic/claude-x" } };
+	assert.equal(row.needed(roles, { subscriptionAuthRequired: true }), true);
+	assert.deepEqual(await older(roles, { subscriptionAuthRequired: true }), { subscriptionRolesUnsupported: "i", declared });
+	assert.equal((await older(roles, { subscriptionAuthRequired: false })).ok, true, "an API-key job's role child is a pi process on every image");
+	assert.equal((await older(roles)).ok, true);
+	assert.equal((await older({ kind: "github" }, { subscriptionAuthRequired: true })).ok, true, "a subscription job with no role map starts no child");
+	const current = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label([...declared, row.token].join(","))) });
+	assert.equal((await current(roles, { subscriptionAuthRequired: true })).ok, true);
+	const said = row.comment("img", "is absent");
+	assert.ok(said.includes("does not declare subscription role children") && said.includes("separate pi process, which the subscription refuses"), said);
 });
 
 test("reportProgress (#644): a job armed with run.progress needs it; an unarmed one never does", async () => {

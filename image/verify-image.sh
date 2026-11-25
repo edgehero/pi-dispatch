@@ -985,6 +985,19 @@ IWHANG
 				[ "$sa_run_code" = 2 ] && echo "$sa_exit" | grep -q 'PI_SUBSCRIPTION_ALLOWANCE_MICROS' \
 					|| fail "the image declares 'subscriptionAllowance' but a job with a malformed PI_SUBSCRIPTION_ALLOWANCE_MICROS was not refused before its first call (exit $sa_run_code: $sa_exit)"
 				;;
+			subscriptionRoles)
+				# Issue #946. The claim is that a subscription job's role child runs inside the runner, on the runtime the runner
+				# admitted and sealed, so the parent's subagent call is answered and the job goes on. Proved offline, twice. First the
+				# baked run-job.mjs itself, as the worker starts it, on an OpenAI subscription with a role map, every request answered
+				# inside the process: the child answers in process with the subscription's token, is metered as a second session, no
+				# separate process starts, and the job completes. Then the baked guards, meter, role tool, in-process child and loader
+				# on a sealed stand-in Anthropic adapter: no provider is registered after the seal, and before it the same call is refused
+				# by name. An older runner would start a separate pi process, which the subscription refuses and the proof never allows.
+				sr_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges \
+					--entrypoint node "$IMAGE_REF" /app/image/runner/test/fixtures/subscription-roles-smoke.mjs 2>&1) && sr_code=0 || sr_code=$?
+				[ "$sr_code" = 0 ] && echo "$sr_out" | grep -q '^subscription role capability holds$' \
+					|| fail "the image declares 'subscriptionRoles' but its offline in-process role child proof failed (exit $sr_code): $sr_out"
+				;;
 			subscriptionLease)
 				# Issue #895. Use the baked guard, drop reader and pinned ModelRuntime with an injected clock:
 				# requests inside the old five-minute floor must work, then use a replacement beyond the old

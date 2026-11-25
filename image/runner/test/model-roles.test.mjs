@@ -207,6 +207,82 @@ test("the pinned CLI keeps leading @ task text literal instead of reading an att
 	assert.deepEqual(parsed.diagnostics, []);
 });
 
+/**
+ * Issue #946: a job on a subscription. The parent is on the subscription's provider (`anthropic`), one role is on an
+ * API-key provider (`test`), and `inProcess` stands in for the runner's in-process child (role-child-session.mjs).
+ */
+const subscriptionDocument = { version: 1, roles: { explorer: "test/small" }, parent: "anthropic/main", models: ["anthropic/main", "test/small"] };
+const subscriptionAgents = [{ name: "scout", description: "Find code", model: "explorer", content: "Find things" }, { name: "checker", description: "Check work", content: "Check things", tools: ["read"] }];
+const subscriptionContext = { cwd: "/workspace", model: { provider: "anthropic", id: "main" }, thinkingLevel: "high" };
+function subscriptionTool({ admitted = () => true, model = (ref) => (ref === "anthropic/main" ? { id: "main" } : null), inProcess = true, excludeTools = ["bash"] } = {}) {
+	const processes = [];
+	const inside = [];
+	let tool;
+	const extension = createRoleSubagents(validateRoleInputs(subscriptionDocument, { version: 1, agents: subscriptionAgents }), {
+		excludeTools,
+		subscriptions: ["anthropic"],
+		admitted,
+		runChild: async (call) => { processes.push(call); return { text: "from a process", exitCode: 0 }; },
+		inProcess: inProcess ? { model, run: async (call) => { inside.push(call); return { text: "from inside", exitCode: 0 }; } } : null,
+	});
+	extension.factories[0].factory({ registerTool: (value) => { tool = value; }, on() {} });
+	return { tool, extension, processes, inside };
+}
+
+test("on a subscription, a child on the subscription's provider runs in process with the CLI child's call, and an API-key child is still a process (#946)", async () => {
+	const { tool, processes, inside, extension } = subscriptionTool();
+	const checked = await tool.execute("id", { agent: "checker", task: "check it" }, undefined, undefined, subscriptionContext);
+	assert.equal(checked.content[0].text, "from inside");
+	assert.equal(checked.isError, undefined);
+	assert.deepEqual(processes, []);
+	assert.equal(inside.length, 1);
+	assert.deepEqual({ ...inside[0], agent: inside[0].agent.name }, { agent: "checker", task: "check it", model: "anthropic/main", cwd: "/workspace", signal: undefined, excludeTools: ["bash"], thinkingLevel: "high" }, "the call a process child gets: an inherited model keeps the parent's thinking level");
+	const scouted = await tool.execute("id", { agent: "scout", task: "find it" }, undefined, undefined, subscriptionContext);
+	assert.equal(scouted.content[0].text, "from a process");
+	assert.deepEqual(processes.map((call) => call.model), ["test/small"]);
+	assert.equal(inside.length, 1);
+	assert.deepEqual(extension.snapshot().refusals, []);
+});
+
+test("a subscription child with no in-process route is refused by name before anything starts, recorded, and the parent goes on (#946)", async () => {
+	for (const [label, options] of [["no in-process route", { inProcess: false }], ["not admitted (before the seal, or after a conflict)", { admitted: () => false }], ["an admission that is not a plain true", { admitted: () => "yes" }], ["no such model on the runtime", { model: () => null }]]) {
+		const { tool, processes, inside, extension } = subscriptionTool(options);
+		const refused = await tool.execute("id", { agent: "checker", task: "check it" }, undefined, undefined, subscriptionContext);
+		assert.equal(refused.isError, true, label);
+		assert.equal(refused.details.reason, "subscription-child-unsupported", label);
+		assert.match(refused.content[0].text, /refused: subscription-child-unsupported/, label);
+		// A batch holding one such child starts none of its siblings.
+		const batch = await tool.execute("id", { tasks: [{ agent: "scout", task: "find" }, { agent: "checker", task: "check" }] }, undefined, undefined, subscriptionContext);
+		assert.equal(batch.details.reason, "subscription-child-unsupported", label);
+		assert.deepEqual([processes.length, inside.length], [0, 0], `${label}: nothing started, never a separate process`);
+		assert.deepEqual(extension.snapshot().refusals.map((row) => row.reason), ["subscription-child-unsupported", "subscription-child-unsupported"], label);
+		assert.match(extension.snapshot().refusals[0].agentHash, /^[a-f0-9]{64}$/);
+		// The parent goes on: the next call to an API-key child runs.
+		assert.equal((await tool.execute("id", { agent: "scout", task: "find" }, undefined, undefined, subscriptionContext)).content[0].text, "from a process", label);
+	}
+});
+
+test("each child of a chain is routed when it starts, so an admission lost midway refuses the rest (#946)", async () => {
+	let admitted = true;
+	const { tool, inside } = subscriptionTool({ admitted: () => admitted });
+	const original = inside.push.bind(inside);
+	inside.push = (call) => { admitted = false; return original(call); };
+	const result = await tool.execute("id", { chain: [{ agent: "checker", task: "one" }, { agent: "checker", task: "two" }] }, undefined, undefined, subscriptionContext);
+	assert.equal(inside.length, 1);
+	assert.equal(result.details.reason, "subscription-child-unsupported");
+});
+
+test("a differently cased reference to a subscription provider never goes to a separate process (#946)", async () => {
+	const document = { version: 1, roles: {}, parent: "Anthropic/main", models: ["Anthropic/main"] };
+	let processes = 0;
+	let tool;
+	const extension = createRoleSubagents(validateRoleInputs(document, { version: 1, agents: [{ name: "checker", description: "c", content: "c" }] }), { subscriptions: ["anthropic"], admitted: () => true, runChild: async () => { processes++; return { text: "", exitCode: 0 }; }, inProcess: { model: () => null, run: () => assert.fail("no such model on the runtime") } });
+	extension.factories[0].factory({ registerTool: (value) => { tool = value; }, on() {} });
+	const result = await tool.execute("id", { agent: "checker", task: "check" }, undefined, undefined, { cwd: "/workspace", model: { provider: "Anthropic", id: "main" } });
+	assert.equal(result.details.reason, "subscription-child-unsupported");
+	assert.equal(processes, 0);
+});
+
 test("a single object for tasks or chain is refused, not wrapped into an array and run (#796)", () => {
 	const { tool } = toolFor({ runChild: () => assert.fail("nothing runs") });
 	for (const args of [{ tasks: { agent: "a", task: "t" } }, { chain: { agent: "a", task: "t" } }, { tasks: [{ agent: null, task: "t" }] }, { agent: null, task: "t" }]) assert.throws(() => tool.prepareArguments(args), Error, JSON.stringify(args));

@@ -123,12 +123,32 @@ export function roleSubagentShadow(tools) {
 	return tools.some((tool) => tool.name === ROLE_SUBAGENT_TOOL && tool.sourceInfo?.path !== OURS) ? ROLE_SUBAGENT_TOOL : null;
 }
 
-export function createRoleSubagents(inputs, { runChild = runRoleChild, excludeTools = [] } = {}) {
+/**
+ * The job's `subagent` tool. `runChild` starts a role child as a pi process (`runRoleChild`); issue #946 adds a second route
+ * for a child whose model is on a provider the job holds as a subscription (`subscriptions`, the providers of the runner's
+ * verified entries). Such a child runs inside the runner, through `inProcess` (role-child-session.mjs says why), and only
+ * while `admitted(provider)` holds, which is the registration guard's own answer: true once the root's runtime is sealed
+ * with the approved adapter in place, false before the seal and after any conflict. A separate process could not run it:
+ * it holds the token but not the admission, and its first call stopped the whole job. With no in-process route, no
+ * admission or no such model on the runtime, the call is refused as `subscription-child-unsupported` before anything
+ * starts, recorded like every other refusal, and the parent goes on. A child on any other provider takes `runChild`
+ * exactly as before.
+ */
+export function createRoleSubagents(inputs, { runChild = runRoleChild, excludeTools = [], subscriptions = [], admitted = () => false, inProcess = null } = {}) {
 	const { document, agents } = validateRoleInputs(inputs.document, { version: 1, agents: inputs.agents });
 	const refusals = [];
 	const refuse = (name, reason) => {
 		if (refusals.length < 8) refusals.push({ agentHash: createHash("sha256").update(String(name)).digest("hex"), reason });
 		return { content: [{ type: "text", text: `Subagent ${JSON.stringify(name)} refused: ${reason}` }], details: { reason }, isError: true };
+	};
+	// Which route a resolved model takes: `{ run }`, or `{ reason }` when it can take none. The provider is compared lower
+	// case, so a differently cased reference to a subscription provider is never sent to a separate process; the runtime
+	// lookup is exact, so such a reference finds no model there and is refused.
+	const routeOf = (model) => {
+		const provider = model.slice(0, model.indexOf("/"));
+		if (!subscriptions.includes(provider.toLowerCase())) return { run: runChild };
+		if (inProcess === null || admitted(provider.toLowerCase()) !== true || !inProcess.model(model)) return { reason: "subscription-child-unsupported" };
+		return { run: inProcess.run };
 	};
 	return {
 		snapshot: () => ({ refusals: structuredClone(refusals) }),
@@ -150,6 +170,8 @@ export function createRoleSubagents(inputs, { runChild = runRoleChild, excludeTo
 						const parent = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : document.parent;
 						const resolved = resolveAgentModel(agent.model, document, parent);
 						if (resolved.reason) return refuse(agent.name, resolved.reason);
+						const route = routeOf(resolved.model);
+						if (route.reason) return refuse(agent.name, route.reason);
 					}
 					const execute = async (args) => {
 					if (!bounded(args.task, 131072)) return refuse(args.agent, "invalid-arguments");
@@ -157,8 +179,11 @@ export function createRoleSubagents(inputs, { runChild = runRoleChild, excludeTo
 					const parent = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : document.parent;
 					const result = resolveAgentModel(agent.model, document, parent);
 					if (result.reason) return refuse(agent.name, result.reason);
+					// Asked again here, not carried from the check above: a chain's later child starts after earlier ones ran.
+					const route = routeOf(result.model);
+					if (route.reason) return refuse(agent.name, route.reason);
 					if (signal?.aborted) return refuse(agent.name, "aborted");
-					const child = await runChild({ agent, task: args.task, model: result.model, cwd: ctx.cwd, signal, excludeTools, ...((agent.model === undefined || agent.model === "inherit") && { thinkingLevel: ctx.thinkingLevel }) });
+					const child = await route.run({ agent, task: args.task, model: result.model, cwd: ctx.cwd, signal, excludeTools, ...((agent.model === undefined || agent.model === "inherit") && { thinkingLevel: ctx.thinkingLevel }) });
 					return { content: [{ type: "text", text: child.text }], details: { agent: agent.name, model: result.model, exitCode: child.exitCode }, ...(child.exitCode !== 0 && { isError: true }) };
 					};
 					if (args.tasks) {

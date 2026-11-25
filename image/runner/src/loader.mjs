@@ -810,6 +810,52 @@ export async function loadProtectedPrompts({ cwd = WORKSPACE, globalPiDir = GLOB
 }
 
 /**
+ * Issue #946: the loader of a role child that runs inside this runner, on a subscription's sealed runtime
+ * (role-child-session.mjs). It runs NO extension code: the job's extensions would register their providers again, and the
+ * adapter's second registration on a sealed runtime is refused for the whole job (community-auth-adapter.mjs). So no
+ * staged package, no overlay or workspace extension, no inline factory (no `subagent`, so no nesting) and no MCP: pi's
+ * built-in tools only. What it keeps is what a job's agent is told and may read: the guardrails, for the job's own merge
+ * permission, and the personas, as the root's loader appends them, then the agent's prompt last, where the CLI child's
+ * `--append-system-prompt` puts it; the repository's, the trigger's and the overlay's skills in the root's order; and the
+ * repository's context files. Built and loaded at call time, after the seal, with the settings copy the child runs on.
+ */
+export async function buildRoleChildResourceLoader({
+	cwd = WORKSPACE,
+	guardrailsPath = GUARDRAILS_PATH,
+	jobPiDir = JOB_PI_DIR,
+	globalPiDir = GLOBAL_PI_DIR,
+	triggerSkillsDir = TRIGGER_SKILLS_DIR,
+	agentDir = getAgentDir(),
+	settingsManager,
+	mayMerge = false,
+	agentPrompt,
+} = {}) {
+	const guardrails = guardrailsForMerge(readFileSync(guardrailsPath, "utf8"), mayMerge);
+	const additions = readPromptAdditions({ globalPiDir, jobPiDir });
+	const personas = [...new Set([additions.overlay, additions.repository].filter(Boolean))];
+	const globalSkills = `${globalPiDir}/skills`;
+	const loader = rememberPromptAdditions(new DefaultResourceLoader({
+		cwd,
+		agentDir,
+		settingsManager,
+		noContextFiles: false,
+		noExtensions: true,
+		noSkills: true,
+		noPromptTemplates: true,
+		noThemes: true,
+		additionalExtensionPaths: [],
+		additionalSkillPaths: [
+			`${jobPiDir}/skills`,
+			...(existsSync(triggerSkillsDir) ? [triggerSkillsDir] : []),
+			...(existsSync(globalSkills) ? [globalSkills] : []),
+		],
+		appendSystemPromptOverride: () => [guardrails, ...personas, agentPrompt].filter(Boolean),
+	}), additions);
+	await loader.reload();
+	return loader;
+}
+
+/**
  * Build and load. Separate from buildResourceLoader so tests can assert on a
  * half-built loader if they need to, but nothing should skip this.
  *
