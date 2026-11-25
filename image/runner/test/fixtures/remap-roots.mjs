@@ -54,4 +54,34 @@ for (const name of ["spawn", "execFile", "exec", "fork"]) {
 		return real.apply(this, args);
 	};
 }
+// Issue #946: with PI_DISPATCH_TEST_OWN_PROC=1 a listing of /proc names only this process's own descendants, as the job's
+// pid namespace does in a container. Outside one, on a Linux host, the runner's child detector (child-watch.mjs
+// `linuxProc`) reads every process of the machine, and a test suite runs several jobs at once: another test's runner or
+// role child, which carries another job's ledger directory, was read as this job's unmetered child and stopped it under
+// its model list (seen on CI). Every process this runner starts is still listed, so a pi process the job itself starts
+// is judged as it is in a container; one that leaves the tree (its parent gone, taken in by pid 1) is not, which only a
+// container run shows. Test-only, opt-in, and Linux-only: elsewhere there is no /proc and no detector.
+if (process.env.PI_DISPATCH_TEST_OWN_PROC === "1" && process.platform === "linux") {
+	const readdir = fs.readdirSync;
+	const readFile = fs.readFileSync;
+	const parentOf = (pid) => {
+		try {
+			const text = readFile(`/proc/${pid}/stat`, "latin1");
+			return Number(text.slice(text.lastIndexOf(")") + 2).split(" ")[1]);
+		} catch {
+			return 0;
+		}
+	};
+	const ours = (pid) => {
+		for (let at = Number(pid), steps = 0; at > 1 && steps < 64; steps += 1) {
+			if (at === process.pid) return true;
+			at = parentOf(at);
+		}
+		return false;
+	};
+	fs.readdirSync = Object.assign(function (path, ...rest) {
+		const names = readdir.call(this, path, ...rest);
+		return path === "/proc" && rest.length === 0 ? names.filter((name) => !/^[1-9][0-9]*$/.test(String(name)) || ours(name)) : names;
+	}, readdir);
+}
 syncBuiltinESMExports();

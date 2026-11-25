@@ -253,11 +253,11 @@ test("an in-process child whose provider fails is a failed result that names no 
 });
 
 test("the real runner on a subscription: its subagent call is answered by an in-process child on its own admitted runtime, and the job completes", { skip, timeout: 120_000 }, async () => {
-	await smoke.verifySubscriptionRolesRunner(tempDir("pi-subscription-roles-runner-"));
+	await smoke.verifySubscriptionRolesRunner(tempDir("pi-subscription-roles-runner-"), { ownProcesses: true });
 });
 
 test("the real runner tells an in-process child the job's own merge permission", { skip, timeout: 120_000 }, async () => {
-	const job = await smoke.subscriptionRunnerJob({ root: tempDir("pi-subscription-roles-merge-"), mayMerge: true });
+	const job = await smoke.subscriptionRunnerJob({ root: tempDir("pi-subscription-roles-merge-"), mayMerge: true, ownProcesses: true });
 	assert.equal(job.code, 0, JSON.stringify(job.exit));
 	const child = job.requests.find((request) => request.who === "child");
 	assert.ok(child && child.permittedMerge && !child.defaultMerge, JSON.stringify(child));
@@ -265,7 +265,7 @@ test("the real runner tells an in-process child the job's own merge permission",
 
 test("the real runner refuses the child by name once its subscription's admission is lost, and starts nothing", { skip, timeout: 120_000 }, async () => {
 	// An overlay extension registers the provider again when the parent calls the tool, which latches the guard's conflict.
-	const job = await smoke.subscriptionRunnerJob({ root: tempDir("pi-subscription-roles-latched-"), latch: true });
+	const job = await smoke.subscriptionRunnerJob({ root: tempDir("pi-subscription-roles-latched-"), latch: true, ownProcesses: true });
 	assert.deepEqual(job.requests.map((request) => request.who), ["root"], "no child call, and the parent's next call is refused too");
 	assert.deepEqual(job.exit?.modelRoles?.refusals?.map((row) => row.reason), ["subscription-child-unsupported"], JSON.stringify(job.exit));
 	assert.equal(job.exit.tokens.childProcesses, 0, "never a separate process");
