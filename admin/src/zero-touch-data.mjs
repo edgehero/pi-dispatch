@@ -66,6 +66,15 @@ const stageRefusal = (err) => {
  */
 export const UNDO_UNMARKED = "The instruction was put back as it was before this fix, but the fix could not be marked undone: Zero touch may still show it as applied until its row expires. Do not undo it again.";
 
+/** What a settle's preview and confirm say when nothing waits (issue #1076): another settle, or the worker's daily sweep, came first. */
+export const SETTLE_NOTHING = "Nothing is waiting to be settled. Reload the Zero touch page.";
+/**
+ * What a settle says when the fix store did not answer it after the touches were settled (issue #1076): some fixes may
+ * have been committed. Settling again is safe, since a committed fix is no longer pending.
+ */
+export const SETTLE_IN_PART = "The pending accounting may have been settled in part: Valkey did not answer. Preview the settle again once Valkey answers; settling twice records nothing twice.";
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
 /** What a grouping confirm says of an add that was started and not confirmed, and of a status write that was not answered. */
 export const GROUP_UNCONFIRMED = "The grouping job may or may not have been queued: the queue did not confirm it. Preview it again first: the preview says when a grouping is pending. A second one is paid again.";
 // How long it may read as pending is said too (issue #987): only a grouping's own status write replaces the mark (one
@@ -98,14 +107,18 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
   const indexMax = runMirrorMaxRunsOf(env.PI_RUN_MIRROR_MAX_RUNS).value;
   const config = () => parseTriggersDocument(fs.readFileSync(paths.triggersPath, "utf8"), paths.triggersPath).zeroTouch;
   const repairFiles = new Set(Object.entries(paths).filter(([key, value]) => /(?:File|Path)$/.test(key) && typeof value === "string").map(([, value]) => value));
+  // What proves a pending fix landed: the triggers file's entry, and a configuration file only on the console's own
+  // allowlist (a path a peer wrote into the row never chooses a read). The page's read and the settle use the same two.
+  const proof = { readTrigger: (index) => JSON.parse(fs.readFileSync(paths.triggersPath, "utf8")).triggers?.[index], readFile: (path) => repairFiles.has(path) ? fs.readFileSync(path, "utf8") : null };
   // Every path on the console's bounded client (issue #961): a command a Valkey took and never answered ends at the
   // bound, with `valkeyMayStillRun`. `timeoutMs` is for a path that only READS for its answer (the page, a preview): it
   // ends there whatever is still waiting, its client dropped so nothing more is sent. NEVER for a path that carries a
   // person's write (`withWriters`, `trackConfiguration`, `apply`): a timer that fired first would answer for a write
   // it knows nothing about, where the client's own error says whether it was sent.
-  // `reads` (issue #987) is for a timed path that writes nothing at all (a preview, a fix's context): its timer's error
-  // is marked `valkeyNotSent`, which the console's preview answers as Valkey unreachable with Try again. Never the
-  // page's read, which repairs what an earlier write left behind before it reads, so its timer cannot say that.
+  // `reads` (issue #987) is for a timed path that writes nothing at all (a preview, a fix's context, and since issue
+  // #1076 the page's read): its timer's error is marked `valkeyNotSent`, which the console's preview answers as Valkey
+  // unreachable with Try again. The page's read repaired what an earlier write left behind before it read, so its
+  // timer could not say that; it now only counts what a settle would do (`zero-touch-settle`).
   const using = async (fn, { timeoutMs = null, reads = false } = {}) => {
     const redis = boundedClient(redisFn, paths.valkeyUrl);
     const groups = makeQuestionGroupStore({ redis, now, retentionDays });
@@ -114,10 +127,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
     const outbox = makeTouchOutbox({ dir: join(paths.logsDir, "touch-outbox"), store: touches, fs, log });
     // The stores that take a bound, made again with `ms` for each of their commands (issue #988): a page's read makes
     // them step by step, each with what is left of its deadline.
-    const boundedBy = (ms) => ({
-      groups: makeQuestionGroupStore({ redis, now, retentionDays, timeoutMs: ms }),
-      outbox: makeTouchOutbox({ dir: join(paths.logsDir, "touch-outbox"), store: makeTouchStore({ redis, now, retentionDays, timeoutMs: ms }), fs, log }),
-    });
+    const boundedBy = (ms) => ({ groups: makeQuestionGroupStore({ redis, now, retentionDays, timeoutMs: ms }) });
     const release = () => {
       try { redis.disconnect(); } catch { /* already closed */ }
     };
@@ -147,8 +157,8 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
    * a later read of the page would begin again.
    *
    * `landed` is for a change whose answer says it may have been made (`partial`, or a throw marked
-   * `valkeyMayStillRun`): its row is left pending, for the page's repair to settle by the file's digest, never
-   * refused. NO action reaches that today: every action that can be made because of a refusal changes a file alone,
+   * `valkeyMayStillRun`): its row is left pending, for a settle (`zero-touch-settle`) to commit by the file's digest,
+   * never refused. NO action reaches that today: every action that can be made because of a refusal changes a file alone,
    * and none of them answers `partial` or throws the mark. It is for one that would write Valkey beside its file, and
    * the tests reach it through `trackConfiguration` itself.
    */
@@ -183,11 +193,43 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
       return planZeroTouchInstruction({ params, paths, sourceRecord: source.record, group: snapshot.groups.find((g) => g.id === params.groupId), binding, fs, surface: "console" });
     }
     if (name === "zero-touch-undo") return planZeroTouchInstructionUndo({ params, paths, fix: await valkeyRead(stores.fixes.read(params.fixId, { includeUndo: true })), fs, surface: "console" });
+    if (name === "zero-touch-settle") return planSettle(stores);
     return { refusal: "This Zero touch action is not available." };
+  }
+  /**
+   * What a settle would do (issue #1076), read only: the touch intents this host's outbox holds as applied (actions that
+   * ran and whose accounting did not finish), the ones it holds as pending (interrupted before they said whether they
+   * ran, which a settle only begins again), and the pending fixes whose file or trigger proves the change landed.
+   * Nothing waiting is a refusal, so a confirm a settle elsewhere overtook says so rather than settling nothing.
+   */
+  async function planSettle(stores) {
+    const touches = stores.outbox.inspect();
+    const { ready } = await valkeyRead(stores.fixes.settleable(proof));
+    if (touches.applied === 0 && ready.length === 0) return { refusal: SETTLE_NOTHING };
+    const lines = [
+      ...(touches.applied > 0 ? [`${plural(touches.applied, "action")} that ran and whose touch was not recorded: each is recorded once, and none runs again.`] : []),
+      ...(ready.length > 0 ? [`${plural(ready.length, "fix", "fixes")} whose change landed and whose accounting did not finish: each is listed under Fixes that worked.`] : []),
+      ...(touches.pending > 0 ? [touches.pending === 1 ? "1 action interrupted before it said whether it ran stays unknown: a settle begins it again and cannot prove it." : `${touches.pending} actions interrupted before they said whether they ran stay unknown: a settle begins them again and cannot prove them.`] : []),
+    ];
+    return { plan: { title: "Settle pending Zero touch accounting", summary: lines, target: "Zero touch accounting", settle: { touches: touches.applied, fixes: ready.length } } };
+  }
+  /**
+   * The settle itself: the outbox's repair, then the fix store's. Each is idempotent (an intent is published once by
+   * its id, a committed fix is no longer pending), so a settle repeated, or one the worker's daily sweep overtook,
+   * changes nothing twice. The fix store ends each command by a timer of its own: a throw after the outbox's repair is
+   * a settle that may have landed in part, said as one.
+   */
+  async function settle(stores) {
+    const touches = await stores.outbox.repair();
+    let fixes;
+    try { fixes = await stores.fixes.repair(proof); }
+    catch (err) { log("zero_touch_fix_settle_pending", { cause: causeOf(err) }); return { invalid: SETTLE_IN_PART, partial: true }; }
+    const left = stores.outbox.inspect().applied;
+    return { ok: true, settled: { touches: touches.repaired, fixes: fixes.settled }, ...(left > 0 ? { note: `${plural(left, "touch")} could not be recorded: Valkey did not take ${left === 1 ? "it" : "them"}. Settle again once Valkey answers` } : {}) };
   }
   return {
     // `within` (issue #988) is a page's deadline: a read's own bound, or what the deadline has left when that is
-    // sooner. The report's steps follow one another (the repairs, the two snapshots, the fold of the window), each with
+    // sooner. The report's steps follow one another (the fix proof, the two snapshots, the fold of the window), each with
     // a bound of two seconds, so on a Valkey that stopped answering they end together with a six second deadline, and
     // a page that cut the read there drew "could not be read" where this read was about to say what it could not
     // read: a window that is partial, this host's runs, the mirror not reached. With `within` each step that takes a
@@ -195,14 +237,15 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
     async read({ days = 30, windowDays = days, project = null, scope = null, scopeId = scope, includeRecords = false, within: deadline = null } = {}) {
       return using(async ({ redis, groups: ownGroups, fixes, outbox: ownOutbox, boundedBy }) => {
         const left = typeof deadline === "function" ? () => deadline(ZERO_TOUCH_STORE_MS) : null;
-        const step = () => (left ? boundedBy(left()) : { groups: ownGroups, outbox: ownOutbox });
-        const { outbox } = step();
-        await outbox.repair();
-        // Whether the repair ran to its end (issue #987): only then is a row that still reads pending one whose file does
-        // not show it, which no reload settles and the page says in other words than "Reload to retry".
-        let repaired = true;
-        try { await fixes.repair({ readTrigger: (index) => JSON.parse(fs.readFileSync(paths.triggersPath, "utf8")).triggers?.[index], readFile: (path) => repairFiles.has(path) ? fs.readFileSync(path, "utf8") : null }); }
-        catch (err) { repaired = false; log("zero_touch_fix_repair_pending", { cause: causeOf(err) }); }
+        const step = () => (left ? boundedBy(left()) : { groups: ownGroups });
+        // What a settle would do, and nothing done (issue #1076): a page view is a read. The outbox is counted from this
+        // host's files; the fixes are proved against their files and triggers. A proof the store did not answer leaves
+        // `fixesOpen` unsaid, since a row that still reads pending may then be one a settle commits.
+        const touches = ownOutbox.inspect();
+        let inspected = true;
+        let settleable = 0;
+        try { settleable = (await fixes.settleable(proof)).ready.length; }
+        catch (err) { inspected = false; log("zero_touch_fix_inspect_failed", { cause: causeOf(err) }); }
         // One word per case (issue #988): a triggers file that does not exist configures no grouping, which is an
         // answer; one nobody could read is unread; one that was read and is refused does not load.
         let cfg; let configUnavailable = false; let configuration = null;
@@ -223,16 +266,19 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         report.grouping.partial = questions.partial || missingSources.length > 0;
         report.fixes = report.fixes.map((f) => f.groupId && report.grouping.partial ? { ...f, partial: true, worked: false, status: "observing" } : f);
         report.fixesPartial = changes.partial;
-        // The changes whose accounting is open and that this read's repair could not settle, and for how many days such
-        // a row lives at most: its record's retention, by the fix store's own rule.
-        report.fixesOpen = repaired && changes.state === "ok" && Number.isSafeInteger(changes.pendingCount) ? changes.pendingCount : 0;
+        // What waits for a settle (issue #1076): touches this host's outbox holds as applied, ones it holds as pending
+        // (unknown, which a settle cannot prove), and fixes whose change is proved landed.
+        report.waiting = { touches: touches.applied, unknown: touches.pending, fixes: settleable };
+        // The changes whose accounting is open and that no settle can commit, since their file does not show them, and for
+        // how many days such a row lives at most: its record's retention, by the fix store's own rule.
+        report.fixesOpen = inspected && changes.state === "ok" && Number.isSafeInteger(changes.pendingCount) ? Math.max(0, changes.pendingCount - settleable) : 0;
         report.fixesOpenDays = Math.min(retentionDays > 0 ? retentionDays : 365, 365);
         report.groups = report.groups.map((group) => {
           const fix = report.fixes.filter((f) => f.groupId === group.id && !f.undoneAt).sort((a, b) => b.at - a.at)[0];
           return fix ? { ...group, status: "fixed", fixedAt: fix.at } : group;
         });
         return report;
-      }, { timeoutMs: readTimeoutMs });
+      }, { timeoutMs: readTimeoutMs, reads: true });
     },
     async runs({ before = null, limit = 50, filter = {}, windowDays = 30, scopeId = null, within: deadline = null } = {}) {
       const report = await this.read({ windowDays, project: filter.project ?? null, scopeId, includeRecords: true, within: deadline });
@@ -270,7 +316,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         let pending = false;
         try { pending = !await fixes.commit(staged.fix.id); } catch (err) { pending = true; log("zero_touch_fix_pending", { cause: causeOf(err) }); }
         const tracked = await outbox.applied(intent);
-        return { ...result, ...(pending || !tracked.ok ? { warning: "The configuration was changed; accounting is pending repair. Do not repeat the change." } : {}) };
+        return { ...result, ...(pending || !tracked.ok ? { warning: "The configuration was changed; its accounting is waiting to be settled on the Zero touch page. Do not repeat the change." } : {}) };
       });
     },
     async apply(name, entry) {
@@ -284,6 +330,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         if (!planned.plan) return { invalid: planned.refusal ?? "The change no longer applies; preview it again." };
         const p = planned.plan;
         if (p.afterText && hash(p.afterText) !== entry.afterDigest) return { invalid: "The file changed since the preview. Reload and preview it again." };
+        if (name === "zero-touch-settle") return settle(stores);
         if (name === "zero-touch-group") {
           if (p.configDigest !== entry.payload.configDigest || p.digest !== entry.payload.digest) return { invalid: "The question or grouping configuration changed since the preview." };
           // A paid enqueue in two phases (issue #961, `connectedQueue`): a connected queue under a bound, past which
@@ -347,7 +394,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
           try { fixPending = !await stores.fixes.commit(staged.fix.id); }
           catch (err) { fixPending = true; log("zero_touch_fix_pending", { cause: causeOf(err) }); }
           const tracked = await stores.outbox.applied(intent);
-          return { ok: true, fixId: staged.fix.id, ...(tracked.ok && !fixPending ? {} : { warning: "The instruction was saved; accounting is pending repair. Do not repeat the edit." }) };
+          return { ok: true, fixId: staged.fix.id, ...(tracked.ok && !fixPending ? {} : { warning: "The instruction was saved; its accounting is waiting to be settled on the Zero touch page. Do not repeat the edit." }) };
         }
         // The Undo's file is written by now. Its mark goes through the fix store, whose read and write each end by the
         // store's own timer: whatever it throws, the instruction is put back in the file, so the answer is a change

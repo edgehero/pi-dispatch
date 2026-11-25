@@ -2110,8 +2110,8 @@ you set it up otherwise, so a link to it would open nothing for the people readi
 Operators can change the deployment from the pages that show it. Every action is the same two steps as any write
 ([Writes](#writes)): **Preview** shows exactly what will happen (a diff for a file, the list of jobs for a job
 action) and **Confirm** does it. Nothing happens on a preview: like opening a page, it only reads, so it creates no
-queue key in Valkey and removes no stale entry (signing in, which writes its audit row, and the zero touch page, which
-first repairs an accounting entry left pending, are the two exceptions). If something changed in between, the confirm is
+queue key in Valkey and removes no stale entry (signing in, which writes its audit row, is the one exception; the zero
+touch page settles nothing either, 2026-11-25, #1076). If something changed in between, the confirm is
 refused with "changed since the preview" and nothing is done; preview again and you see the new state. Every action
 goes through the same functions as the `/dispatch` panel and the pi extension's tools, so a value the panel refuses
 is refused here with the same words, and every action lands in the [audit log](#the-audit-log).
@@ -3225,7 +3225,7 @@ Runs has a second tab, **Zero touch**, with 7, 30 and 90 day workload touch rate
 streaks, waits, causes and linked fixes. Longer or incomplete history is explicitly partial. Question groups and
 all writes are for operators only; the page never quotes questions. Grouping is an explicitly confirmed capped job,
 not a page-load model call. Read [Zero touch](zero-touch.md) for counting rules, opt-in private capture, retention,
-source-linked instruction/configuration fixes and incomplete-accounting repair.
+source-linked instruction/configuration fixes and settling incomplete accounting.
 
 The touched-run view uses `touched=1` with `days=7`, `30` or `90` and optional opaque `scope`; these page controls
 persist through pagination and live updates. Configuration pages may carry `becauseRun=<retained refusal id>` to
@@ -3235,8 +3235,18 @@ such a fix never answers in the change's place: a change that was refused, or th
 whatever became of its accounting. What it could not take back is in the console's log, one line per event with its
 cause: `console: Zero touch accounting needs repair (<event>: <cause>)`, where the cause is an error's name and code,
 with its message only when that is one of the console's own fixed sentences, so never a stored value. Of a change
-whose accounting did not finish and whose file does not show it, the Zero touch page says that a reload does not
-settle it and when its record ends.
+whose accounting did not finish and whose file does not show it, the Zero touch page says that no settle records it
+and when its record ends.
+
+Opening the Zero touch page, or the touched runs list, writes nothing (2026-11-25, #1076). When an earlier write left
+accounting unfinished on this host (an action that ran and whose touch was not recorded, or a fix whose change landed
+and whose completion was lost), the page says how many wait. Where that is all that keeps the touch rate from being
+counted, the rate card alone says so: "Zero touch is waiting for 2 actions to be settled". An operator on a writable
+console settles them with **Preview settling**, then **Confirm**: the preview lists what it records, and the confirm
+records each once and never runs an action again. Settling twice records nothing twice, and the worker's daily sweep
+also records unfinished touches on a host that shares the logs folder. A viewer, and an operator on a read-only
+console, see who can settle. An action interrupted before it said whether it ran stays unknown: a settle cannot prove
+it.
 Ordinary record-field filters remain unchanged.
 
 

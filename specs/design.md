@@ -16471,9 +16471,31 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   write that leaves no key changed is seen, and a page or an action added later joins by itself. A script is read by
   its body (the proxy makes the client send it). Three scripts hold a write a read never reaches and are named:
   BullMQ's `getCounts` and `getRanges` (the BullMQ 4 marker's RPOP, `DES-QUEUE-BULLMQ-OVER-CUSTOM`) and the run
-  mirror's `READ_SCRIPT` (the helpers it shares with the trim and prune scripts). TWO KNOWN EXCEPTIONS, named in the
-  test: signing in appends its audit row, and is not a page read; and the zero touch page repairs a pending entry of
-  its accounting outbox, and a pending fix, before it reads, a write when one is pending, which is not changed here.
+  mirror's `READ_SCRIPT` (the helpers it shares with the trim and prune scripts). ONE KNOWN EXCEPTION, named in the
+  test: signing in appends its audit row, and is not a page read. There were two until 2026-11-25. AMENDED 2026-11-25
+  (#1076), THE ZERO TOUCH PAGE READS AND AN OPERATOR SETTLES: the page repaired a pending entry of its accounting
+  outbox, and a pending fix, before it read, so any view by anyone (a viewer too, and `/runs?touched=1`, which reads
+  the same report and was never walked) wrote Valkey whenever an earlier write had left a row to settle. Now its read
+  counts what a settle would do and writes nothing: the outbox's intents from this host's files (`inspect`), and the
+  pending fixes whose file or trigger proves the change landed (the fix store's `settleable`, reads alone, which
+  `repair` commits exactly). It reports `waiting: { touches, unknown, fixes }`, and its timer's error is marked
+  `valkeyNotSent` like a preview's, which replaces what the #987 passage above says of it ("not marked: it repairs
+  before it reads"); `fixesOpen` is the pending rows a proof that ran to its end could not prove, where it was the rows
+  a repair that ran to its end could not settle. Settling is `zero-touch-settle`, a confirmed operator action on a
+  writable console: its preview lists what it records, and is refused when nothing waits; its confirm runs the
+  outbox's repair and then the fix store's, each idempotent (an intent is published once by its id, a committed fix
+  is no longer pending), so a settle repeated, or one the worker's daily `touch_outbox` sweep overtook, records
+  nothing twice. A window that collapsed on unresolved actions alone, with the runs read, is marked `unresolvedOnly`
+  by the worker's report, and the view draws it as `waiting` (the touch rate card alone, as `not-started` and
+  `unavailable` are, with what waits and the settle) rather than "could not be read": the read worked. REJECTED:
+  keeping the repair on the view and naming it as intended, since a viewer's page load is then a write and the rule
+  above has a hole the wire test could not see (no deployment it walked had anything pending); repairing on the
+  console's next write, since a console where nobody acts, or a read-only one, never settles and the page cannot say
+  when it will; a console timer, since the console has none and would gain a process that writes on its own; and
+  moving the fix store's repair into the worker's sweep beside the outbox's, since the proof reads the console's own
+  allowlist of configuration files, which a worker does not hold. The worker's sweep keeps settling applied intents on
+  a host that shares the logs folder, unchanged. A pending intent (an action interrupted before it said whether it
+  ran) is still begun again by a settle, which renews the pending set's TTL: a residual, unchanged from the repair.
   The console's kill switch goes through those same queues, and a pause or a resume does
   not need the constructor's write (`DES-QUEUE-BULLMQ-OVER-CUSTOM`, measured through the reader too: a queue with no
   meta key is paused and resumed, a job added meanwhile waits in the paused list and moves back). The switch preview
@@ -21406,3 +21428,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-24 (#971) | **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: ended label-job receipts. The two listeners that post the completion receipt post `INT-FORGE-ENDED-RECEIPT` for a returned refusal or stop and for a final failure, after the comment that says why, with the same binding. The rejection of receipts for failed jobs is reversed for this separate receipt, with supersession by the newest receipt per job id; a marker inside the human comments, a v1 field and a retry hint are rejected. UNCHANGED, checked: the completion receipt, the human comments' bytes, the refusal net, the failure hook and its paging. |
 | 2026-11-24 (#950) | **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: one row, `provider-stop-refusal`, the runner's exit-2 stop of a run whose provider ended the reply with an explicit refusal. A fixed sentence that never carries the provider's explanation, a reason catalog row whose sentence is that comment, and a page through the hook's spread of `RUNNER_POLICY_REASONS`. Rejected: putting the explanation in the comment, since it is the provider's prose about what the job was asked. UNCHANGED, checked: `DES-MODEL-FAILOVER` (the stop is an exit 2: its model attempt keeps only the marker written before the container started, it writes no cooldown, and it is never retried, so it never fails over), the refusal net and the ended receipt's binding. |
 | 2026-11-25 (#1046) | **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` AMENDED**: the retest residual is closed. An attempt that claimed a trial and never reached the provider gives it back, on the runtime's `container-never-started` verdict and on a refusal returned after the prepare before any container was asked for, through one release in the pickup that names the connection from `auth.check` and is guarded by the holder. A wait keeps its claim; a non-retryable throw before the container is the residual. `CONST-RETRY-INFRA-ONLY` UNCHANGED, checked: the release never throws and never changes the result. `INT-SUBSCRIPTION-QUOTA-KEY` AMENDED (its settled-trial bullet): the store's release and its guards are as they were, with a second caller. |
+| 2026-11-25 (#1076) | **`DES-OPERATOR-CONSOLE` AMENDED**, the passage on the read rule: one known exception (signing in) where there were two. The zero touch page's read, which repaired its accounting outbox and the pending fixes on every view, counts what a settle would do and writes nothing; `zero-touch-settle`, a confirmed operator action, settles; the report's `unresolvedOnly` lets the view say what waits rather than "could not be read". Rejected: the repair kept on the view, repairing on the next console write, a console timer, and the fix repair moved to the worker. **`DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` UNCHANGED, checked**: durable intents and an idempotent completion still separate telemetry failure from action failure; only who runs the completion changed. |

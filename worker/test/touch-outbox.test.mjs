@@ -27,6 +27,25 @@ test("successful action and failed publication survive restart without repeating
 	assert.deepEqual(fs.readdirSync(dir), []);
 });
 
+test("inspect counts what a repair would publish, begin again and pass over, and writes nothing (#1076)", async () => {
+	const dir = join(tempDir("pd-touch-inspect-"), "outbox");
+	const sent = [];
+	const store = { begin: async (e) => { sent.push("begin"); return { ok: true, event: e }; }, write: async () => { sent.push("write"); return { error: "unavailable" }; }, abort: async () => ({ ok: true }) };
+	const outbox = makeTouchOutbox({ dir, store });
+	assert.deepEqual(outbox.inspect(), { applied: 0, pending: 0, invalid: 0 }, "no folder yet");
+	await outbox.applied(await outbox.begin(event));
+	await outbox.begin({ ...event, nonce: "another-action" });
+	fs.writeFileSync(join(dir, `${"f".repeat(64)}.json`), "not json");
+	fs.writeFileSync(join(dir, "notes.txt"), "not an intent's name");
+	sent.length = 0;
+	const files = fs.readdirSync(dir).sort();
+	assert.deepEqual(outbox.inspect(), { applied: 1, pending: 1, invalid: 1 });
+	assert.deepEqual([sent, fs.readdirSync(dir).sort()], [[], files], "nothing sent, nothing removed");
+	// The repair acts on exactly what inspect counted.
+	assert.deepEqual(await outbox.repair(), { repaired: 0, pending: 1, invalid: 1 });
+	assert.deepEqual(sent.sort(), ["begin", "write"]);
+});
+
 test("a crash before an applied marker remains uncertain rather than fabricating a touch", async () => {
 	const dir = join(tempDir("pd-touch-intent-"), "outbox");
 	let writes = 0;

@@ -64,6 +64,7 @@ export const ACTION_AGENT_POLICIES = Object.freeze({
   "zero-touch-name": rule("person", "A person supplies the group's name."),
   "zero-touch-instruction": rule("person", "Standing instructions are an operator's reviewed text."),
   "zero-touch-undo": rule("person", "Undo changes standing instructions."),
+  "zero-touch-settle": rule("person", "Settling accounting is an operator's confirmed write, never a page view's."),
   "board-freeze": rule("person", "Board authority has no model tool."),
   "board-unfreeze": rule("person", "Board authority has no model tool."),
   "board-clear": rule("person", "Board authority has no model tool."),

@@ -289,8 +289,9 @@ const zeroTouchStateOf = (view) => zeroTouchView(view?.data?.zeroTouch, { role: 
 function zeroTouchLayout(role, state) {
   // Tracking that has not started (issue #962) is said once, by the rate card alone: seven more cards would have
   // nothing to hold but the same sentence, or a zero nobody counted. So is a report that could not be read (issue
-  // #988), which seven cards each said in the same words.
-  if (state === "not-started" || state === "unavailable") return [{ cls: "stack", items: ["p-zt-rate"] }];
+  // #988), which seven cards each said in the same words. So is a report waiting for its accounting to be settled
+  // (issue #1076): the rate card says what waits and offers the settle.
+  if (state === "not-started" || state === "unavailable" || state === "waiting") return [{ cls: "stack", items: ["p-zt-rate"] }];
   if (role === "operator") return PAGE_LAYOUT["zero-touch"];
   return [PAGE_LAYOUT["zero-touch"][0], { cls: "cols zt-layout", items: [{ cls: "stack zt-main", items: ["p-zt-projects", "p-zt-questions", "p-zt-fixes"] }, { cls: "stack zt-side", items: ["p-zt-causes"] }] }];
 }

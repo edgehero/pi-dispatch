@@ -59,7 +59,12 @@ test("pending fix survives a lost completion write, stays partial and repairs on
 		assert.equal((await store.read(staged.fix.id, { includeUndo: true })).undo.before, null);
 		await store.repair({ readTrigger: async () => ({ ...entry, on: { type: "label", any: ["different"] } }) });
 		assert.equal((await store.publicSnapshot()).pendingCount, 1);
-		await store.repair({ readTrigger: async () => entry });
+		// Issue #1076: what a settle would commit, proved by reads alone; the Zero touch page asks this and writes nothing.
+		assert.deepEqual(await store.settleable({ readTrigger: async () => ({ ...entry, on: { type: "label", any: ["different"] } }) }), { ready: [] });
+		assert.deepEqual(await store.settleable({ readTrigger: async () => entry }), { ready: [staged.fix.id] });
+		assert.deepEqual(await store.settleable({}), { ready: [] }, "with no proof to read, nothing is proved");
+		assert.equal((await store.publicSnapshot()).pendingCount, 1, "proving commits nothing");
+		assert.deepEqual(await store.repair({ readTrigger: async () => entry }), { settled: 1 });
 		assert.equal((await store.publicSnapshot()).pendingCount, 0);
 		assert.equal((await store.publicSnapshot()).fixes.length, 1);
 		assert.ok(!JSON.stringify(await store.publicSnapshot()).includes("Use pnpm"));

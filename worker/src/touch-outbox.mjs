@@ -14,6 +14,21 @@ export function makeTouchOutbox({ dir, store, fs = nodeFs, log = () => {} } = {}
 		try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); fs.writeFileSync(`${path(event.id)}.tmp`, JSON.stringify({ state, event }), { mode: 0o600 }); fs.renameSync(`${path(event.id)}.tmp`, path(event.id)); return true; } catch { log("touch_outbox_unavailable", {}); return false; }
 	}
 	function drop(event) { try { fs.unlinkSync(path(event.id)); } catch {} }
+	// The intents this host's outbox holds, from its files alone, in the folder's order: each valid one with its state,
+	// and how many files are not intents at all. Shared by `repair()`, which acts on them, and `inspect()`, which only
+	// counts them (issue #1076), so the two cannot disagree about what a file is.
+	function entries() {
+		const found = { rows: [], invalid: 0 };
+		let names; try { names = fs.readdirSync(dir); } catch { return found; }
+		for (const name of names) {
+			if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+			let row; try { const stat = fs.lstatSync(join(dir, name)); if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096) throw new Error(); row = JSON.parse(fs.readFileSync(join(dir, name), "utf8")); } catch { found.invalid++; continue; }
+			const event = cleanTouch(row.event);
+			if (!event || `${event.id}.json` !== name) { found.invalid++; continue; }
+			found.rows.push({ event, applied: row.state === "applied" });
+		}
+		return found;
+	}
 	return {
 		async begin(value) {
 			const event = cleanTouch(value);
@@ -35,18 +50,25 @@ export function makeTouchOutbox({ dir, store, fs = nodeFs, log = () => {} } = {}
 		// it ANSWERS an error and never throws, so a caller that logs what it could not take back had nothing to log.
 		async abort(intent) { if (!intent?.event) return { ok: true }; try { return await store.abort(intent.event); } finally { drop(intent.event); } },
 		async repair() {
-			const result = { repaired: 0, pending: 0, invalid: 0 };
-			let names; try { names = fs.readdirSync(dir); } catch { return result; }
-			for (const name of names) {
-				if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
-				let row; try { const stat = fs.lstatSync(join(dir, name)); if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4096) throw new Error(); row = JSON.parse(fs.readFileSync(join(dir, name), "utf8")); } catch { result.invalid++; continue; }
-				const event = cleanTouch(row.event);
-				if (!event || `${event.id}.json` !== name) { result.invalid++; continue; }
-				if (row.state !== "applied") { result.pending++; await store.begin(event); continue; }
+			const found = entries();
+			const result = { repaired: 0, pending: 0, invalid: found.invalid };
+			for (const { event, applied } of found.rows) {
+				if (!applied) { result.pending++; await store.begin(event); continue; }
 				const sent = await store.write(event);
 				if (sent.ok) { drop(event); result.repaired++; }
 			}
 			return result;
+		},
+		/**
+		 * What `repair()` would do, with nothing written (issue #1076): the Zero touch page reads this, and settling is an
+		 * operator's action. `applied` intents are actions that ran and whose accounting did not finish, which a settle
+		 * publishes; `pending` ones are actions interrupted before they said whether they ran, which a settle only begins
+		 * again; `invalid` files are passed over by both.
+		 */
+		inspect() {
+			const found = entries();
+			const applied = found.rows.filter((row) => row.applied).length;
+			return { applied, pending: found.rows.length - applied, invalid: found.invalid };
 		},
 	};
 }

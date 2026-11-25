@@ -508,6 +508,16 @@ and a label job's requester waited for a job that would never come. Run records,
 label are unchanged; no migration, backup path or older-state detector is needed. An older worker keeps refusing these
 in silence, so upgrade every worker for the comments to appear. See [when another event starts a job](triggers.md#when-another-event-starts-a-job).
 
+### Unreleased: the Zero touch page settles nothing by itself (#1076)
+
+Opening the console's Zero touch page, or the touched runs list, no longer writes to Valkey. Before, each view settled
+the accounting an earlier write had left unfinished (an action whose touch was not recorded, a fix whose completion
+was lost). Now the page says how many wait, and an operator settles them with **Preview settling** and **Confirm**. The
+worker's daily sweep still records unfinished touches on a host that shares the logs folder. Run records, job data,
+queue keys and the accounting keys are unchanged; no migration, backup path or older-state detector is needed. An older
+console keeps settling on a view. After upgrading, open the Zero touch page once as an operator and settle anything it
+says is waiting. See [Zero touch](zero-touch.md).
+
 ### Unreleased: a provider's refusal stop is not retried (#950)
 
 A job image from this release exits 2 as `provider-stop-refusal` when the AI provider ends the reply with an explicit
