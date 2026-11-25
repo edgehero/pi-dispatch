@@ -69,7 +69,7 @@ import { removeHeldJob, requestCancel, withdrawCancel } from "@edgehero/pi-dispa
 import { makeRunBudgetLedger } from "@edgehero/pi-dispatch/run-budget-ledger";
 import { RECOVERY_CAP, recoveryJobId, runIdOf } from "@edgehero/pi-dispatch/recovery-queue";
 import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES, isOpen as steerIsOpen, listInboxPublic } from "@edgehero/pi-dispatch/steer-inbox";
-import { HELD_SET, jobKey, WAIT_ANSWER_PREFIX, WAIT_ANSWERS, WAIT_PROFILE_FIELD_RE } from "@edgehero/pi-dispatch/wait-state";
+import { HELD_SET, jobKey, pruneHeld, WAIT_ANSWER_PREFIX, WAIT_ANSWERS, WAIT_PROFILE_FIELD_RE } from "@edgehero/pi-dispatch/wait-state";
 // Why a waiting job waits (issue #737): the worker's closed vocabulary and the rules each field of its record is held to,
 // from the leaf the worker writes with, so the reader and the writer cannot drift on the key, a field or a bucket.
 import { DEFER_BUCKETS, DEFER_FIELDS, DEFER_HOST_RE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, WAITING_DUE_GRACE_MS, deferKey, parseDefer, recordMatchesDue } from "@edgehero/pi-dispatch/defer-reasons";
@@ -347,9 +347,9 @@ function parseNonNegInt(raw, fallback) {
  * `readOnly` (issue #1036, default false) makes it write NOTHING: its queues are built without BullMQ's meta write
  * (`makeQueue`'s `metaWrite: false`) and its registry read prunes no stale member. For `dispatch_status`, which is
  * described to a model as read-only. `/dispatch status` and the setup wizard's probe are a person's and keep the
- * default: they prune as they read. Who else does depends on the index, and for one of them nobody else does
- * (`INT-HOST-REGISTRY-CONTRACT`, "WHO PRUNES": a `host:live` member, the worker and the receiver at times, the CLI and
- * doctor; a `wait:held` member, no service at all), so no read may depend on a prune.
+ * default: they prune as they read. Who else does depends on the index (`INT-HOST-REGISTRY-CONTRACT`, "WHO PRUNES": a
+ * `host:live` member, the worker and the receiver at times, the CLI and doctor; a `wait:held` member, the worker's
+ * retention sweep alone, on its timer, since issue #1075, and nobody else before it), so no read may depend on a prune.
  */
 export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500, readOnly = false } = {}) {
   let queue;
@@ -2743,7 +2743,9 @@ const HELD_HYDRATE_MAX = 200;
  * 2,000 stale members beside 4 real holds answered no hold at all, on every read. The walk now goes on past a stale
  * member, a page at a time, until it holds `HELD_HYDRATE_MAX` real holds, has looked at every member, or has looked at
  * this many. Past this bound the read says it is not whole (`truncated`), which then means: members remain that
- * nobody looked at, so a hold may be missing from the list.
+ * nobody looked at, so a hold may be missing from the list. Since issue #1075 the worker's retention sweep prunes the
+ * index too (`sweepHeld`, every PI_SWEEP_INTERVAL_HOURS), and the walk stays: a read must still not depend on a prune
+ * (the sweep can be off, and a crowd can grow between two passes).
  */
 export const HELD_LOOK_MAX = 2_000;
 
@@ -2937,9 +2939,10 @@ export function resolveWorkerCount({ hosts, workerCount }) {
  *
  * `prune` (issue #1036, default true): a member with no hash is stale and is removed in passing, which is what keeps an
  * index a set cannot expire from only growing. False skips it the same and writes nothing, for `dispatch_waits`, which
- * is described to a model as read-only; `/dispatch status` keeps the default and prunes. No service prunes this
- * index, so a read must not depend on one: either way the walk goes on past a stale member, to `HELD_LOOK_MAX`
- * members looked at (`walkHeldIndex`), and the real holds are listed whatever stale members sit before them.
+ * is described to a model as read-only; `/dispatch status` keeps the default and prunes. The worker's retention
+ * sweep prunes it too since issue #1075, on its timer alone, so a read must still not depend on a prune: either way
+ * the walk goes on past a stale member, to `HELD_LOOK_MAX` members looked at (`walkHeldIndex`), and the real holds
+ * are listed whatever stale members sit before them.
  */
 export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now(), prune = true } = {}) {
   let redis;
@@ -2956,9 +2959,11 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
             const h = await redis.hgetall(jobKey(jobId));
             // A member with no hash is STALE: the hash expired or the hold was released without the index
             // being updated. The reader prunes it, which is what makes an index safe here at all -- a set
-            // cannot expire its own members, so the alternative is a set that only grows.
+            // cannot expire its own members, so the alternative is a set that only grows. Through the worker's
+            // one prune script (issue #1075), which looks at the hash again in the step that removes: a separate
+            // SREM removed a member whose hold was written between this HGETALL and it.
             if (!h || !h.since) {
-              if (prune) await redis.srem(HELD_SET, jobId).catch(() => {});
+              if (prune) await pruneHeld(redis, [jobId]).catch(() => {});
               return null;
             }
             const since = Number(h.since);
@@ -3484,13 +3489,17 @@ export function scanRunRecords({ logsDir, sinceMs, nowMs = Date.now(), fs = node
  * Read-only and bounded like the fleet's own window. `{ records, partial }`, and it never rejects: a side that cannot
  * be read, or a mirror with more in the window than the bound, says `partial`, so a caller can say a run may be missing
  * rather than present what it has as the whole. A missing record fails toward another canary, never toward an Adopt.
+ * `unread: true` beside `partial` (issue #1073) when a side could not be read, where a mirror cut at its bound is
+ * partial alone: a cache keeps the first only `FAILED_READ_KEEP_MS`, since reading it again may answer whole.
  */
 export async function scanFleetRunRecords({ redis = null, logsDir, sinceMs, nowMs = Date.now(), fs = nodeFs, limit = WIDE_RUNS, timeoutMs = FLEET_READ_TIMEOUT_MS } = {}) {
   const local = scanRunRecords({ logsDir, sinceMs, nowMs, fs });
   const { runs, degraded } = await readMirroredRuns(redis, { limit, sinceMs, prune: false, now: () => nowMs, timeoutMs });
+  const unread = !Array.isArray(local) || degraded.startsWith("unreachable");
   return {
     records: mergeRuns(Array.isArray(local) ? local : [], runs.map(shownRecord), { limit: Infinity }),
-    partial: !Array.isArray(local) || degraded === "truncated" || degraded.startsWith("unreachable"),
+    partial: unread || degraded === "truncated",
+    ...(unread ? { unread: true } : {}),
   };
 }
 
@@ -4969,10 +4978,11 @@ async function heldJobs(redis, { prune = true } = {}) {
       try {
         const h = await redis.hgetall(`wait:job:${jobId}`);
         if (!h || !h.since) {
-          // Stale index member: prune as we go, which is what makes an index safe when a SET cannot expire. Not on a
-          // read-only reader (the console's): the row is skipped the same and left for the panel or `/dispatch status`,
-          // the only two that prune this index.
-          if (prune) await redis.srem("wait:held", jobId).catch(() => {});
+          // Stale index member: prune as we go, which is what makes an index safe when a SET cannot expire, through the
+          // worker's one prune script (`readHeldJobs` says why not a bare SREM). Not on a read-only reader (the
+          // console's): the row is skipped the same and left for the panel, `/dispatch status` and the worker's
+          // retention sweep (issue #1075).
+          if (prune) await pruneHeld(redis, [jobId]).catch(() => {});
           return null;
         }
         const since = Number(h.since);
@@ -5000,6 +5010,22 @@ async function heldJobs(redis, { prune = true } = {}) {
  * run index below (issue #641) is cached for the same span and the same reason.
  */
 const DOLLAR_RECORDS_TTL_MS = 15_000;
+
+/**
+ * How long a cache of the console's keeps an answer that says a read failed, or one a deadline cut, where it keeps a
+ * good answer longer (issue #1073): about 5 seconds, counted from when the failed answer came, and never longer than a
+ * good one is kept. The wide run window (15 s), the doctor results (15 s), the parked runs' pending-answer scan (15 s),
+ * the run page's park and action checks (15 s), and the console's `cachedFor` and `cachedPerWindow` (30 s: the Insights
+ * assembly, the updates page's run history, a trigger's run history and the hosts' doctor runs) each kept such an
+ * answer for their whole window, so a page went on saying a read failed for up to 30 seconds after Valkey answered.
+ * Not dropped at once: an outage would then run each of those reads once per refresh for as long as it lasts, the
+ * load the windows exist to spare. With the floor, a read that fails is made at most once per floor, and a page reads
+ * whole again within about 5 seconds of the read answering. The waiting read keeps both answers `WAITING_TTL_MS`,
+ * which is this floor already. One named exception keeps longer: a keyspace scan that read nothing while the registry
+ * answered keeps `WAITING_DISCOVERY_TTL_MS`, since asking again does not end a keyspace too big for the bound or a SCAN
+ * Valkey refuses.
+ */
+export const FAILED_READ_KEEP_MS = 5_000;
 
 /**
  * A registry row as the snapshot carries it (issue #596 phase 3, issue #599 phase 3): the budget pair and what its jobs
@@ -5578,7 +5604,11 @@ export function createFleetReader(
   // instant the cache runs out, and each would otherwise make its own mirror read of WIDE_RUNS runs. Cleared when it
   // settles, so a read that failed is retried by the next caller, never handed out again.
   let wideRead = null;
-  // The last pending-answer scan for the parked rows (issue #647), `{ at, key, got }`, reused for DOLLAR_RECORDS_TTL_MS.
+  // Until when the wide window is kept (issue #1073): DOLLAR_RECORDS_TTL_MS from the read's start for a window both
+  // sides answered, and FAILED_READ_KEEP_MS from its answer for one that is `partial` (a side not read), never longer.
+  let wideUntil = 0;
+  // The last pending-answer scan for the parked rows (issue #647), `{ at, key, got, until }`, reused for
+  // DOLLAR_RECORDS_TTL_MS, and an unreachable one for FAILED_READ_KEEP_MS (issue #1073).
   let parkedPending = null;
   // The wide window from this host's records (`local`, the index's answer) and the mirror's (`readMirroredRuns`').
   const wideOf = (at, local, { runs: fromMirror, degraded }) => {
@@ -5594,11 +5624,13 @@ export function createFleetReader(
   };
   const wideRuns = async () => {
     const at = nowFn();
-    if (wide && at >= wide.at && at - wide.at < DOLLAR_RECORDS_TTL_MS) return wide;
+    if (wide && at >= wide.at && at < wideUntil) return wide;
     if (wideRead !== null) return wideRead;
     const read = (async () => {
       const local = localIndex.records();
-      wide = wideOf(at, local, await readMirroredRuns(redis, { limit: WIDE_RUNS, prune: false, timeoutMs: FLEET_READ_TIMEOUT_MS }));
+      const got = wideOf(at, local, await readMirroredRuns(redis, { limit: WIDE_RUNS, prune: false, timeoutMs: FLEET_READ_TIMEOUT_MS }));
+      wideUntil = got.partial === null ? at + DOLLAR_RECORDS_TTL_MS : Math.min(at + DOLLAR_RECORDS_TTL_MS, nowFn() + FAILED_READ_KEEP_MS);
+      wide = got;
       return wide;
     })();
     // Cleared in the first reaction to the read, on either outcome, before any waiting caller resumes. What the callers
@@ -5618,13 +5650,14 @@ export function createFleetReader(
 
   // The published doctor results (issue #712, `INT-DOCTOR-RESULTS-KEY`), `{ at, got }`, read at most once per
   // DOLLAR_RECORDS_TTL_MS: a host publishes once a day, so a per-second MGET would be load for nothing. Read for the
-  // index's hosts and the live ones, pruning only where this reader may write.
+  // index's hosts and the live ones, pruning only where this reader may write. One that could not be read is kept for
+  // FAILED_READ_KEEP_MS from its answer (issue #1073), never the whole window.
   let doctorRead = null;
   const doctorResults = async () => {
     const at = nowFn();
-    if (doctorRead && at >= doctorRead.at && at - doctorRead.at < DOLLAR_RECORDS_TTL_MS) return doctorRead.got;
+    if (doctorRead && at >= doctorRead.at && at < doctorRead.until) return doctorRead.got;
     const got = await readDoctorResultsFn(redis, { names: lastHosts.map((h) => h?.name).filter((n) => typeof n === "string"), prune, now: nowFn, timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((err) => ({ unreachable: err?.message ?? String(err) }));
-    doctorRead = { at, got };
+    doctorRead = { at, got, until: got?.unreachable ? Math.min(at + DOLLAR_RECORDS_TTL_MS, nowFn() + FAILED_READ_KEEP_MS) : at + DOLLAR_RECORDS_TTL_MS };
     return got;
   };
 
@@ -5810,6 +5843,12 @@ export function createFleetReader(
   // `queuesShort: true` beside the read (issue #963) when the queues it read may not be every queue that exists: the
   // registry was not read this call (`fleetDegraded`) or the keyspace discovery behind the set was not whole. Judged per
   // call over a copy, never on the kept read, since two calls inside one window can see the registry differently.
+  // `registryUnread` is the caller's own registry read (issue #1073 names the two): `waiting()` hands its `fleetRead`
+  // view's word and the snapshot its `registry`'s, each taken from the read that named `queues`. The default, the
+  // reader's variable, is there for a caller that passes none, and no caller does: the variable is the last registry
+  // read of ANY call, so a snapshot that waited on its run history while another call read the registry would be
+  // judged by that other read. The kill switch's `blind` (`poolSet`) is taken from its own discovery for the same
+  // reason, and reads the variable only where that discovery read nothing itself.
   let waitingCache = null;
   const waitingOf = async (queues, projects, triggers, fresh = false, registryUnread = fleetDegraded !== null) => {
     const registry = [...new Set(queues.map((q) => q?.name).filter((n) => typeof n === "string"))];
@@ -6109,9 +6148,9 @@ export function createFleetReader(
       // read as the job's id, false (the scan saw everything and found none), or null (unknown: partial or unreadable).
       if (fold.parked.length > 0) {
         const parkKey = fold.parked.map((p) => `${p.kind}\u0000${p.target}\u0000${p.jobId}`).join("\n");
-        if (!parkedPending || parkedPending.key !== parkKey || nowMs < parkedPending.at || nowMs - parkedPending.at >= DOLLAR_RECORDS_TTL_MS) {
+        if (!parkedPending || parkedPending.key !== parkKey || nowMs < parkedPending.at || nowMs >= parkedPending.until) {
           const got = await readPendingOnTargets({ queues, targets: fold.parked.map((p) => ({ kind: p.kind, target: p.target, runId: typeof p.jobId === "string" ? p.jobId : null })), timeoutMs: FLEET_READ_TIMEOUT_MS });
-          parkedPending = { at: nowMs, key: parkKey, got };
+          parkedPending = { at: nowMs, key: parkKey, got, until: got?.unreachable ? Math.min(nowMs + DOLLAR_RECORDS_TTL_MS, nowFn() + FAILED_READ_KEEP_MS) : nowMs + DOLLAR_RECORDS_TTL_MS };
         }
         const got = parkedPending.got;
         for (const p of fold.parked) {
@@ -7141,7 +7180,10 @@ export const WAITING_DISCOVERY_TTL_MS = 60_000;
  */
 export const LOOKUP_TOLD_MAX = 256;
 
-/** How long the fleet reader keeps one `readWaiting` for the same queues (`createFleetReader`'s `waiting`). */
+/**
+ * How long the fleet reader keeps one `readWaiting` for the same queues (`createFleetReader`'s `waiting`), whatever it
+ * answered: already the floor a failed read is kept for (`FAILED_READ_KEEP_MS`, issue #1073), so it is not shortened.
+ */
 export const WAITING_TTL_MS = 5_000;
 
 /** The BullMQ states of a job that has not started: the four lists `readWaiting` reads, in its order. */

@@ -943,6 +943,46 @@ test("snapshot({ waiting: true }): a queue no registry row names is read too, by
   assert.equal(scans.length, 4);
 });
 
+test("snapshot({ waiting: true }): queuesShort is judged on THIS snapshot's own registry read, never on what another call read while it waited (#1073)", async () => {
+  // Issue #1073 names it: two calls of one reader each read the registry, and the reader keeps the last read's word in
+  // a variable. A snapshot waits on its run history between its registry read and its waiting read, so a call beside
+  // it can read the registry in that wait. Its `queuesShort` is its own read's, either way round. `waiting()` hands its
+  // own read's word the same way, with no wait between the two reads in which another call could read the registry, so
+  // the snapshot is the case a test can race.
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  for (const [mine, beside] of [[{ unreachable: "timed out reaching the host registry" }, { hosts: [] }], [{ hosts: [] }, { unreachable: "timed out reaching the host registry" }]]) {
+    const logsDir = tempDir("pd-1073-own-view-");
+    const v = fakeValkey();
+    addJob(v, "pi-jobs", "gh-1", { state: "waiting" });
+    const redis = snapshotValkey(v);
+    // The first snapshot's run history waits on a gate: the mirror's first read.
+    let open;
+    const gate = new Promise((resolve) => { open = resolve; });
+    let mirrorReads = 0;
+    redis.zrevrangebyscore = async () => ((mirrorReads += 1) === 1 ? gate.then(() => []) : []);
+    const answers = [mine, beside];
+    const reader = createFleetReader(
+      { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 },
+      { makeQueueFn: quietQueue, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => answers.shift() ?? { hosts: [] }, discoverHostQueuesFn: async () => ["pi-jobs"], nowFn: () => AT },
+    );
+    try {
+      const first = reader.snapshot(ASK);
+      while (answers.length > 1) await tick();
+      await tick();
+      // Beside it, a whole snapshot: its registry read is the reader's last word by the time the first one goes on.
+      const second = await reader.snapshot(ASK);
+      open();
+      const own = await first;
+      const what = `own ${JSON.stringify(mine)}, beside ${JSON.stringify(beside)}`;
+      assert.deepEqual([Boolean(own.queue.fleetDegraded), own.waiting.queuesShort === true], [Boolean(mine.unreachable), Boolean(mine.unreachable)], `${what}: the first call's own read`);
+      assert.deepEqual([Boolean(second.queue.fleetDegraded), second.waiting.queuesShort === true], [Boolean(beside.unreachable), Boolean(beside.unreachable)], `${what}: the call beside it`);
+      assert.deepEqual(own.waiting.rows.map((r) => r.jobId), ["gh-1"], "the one kept read, judged per call");
+    } finally {
+      await reader.dispose();
+    }
+  }
+});
+
 test("snapshot({ waiting: true }): a look for queues made while Valkey did not answer is made again a window later, so the floor ends with the outage", async () => {
   // Issue #986, on the real scan (`discoverHostQueuesReporting`, which answers `{ names: [], incomplete }` for a scan
   // that got no answer and never throws for it) and a registry read that got no answer either: the pages said that not

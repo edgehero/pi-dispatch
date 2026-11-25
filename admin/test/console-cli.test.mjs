@@ -11,7 +11,7 @@ import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
 import * as realPages from "../src/console/pages.mjs";
 import * as server from "../src/console/server.mjs";
 import * as sandboxData from "../src/sandbox-data.mjs";
-import { readTriggerEditor, configLocationsOf, deploymentOwnQueue, panelEnv, PANEL_SERVICE_KEYS } from "../src/read-model.mjs";
+import { readTriggerEditor, configLocationsOf, deploymentOwnQueue, FAILED_READ_KEEP_MS, panelEnv, PANEL_SERVICE_KEYS } from "../src/read-model.mjs";
 import * as realWhatif from "../src/console/whatif.mjs";
 import { RESTART_CLEARED, RESTART_RECHECK_MS, RESTART_TITLE } from "../src/console/restart-notice.mjs";
 import { makeRedisClient, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
@@ -113,6 +113,7 @@ function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".
     },
     confirm: { makeConfirmTickets: () => ({ issue: () => ({ ticket: "t", expiresAt: T0 + 300_000 }), redeem: () => ({ refusal: "no" }) }) },
     readModel: {
+      FAILED_READ_KEEP_MS,
       configLocationsOf,
       readTriggerEditor,
       writePauseWindows: () => ({ ok: true }),
@@ -1267,6 +1268,119 @@ test("cachedPerWindow: one call per window within the TTL on the injected clock,
   assert.deepEqual(optsSeen, [undefined], "one names-only assembly, asked for no host path");
   await names("7d", { fullPaths: true });
   assert.deepEqual(optsSeen, [undefined, { fullPaths: true }]);
+});
+
+test("cachedFor and cachedPerWindow keep an answer that says a read failed for the short floor from when it came, never a good answer's window, and refuse a floor with no length (#1073)", async () => {
+  assert.equal(FAILED_READ_KEEP_MS, 5_000);
+  let t = T0;
+  let answer = { unreachable: true };
+  let calls = 0;
+  let gate = null;
+  const read = async () => {
+    calls += 1;
+    if (gate) await gate;
+    return answer;
+  };
+  const failed = (got) => got?.unreachable === true;
+  const once = cachedFor(read, { now: () => t, ttlMs: INSIGHTS_CACHE_MS, failed, failedMs: FAILED_READ_KEEP_MS });
+  // A failed answer: kept for the floor, then read again.
+  assert.deepEqual(await once(), { unreachable: true });
+  t += FAILED_READ_KEEP_MS - 1;
+  await once();
+  assert.equal(calls, 1, "inside the floor the failure is reused, so an outage reads once per floor");
+  t += 1;
+  answer = { hosts: [] };
+  assert.deepEqual(await once(), { hosts: [] }, "past it, read again, and whole");
+  assert.equal(calls, 2);
+  // A good answer: its whole window, as before.
+  t += INSIGHTS_CACHE_MS - 1;
+  await once();
+  assert.equal(calls, 2, "a good answer is kept its window");
+  // The floor is counted from when the failed answer came: a read that took 3 s is kept 5 s past its answer.
+  t += 1;
+  answer = { unreachable: true };
+  let open;
+  gate = new Promise((resolve) => { open = resolve; });
+  const slow = once();
+  t += 3_000;
+  open();
+  gate = null;
+  await slow;
+  assert.equal(calls, 3);
+  t += FAILED_READ_KEEP_MS - 1;
+  await once();
+  assert.equal(calls, 3, "kept for the floor from the answer, not from the start");
+  t += 1;
+  await once();
+  assert.equal(calls, 4);
+  // Never longer than a good answer's window, and a `failed` that throws counts the answer as failed.
+  let short = 0;
+  const brief = cachedFor(async () => (short += 1, {}), { now: () => t, ttlMs: 1_000, failed: () => { throw new Error("no"); }, failedMs: FAILED_READ_KEEP_MS });
+  await brief();
+  t += 999;
+  await brief();
+  t += 1;
+  await brief();
+  assert.equal(short, 2, "the window's 1 s, not the floor's 5");
+  // Per window too, each key on its own.
+  const seen = [];
+  const perWindow = cachedPerWindow(async (w) => (seen.push(w), { partsUnread: w === "7d" }), { now: () => t, failed: (got) => got?.partsUnread === true, failedMs: FAILED_READ_KEEP_MS });
+  await perWindow("7d");
+  await perWindow("30d");
+  t += FAILED_READ_KEEP_MS;
+  await perWindow("7d");
+  await perWindow("30d");
+  assert.deepEqual(seen, ["7d", "30d", "7d"], "the view with a part not read is read again past the floor; the whole one is kept");
+  // A cache told how to see a failure and not how long to keep one is refused at once.
+  assert.throws(() => cachedFor(read, { now: () => t, ttlMs: 1_000, failed }), /failedMs/);
+  assert.throws(() => cachedPerWindow(read, { now: () => t, failed }), /failedMs/);
+});
+
+test("the console's four cached reads keep a failed answer for the short floor and a good one for their window: a trigger's history, the fleet's run records, the hosts' doctor runs and an Insights view (#1073)", async () => {
+  const dep = deployment();
+  const modules = fakeModules();
+  let t = T0;
+  const asked = { scan: 0, fleet: 0, loads: 0, insights: 0 };
+  const answers = { scan: { unreachable: "EACCES" }, fleet: { records: [], partial: true, unread: true }, loads: { unreachable: true, hosts: [], more: 0 }, insights: { partsUnread: true } };
+  modules.readModel.scanRunRecords = () => (asked.scan += 1, answers.scan);
+  modules.readModel.scanFleetRunRecords = async () => (asked.fleet += 1, answers.fleet);
+  modules.hostLoadsView = { readHostLoadsView: async () => (asked.loads += 1, answers.loads) };
+  modules.insights = { ...modules.insights, assembleInsightsView: async () => (asked.insights += 1, answers.insights) };
+  modules.scheduleZones = { readTriggerScheduleZones: async () => ({}) };
+  modules.triggerList = { triggerListOf: (args) => args };
+  modules.updatesView = { readDeploymentUpdates: async () => ({}) };
+  let captured;
+  modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+  let stop;
+  const until = new Promise((resolve) => { stop = resolve; });
+  assert.equal(await runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => t, uid: process.geteuid?.(), out: () => {}, err: () => {}, until, onListening: () => stop() }), 0);
+  const deps = captured.pageDeps;
+  const readAll = async () => {
+    await deps.triggerList({ triggers: { triggers: [] }, schedulersUnread: true });
+    await deps.updates();
+    await deps.hostLoads();
+    await deps.insights("7d", { view: "spend" });
+  };
+  await readAll();
+  assert.deepEqual(asked, { scan: 1, fleet: 1, loads: 1, insights: 1 });
+  t += FAILED_READ_KEEP_MS - 1;
+  await readAll();
+  assert.deepEqual(asked, { scan: 1, fleet: 1, loads: 1, insights: 1 }, "a failed answer is reused inside the floor");
+  // Valkey answers again, and the files can be read: past the floor each is read again, and is whole.
+  Object.assign(answers, { scan: [], fleet: { records: [], partial: false }, loads: { hosts: [], more: 0 }, insights: {} });
+  t += 1;
+  await readAll();
+  assert.deepEqual(asked, { scan: 2, fleet: 2, loads: 2, insights: 2 }, "read again once the floor passed");
+  t += INSIGHTS_CACHE_MS - 1;
+  await readAll();
+  assert.deepEqual(asked, { scan: 2, fleet: 2, loads: 2, insights: 2 }, "a good answer keeps its window");
+  // A mirror cut at its bound is partial and no failure: it keeps the window too.
+  t += 1;
+  answers.fleet = { records: [], partial: true };
+  await readAll();
+  t += FAILED_READ_KEEP_MS;
+  await readAll();
+  assert.equal(asked.fleet, 3, "a cut read is not read again before its window ends");
 });
 
 test("readSideOf: the deployment .env fills the read side's keys, relative paths are the deployment folder's, PI_SESSIONS_DIR turns on sessionsDir", async () => {
