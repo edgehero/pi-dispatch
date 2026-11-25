@@ -11,7 +11,7 @@ import * as sessionsModule from "../src/console/sessions.mjs";
 import { agentReadProjection } from "../src/agent-read.mjs";
 import { recordedLoaded } from "../../worker/src/loaded-record.mjs";
 import { NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE } from "../src/newer-release.mjs";
-import { FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, PENDING_STATES, readJobStatus, readPendingAnswer, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUN_PLACES, RUN_RECORD_UNREAD, runAbsent, runPlaces, targetKeyOf } from "../src/read-model.mjs";
+import { FAILED_READ_KEEP_MS, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, PENDING_STATES, readJobStatus, readPendingAnswer, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUN_PLACES, RUN_RECORD_UNREAD, runAbsent, runPlaces, targetKeyOf } from "../src/read-model.mjs";
 
 // `GET /api/run` (issue #647): the run lookup the terminal chat asks which mode to open. `forgeTargetOf` held to
 // `forgeLinkOf` by a round trip per forge, the query rules, `readJobStatus` on fake queues, and the route over a real
@@ -738,7 +738,7 @@ test("chatFactsOf: the run page loop reuses a parked record's newer-run search f
   assert.equal(fleet.calls.runsPage.length, 4, "/api/run's search is never cached");
 });
 
-test("chatFactsOf and parkedAnswerCheckOf: the run page loop reuses a park's pending scan and planner check for PARK_CHECK_CACHE_MS per run id, an unreadable one as long as a good one, and reads again on a new record", async () => {
+test("chatFactsOf and parkedAnswerCheckOf: the run page loop reuses a park's pending scan and planner check for PARK_CHECK_CACHE_MS per run id, an unreadable one and a refusal for the short floor alone, and reads again on a new record", async () => {
   const parked = record("gh-park2", { reason: "awaiting-input", target: "acme/web#21" });
   let pending = { jobId: null };
   const fleet = fakeFleet({ records: { "gh-park2": parked }, jobs: { "gh-park2": { found: true, state: "completed", continuesAs: null } }, pending: () => pending });
@@ -766,27 +766,41 @@ test("chatFactsOf and parkedAnswerCheckOf: the run page loop reuses a park's pen
   await tick({ ...parked, endedAt: iso(T0 - 1000) });
   assert.equal(fleet.calls.pending.length, 3, "a different record reads afresh");
   assert.equal(checks, 3);
-  // An unreadable scan or check is kept for the window as a good one is (issue #737): a Valkey that is failing is asked
-  // once per window, never once per tick; the window after it reads again.
+  // An unreadable scan or check is kept for the short floor from when it came (issue #1073), never the window: a Valkey
+  // that is failing is asked once per floor and never once per tick (issue #737), and the page reads whole again within
+  // the floor of Valkey answering, where it said the check could not be read for the rest of the window.
+  assert.ok(FAILED_READ_KEEP_MS < PARK_CHECK_CACHE_MS && FAILED_READ_KEEP_MS > 2_000, "a floor longer than a tick and shorter than the window");
   t += PARK_CHECK_CACHE_MS;
   pending = { unreachable: true };
   check = { unreachable: true };
   const unread = await tick();
   assert.deepEqual(unread.check, { unreachable: true });
   t += 2_000;
-  assert.deepEqual((await tick()).check, { unreachable: true }, "the same unreadable answer, reused");
+  assert.deepEqual((await tick()).check, { unreachable: true }, "the same unreadable answer, reused inside the floor");
   assert.equal(fleet.calls.pending.length, 4);
   assert.equal(checks, 4);
   pending = { jobId: null };
   check = { ok: true };
-  t += PARK_CHECK_CACHE_MS;
-  assert.deepEqual((await tick()).check, { ok: true }, "read again once its window passed");
+  t += FAILED_READ_KEEP_MS - 2_000;
+  assert.deepEqual((await tick()).check, { ok: true }, "read again once the floor passed, inside the window");
   assert.equal(fleet.calls.pending.length, 5);
   assert.equal(checks, 5);
+  // A planner's refusal is kept for the floor too (issue #1073): "the triggers file does not load" is an operator's to
+  // fix, and the fix was said under a Live pill only when the window ended.
+  t += PARK_CHECK_CACHE_MS;
+  check = { refusal: "the triggers file does not load" };
+  assert.deepEqual((await tick()).check, { refusal: "the triggers file does not load" });
+  check = { ok: true };
+  t += FAILED_READ_KEEP_MS - 1;
+  assert.deepEqual((await tick()).check, { refusal: "the triggers file does not load" }, "kept inside the floor");
+  t += 1;
+  assert.deepEqual((await tick()).check, { ok: true }, "the fix, read once the floor passed");
+  assert.equal(checks, 7);
+  assert.equal(fleet.calls.pending.length, 6, "the scan that answered is kept for its window meanwhile");
   // `/api/run` scans afresh every time.
   await chatFactsOf(fleet, "gh-park2", parked, { now });
   await chatFactsOf(fleet, "gh-park2", parked, { now });
-  assert.equal(fleet.calls.pending.length, 7);
+  assert.equal(fleet.calls.pending.length, 8);
 });
 
 test("the run page's loader reads a park's planner check through the cache: five 2 s refreshes read it once (review round 2)", async () => {
