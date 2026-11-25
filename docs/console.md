@@ -1481,6 +1481,10 @@ retry attempts cannot be reconstructed. A run spanning a range boundary is inclu
 The console reads its files, live workers' files over the existing Valkey connection, then mirror records for hosts
 not read directly. No paid job starts. Upgrade the workers as well as the console to read beyond the mirror on other
 hosts. Old or offline workers may hold inaccessible records, and the mirror cannot establish their oldest history.
+A worker that could not subscribe to its history channel when it started tries again, 5 seconds later and then
+less often, up to once a minute, for as long as it runs, so it answers again within about a minute of Valkey answering it.
+Its log says `history_reader_unavailable` once at the first failure and `history_reader_recovered` once when it
+subscribes, with how many attempts failed and the seconds that passed.
 
 Loading, empty ranges, incomplete reads, unavailable hosts and retryable errors are distinct states. A finished scan
 says which sources were read; it never claims to have proved the beginning of an offline host's history. A historical
@@ -2020,7 +2024,9 @@ job's forge comment works whichever host's console it names. The card then names
 file's address carries `&host=<host>`. A file from another host is sent a piece at a time and checked against the
 size and digest in that host's manifest: a file that does not match never arrives whole, and the browser reports a
 failed download. Nothing is copied to the console's disk. A host is asked only while it runs (its row in the fleet's
-registry), and only once it runs a release with the channel. One console fetches at most four files from other hosts
+registry), and only once it runs a release with the channel. A host that could not subscribe to the channel when it
+started tries again, as for history, and answers within about a minute of Valkey answering it; its log says
+`artifacts_channel_unavailable` once and `artifacts_channel_recovered` once. One console fetches at most four files from other hosts
 at once; a further request (a page's fifth picture, say) waits up to 15 seconds for one of them to finish, and is then
 answered with a sentence asking to try again shortly. The card is asked for when the page is drawn, not on each live
 update, so an open page costs the other host one request; reload the page to ask again.

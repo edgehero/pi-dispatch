@@ -16138,7 +16138,16 @@ Metadata pages contain only ids, project, host, target, outcome/reason tokens, a
 the by-id response is the existing JSON record, judged by the normal detail reader and role projection. Raw logs,
 transcripts and filesystem paths never enter the transport. No incoming query selects a path or network address.
 A worker closes the subscription and its cursors on shutdown. A failed subscription is logged with a fixed event and
-never stops paid-job boot. Earlier workers do not subscribe and are explicitly unavailable to an archive read.
+never stops paid-job boot. **AMENDED 2026-11-25 (#1096):** nor is it final. The worker subscribes again, each attempt with
+a reader of its own, waiting 5 s after the first failed attempt, then 10, 20 and 40 s, then 60 s after each one (an
+attempt that fails takes up to its 5 s bound, so about one a minute) for as long as it runs, never awaited by boot or
+any job (`keepServing`, `worker/src/keep-serving.mjs`). It logs `history_reader_unavailable` (no fields) once, at the
+first failure, and `history_reader_recovered` once, when an attempt after a failure holds, with `failedAttempts` and
+`waitedSeconds` (the seconds since the first failure), counts only: no error text, which could carry the Valkey URL and
+its password, and no line per attempt. Shutdown ends a pending wait at once and closes a subscription that held, once;
+an attempt still pending then is closed when it settles. Only the first subscription needs this: ioredis subscribes again
+after a reconnect to a channel it once held. Before, a subscription that failed at boot was never tried again, and the
+worker answered no history read until it restarted. Earlier workers do not subscribe and are explicitly unavailable to an archive read.
 
 Sources are the console's files, each live worker's files, and mirror records for hosts not read directly. A source
 failure leaves partial coverage while other sources remain browsable. Offline or no-longer-registered hosts may hold
@@ -16155,7 +16164,13 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 - **Producer**: the worker (`serveArtifacts`, `worker/src/artifacts-channel.mjs`), started by `start.mjs` beside the
   history service, on the channel of its name (`PI_WORKER_NAME`, else the name the worker gives itself) and reading
   `PI_ARTIFACTS_DIR`. Boot never waits for it: a subscription that fails or takes over five seconds logs
-  `artifacts_channel_unavailable` with no fields and the worker runs on. Shutdown closes it. **Consumer**: the console
+  `artifacts_channel_unavailable` with no fields and the worker runs on. **AMENDED 2026-11-25 (#1096):** and tries again,
+  as the history channel does (`INT-HISTORY-READ-TRANSPORT`, `keepServing`): after 5 s, then 10, 20 and 40 s, then every
+  60 s for as long as it runs, never awaited by boot or a job, with its own retries, so neither channel's failure holds
+  the other's back. The unavailable line is said once, at the first failure, and `artifacts_channel_recovered` once, when
+  an attempt after a failure holds, with `failedAttempts` and `waitedSeconds`, counts only. Before, a subscription that
+  failed at boot was never tried again, and the host answered no artifacts request until it restarted. Shutdown ends a
+  pending wait and closes a subscription that held, once. **Consumer**: the console
   (`readHostArtifactsManifest`, `openHostArtifactTransfer`, exported as `@edgehero/pi-dispatch/artifacts-channel`), for
   the run page's artifacts card and its file route (`admin/src/read-model.mjs`, `admin/src/console/artifact-api.mjs`).
 - **Transport**: pub/sub on the deployment's existing authenticated Valkey connection: no key, nothing retained, no job
@@ -16209,7 +16224,9 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
   `buildContainerEnvAndSource` writes, and `VALKEY_PASSWORD` is refused in `PI_FORWARD_ENV` and in a job's secrets
   (`WORKER_ONLY_SECRET_VARS`, `RESERVED_ENV_NAMES`).
 - **Mixed versions**: an earlier worker does not subscribe, so a reader's wait ends as `host-unavailable`; an earlier
-  console never asks. Neither side writes a store, a record or a key, so no migration is involved.
+  console never asks. A worker of #942's release whose subscription failed at boot also reads as `host-unavailable`
+  until it restarts; one from #1096 on answers again within about a minute of Valkey answering it. Neither side writes
+  a store, a record or a key, so no migration is involved.
 - **Acceptance**: `worker/test/artifacts-channel.test.mjs` (every bound pinned by its number; the round trip on a store
   the real collector wrote, larger than two chunks and empty; offsets; names; the request's shape; a link at the run's
   folder, `files/`, the manifest and the file; digest, size and kind drift; another job's manifest; the fifth request;
@@ -16223,6 +16240,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-25 (#1096) | **`INT-HISTORY-READ-TRANSPORT` AMENDED**: a history subscription that fails at boot is retried for as long as the worker runs, after 5 s doubling to a 60 s cap, each attempt with a reader of its own, never awaited by boot or a job; `history_reader_unavailable` once at the first failure and NEW `history_reader_recovered` once at the recovery, with `failedAttempts` and `waitedSeconds` and no error text; shutdown ends a pending wait and closes a held subscription once. **`INT-ARTIFACTS-CHANNEL` AMENDED**, the producer's boot sentence and the mixed-versions paragraph: the artifacts subscription is retried the same way, with its own retries, `artifacts_channel_unavailable` once and NEW `artifacts_channel_recovered` once, and a worker of #942's release whose subscription failed at boot named as unavailable until it restarts. UNCHANGED, checked: the request and reply channels, their bounds and the wire format of both, and `INT-RUN-HISTORY-FILE-CONTRACT` (no file shape moves). **Code evidence**: worker/src/keep-serving.mjs -> keepServing, keepServingWaitMs; worker/src/start.mjs -> startWorker; worker/src/history-reader.mjs -> serveHistory; worker/src/artifacts-channel.mjs -> serveArtifacts. |
 | 2026-11-25 (#946) | **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: NEW capability token and last `CAPABILITY_GATES` row `subscriptionRoles` (`job-image-subscription-roles-unsupported`, pre-spend), needed by a job with a role map that holds a subscription, proved offline by the baked `run-job.mjs` on an OpenAI subscription with a role map and by the baked modules on a sealed stand-in Anthropic adapter; the `subscriptionAllowance` row is no longer the last and says it follows every older row. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum gains `job-image-subscription-roles-unsupported`, and the role refusal reasons gain `subscription-child-unsupported`, a child on a subscription the runner could not run inside itself, refused before it started. **`INT-AUTH-CONNECTIONS-FILE-CONTRACT` AMENDED**: the job's role child on a subscription is a session sharing the admitted runtime, a staged package's own pi child still refuses, and "in the initial release" is gone; the file's shape is unchanged. **`INT-REASON-CATALOG` UNCHANGED, checked**: its contract covers every enum token, and the new row is the image refusal's sentence. **Code evidence**: worker/src/image-preflight.mjs -> CAPABILITY_GATES; worker/src/run-history.mjs -> MODEL_ROLE_REFUSAL_REASONS; worker/src/reason-catalog.mjs; image/runner/src/model-roles.mjs -> createRoleSubagents; image/runner/src/role-child-session.mjs -> createRoleChildSessions; image/Dockerfile; image/verify-image.sh. |
 | 2026-11-25 (#1094, pi 1.6.1, part 3) | **`INT-QUESTION-GROUPS` AMENDED**, the free gate: the classifier's api must be one the runner's bound prices, so `pi-decision` or an overlay's own classifier api is refused at pickup as `question-group-refused` before any reservation, and a builtin classifier is resolved by its type, so `openai/gpt-6-luna` (a chat model and a decision model under one id) resolves to the decision model where the first match, the chat model, was refused. |
 | 2026-11-25 (#1094, pi 1.6.1) | **`INT-WATCH-TRACE-STREAM` AMENDED**: a watch decision's classify call adds the provider's own `responseId` to the operator projection, shape-checked by the runner and again by the worker and never in the public projection or model-facing reads, and a public `billed` yes when pi reports the cost as billed by the provider (`usage.cost.totalFromProvider`). Both are optional and read from the runner's output alone; an older image's output imports as before, an older worker drops them, and the durable finding record is unchanged. Answer drafts and question grouping carry no `responseId`: their worker readers take exact keys, and the image is upgraded before the worker, so a new key there would make an older worker refuse every draft. |
