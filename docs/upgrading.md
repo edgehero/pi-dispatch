@@ -551,6 +551,16 @@ queue keys and the accounting keys are unchanged; no migration, backup path or o
 console keeps settling on a view. After upgrading, open the Zero touch page once as an operator and settle anything it
 says is waiting. See [Zero touch](zero-touch.md).
 
+### Unreleased: the Zero touch fix history keeps its retention (#1072)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Valkey `zero-touch:fixes:meta:<id>` | A settle, a refusal and an Undo now keep the expiry the record was given when its change was staged, where each gave it a new retention. Records written before keep the expiry they have. Nothing moves, and no older-state detector applies. |
+| Valkey `zero-touch:fixes:index` | Each new fix now also removes the entries older than the retention. The page no longer reads an entry past the retention, so a fix whose record expired is no longer counted as missing and the page stops saying "Fix history is incomplete" for it. Nothing moves: the entries already there are trimmed with the next fix. |
+| Mixed versions | An older console reads the whole index, so it says the history is incomplete whenever a fix's record has expired and no newer console has recorded a fix since. A settle or an Undo on an older console still gives the record a new retention; a newer console leaves such a fix out once its change is older than the retention. Upgrade every console. |
+
+See [Zero touch](zero-touch.md).
+
 ### Unreleased: warnings before the turn and time limits (#1055)
 
 A job is now told once, at 70% of its turn limit (`run.maxTurns`) and at 70% of its time limit (`run.maxMinutes`,

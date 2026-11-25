@@ -7,11 +7,30 @@ const idOf = value => createHash("sha256").update(JSON.stringify(value)).digest(
 export function validFix(value) {
 	return value && Object.keys(value).every(key => ["id", "kind", "at", "runId", "scopeId", "project", "groupId", "reason", "triggerIndex", "undoneAt", "state"].includes(key)) && /^[a-f0-9]{32}$/.test(value.id) && FIX_KINDS.includes(value.kind) && (value.state === undefined || ["pending", "applied", "refused"].includes(value.state)) && Number.isSafeInteger(value.at) && value.at >= 0 && QUESTION_RUN_RE.test(value.runId) && QUESTION_SCOPE_RE.test(value.scopeId) && (value.project === null || typeof value.project === "string" && /^[a-z][a-z0-9_-]{0,63}$/.test(value.project)) && ((GROUP_ID_RE.test(value.groupId ?? "") && value.reason === null) || (value.groupId === null && Object.hasOwn(REASONS, value.reason))) && (value.triggerIndex === null || Number.isSafeInteger(value.triggerIndex) && value.triggerIndex >= 0) && (value.undoneAt === undefined || Number.isSafeInteger(value.undoneAt) && value.undoneAt >= value.at);
 }
+/**
+ * How far apart the clocks of the hosts that stage and read the fix history may be (issue #1072). A reader reads an
+ * index entry only while its time is newer than the retention less this margin, so a record that expired with the
+ * retention is not read as a missing row on a host whose clock runs up to an hour ahead of the one that staged it. The
+ * cost is the other way round and harmless: a fix leaves the history up to an hour before its record does.
+ */
+export const FIX_CLOCK_SKEW_MS = 3_600_000;
+
 /** Safe fix telemetry is public; the exact human instruction used for Undo is private. */
 export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 30, prefix = "zero-touch:fixes:" } = {}) {
 	const bounded = promise => { let timer; return Promise.race([Promise.resolve(promise), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("fix-store-timeout")), 2000); })]).finally(() => clearTimeout(timer)); };
 	const command = (method, ...args) => bounded(redis[method](...args));
 	const ttl = Math.min(Number(retentionDays) > 0 ? Number(retentionDays) : 365, 365) * DAY;
+	// The oldest entry a reader reads (issue #1072). A fix's record expires with the retention counted from its stage
+	// (a mark keeps that expiry, below), and its index entry's score is the stage's time, so an entry older than this is
+	// one whose record has expired or is about to: it is left out, never counted as a missing row. Before, the readers
+	// read the whole index, and every newer fix renewed the index's expiry, so from the day the first record expired
+	// the page said "Fix history is incomplete" for as long as fixes kept being made. A record that exists and does not
+	// read is still a missing row: only age is forgiven.
+	const oldestRead = () => now() - ttl + FIX_CLOCK_SKEW_MS;
+	// A mark (commit, reject, Undo) rewrites a record in place: KEEPTTL keeps the expiry its stage gave it, where `PX ttl`
+	// gave the record a new retention its index entry did not have, and XX writes nothing once the record has expired,
+	// where a SET recreated it. Answers whether it wrote. The read before it is not atomic with it, as before.
+	const mark = async (id, fix) => await command("set", `${prefix}meta:${id}`, JSON.stringify(fix), "KEEPTTL", "XX") === "OK";
 	return {
 		async add(value, { privateUndo = null, identity = null, pending = false } = {}) {
 			const fix = { id: idOf(identity ?? value), kind: value.kind, at: value.at ?? now(), runId: value.runId, scopeId: value.scopeId, project: value.project ?? null, groupId: value.groupId ?? null, reason: value.reason ?? null, triggerIndex: value.triggerIndex ?? null, state: pending ? "pending" : "applied" };
@@ -19,7 +38,14 @@ export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 3
 			const tx = redis.multi();
 			tx.set(`${prefix}meta:${fix.id}`, JSON.stringify(fix), "PX", ttl, "NX");
 			if (privateUndo) tx.set(`${prefix}private:${fix.id}`, JSON.stringify(privateUndo), "PX", ttl, "NX");
-			tx.zadd(`${prefix}index`, fix.at, fix.id); tx.zremrangebyrank(`${prefix}index`, 0, -5001); tx.pexpire(`${prefix}index`, ttl);
+			// The entries whose records expired with the retention go in the same transaction (issue #1072): the readers skip
+			// them by their score already, and a console from before that skip counts them as missing rows until they go.
+			// The entry is added NX, after that trim. A second stage of the same id finds its record there and keeps it (the
+			// SET is NX too), with the expiry counted from the first stage; a ZADD that moved the score forward made the
+			// entry outlive that record inside the read window, a missing row again. The trim comes first so that an old
+			// entry of an id whose record expired is gone before the NX: left, it would keep the new record's entry at its
+			// old score, and the trim behind it would then remove that entry and leave the new record out of the index.
+			tx.zremrangebyscore(`${prefix}index`, "-inf", `(${now() - ttl}`); tx.zadd(`${prefix}index`, "NX", fix.at, fix.id); tx.zremrangebyrank(`${prefix}index`, 0, -5001); tx.pexpire(`${prefix}index`, ttl);
 			const result = await bounded(tx.exec());
 			if (!Array.isArray(result) || result.some(row => row[0])) throw new Error("fix metadata unavailable");
 			return { ok: true, fix };
@@ -40,7 +66,7 @@ export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 3
 		},
 		async publicSnapshot({ sinceMs = 0 } = {}) {
 			try {
-				const ids = await command("zrevrangebyscore", `${prefix}index`, "+inf", sinceMs, "LIMIT", 0, 5000);
+				const ids = await command("zrevrangebyscore", `${prefix}index`, "+inf", Math.max(sinceMs, oldestRead()), "LIMIT", 0, 5000);
 				const fixes = (await Promise.all(ids.map(id => this.read(id)))).filter(Boolean);
 				const pendingCount = fixes.filter(fix => fix.state === "pending").length;
 				return { state: "ok", fixes: fixes.filter(fix => fix.state === undefined || fix.state === "applied"), pendingCount, partial: fixes.length !== ids.length || ids.length === 5000 || pendingCount > 0 };
@@ -49,11 +75,11 @@ export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 3
 		async stage(value, options = {}) { return this.add(value, { ...options, pending: true }); },
 		async commit(id) {
 			const fix = await this.read(id); if (!fix || fix.state === "refused") return false;
-			await command("set", `${prefix}meta:${id}`, JSON.stringify({ ...fix, state: "applied" }), "PX", ttl); return true;
+			return mark(id, { ...fix, state: "applied" });
 		},
 		async reject(id) {
 			const fix = await this.read(id); if (!fix || fix.state !== "pending") return false;
-			await command("set", `${prefix}meta:${id}`, JSON.stringify({ ...fix, state: "refused" }), "PX", ttl); return true;
+			return mark(id, { ...fix, state: "refused" });
 		},
 		/**
 		 * The pending fixes whose change provably landed: the file the change wrote still has the digest it wrote, or the
@@ -64,7 +90,7 @@ export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 3
 		async settleable({ readTrigger, readFile } = {}) {
 			const ready = [];
 			if (typeof readTrigger !== "function" && typeof readFile !== "function") return { ready };
-			const ids = await command("zrevrangebyscore", `${prefix}index`, "+inf", 0, "LIMIT", 0, 5000);
+			const ids = await command("zrevrangebyscore", `${prefix}index`, "+inf", oldestRead(), "LIMIT", 0, 5000);
 			for (const id of ids) {
 				const fix = await this.read(id, { includeUndo: true });
 				if (!fix || fix.state !== "pending") continue;
@@ -94,7 +120,7 @@ export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 3
 		},
 		async markUndone(id, at = now()) {
 			const fix = await this.read(id); if (!fix || fix.undoneAt) return false;
-			await command("set", `${prefix}meta:${id}`, JSON.stringify({ ...fix, undoneAt: at }), "PX", ttl); return true;
+			return mark(id, { ...fix, undoneAt: at });
 		},
 	};
 }

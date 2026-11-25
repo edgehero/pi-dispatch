@@ -125,3 +125,96 @@ test("the repair never loses a change that was made: a pending row its file or t
 		}
 	} finally { await redis.quit(); }
 });
+
+test("a fix's record keeps the expiry its stage gave it, and the history reads an expired record as gone, never as a missing row (#1072)", { skip }, async () => {
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const { FIX_CLOCK_SKEW_MS } = await import("../src/zero-touch-fixes.mjs");
+	const redis = makeRedisClient(url), prefix = `test-fixes-${randomBytes(8).toString("hex")}:`;
+	let t = nowMs;
+	const store = makeZeroTouchFixStore({ redis, prefix, now: () => t, retentionDays: 30 });
+	const ttl = 30 * 86400000, DAY_MS = 86400000;
+	const meta = id => `${prefix}meta:${id}`;
+	const value = (runId, extra = {}) => ({ kind: "config", runId, scopeId, reason: "secret-unresolved", ...extra });
+	try {
+		// A mark keeps the record's expiry: commit, reject and Undo each rewrite the record and leave its TTL as it was,
+		// where each gave it a whole new retention that its index entry did not get.
+		const committed = await store.stage(value("kept-c"), { identity: "kept-c" });
+		const rejected = await store.stage(value("kept-r"), { identity: "kept-r" });
+		const undone = await store.add(value("kept-u"), { identity: "kept-u" });
+		for (const row of [committed, rejected, undone]) {
+			assert.ok(row.ok);
+			const left = await redis.pttl(meta(row.fix.id));
+			assert.ok(left > ttl - 60_000 && left <= ttl, "a stage gives its record the retention");
+			await redis.pexpire(meta(row.fix.id), 120_000);
+		}
+		assert.equal(await store.commit(committed.fix.id), true);
+		assert.equal(await store.reject(rejected.fix.id), true);
+		assert.equal(await store.markUndone(undone.fix.id, t + 1), true);
+		for (const row of [committed, rejected, undone]) {
+			const left = await redis.pttl(meta(row.fix.id));
+			assert.ok(left > 0 && left <= 120_000, `a mark keeps the record's expiry (${left} ms left)`);
+		}
+		assert.deepEqual([(await store.read(committed.fix.id)).state, (await store.read(rejected.fix.id)).state, (await store.read(undone.fix.id)).undoneAt], ["applied", "refused", t + 1]);
+
+		// A record that expired between a mark's read and its write is not made again: the write lands only on a record
+		// that still exists, and the mark answers that it wrote nothing.
+		const late = await store.stage(value("late"), { identity: "late" });
+		const expiring = new Proxy(redis, { get(target, name) {
+			if (name !== "get") return typeof target[name] === "function" ? target[name].bind(target) : target[name];
+			return async (key) => { const raw = await target.get(key); if (key === meta(late.fix.id)) await target.del(key); return raw; };
+		} });
+		const racing = makeZeroTouchFixStore({ redis: expiring, prefix, now: () => t, retentionDays: 30 });
+		assert.equal(await racing.commit(late.fix.id), false, "a mark on a record that expired under it writes nothing");
+		assert.equal(await redis.exists(meta(late.fix.id)), 0, "and does not make the record again");
+		await redis.zrem(`${prefix}index`, late.fix.id);
+
+		// Within the retention, a record that is gone or does not read is a missing row, as before: the history says so.
+		const lost = await store.add(value("lost"), { identity: "lost" });
+		await redis.set(meta(lost.fix.id), "not a fix record");
+		let snapshot = await store.publicSnapshot();
+		assert.equal(snapshot.partial, true, "an unreadable record within the retention is a missing row");
+		await redis.del(meta(lost.fix.id));
+		assert.equal((await store.publicSnapshot()).partial, true, "so is one that is gone within the retention");
+		await redis.zrem(`${prefix}index`, lost.fix.id);
+		assert.equal((await store.publicSnapshot()).partial, false);
+
+		// Past the retention, an entry whose record expired is not read at all: no missing row, no pending count, no
+		// proof to settle. Valkey's own clock ends the record; the test removes it, as that expiry would.
+		const old = await store.stage(value("old"), { identity: "old", privateUndo: { file: "/approved/settings.json", afterDigest: hash("bytes") } });
+		t += ttl - FIX_CLOCK_SKEW_MS + 1;
+		await redis.del(meta(old.fix.id), `${prefix}private:${old.fix.id}`);
+		snapshot = await store.publicSnapshot();
+		assert.equal(snapshot.partial, false, "an entry whose record expired with the retention is not a missing row");
+		assert.equal(snapshot.pendingCount, 0);
+		assert.deepEqual(await store.settleable({ readFile: async () => "bytes" }), { ready: [] });
+		assert.ok((await redis.zscore(`${prefix}index`, old.fix.id)) !== null, "the entry stays in the index until an add trims it");
+
+		// An add trims, in its own transaction, every entry older than the retention, whatever its record still holds.
+		t += FIX_CLOCK_SKEW_MS;
+		const fresh = await store.add(value("fresh"), { identity: "fresh" });
+		assert.deepEqual(await redis.zrange(`${prefix}index`, 0, -1), [fresh.fix.id], "the add trimmed every entry past the retention");
+		snapshot = await store.publicSnapshot();
+		assert.deepEqual([snapshot.fixes.map(fix => fix.id), snapshot.partial], [[fresh.fix.id], false]);
+
+		// The same id staged twice: the second stage finds the record and keeps it, with the expiry counted from the first,
+		// and the entry keeps the first stage's time with it. Moved forward, the entry outlived the record by a day inside
+		// the read window, and the history read as incomplete again.
+		const first = t;
+		const once = await store.stage(value("twice"), { identity: "twice" });
+		t += DAY_MS;
+		const again = await store.stage(value("twice", { at: t }), { identity: "twice" });
+		assert.equal(again.fix.id, once.fix.id);
+		assert.equal(Number(await redis.zscore(`${prefix}index`, once.fix.id)), first, "the entry keeps the first stage's time");
+		assert.equal(JSON.parse(await redis.get(meta(once.fix.id))).at, first, "and the record is the first stage's");
+		t = first + ttl + 1;
+		await redis.del(meta(once.fix.id));
+		snapshot = await store.publicSnapshot();
+		assert.deepEqual([snapshot.partial, snapshot.pendingCount], [false, 0], "the record expired with its retention: no missing row");
+		// An id whose record expired and whose entry is still there is staged again: the old entry goes first, and the new
+		// record gets an entry of its own time, never one at the old score that the same trim would then remove.
+		await redis.zadd(`${prefix}index`, first, once.fix.id);
+		const renewed = await store.stage(value("twice"), { identity: "twice" });
+		assert.equal(Number(await redis.zscore(`${prefix}index`, renewed.fix.id)), t, "a new record has its own entry");
+		assert.equal((await store.publicSnapshot()).pendingCount, 1);
+	} finally { const keys = await redis.keys(`${prefix}*`); if (keys.length) await redis.del(...keys); await redis.quit(); }
+});
