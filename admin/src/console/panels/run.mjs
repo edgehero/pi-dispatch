@@ -38,7 +38,7 @@ import { ARTIFACT_DROP_REASONS, ARTIFACT_DROP_TEXT, artifactSizeText } from "@ed
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { STEER_MAX_MESSAGES, STEER_TOTAL_MAX_BYTES } from "@edgehero/pi-dispatch/steer-inbox";
-import { changesOffered, plural, SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread, registryReadInPart, rowLastSeen, SHELLS_SHOWN, shellsShort } from "./common.mjs";
+import { changesOffered, plural, SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread, registryReadInPart, hostPartCase, rowLastSeen, SHELLS_SHOWN, shellsShort } from "./common.mjs";
 import { windowFloor } from "./runs.mjs";
 
 const titled = (title, body) => ui.card({ title, body });
@@ -1207,7 +1207,10 @@ function hostFacts(view, name) {
   const doctor = doctorHostsOf(s).filter((d) => d.name === name).sort((a, b) => (a.ageMs ?? Infinity) - (b.ageMs ?? Infinity))[0] ?? null;
   // "No live registry row" is said only over a registry read THIS time (`rowLastSeen`): after one good read a registry
   // that fails shows its rows as last seen, and the cards said "none" of a host that had registered since.
-  const kind = !read ? "unread" : registryReadInPart(s) && (!host || host.notRead === true) ? "part" : hostsUnread(s) ? "hosts" : rowLastSeen(s, host) ? "last" : host ? null : "none";
+  // A host with no row over a registry read in part (issue #1073): "part" only where that read may have missed its row
+  // (`hostPartCase`: it names this host, or does not name every host it missed); a read that names every host it missed
+  // and not this one found no row, so the host has none, as over a registry read whole. It said "part" of any such host.
+  const kind = !read ? "unread" : registryReadInPart(s) && (host?.notRead === true || (!host && hostPartCase(s, name) !== null)) ? "part" : hostsUnread(s) ? "hosts" : rowLastSeen(s, host) ? "last" : host ? null : "none";
   const hostGap = { unread: REFUSED_WORDS.unread, part: REFUSED_WORDS.inPart, hosts: HOSTS_UNREAD, last: REFUSED_WORDS.lastSeen, none: REFUSED_WORDS.noRow(name) }[kind] ?? null;
   const floorGap = { unread: HOSTS_UNREAD, part: REFUSED_WORDS.inPart, hosts: HOSTS_UNREAD, last: REFUSED_WORDS.lastSeen, none: `not known: ${REFUSED_WORDS.noRow(name)}` }[kind] ?? null;
   // A row that is as last seen has a beat, and its age is not this read's to tell.

@@ -1,4 +1,5 @@
 import { subscriptionResetSentence } from "../model-words.mjs";
+import { QUEUE_KEY, queueKey } from "@edgehero/pi-dispatch/bullmq-internals";
 /**
  * The console's action table and its ONE preview/confirm pipeline (issue #642, DES-OPERATOR-CONSOLE,
  * REQ-OPERATOR-CONSOLE-ACTIONS). Every write the console can make is an entry in `ACTIONS`, and `server.mjs` generates
@@ -1820,9 +1821,17 @@ export const SWITCH_ERRORED_LINE = (errored) => `${queueErrorsLead(errored)}; th
  * flag where it WAS read and its counts alone were answered with an error; the refusal then says the queue as it
  * reads, and that its counts are what is missing, never that its paused state is not known.
  */
-export const queueErroredRefusal = (queue, error, paused) => (typeof paused === "boolean"
-  ? `the counts of ${queue} could not be read: Valkey answered that read with an error (${error}). It is ${paused ? "paused" : "running"}, and what the switch would change there is not known here; nothing was changed`
-  : `${queue} could not be read: Valkey answered its read with an error (${error}), so whether it is paused is not known here; nothing was changed`);
+export const queueErroredRefusal = (queue, error, paused) => {
+  // Through the shared words (issue #1073, `erroredReadWords`): the code, and by its class what has to be put right first
+  // or that waiting may end it, where it said "Valkey answered ... with an error (CODE)" and nothing of what that means.
+  // A paused flag that was not read is the queue's meta key's, which the remedy then names; the counts are several keys.
+  const counts = typeof paused === "boolean";
+  const w = erroredReadWords(counts ? "the read of its counts" : queueKey(queue, QUEUE_KEY.meta), error);
+  const step = !counts && w.first !== null ? `. ${w.first}` : w.lasting === true ? `. ${w.waiting}` : w.again ? `. ${w.waiting}` : "";
+  return counts
+    ? `the counts of ${queue} could not be read: ${w.said}. It is ${paused ? "paused" : "running"}, and what the switch would change there is not known here${step}; nothing was changed`
+    : `${queue} could not be read: ${w.said}, so whether it is paused is not known here${step}; nothing was changed`;
+};
 
 /**
  * A fleet resume's waiting line when the snapshot was not read (issue #737): the bound fired (`snapshotOf`'s

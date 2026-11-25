@@ -2,7 +2,7 @@
 import { PROFILE_SOURCE_TEXT, PROFILE_ROOTS_TEXT, profileHostsText, bundleDeclaredText, bundleEndpointsText } from "../../read-model.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
-import { canAct, runLink, timeHtml } from "./common.mjs";
+import { RELOAD_TEXT, canAct, runLink, timeHtml, unreadText } from "./common.mjs";
 import { actForm, field } from "./config-ui.mjs";
 
 const viewOf = (ctx) => ctx.data?.secrets ?? null;
@@ -22,6 +22,8 @@ const unread = () => html`<p class="muted">The deployment could not be read. Rel
  */
 export const SECRETS_FILES_ONLY_TITLE = "What runs received and which hosts serve a profile are not known";
 export const SECRETS_FILES_ONLY_TEXT = "Valkey could not be read, so this shows what the settings overlay, the triggers file and the .env declare, and offers no change. Reload to try again.";
+/** The same in the words of the cause (issue #1073): `SECRETS_FILES_ONLY_TEXT` for a Valkey that did not answer. */
+export const secretsFilesOnlyText = (ctx) => unreadText(ctx, { then: "so this shows what the settings overlay, the triggers file and the .env declare, and offers no change", retry: RELOAD_TEXT });
 /** In a row's place for a run fact where no run was read: never "no run in view". */
 export const SECRETS_RUN_UNREAD = "not known: the runs could not be read";
 /** Where a source of the list could not be read, so its count is not one: never "0". */
@@ -70,7 +72,7 @@ export function secretsHeadline(ctx) {
 export function secretsProblems(ctx) {
   const v = viewOf(ctx);
   if (!v?.filesKnown) return ui.banner({ status: "attention", title: "Secret declarations are unknown", body: unread(), block: true });
-  const only = filesOnly(v) ? ui.banner({ status: "attention", title: SECRETS_FILES_ONLY_TITLE, body: SECRETS_FILES_ONLY_TEXT, block: true }) : null;
+  const only = filesOnly(v) ? ui.banner({ status: "attention", title: SECRETS_FILES_ONLY_TITLE, body: secretsFilesOnlyText(ctx), block: true }) : null;
   const p = v.problems[0];
   if (!p) return html`${only}`;
   ctx = acting(ctx, v);

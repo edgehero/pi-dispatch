@@ -55,7 +55,7 @@ import { NO_EXPLANATION, docsHref, queueErrorsOf } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { TIMELINE_DEFAULTS, TIMELINE_ROWS, TIMELINE_WAIT_WORDS, TIMELINE_ZOOMS, timelineHtml, timelineLegend, timelineModel } from "../timeline.mjs";
-import { BEAT_FRESH_MS, HOSTS_UNREAD_TEXT, NO_BEAT_READ, PAUSED_UNKNOWN_BUCKET, PAUSED_UNKNOWN_TEXT, SCHEDULES_PART_TEXT, WAITING_CUT_TEXT, WAIT_BUCKETS, WAIT_BUCKET_WORDS, queueErrorsText, registryPartText, registryReadInPart, rowLastSeen, schedulesShort, waitBucketOf, waitingFloor, waitingPausedUnread, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, hostsUnread, killSwitchUnreadForms, pausedStateUnknown, unaskedQueuesText, moneyHtml, overlayRefused, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
+import { NEXT_REFRESH_TEXT, snapshotMissingText, unreadCauseOf, unreadText, BEAT_FRESH_MS, HOSTS_UNREAD_TEXT, NO_BEAT_READ, PAUSED_UNKNOWN_BUCKET, PAUSED_UNKNOWN_TEXT, SCHEDULES_PART_TEXT, WAITING_CUT_TEXT, WAIT_BUCKETS, WAIT_BUCKET_WORDS, queueErrorsText, registryPartText, registryReadInPart, rowLastSeen, schedulesShort, waitBucketOf, waitingFloor, waitingPausedUnread, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, hostsUnread, killSwitchUnreadForms, pausedStateUnknown, unaskedQueuesText, moneyHtml, overlayRefused, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
 
 // ---- the sentences -----------------------------------------------------------------------------------------------------
 
@@ -75,7 +75,12 @@ export const REGISTRY_UNREAD_TEXT = "The host registry could not be read; this s
 /** The line under the caps: the budget's windows reset on UTC boundaries, not on the reader's local ones. */
 export const COUNT_WINDOWS_UTC_TEXT = "Days, weeks (Monday to Sunday) and months here are UTC, as the budget counts them.";
 
-/** What a panel says when the snapshot could not be read at all (the panels' shared sentence, `common.mjs`'s). */
+/** The line under the title where the snapshot could not be read, for a Valkey that did not answer (`unreadText` for the others). */
+export const OVERVIEW_UNREAD_HEADLINE = "Valkey could not be read; the next refresh tries again.";
+/**
+ * What a panel says when the snapshot could not be read at all (the panels' shared sentence, `common.mjs`'s
+ * `SNAPSHOT_MISSING`), for a Valkey that did not answer; `snapshotMissingText` says it in the words of each cause.
+ */
 export const OVERVIEW_UNREAD_TEXT = "The deployment's Valkey could not be read, so this panel has nothing to show. The next refresh tries again.";
 
 /** Needs you's definition, under its numbers: drawn with them, so not under "0 nothing needs you" (the card's). */
@@ -273,7 +278,7 @@ const setupOf = (view) => firstRunState(view?.data?.snapshot ?? null, { session:
 function overviewPanel(title, render, { unread = null } = {}) {
   return (view) => {
     const s = view?.data?.snapshot;
-    if (!s) return ui.card({ title, body: html`<p class="muted">${OVERVIEW_UNREAD_TEXT}</p>${typeof unread === "function" ? unread(view) : null}` });
+    if (!s) return ui.card({ title, body: html`<p class="muted">${snapshotMissingText(view)}</p>${typeof unread === "function" ? unread(view) : null}` });
     if (setupOf(view).applies) return html``;
     return render(s, view);
   };
@@ -398,7 +403,8 @@ const andList = (items) => (items.length <= 1 ? items.join("") : `${items.slice(
  */
 export function overviewHeadline(view) {
   const s = view?.data?.snapshot;
-  if (!s) return html`Valkey could not be read; the next refresh tries again.`;
+  // In the words of the cause (issue #1073): the line said Valkey could not be read of every failed read.
+  if (!s) return html`${unreadCauseOf(view?.data).kind === "silent" ? OVERVIEW_UNREAD_HEADLINE : unreadText(view, { retry: NEXT_REFRESH_TEXT })}`;
   const setup = setupOf(view);
   if (setup.applies) return html`${setup.lead}`;
   const need = needsOf(s);
@@ -748,7 +754,7 @@ function chipsHtml(view, q, model) {
 }
 
 export const overviewTimeline = overviewPanel("Runs by project", (s, view) => {
-  if (!Number.isFinite(view.now)) return ui.card({ title: "Runs by project", body: html`<p class="muted">${OVERVIEW_UNREAD_TEXT}</p>` });
+  if (!Number.isFinite(view.now)) return ui.card({ title: "Runs by project", body: html`<p class="muted">${snapshotMissingText(view)}</p>` });
   const q = timelineQuery(view);
   // A parked run's project is its record's (the parked list carries none), as Needs you reads it.
   const projects = projectsByJob(s);

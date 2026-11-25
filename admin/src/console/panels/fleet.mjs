@@ -23,7 +23,7 @@ import {
   beatAgeOf,
   progressText,
   workersOnline, plural,
-  hostsUnread, HOSTS_UNREAD, HOSTS_UNREAD_TEXT, hostsAsLastRead, HOSTS_AS_LAST_READ, NO_HOST_AS_LAST_READ,
+  hostsUnread, HOSTS_UNREAD, HOSTS_UNREAD_TEXT, hostsAsLastRead, NEXT_REFRESH_TEXT, unreadText, HOSTS_AS_LAST_READ, NO_HOST_AS_LAST_READ,
   killSwitchUnreadForms, pausedStateUnknown,
   NO_BEAT_READ, registryPartText, registryReadInPart, rowLastSeen,
   SCHEDULES_PART_TEXT, WAIT_BUCKETS, WAIT_BUCKET_WORDS, hostQueuesUnasked, schedulesCount, schedulesShort, unaskedQueuesText, waitBucketOf, waitingFloor, waitingPausedUnread } from "./common.mjs";
@@ -35,6 +35,9 @@ import {
 } from "./overview.mjs";
 
 const runLink = (id) => recordLink(id, { pulse: true });
+
+/** A Fleet card with no snapshot, in the words of the cause (issue #1073); for a Valkey that did not answer, as it was. */
+const fleetUnreadText = (view) => unreadText(view, { lead: "The deployment's Valkey could not be read", retry: NEXT_REFRESH_TEXT });
 
 // ---- unread is not empty (issue #962) ---------------------------------------------------------------------------------
 
@@ -80,7 +83,7 @@ const wrap =
       end: typeof end === "function" ? (snapshot ? end(snapshot, view) : null) : end,
       body: snapshot
         ? typeof foot === "function" ? html`${fn(snapshot, view)}${foot(snapshot, view)}` : fn(snapshot, view)
-        : html`<p class="note">The deployment's Valkey could not be read. The next refresh tries again.</p>`,
+        : html`<p class="note">${fleetUnreadText(view)}</p>`,
     });
   };
 const act = (view, action, label, hidden = [], { small = true } = {}) =>
@@ -150,7 +153,7 @@ export const fleetBar = (v) => {
   if (!s)
     return ui.card({
       title: "Fleet",
-      body: html`<p>The deployment's Valkey could not be read. The next refresh tries again.</p>${killSwitchUnreadForms(v)}`,
+      body: html`<p>${fleetUnreadText(v)}</p>${killSwitchUnreadForms(v)}`,
     });
   const queues = list(s.queueCounts);
   const paused = queues.filter((q) => q.paused);

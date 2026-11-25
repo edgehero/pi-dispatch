@@ -1157,6 +1157,9 @@ const DRAW = {
   // Issue #1073: the overview over a Valkey that does not answer, the real reader over the outage's files: no snapshot,
   // and the kill switch's two forms the one change it offers (issue #1035).
   "overview-no-snapshot.operator": async () => overviewLive(null, { fleet: noSnapshotFleet({}, { pinned: false }) }),
+  // Issue #1073: the same page where Valkey ANSWERED the snapshot's read with an error: its code and class, and no
+  // "try again" over a cause that waiting does not end.
+  "overview-snapshot-error.operator": async () => overviewLive(null, { fleet: noSnapshotFleet({ snapshot: async () => { throw Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value"), { name: "ReplyError" }); } }, { pinned: false }) }),
   // RunsScreen's footer, one state each: the fleet's run mirror off or partly read, the history read cut, the history
   // not read at all, nothing matching, and a reason token this console has no words for.
   "runs-mirror-off.operator": async () => runsLive({ page: { runs: RUNS_PAGE_RUNS, mirror: "off", next: null } }),

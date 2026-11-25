@@ -2,8 +2,7 @@
 import { ANSWER_CLASSIFICATIONS } from "@edgehero/pi-dispatch/answerer";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
-import { ageText, canAct, changesOffered, noChangeText, RUN_ID_RE } from "./common.mjs";
-import { OVERVIEW_UNREAD_TEXT } from "./overview.mjs";
+import { ageText, canAct, changesOffered, noChangeText, RUN_ID_RE, snapshotMissingText } from "./common.mjs";
 
 export const ANSWERER_PASS_WORDS = Object.freeze({
   "product-decision": "a product decision", product_decision: "a product decision", security: "security", money: "money", scope: "scope", approval: "an approval", "category-not-allowed": "the category is outside this rule", "low-confidence": "the confidence is below the rule's minimum", "no-sources": "no cited source covers it", "not-answerable": "the sources do not cover it", "invalid-result": "the draft result was invalid", "source-unavailable": "the source is no longer retained", "rule-changed": "the reviewed answer rule changed", "classification-only": "this rule only classifies questions", "draft-expired": "the draft is no longer retained", "no-question": "the posted question is unavailable", "unsupported-forge": "this forge cannot supply a safe read-only source", "budget-refused": "the draft job was refused by its cap", failed: "the draft job could not finish", "outside-projects": "this run is outside the rule projects", "source-oversize": "the bounded source is too large", "category-disallowed": "the category is outside this rule", uncovered: "the cited sources do not cover it", "classify-only": "this rule only classifies", "config-changed": "the reviewed answer configuration changed", "output-invalid": "the model result was invalid", "cap-refused": "the draft job was refused by a cap",
@@ -88,7 +87,7 @@ export function answererParked(view, { manualAnswer = () => null } = {}) {
   if (!state || !(state.rules?.length || state.rows?.length || state.state !== "ok")) return null;
   const operator = view.role === "operator";
   const s = view.data?.snapshot ?? null;
-  const parkedUnread = s === null ? OVERVIEW_UNREAD_TEXT : typeof s.parkedUnreachable === "string" && s.parkedUnreachable !== "" ? `The parked runs could not be read (${s.parkedUnreachable}); this is not an empty inbox.` : null;
+  const parkedUnread = s === null ? snapshotMissingText(view) : typeof s.parkedUnreachable === "string" && s.parkedUnreachable !== "" ? `The parked runs could not be read (${s.parkedUnreachable}); this is not an empty inbox.` : null;
   const known = resultsRead(state);
   const parked = parkedUnread === null && Array.isArray(s.parked) ? s.parked : [];
   const rows = new Map((state.rows ?? []).map(row => [row.runId, row]));

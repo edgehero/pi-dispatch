@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { SKEW_UNKNOWN_TEXT } from "../src/console/panels/trigger.mjs";
 import assert from "node:assert/strict";
 import { hostKey } from "@edgehero/pi-dispatch/host-registry";
 import { waitingLine } from "../src/console/actions.mjs";
@@ -152,7 +153,10 @@ test("a set of queues that may be short makes every reader of the waiting jobs s
   assert.match(project.words, new RegExp(`0 in line \\(at least\\) ${WAITING_QUEUES_SHORT_TEXT.replace(/[.]/g, "\\.")}`));
   const trigger = await page("trigger", "index=1", QUEUES_SHORT({ triggers: TRIGGERS }));
   assert.ok(trigger.words.includes(`Jobs in line now: none found, and a job may be missing. ${WAITING_QUEUES_SHORT_TEXT}`), trigger.words.match(/Jobs in line now[^]{0,200}/)?.[0]);
-  assert.match(trigger.words, new RegExp(`At least 0 jobs in view would be refused now\\. The queue check was incomplete\\. ${WAITING_QUEUES_SHORT_TEXT.replace(/[.]/g, "\\.")}`));
+  // Issue #1073: over a check that saw none, the count is not known, never "At least 0"; and why the list is a floor is
+  // said once, under "Jobs in line now" above, not again here.
+  assert.ok(trigger.words.includes(SKEW_UNKNOWN_TEXT) && !trigger.words.includes("At least 0 jobs"), trigger.words.match(/[^.]*would be refused[^.]*\./)?.[0]);
+  assert.equal(trigger.words.split(WAITING_QUEUES_SHORT_TEXT).length - 1, 1, "the floor is said once");
   for (const role of ["operator", "viewer", "agent"]) {
     const models = await page("models", "", QUEUES_SHORT(), role);
     assert.ok(models.words.includes(`No job found waiting on model cooldown, model window or subscription quota, and one may be missing. ${WAITING_QUEUES_SHORT_TEXT}`), `/models for ${role}`);

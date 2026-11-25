@@ -119,6 +119,9 @@ export const CONFIGURATION_DRAW = Object.freeze({
   // files; the secret cards, whose facts are Valkey's too, say they could not be read.
   "config-no-snapshot.operator": () => draw("config", { fleet: noSnapshotFleet() }),
   "config-no-snapshot.viewer": () => draw("config", { role: "viewer", fleet: noSnapshotFleet() }),
+  // Issue #1073: /config where the console's own code failed reading the deployment (an engine error, not Valkey): the
+  // cards say so, and that the console's log names the error, where they said Valkey could not be read.
+  "config-console-fault.operator": () => draw("config", { fleet: noSnapshotFleet({ snapshot: async () => { const row = null; return row.name; } }) }),
   // Issue #962: /config/secrets over a Valkey that does not answer. The declarations come from the files and the .env,
   // read-only; what a run last received and which hosts serve a profile are not known.
   "secrets-no-snapshot.operator": () => draw("secrets", { fleet: noSnapshotFleet({ fileViews: secretFilesFixture }), secretsFromFiles: true }),

@@ -28,7 +28,7 @@ import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
 import { RUN_KINDS } from "@edgehero/pi-dispatch/forges";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { forgeLinkOf } from "../../read-model.mjs";
-import { RUN_FILTER_FIELDS, runVenueOf } from "../../run-filter.mjs";
+import { RUN_FILTER_FIELDS, runVenueOf, triggerIdentityOf, triggerRowOnly } from "../../run-filter.mjs";
 import { OUTCOME_KEYS, OUTCOME_KEY_WORDS, VENUE_LABEL, rowNumber } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
@@ -124,10 +124,21 @@ function without(filter, ...fields) {
   return out;
 }
 
-/** A trigger value as a person reads it: a triggers-file position by its row number ("row 2"), a scheduler id as itself. */
+/**
+ * A trigger value as a person reads it: a triggers-file position by its row number ("row 2"), with its identity where
+ * the value names it ("row 2, github label", issue #1073), a scheduler id as itself.
+ */
 function triggerLabel(v) {
+  const identity = triggerIdentityOf(v);
+  if (identity !== null) return `row ${rowNumber(identity.index)}, ${identity.kind} ${identity.type.replace(/_/g, " ")}`;
   return /^\d{1,4}$/.test(v) ? `row ${rowNumber(Number(v))}` : v;
 }
+
+/**
+ * Under a list filtered by a row alone (issue #1073), a link written before the filter took a trigger's identity: what
+ * it matches, which is every run of whatever trigger held that row, and where a trigger's own runs are listed.
+ */
+export const RUNS_TRIGGER_ROW_ONLY = "This link names a trigger by its row alone, so a run of another trigger that held that row is listed too. Choose the trigger in the filter to list its runs alone.";
 
 /** A filter value as its chip shows it: an outcome key by its word, a trigger by `triggerLabel`, the rest as given. */
 function chipValue(field, v) {
@@ -422,6 +433,7 @@ export function runsTableModel(view) {
   else if (mirrorUnread) foot.push(runs.length === 0 ? RUNS_MIRROR_DEGRADED_EMPTY : RUNS_MIRROR_DEGRADED);
   else if (mirrorCut) foot.push(runs.length === 0 ? RUNS_MIRROR_CUT_EMPTY : RUNS_MIRROR_CUT);
   if (page.truncated) foot.push(runsTruncatedText(page.examined));
+  if (triggerRowOnly(filter.trigger)) foot.push(RUNS_TRIGGER_ROW_ONLY);
   // A group row before each UTC day's first run: the history is newest first, so a day's runs stand together.
   const rows = [];
   let day = null;

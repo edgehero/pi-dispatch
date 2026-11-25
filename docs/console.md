@@ -1011,7 +1011,13 @@ the steps it could not judge as not known, Triggers lists the file's rules witho
 its files read-only, its two secret cards counted from the files too, Connections shows the triggers, the MCP servers
 and the staged packages the files hold and says the hosts' doctor results and the subscription status are not known,
 and Parked and Sandboxes show no count of what they did not read. Runs lists what the fleet's run mirror holds where
-this host's own run files could not be listed, and says that this host's runs the mirror does not hold are missing. A page that could not read the
+this host's own run files could not be listed, and says that this host's runs the mirror does not hold are missing.
+A page that could not read the deployment says why, in the words of the cause: "Valkey could not be read" where
+nothing answered; "Valkey answered this page's read with WRONGTYPE" where Valkey answered with an error, with what
+that code means and, for a key of another type or a permission, what an operator has to put right first (with no
+"try again", which waiting would not make true); "This page could not read the deployment in time" where the page's
+deadline cut a read of a Valkey that may be answering; and "This console failed while it read the deployment" where
+the console's own code failed, which is not Valkey's doing, and whose cause the console's log names. A page that could not read the
 deployment offers no change, with one exception, the kill switch: Fleet and the overview's Hosts card still show an
 operator **Pause the fleet** and **Resume the fleet** under their sentence, with "The kill switch works without a read:
 a pause reaches every queue it finds, and its answer names them." A Valkey that stopped answering is when the fleet has
@@ -2047,7 +2053,7 @@ The same filters can be written in the query string. Each one is matched exactly
 | `repo` | repository, such as `acme/web` |
 | `kind` | forge: `github`, `gitlab`, `forgejo`, `azure`, or `local` |
 | `flow` | flow name |
-| `trigger` | trigger: its position in the triggers file, counted from 0 (the list shows it as "row 1" for 0), a schedule's id, or `event:forge:id` for a local event command |
+| `trigger` | trigger: a forge trigger by its position in the triggers file, counted from 0, with its forge and type (`3:github:label`, which the list shows as "row 4, github label"), a schedule's id, or `event:forge:id` for a local event command. A position alone (`3`, from a link written before) matches every run of whatever trigger held that row, and the page says so |
 | `project` | project id |
 | `host` | worker name |
 | `backend` | venue, as the Venues panel on `/fleet` names it (a run recorded before venues were recorded counts as `local`) |
