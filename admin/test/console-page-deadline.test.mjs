@@ -1154,17 +1154,18 @@ test("the zero touch report under a page's deadline: each step is made with what
   const asked = [];
   const within = (ms) => { asked.push(ms); return 7; };
   const cut = await timersArmed(() => service.read({ windowDays: 30, within }));
-  // The outbox's store, the question groups' and the fold of the window: three steps, each asking the deadline with
-  // the two seconds a store has by itself. The fix store takes no bound, and its commands keep their own.
-  assert.deepEqual(asked, [ZERO_TOUCH_STORE_MS, ZERO_TOUCH_STORE_MS, ZERO_TOUCH_STORE_MS]);
-  assert.ok(cut.delays.filter((ms) => ms === 7).length >= 3, "each of those steps was bounded by what the deadline had left");
+  // The question groups' store and the fold of the window: two steps, each asking the deadline with the two seconds a
+  // store has by itself. The fix store takes no bound, and its commands keep their own. The outbox was a third step
+  // while the read repaired it; it now counts this host's files and asks Valkey nothing (issue #1076).
+  assert.deepEqual(asked, [ZERO_TOUCH_STORE_MS, ZERO_TOUCH_STORE_MS]);
+  assert.ok(cut.delays.filter((ms) => ms === 7).length >= 2, "each of those steps was bounded by what the deadline had left");
   assert.equal(cut.got.coverage.partial, true, "its own answer: a window that is partial");
   assert.ok(cut.got.coverage.reasons.includes("touch-index-unavailable"));
   // The touched runs are that report's: the same bound goes on, and the list says the window is partial and the mirror
   // was not reached, where a page that stopped waiting could only say the history could not be read.
   asked.length = 0;
   const runs = await service.runs({ windowDays: 30, filter: { touched: "1", days: "30" }, within });
-  assert.deepEqual(asked, [ZERO_TOUCH_STORE_MS, ZERO_TOUCH_STORE_MS, ZERO_TOUCH_STORE_MS]);
+  assert.deepEqual(asked, [ZERO_TOUCH_STORE_MS, ZERO_TOUCH_STORE_MS]);
   assert.deepEqual([runs.runs, runs.truncated, runs.touchCoverage.partial, /unreachable/.test(runs.mirror)], [[], true, true, true]);
   // No deadline: every store keeps its own bound.
   const own = await timersArmed(() => service.read({ windowDays: 30 }));

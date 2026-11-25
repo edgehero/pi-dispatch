@@ -250,6 +250,28 @@ test("tracking that has not started says so once, with no totals and no zeros, a
   assert.equal(zeroTouchView(started, { role: "viewer", nowMs: NOW }).state, "ready");
 });
 
+test("a report waiting only on actions this host can settle says so with the settle, once, and never settles on the view (#1076)", async () => {
+  const collapsed = (over = {}) => ({ ...zeroTouchFixture(NOW), state: "unavailable", unresolvedOnly: true, coverage: { requestedFromMs: NOW - 30 * 86400_000, fromMs: NOW, partial: true, reasons: ["touch-actions-unresolved"] }, waiting: { touches: 2, unknown: 1, fixes: 0 }, ...over });
+  const view = zeroTouchView(collapsed(), { role: "operator", nowMs: NOW });
+  assert.deepEqual([view.state, view.waiting], ["waiting", { touches: 2, unknown: 1, fixes: 0 }]);
+  assert.deepEqual(view.totals, {}, "no zero nobody counted");
+  // The page projects its data and the panels project it again: the second pass keeps the state.
+  assert.equal(zeroTouchView(view, { role: "operator", nowMs: NOW }).state, "waiting");
+  // The controls: nothing here to settle, a collapse with another reason beside it, and a read that failed stay unavailable.
+  assert.equal(zeroTouchView(collapsed({ waiting: { touches: 0, unknown: 1, fixes: 0 } }), { role: "operator", nowMs: NOW }).state, "unavailable");
+  assert.equal(zeroTouchView(collapsed({ unresolvedOnly: undefined }), { role: "operator", nowMs: NOW }).state, "unavailable");
+  assert.equal(zeroTouchView({ state: "unavailable", failure: "read-failed", waiting: { touches: 2 } }, { role: "operator", nowMs: NOW }).state, "unavailable");
+  const operator = wordsOf(await ZERO_TOUCH_DRAW["zero-touch-waiting.operator"]());
+  const said = "Zero touch is waiting for 2 actions to be settled: they ran, and their touches were not recorded. Until then the rate is not shown; missing history is never counted as zero touches.";
+  assert.equal(operator.split(said).length - 1, 1, operator);
+  assert.ok(operator.includes("Preview settling") && !operator.includes("could not be read") && !operator.includes("Zero-touch streak"), "the rate card alone, with the settle");
+  const viewer = wordsOf(await ZERO_TOUCH_DRAW["zero-touch-waiting.viewer"]());
+  assert.ok(viewer.includes(said) && viewer.includes(ZERO_TOUCH_WORDS.settleBy) && !viewer.includes("Preview settling"));
+  // A ready report with touches this host holds (their begin never reached Valkey): counted as not yet recorded.
+  const ready = wordsOf((await renderPage("zero-touch", { session: { name: "ops", role: "operator" }, data: { now: NOW, zeroTouch: { ...zeroTouchFixture(NOW), waiting: { touches: 1, unknown: 0, fixes: 0 } } }, query: { days: 30 } })).html);
+  assert.ok(ready.includes("1 action that ran is waiting to be settled, so its touch is not counted yet.") && ready.includes("Preview settling") && ready.includes("18%"));
+});
+
 test("the view's reason lists are the worker's own", () => {
   assert.equal(ZERO_TOUCH_NOT_STARTED, TOUCH_NOT_STARTED);
   assert.deepEqual([...ZERO_TOUCH_UNREAD_REASONS], [...TOUCH_UNREAD_REASONS]);
@@ -355,7 +377,7 @@ test("touched-run links keep their exact window and scope through canonical live
   for (const query of ["touched=2", "touched=1&days=8", "days=90", "touched=1&scope=../escape"]) assert.ok(parsePageQuery("runs", query).refusal, query);
 });
 
-test("a fix whose accounting did not finish and that no reload settles is said so, with what ends it; other gaps keep Reload to retry (#987)", async () => {
+test("a fix whose accounting did not finish and that no settle records is said so, with what ends it; one a settle records waits for it; other gaps keep Reload to retry (#987, #1076)", async () => {
   const draw = async (change) => {
     const raw = zeroTouchFixture(NOW);
     change(raw);
@@ -363,13 +385,24 @@ test("a fix whose accounting did not finish and that no reload settles is said s
   };
   // It said "Reload to retry" of a row a reload never cleared.
   const open = await draw((raw) => { raw.fixesPartial = true; raw.fixesOpen = 1; raw.fixesOpenDays = 30; });
-  assert.ok(open.includes("Fix history is incomplete: the accounting of 1 change did not finish and its file does not show it, so a reload does not settle it. Left alone, its record ends by itself within 30 days of the attempt. Missing changes are not evidence that no fix was made."), open.match(/Fix history[^<]*/)?.[0]);
+  assert.ok(open.includes("Fix history is incomplete: the accounting of 1 change did not finish and its file does not show it, so no settle records it. Left alone, its record ends by itself within 30 days of the attempt. Missing changes are not evidence that no fix was made."), open.match(/Fix history[^<]*/)?.[0]);
   // Nothing is promised of making the change again: it may not be possible (the file already reads so), and where it
   // is, the open row is committed beside the new one.
   assert.ok(!open.includes("Reload to retry") && !/made again|counted once/i.test(open));
   const two = await draw((raw) => { raw.fixesPartial = true; raw.fixesOpen = 2; raw.fixesOpenDays = 1; });
-  assert.ok(two.includes("Fix history is incomplete: the accounting of 2 changes did not finish and their files do not show them, so a reload does not settle it. Left alone, their records end by themselves within 1 day of the attempt."), two.match(/Fix history[^<]*/)?.[0]);
-  // A history that could not be read, or whose repair did not run to its end, is one a reload can mend.
+  assert.ok(two.includes("Fix history is incomplete: the accounting of 2 changes did not finish and their files do not show them, so no settle records them. Left alone, their records end by themselves within 1 day of the attempt."), two.match(/Fix history[^<]*/)?.[0]);
+  // Issue #1076: a fix whose file shows it waits for an operator's settle, since a page view no longer commits it. Said
+  // with the action for an operator who can act, and with who can for a viewer and on a read-only console.
+  const waiting = await draw((raw) => { raw.fixesPartial = true; raw.fixesOpen = 0; raw.waiting = { touches: 0, unknown: 0, fixes: 2 }; });
+  assert.ok(waiting.includes("2 fixes are waiting to be settled: their changes landed and their accounting did not finish. Until then they are not listed here."), waiting.match(/[0-9]+ fix[^<]*/)?.[0]);
+  assert.ok(waiting.includes('data-action="zero-touch-settle"') && !waiting.includes("Reload to retry"));
+  for (const [session, readOnly] of [[{ name: "watcher", role: "viewer" }, false], [{ name: "ops", role: "operator" }, true]]) {
+    const raw = zeroTouchFixture(NOW);
+    Object.assign(raw, { fixesPartial: true, fixesOpen: 0, waiting: { touches: 0, unknown: 0, fixes: 1 } });
+    const page = String((await renderPage("zero-touch", { session, readOnly, data: { now: NOW, zeroTouch: raw }, query: { days: 30 } })).html);
+    assert.ok(page.includes("1 fix is waiting to be settled") && !page.includes('data-action="zero-touch-settle"') && page.includes("An operator settles what waits from this page, on a writable console."), `${session.role}${readOnly ? ", read-only" : ""}`);
+  }
+  // A history that could not be read, or whose proof did not run to its end, is one a reload can mend.
   const unread = await draw((raw) => { raw.fixesPartial = true; raw.fixesOpen = 0; });
   assert.ok(unread.includes("Fix history is incomplete. Reload to retry; missing changes are not evidence that no fix was made."));
   // Nothing open and nothing missing: no note.

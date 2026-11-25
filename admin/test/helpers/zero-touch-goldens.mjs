@@ -33,6 +33,9 @@ async function draw({ role = "operator", readOnly = false, change = () => {}, ra
   const out = await renderPage("zero-touch", { query: parsed.query, data, session: { role, name: role === "operator" ? "ops" : "watcher" }, readOnly });
   return String(out.html);
 }
+// Issue #1076: a window that collapsed only on actions still unresolved, two of which this host can settle. The page
+// reads and never settles, so it says what waits; the worker's report marks the collapse `unresolvedOnly`.
+const waitingTouches = (r) => { r.state = "unavailable"; r.unresolvedOnly = true; r.coverage = { requestedFromMs: NOW - 30 * DAY, fromMs: NOW, partial: true, reasons: ["touch-actions-unresolved"] }; r.waiting = { touches: 2, unknown: 0, fixes: 0 }; };
 export const ZERO_TOUCH_DRAW = Object.freeze({
   "zero-touch-populated.operator": () => draw(),
   "zero-touch-populated.viewer": () => draw({ role: "viewer" }),
@@ -46,6 +49,10 @@ export const ZERO_TOUCH_DRAW = Object.freeze({
   "zero-touch-observing.operator": () => draw({ change: (r) => { r.grouping = { enabled: true, state: "pending", pending: 1, unassigned: 2 }; r.groups[0].name = null; r.fixes[0].partial = true; r.fixes[0].subsequentRuns = 0; } }),
   "zero-touch-missing-sources.operator": () => draw({ change: (r) => { r.grouping.state = "unavailable"; r.fixesPartial = true; r.groups = []; r.fixes = []; } }),
   "zero-touch-grouping-errors.operator": () => draw({ change: (r) => { r.grouping.state = "partial"; r.grouping.sources = ["source-expired", "source-unavailable", "source-oversize", "candidates-expired", "group-limit", "stale", "refused", "failed"].map((status, i) => ({ runId: `gh-group-${i}`, status })); } }),
+  "zero-touch-waiting.operator": () => draw({ change: waitingTouches }),
+  "zero-touch-waiting.viewer": () => draw({ role: "viewer", change: waitingTouches }),
+  // Issue #1076: one fix whose change landed waits for a settle, beside one whose file does not show it, which none records.
+  "zero-touch-fixes-waiting.operator": () => draw({ change: (r) => { r.fixesPartial = true; r.waiting = { touches: 0, unknown: 0, fixes: 1 }; r.fixesOpen = 1; r.fixesOpenDays = 30; } }),
   "zero-touch-long-names.operator": () => draw({ change: (r) => { r.projects[0].name = "project-with-a-long-name"; r.projects[0].repositories[0].name = `acme/${"repository-with-a-long-name-".repeat(5)}`; r.groups[0].name = "A human-written group name that uses all the available room in a narrow layout"; } }),
 });
 export const ZERO_TOUCH_PANEL_STATES = Object.freeze(Object.keys(ZERO_TOUCH_DRAW));

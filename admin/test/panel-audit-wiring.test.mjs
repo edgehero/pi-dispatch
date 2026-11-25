@@ -26,6 +26,8 @@ import { parseConnection } from "@edgehero/pi-dispatch/connection";
 import { ACTIONS } from "../src/console/actions.mjs";
 import { runCli } from "../src/console/cli.mjs";
 import { PAGES } from "../src/console/pages.mjs";
+import { cleanTouch, makeTouchStore } from "@edgehero/pi-dispatch/touch-state";
+import { makeZeroTouchFixStore } from "@edgehero/pi-dispatch/zero-touch-fixes";
 import { recordingProxy, scriptCommands } from "./helpers/recording-proxy.mjs";
 
 // Issue #642's review: EVERY panel write surface, driven through the real extension the way pi drives it, appends its
@@ -1139,14 +1141,16 @@ const wirePreviewBodies = ({ repo, digest }) => ({
 });
 
 /**
- * THE KNOWN EXCEPTIONS, by name, each with why it is one. Neither is judged as a page read below.
+ * THE KNOWN EXCEPTION, by name, with why it is one. It is not judged as a page read below.
  *   - Signing in appends its row to the audit log. It is the one request here that is not a read, so what it sends is
  *     not judged; the walk starts after it.
- *   - The zero touch page (`/runs/zero-touch`) repairs a pending entry of its accounting outbox, and a pending fix,
- *     before it reads: a write, when one is pending. Not changed here. This deployment has none pending, so on this
- *     walk the page sends reads only, and it is held to that like every other page.
+ * There was a second (issue #1076): the zero touch page (`/runs/zero-touch`, and `/runs?touched=1`, which reads the same
+ * report) repaired a pending entry of its accounting outbox, and a pending fix, before it read: a write, when one was
+ * pending, by anyone who opened the page. It now only counts what a settle would do, and the settle is an operator's
+ * confirmed action (`zero-touch-settle`). The seeded walk below holds one of each pending, so both pages are judged
+ * with something to repair, not only on a deployment that had nothing pending.
  */
-const WIRE_EXCEPTIONS = Object.freeze(["POST /login", "GET /runs/zero-touch with an accounting entry or a fix pending repair"]);
+const WIRE_EXCEPTIONS = Object.freeze(["POST /login"]);
 
 test("on the wire, every page of the console, its state document and streams, and every action's preview send reads only, on an empty Valkey and on a seeded fleet (#1036)", { timeout: 300_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
   const named = await namedReadScripts();
@@ -1239,6 +1243,8 @@ test("on the wire, every page of the console, its state document and streams, an
       if (bad.length > 0) wrote[where] = bad;
     };
     for (const [id, page] of Object.entries(PAGES)) await judge(`GET ${page.path}${WIRE_PAGE_QUERY[id] ?? ""}`, await call("GET", `${page.path}${WIRE_PAGE_QUERY[id] ?? ""}`));
+    // The runs page's touched filter reads the zero touch report (issue #1076): the second page that repaired on a view.
+    await judge("GET /runs?touched=1", await call("GET", "/runs?touched=1"));
     await judge("GET /api/state", await call("GET", "/api/state"));
     for (const [id, page] of Object.entries(PAGES)) if (page.live) await judge(`GET /api/events?page=${id}`, await call("GET", `/api/events?page=${id}${id === "run" ? "&id=local-wire-done" : id === "host" ? "&name=wirehost" : ""}`, { stream: true }), 60);
     for (const action of ACTIONS) await judge(`preview ${action.name}`, await call("POST", `/api/act/${action.name}/preview`, { body: bodies[action.name] ?? {} }));
@@ -1272,6 +1278,17 @@ test("on the wire, every page of the console, its state document and streams, an
     const record = (rec) => writeFileSync(join(logs, `${sanitizeJobId(rec.jobId)}.json`), JSON.stringify(rec));
     record({ jobId: "local-wire-done", kind: "local", target: "repo", flow: "fix", startedAt: iso(Date.now() - 120_000), endedAt: iso(Date.now() - 60_000), outcome: "completed", reason: null, host: "wirehost" });
     record({ jobId: "gh-wire-parked", kind: "github", target: "acme/web#1", flow: "triage", startedAt: iso(Date.now() - 120_000), endedAt: iso(Date.now() - 60_000), outcome: "completed", reason: "awaiting-input", host: "wirehost" });
+    // Zero touch accounting an earlier write left pending (issue #1076): an action that ran whose touch was not
+    // recorded (its intent saved as applied, its entry in the pending set), and a fix whose change landed and whose
+    // completion was lost (its trigger shows it). The page's read repaired both, on any view; a settle does now.
+    const touch = cleanTouch({ runId: "local-wire-done", cause: "rerun", at: Date.now() - 30_000, nonce: "wire" });
+    mkdirSync(join(logs, "touch-outbox"), { recursive: true });
+    writeFileSync(join(logs, "touch-outbox", `${touch.id}.json`), JSON.stringify({ state: "applied", event: touch }), { mode: 0o600 });
+    assert.equal((await makeTouchStore({ redis: r }).begin(touch)).ok, true);
+    const trigger0 = JSON.parse(readFileSync(join(dir, "triggers.json"), "utf8")).triggers[0];
+    const staged = await makeZeroTouchFixStore({ redis: r }).stage({ kind: "instructions", runId: "gh-wire-parked", scopeId: "a".repeat(64), reason: "secret-unresolved", project: null, groupId: null, triggerIndex: 0 }, { privateUndo: { index: 0, before: null, after: "Use pnpm.", triggerDigest: createHash("sha256").update(JSON.stringify(trigger0)).digest("hex") }, identity: "wire" });
+    assert.equal(staged.ok, true);
+    const pendingAccounting = async () => ({ intent: existsSync(join(logs, "touch-outbox", `${touch.id}.json`)), touch: await r.hexists("touch:pending", touch.id), fix: JSON.parse(await r.get(`zero-touch:fixes:meta:${staged.fix.id}`)).state });
     const planted = async () => ({ host: await r.sismember(HOST_SET, "gone-wire"), held: await r.sismember(HELD_SET, "gone-held"), run: (await r.zscore("runs:index", "gone-run")) !== null ? 1 : 0 });
     // Every key but the audit log's, which the second sign-in adds its row to, and one with an expiry, which goes by
     // itself (the lock the worker above took for its stalled check).
@@ -1292,12 +1309,15 @@ test("on the wire, every page of the console, its state document and streams, an
     assert.deepEqual(seeded.started, [], "the console's start over a seeded fleet sends reads only");
     assert.deepEqual(seeded.wrote, {}, "on a seeded fleet: each request against what it sent that is not a read");
     assert.deepEqual(await planted(), { host: 1, held: 1, run: 1 }, "what a pruning reader removes is still there");
+    assert.deepEqual(await pendingAccounting(), { intent: true, touch: 1, fix: "pending" }, "and the accounting a page view once settled is still pending");
+    assert.equal(seeded.answered["preview zero-touch-settle"], 200, "the settle's preview found both and answered with a ticket");
+    assert.equal(empty.answered["preview zero-touch-settle"], 400, "on an empty Valkey there is nothing to settle");
     assert.deepEqual(await census(), before, "and no key was made or removed");
     // The previews that have to reach the fleet did: each answered past its input checks.
     for (const name of ["cancel-queued", "retry-failed", "remove-failed", "retry-all-failed", "remove-all-failed", "fleet-pause", "queue-pause", "cancel-all-held", "cancel-held"]) assert.equal(seeded.answered[`preview ${name}`], 200, `preview ${name} answered with a ticket (${seeded.answered[`preview ${name}`]})`);
     assert.match(seeded.digest, /^[a-f0-9]{64}$/, "the trigger page's digest was read off the page, so its edit's preview reached its gate");
     assert.equal(seeded.answered["preview trigger-environment-edit"], 409, "its gate read the live hosts and refused: the seeded host publishes no version");
-    assert.equal(WIRE_EXCEPTIONS.length, 2);
+    assert.equal(WIRE_EXCEPTIONS.length, 1);
   } finally {
     for (const q of opened) await q.close().catch(() => {});
     proxy?.close();

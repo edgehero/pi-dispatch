@@ -862,8 +862,9 @@ test("the zero touch grouping job is one job per confirm, says may or may not wh
     proxy.freeze();
     const short = makeZeroTouchService({ paths, now, redisFn: clientHere, parseConnectionFn: boundedHere, readTimeoutMs: CONNECT, stepTimeoutMs: CONNECT });
     // What the preview throws is marked as a Valkey read that got no answer (issue #987), which the console answers as
-    // Valkey unreachable. The page's read is not: it repairs before it reads, so its timer cannot say nothing was sent.
-    for (const [reading, marked] of [[() => short.read({}), undefined], [() => short.preview("zero-touch-group", { runId }), true]]) {
+    // Valkey unreachable. So, since issue #1076, is what the page's read throws: it repaired before it read, so its
+    // timer could not say nothing was sent; it now reads only, and a settle is an operator's action.
+    for (const [reading, marked] of [[() => short.read({}), true], [() => short.preview("zero-touch-group", { runId }), true]]) {
       const got = await clocked(reading());
       assert.ok(got.res.thrown instanceof Error, JSON.stringify(got.res));
       assert.equal(got.res.thrown.valkeyNotSent, marked);

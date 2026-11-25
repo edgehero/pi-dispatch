@@ -114,17 +114,26 @@ and after the change. Untouched refusals and unanswered questions still count. I
 incomplete coverage. No subsequent runs means observing, not proof that a fix worked. Reverted instruction fixes
 remain visible as reverted. Viewers see safe change descriptions and counts, without instruction text or actors.
 
-Accounting publication can fail after a successful action. Pending intents and exact-proof repair make that visible
-without repeating the action. Read the returned warning, restore the unavailable source and reload; do not repeat an
-edit because its metric is pending. Conflicting later edits leave uncertain evidence partial.
+Accounting publication can fail after a successful action. Pending intents and exact-proof settling make that visible
+without repeating the action. Read the returned warning, restore the unavailable source and settle it from the Zero
+touch page; do not repeat an edit because its metric is pending. Conflicting later edits leave uncertain evidence
+partial.
 
-A change that was made is never lost from the fix history: when its completion could not be written, the page
-completes it the next time it is read, as soon as its file shows the change, whatever other fix wrote the same bytes.
-A change that was REFUSED can leave its accounting open when Valkey did not answer. While such an entry is open and
-its file does not show the change, the page says "Fix history is incomplete: the accounting of 1 change did not finish
-and its file does not show it, so a reload does not settle it", with how long its record lives at most (the history's
-retention). If the same bytes are written later, by the same change made again or by hand, the open entry is
-completed too, so one change can read as two fixes; that needs Valkey silent exactly at a refusal's accounting.
+Opening the page never settles anything (2026-11-25, #1076): a page view is a read. The page counts what waits, and an
+operator settles it with **Preview settling** and **Confirm** on a writable console. A settle records an action that
+ran and whose touch was not recorded, once, and completes a fix whose change landed and whose completion was lost.
+It never runs an action again, and settling twice records nothing twice. The worker's daily sweep also records
+unfinished touches on a host that shares the logs folder. An action interrupted before it said whether it ran stays
+unknown: no settle can prove it, and while it is pending the touch rate is not shown.
+
+A change that was made is never lost from the fix history: when its completion could not be written, the page says
+"1 fix is waiting to be settled", and a settle completes it as soon as its file shows the change, whatever other fix
+wrote the same bytes. A change that was REFUSED can leave its accounting open when Valkey did not answer. While such
+an entry is open and its file does not show the change, the page says "Fix history is incomplete: the accounting of 1
+change did not finish and its file does not show it, so no settle records it", with how long its record lives at most
+(the history's retention). If the same bytes are written later, by the same change made again or by hand, a settle
+completes the open entry too, so one change can read as two fixes; that needs Valkey silent exactly at a refusal's
+accounting.
 
 ## Roles and interaction
 

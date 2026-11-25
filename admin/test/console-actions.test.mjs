@@ -35,12 +35,14 @@ import { fleetActive, fleetFailed, fleetHeld, fleetQueues, configTriggers, parke
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as RM from "../src/read-model.mjs";
 import * as WP from "../src/write-plans.mjs";
-import { FIX_STAGE_IN_PART, FIX_STAGE_UNCONFIRMED, UNDO_UNMARKED, causeOf, makeZeroTouchService } from "../src/zero-touch-data.mjs";
+import { FIX_STAGE_IN_PART, FIX_STAGE_UNCONFIRMED, SETTLE_IN_PART, SETTLE_NOTHING, UNDO_UNMARKED, causeOf, makeZeroTouchService } from "../src/zero-touch-data.mjs";
 import { zeroTouchLog } from "../src/console/cli.mjs";
 import { UNDO_ALREADY_WRITTEN } from "../src/zero-touch-actions.mjs";
 import { makeAnswererService } from "../src/answerer-data.mjs";
 import { makeQuestionGroupStore } from "@edgehero/pi-dispatch/question-groups";
 import { makeTouchStore } from "@edgehero/pi-dispatch/touch-state";
+import { makeTouchOutbox } from "@edgehero/pi-dispatch/touch-outbox";
+import { zeroTouchView } from "../src/zero-touch-view.mjs";
 import { makeZeroTouchFixStore } from "@edgehero/pi-dispatch/zero-touch-fixes";
 import { createModelRoleActions, MODEL_ROLE_EDIT_FIELDS } from "../src/model-role-plans.mjs";
 import { createTriggerEnvironmentActions } from "../src/trigger-environment-plans.mjs";
@@ -378,7 +380,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "envelope-set": "envelope-set",
     "priorities-set": "priorities-set",
     "allocation-revert": "allocation-revert",
-    "zero-touch-group": "zero-touch-group", "zero-touch-name": "zero-touch-name", "zero-touch-instruction": "zero-touch-instruction", "zero-touch-undo": "zero-touch-undo",
+    "zero-touch-group": "zero-touch-group", "zero-touch-name": "zero-touch-name", "zero-touch-instruction": "zero-touch-instruction", "zero-touch-undo": "zero-touch-undo", "zero-touch-settle": "zero-touch-settle",
     "board-freeze": "board-freeze", "board-unfreeze": "board-unfreeze", "board-clear": "board-clear", "board-revert": "board-revert", "board-adopt": "board-adopt",
     "package-canary": "package-canary", "package-adopt": "package-adopt", "package-undo": "package-undo",
   });
@@ -410,11 +412,11 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "limit-add": ["limit"], "limit-edit": ["index", "limit"], "limit-delete": ["index"],
     "project-add": ["id", "name", "members"], "project-edit": ["id", "name", "members"], "project-delete": ["id"],
     "envelope-set": ["envelope"], "priorities-set": ["projects", "validDays"], "allocation-revert": ["index"],
-    "zero-touch-group": ["runId"], "zero-touch-name": ["groupId", "name"], "zero-touch-instruction": ["runId", "groupId", "index", "sentence"], "zero-touch-undo": ["fixId"],
+    "zero-touch-group": ["runId"], "zero-touch-name": ["groupId", "name"], "zero-touch-instruction": ["runId", "groupId", "index", "sentence"], "zero-touch-undo": ["fixId"], "zero-touch-settle": [],
     "board-freeze": ["rule", "expectedVersion"], "board-unfreeze": ["rule", "expectedVersion"], "board-clear": ["rule", "expectedVersion"], "board-revert": ["rule", "expectedVersion", "version"], "board-adopt": ["rule", "expectedVersion", "proposalId"],
   };
   Object.assign(FIELDS, Object.fromEntries(SETUP_ACTION_NAMES.map(name => [name, name.startsWith("setup-provider-key") ? ["provider", "value"] : name === "setup-viewer-add" ? ["name"] : name === "setup-viewer-revoke" ? ["name", "identity"] : []])));
-  assert.equal(ACTIONS.length, 63 + SETUP_ACTION_NAMES.length);
+  assert.equal(ACTIONS.length, 64 + SETUP_ACTION_NAMES.length);
   for (const name of CONFIG_FIX_ACTIONS) FIELDS[name].push("becauseRun");
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
@@ -496,6 +498,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["zero-touch-name", {}, twice("Rename the group again from Zero touch."), null, "Save group name", "Saved the group name"],
     ["zero-touch-instruction", {}, twice("Remove this sentence while the trigger still matches the confirmed change."), null, "Add instruction sentence", "Added the instruction sentence and linked its cause"],
     ["zero-touch-undo", {}, twice("Add a new reviewed sentence from the same cause."), null, "Remove instruction sentence", "Removed the instruction sentence"],
+    ["zero-touch-settle", {}, twice("Settled accounting stays recorded until its retention ends; no action ran again."), null, "Settle pending accounting", "Settled the pending Zero touch accounting"],
     ...["freeze", "unfreeze", "clear", "revert", "adopt"].map((op) => [`board-${op}`, { target: "shop" }, twice("Restore a retained board version, or change its freeze state."), null, `${op[0].toUpperCase() + op.slice(1)} board`, "Changed board shop"]),
     ["run-fork", { target: "gh-f", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Fork for up to $2.00", "Queued a fork of gh-f"],
     ["cancel-active", { payload: { jobId: "gh-1" } }, twice(U.cancelled), null, "Cancel the run", "Cancelled running job gh-1"],
@@ -2486,7 +2489,7 @@ test("a successful re-run with incomplete touch accounting keeps success and war
   assert.equal(result.status, 200, result.text);
   assert.equal(result.json().ok, true);
   assert.equal(result.json().touchWarning, "touch-tracking-incomplete");
-  assert.match(result.json().change.summary, /accounting is incomplete and pending repair/);
+  assert.match(result.json().change.summary, /accounting is incomplete and waiting to be settled on the Zero touch page/);
   const banner = String(doneBannerHtml(c.sessions.flashes.at(-1).change));
   assert.match(banner, /The action succeeded; do not repeat it for its metric/);
   assert.equal((await c.confirm("rerun", preview.json().ticket)).status, 409);
@@ -4838,7 +4841,7 @@ test("what tracks a configuration fix never takes the place of the change's own 
   } finally { await f.done(); }
 });
 
-test("what the tracking of a fix could not take back is logged with its cause, a row still open is reported only by a repair that ran to its end, and the instruction path takes its accounting back (#987)", live, async () => {
+test("what the tracking of a fix could not take back is logged with its cause, a row still open is reported only by a proof that ran to its end, and the instruction path takes its accounting back (#987, #1076)", live, async () => {
   const f = await freshValkey();
   try {
     const { paths } = deployment(URL13);
@@ -4886,17 +4889,18 @@ test("what the tracking of a fix could not take back is logged with its cause, a
     failing = null;
     assert.equal(refused.status, 409, refused.text);
     assert.deepEqual(await states(), ["pending"]);
-    // The page says what is so of it: its file does not show it, so no reload settles it. It said "Reload to retry".
+    // The page says what is so of it: its file does not show it, so no settle records it. It said "Reload to retry".
     let page = await service.read({ days: 30 });
-    assert.deepEqual([page.fixesPartial, page.fixesOpen, page.fixesOpenDays, page.fixes.length], [true, 1, 30, 0]);
+    assert.deepEqual([page.fixesPartial, page.fixesOpen, page.fixesOpenDays, page.fixes.length, page.waiting.fixes], [true, 1, 30, 0, 0]);
     assert.deepEqual(logged.splice(0), [["zero_touch_fix_reject_pending", { cause: "Error: fix-store-timeout" }]]);
-    // Only a repair that ran to its end says so. One that failed has looked at nothing, a reload does retry it, and
-    // the page keeps "Reload to retry": the same row was reported as one no reload settles.
+    // Only a proof that ran to its end says so (issue #1076: the page proves and never commits). One that failed has
+    // looked at nothing, a reload does retry it, and the page keeps "Reload to retry": the same row was reported as one
+    // no reload settles.
     noProof = true;
     page = await service.read({ days: 30 });
     noProof = false;
     assert.deepEqual([page.fixesPartial, page.fixesOpen], [true, 0]);
-    assert.deepEqual(logged.splice(0), [["zero_touch_fix_repair_pending", { cause: "Error: fix-store-timeout" }]]);
+    assert.deepEqual(logged.splice(0), [["zero_touch_fix_inspect_failed", { cause: "Error: fix-store-timeout" }]]);
 
     // What the tracking cannot take back is logged with WHY. A fault of the code on a Valkey that answers is told from
     // an outage by its name, and its message, which is nobody's fixed sentence, stays out of the log; the line said the
@@ -5013,13 +5017,102 @@ test("a change made three times whose third completion was lost reads as three f
     assert.deepEqual(await states(), ["applied", "applied", "pending"]);
     // Why it is pending is in the log: this line carried no cause.
     assert.deepEqual(logged.splice(0), [["zero_touch_fix_pending", { cause: "Error: fix-store-timeout" }]]);
-    // The page's repair finds the file showing the change and completes it: three fixes. An earlier fix with the same
-    // bytes held this one pending for good, a made change the history never listed, while the change could not be made
-    // again either ("the file already says this").
+    // Issue #1076: the page's read finds the file showing the change and says a settle would complete it, writing
+    // nothing: a page view is a read. It completed it on every view, a write by whoever opened the page.
     t += 60_000;
-    const page = await service.read({ days: 30 });
+    let page = await service.read({ days: 30 });
+    assert.deepEqual(await states(), ["applied", "applied", "pending"]);
+    assert.deepEqual([page.fixes.length, page.fixesPartial, page.fixesOpen, page.waiting.fixes], [2, true, 0, 1]);
+    // The settle completes it: three fixes. An earlier fix with the same bytes held this one pending for good, a made
+    // change the history never listed, while the change could not be made again either ("the file already says this").
+    // Its preview says what it records and writes nothing either.
+    const settle = await c.act("zero-touch-settle", {});
+    assert.equal(settle.status, 200, settle.text);
+    assert.ok(settle.json().summary.some((line) => line.startsWith("1 fix whose change landed")), settle.text);
+    assert.deepEqual(await states(), ["applied", "applied", "pending"]);
+    const settled = await c.confirm("zero-touch-settle", settle.json().ticket);
+    assert.equal(settled.status, 200, settled.text);
     assert.deepEqual(await states(), ["applied", "applied", "applied"]);
-    assert.deepEqual([page.fixes.length, page.fixesPartial, page.fixesOpen], [3, false, 0]);
+    page = await service.read({ days: 30 });
+    assert.deepEqual([page.fixes.length, page.fixesPartial, page.fixesOpen, page.waiting.fixes], [3, false, 0, 0]);
+    // Nothing left: a second settle is refused before it writes, as one a settle elsewhere overtook is.
+    const again = await c.act("zero-touch-settle", {});
+    assert.equal(again.status, 400, again.text);
+    assert.equal(again.json().error, SETTLE_NOTHING);
+    assert.deepEqual(logged, []);
+  } finally { await f.done(); }
+});
+
+test("a settle records what an earlier write left pending, and only an operator's confirmed settle does: the page and the preview read, a settle the fix store cut short says so, one Valkey did not take says what is left (#1076)", live, async () => {
+  const f = await freshValkey();
+  try {
+    const { paths } = deployment(URL13);
+    let t = T0;
+    const now = () => t;
+    // A job action whose touch publication did not finish: its intent saved as applied, and its entry left in the
+    // pending set, as `trackTouchAction` leaves one whose write Valkey did not take.
+    const dir = join(paths.logsDir, "touch-outbox");
+    const touches = makeTouchStore({ redis: f.redis, now });
+    await touches.initialize();
+    const lost = makeTouchOutbox({ dir, store: { ...touches, write: async () => ({ error: "touch-index-unavailable" }) } });
+    const intent = await lost.begin({ runId: "gh-rerun", cause: "rerun", at: T0 - 1000, nonce: "one" });
+    assert.equal((await lost.applied(intent)).error, "touch-index-unavailable");
+    assert.deepEqual([readdirSync(dir).length, await f.redis.hlen("touch:pending")], [1, 1]);
+    // And a configuration fix whose change landed and whose completion did not: its file shows it.
+    writeFileSync(paths.settingsFile, `${JSON.stringify({ maxTurns: 35 }, null, 2)}\n`);
+    const fixes = makeZeroTouchFixStore({ redis: f.redis, now });
+    await fixes.stage({ kind: "config", runId: "gh-refusal", scopeId: "a".repeat(64), reason: "secret-unresolved", project: null, groupId: null, triggerIndex: 0 }, { privateUndo: { file: paths.settingsFile, afterDigest: sha256(read(paths.settingsFile)) }, identity: "one" });
+    let failSet = false;
+    let failEval = false;
+    const logged = [];
+    const redisFn = (url, options) => {
+      const real = makeRedisClient(url, options);
+      return new Proxy(real, { get(target, name) {
+        const value = Reflect.get(target, name);
+        if (typeof value !== "function") return value;
+        if (name === "set") return (...args) => (failSet ? Promise.reject(new Error("fix-store-timeout")) : value.apply(target, args));
+        if (name === "eval") return (...args) => (failEval ? Promise.reject(new Error("Command timed out")) : value.apply(target, args));
+        return value.bind(target);
+      } });
+    };
+    const service = makeZeroTouchService({ paths, now, redisFn, log: (event, detail) => logged.push([event, detail]) });
+    const c = await start({ paths, a: { zeroTouch: service } });
+    const census = async () => [readdirSync(dir).length, await f.redis.hlen("touch:pending"), JSON.parse(await f.redis.get(`zero-touch:fixes:meta:${(await f.redis.zrange("zero-touch:fixes:index", 0, -1))[0]}`)).state];
+    const page = await service.read({ days: 30 });
+    assert.deepEqual(page.waiting, { touches: 1, unknown: 0, fixes: 1 });
+    // The window collapsed on the unresolved action alone (the runs were read, with no mirror beside them): the page
+    // says it waits for a settle, where it said "could not be read".
+    assert.deepEqual([page.state, page.unresolvedOnly, zeroTouchView(page, { role: "operator", nowMs: T0 }).state], ["unavailable", true, "waiting"]);
+    assert.deepEqual(await census(), [1, 1, "pending"], "a page view settles nothing");
+    const p = await c.act("zero-touch-settle", {});
+    assert.equal(p.status, 200, p.text);
+    assert.deepEqual(p.json().summary, ["Settle pending Zero touch accounting", "1 action that ran and whose touch was not recorded: each is recorded once, and none runs again.", "1 fix whose change landed and whose accounting did not finish: each is listed under Fixes that worked."]);
+    assert.deepEqual(await census(), [1, 1, "pending"], "nor does its preview");
+    // The fix store cuts the settle short after the touches were recorded: said as a settle that may have landed in part.
+    failSet = true;
+    const cut = await c.confirm("zero-touch-settle", p.json().ticket);
+    failSet = false;
+    assert.equal(cut.status, 409, cut.text);
+    assert.equal(cut.json().error, SETTLE_IN_PART);
+    assert.deepEqual(await census(), [0, 0, "pending"]);
+    assert.deepEqual(logged.splice(0), [["zero_touch_fix_settle_pending", { cause: "Error: fix-store-timeout" }]]);
+    // Settled again: the touch is recorded once, whatever ran twice, and the fix completes.
+    const again = await c.both("zero-touch-settle", {});
+    assert.equal(again.confirm.status, 200, again.confirm.text);
+    assert.deepEqual(await census(), [0, 0, "applied"]);
+    assert.equal((await touches.read()).events.length, 1);
+    const settledPage = await service.read({ days: 30 });
+    assert.deepEqual([settledPage.unresolvedOnly, settledPage.waiting, settledPage.fixes.length, settledPage.fixesPartial], [undefined, { touches: 0, unknown: 0, fixes: 0 }, 1, false]);
+    // A touch Valkey does not take at the settle stays for the next one, and the banner says what is left.
+    const later = await lost.begin({ runId: "gh-rerun", cause: "rerun", at: T0 - 500, nonce: "two" });
+    await lost.applied(later);
+    const q = await c.act("zero-touch-settle", {});
+    failEval = true;
+    const left = await c.confirm("zero-touch-settle", q.json().ticket);
+    failEval = false;
+    assert.equal(left.status, 200, left.text);
+    assert.match(left.json().change.summary, /^Settled the pending Zero touch accounting, but 1 touch could not be recorded: Valkey did not take it\. Settle again once Valkey answers/);
+    assert.equal(readdirSync(dir).length, 1);
     assert.deepEqual(logged, []);
   } finally { await f.done(); }
 });

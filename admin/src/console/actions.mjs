@@ -2428,6 +2428,7 @@ const WRITE_RULES = {
   "zero-touch-name": { fields: ["groupId", "name"], danger: false, undo: () => "Rename the group again from Zero touch.", inverse: none, confirmLabel: () => "Save group name", done: () => "Saved the group name" },
   "zero-touch-instruction": { fields: ["runId", "groupId", "index", "sentence"], danger: false, atConfirm: true, undo: () => "Remove this sentence while the trigger still matches the confirmed change.", inverse: (out, body, result) => result?.fixId ? { action: "zero-touch-undo", body: { fixId: result.fixId } } : null, confirmLabel: () => "Add instruction sentence", done: () => "Added the instruction sentence and linked its cause" },
   "zero-touch-undo": { fields: ["fixId"], danger: false, undo: () => "Add a new reviewed sentence from the same cause.", inverse: none, confirmLabel: () => "Remove instruction sentence", done: () => "Removed the instruction sentence" },
+  "zero-touch-settle": { fields: [], danger: false, undo: () => "Settled accounting stays recorded until its retention ends; no action ran again.", inverse: none, confirmLabel: () => "Settle pending accounting", done: () => "Settled the pending Zero touch accounting" },
   ...Object.fromEntries(["freeze", "unfreeze", "clear", "revert", "adopt"].map((op) => [`board-${op}`, { fields: ["rule", "expectedVersion", ...(op === "revert" ? ["version"] : []), ...(op === "adopt" ? ["proposalId"] : [])], danger: op !== "unfreeze" && op !== "adopt", undo: () => "Restore a retained board version, or change its freeze state.", inverse: () => null, confirmLabel: () => `${op[0].toUpperCase() + op.slice(1)} board`, done: (out) => `Changed board ${out.target}` }])),
   "cancel-active": { fields: ["jobId"], danger: true, undo: say(UNDO_SENTENCES.cancelled), inverse: none, confirmLabel: () => "Cancel the run", done: (out) => `Cancelled running job ${out.payload.jobId}` },
   "cancel-held": { fields: ["jobId"], danger: true, undo: say(UNDO_SENTENCES.held), inverse: none, confirmLabel: () => "Cancel the held job", done: (out) => `Cancelled held job ${out.payload.jobId}` },
@@ -2572,13 +2573,17 @@ function withRules(a) {
   } });
 }
 
-/** These writes are console-only: no model tool can add instructions or create a model-owned group name. */
-const zeroTouchActions = ["group", "name", "instruction", "undo"].map((operation) => ({
+/**
+ * These writes are console-only: no model tool can add instructions or create a model-owned group name. `settle`
+ * (issue #1076) records the accounting an earlier write left pending, which the page's read once did on every view.
+ */
+const zeroTouchActions = ["group", "name", "instruction", "undo", "settle"].map((operation) => ({
   name: `zero-touch-${operation}`, kind: `zero-touch-${operation}`, paid: operation === "group", bulk: false, needs: ["zeroTouch"],
   async preview(body, ctx) {
     const params = operation === "group" ? { runId: jobIdOf({ jobId: body.runId }) }
       : operation === "name" ? { groupId: str(body, "groupId", { required: true, max: 32 }), name: str(body, "name", { required: true, max: 240 }) }
       : operation === "undo" ? { fixId: str(body, "fixId", { required: true, max: 32 }) }
+      : operation === "settle" ? {}
       : { runId: jobIdOf({ jobId: body.runId }), ...(body.groupId ? { groupId: str(body, "groupId", { max: 32 }) } : {}), index: index(body, "index"), sentence: str(body, "sentence", { required: true, max: 2000 }) };
     const got = await ctx.a.zeroTouch.preview(this.name, params);
     if (!got.plan) return got;
@@ -3219,7 +3224,7 @@ function changeOf(ctx, entry, action, { auditSeq, auditLast = null, count, done 
   // Issue #964: what a write that landed must still say (the kill switch's list of queues that may be short) follows its
   // past tense, so the banner never reads as a flat success over it.
   if (typeof result?.note === "string" && result.note !== "") change.summary += `, but ${result.note}`;
-  if (result?.touchWarning || result?.warning || result?.results?.some((row) => row.touchWarning)) change.summary += " Zero touch accounting is incomplete and pending repair. The action succeeded; do not repeat it for its metric.";
+  if (result?.touchWarning || result?.warning || result?.results?.some((row) => row.touchWarning)) change.summary += " Zero touch accounting is incomplete and waiting to be settled on the Zero touch page. The action succeeded; do not repeat it for its metric.";
   if (Buffer.byteLength(JSON.stringify(change), "utf8") > FLASH_MAX_BYTES) {
     change.inverse = null;
     change.undo = UNDO_SENTENCES.tooBigAfter;

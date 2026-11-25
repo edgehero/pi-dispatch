@@ -13,7 +13,7 @@ const base = process.env.VALKEY_TEST_URL;
 if (!base && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") throw new Error("Zero touch data integration requires VALKEY_TEST_URL");
 const NOW = Date.UTC(2026, 9, 30, 12);
 
-test("the page service repairs confirmed configuration writes only through configured file paths", { skip: base ? false : "VALKEY_TEST_URL not set" }, async () => {
+test("the page service proves confirmed configuration writes only through configured file paths, and only a settle commits them (#1076)", { skip: base ? false : "VALKEY_TEST_URL not set" }, async () => {
   const url = new URL(base); url.pathname = "/14";
   const redis = makeRedisClient(url.toString());
   const store = makeZeroTouchFixStore({ redis, now: () => NOW });
@@ -32,11 +32,20 @@ test("the page service repairs confirmed configuration writes only through confi
     const allowed = await store.stage(fix, { privateUndo: { file: paths.settingsFile, afterDigest: hash }, identity: randomUUID() }); staged.push(allowed.fix.id);
     const denied = await store.stage(fix, { privateUndo: { file: privatePath, afterDigest: hash }, identity: randomUUID() }); staged.push(denied.fix.id);
     const service = makeZeroTouchService({ paths, now: () => NOW, fs: { ...fs, readFileSync(path, ...args) { reads.push(path); return fs.readFileSync(path, ...args); } } });
+    // The page's read proves and writes nothing: the lost completion waits for a settle, the unprovable edit stays open.
     const report = await service.read();
-    assert.equal((await store.read(allowed.fix.id)).state, "applied", "the lost metadata completion is repaired without repeating the file write");
+    assert.equal((await store.read(allowed.fix.id)).state, "pending", "a page view commits nothing");
+    assert.deepEqual([report.waiting.fixes, report.fixesPartial], [1, true]);
+    assert.ok(report.fixesOpen >= 1, "the edit whose file is not on the allowlist is open: no settle records it");
+    // The settle commits what the read proved, without repeating the file write.
+    const preview = await service.preview("zero-touch-settle", {});
+    assert.equal(preview.plan.settle.fixes, 1);
+    assert.equal((await store.read(allowed.fix.id)).state, "pending", "nor does a preview");
+    const settled = await service.apply("zero-touch-settle", { payload: { params: {} } });
+    assert.equal(settled.ok, true, JSON.stringify(settled));
+    assert.equal((await store.read(allowed.fix.id)).state, "applied", "the lost metadata completion is settled without repeating the file write");
     assert.equal((await store.read(denied.fix.id)).state, "pending");
     assert.equal(reads.includes(privatePath), false, "private pending proofs cannot turn into arbitrary host reads");
-    assert.equal(report.fixesPartial, true, "the unprovable edit remains visibly uncertain");
     assert.equal(fs.readFileSync(paths.settingsFile, "utf8"), after);
   } finally {
     for (const id of staged) { await redis.del(`zero-touch:fixes:meta:${id}`, `zero-touch:fixes:private:${id}`); await redis.zrem("zero-touch:fixes:index", id); }

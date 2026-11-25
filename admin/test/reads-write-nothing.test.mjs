@@ -5,7 +5,8 @@
 // and a stale `host:live` member removed (SREM) by a registry read that prunes.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { HOST_SET } from "@edgehero/pi-dispatch/host-registry";
 import { sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
@@ -17,6 +18,9 @@ import { planTriggerFire } from "../src/trigger-fire.mjs";
 import { readTriggerScheduleZones } from "../src/trigger-schedule-zones.mjs";
 import { keyedRedis, registryKeys } from "./helpers/fleet-reader-fakes.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { makeZeroTouchService } from "../src/zero-touch-data.mjs";
+import { cleanTouch } from "@edgehero/pi-dispatch/touch-state";
+import { READ_SCRIPT } from "@edgehero/pi-dispatch/run-mirror";
 
 const NOW = Date.now();
 const STALE = "gone-host";
@@ -156,4 +160,45 @@ test("a page view writes nothing: the trigger page's Fire now check, the trigger
   for (const view of ["capacity", "spend", "budget-split", "flows", "breakdown"]) await assembleInsightsView(paths, "7d", { view, pricing, nowMs: NOW, envFn: () => ({}), reads }).catch(() => {});
   assert.ok(seen.length >= 3, `the views read the registry (${seen.length} reads)`);
   assert.deepEqual(seen.filter((s) => !s.endsWith(" no-prune")), [], "every registry read of an Insights view is one that prunes nothing");
+});
+
+test("the zero touch page's read writes nothing, with accounting pending that it once settled: it counts what a settle would do (#1076)", async () => {
+  // A host with what an earlier write left pending: an action that ran whose touch was not recorded (its intent saved
+  // as applied), and a fix whose change landed and whose completion was lost (its trigger shows it). The page's read
+  // repaired both before it read. Every command it sends now is recorded, and none may be a write.
+  const root = tempDir("pd-1076-read-");
+  const logs = join(root, "logs");
+  mkdirSync(join(logs, "touch-outbox"), { recursive: true });
+  const triggersPath = join(root, "triggers.json");
+  const trigger = { on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "triage" } };
+  writeFileSync(triggersPath, JSON.stringify({ triggers: [trigger] }));
+  const touch = cleanTouch({ runId: "gh-1", cause: "rerun", at: NOW - 1000, nonce: "n" });
+  const intent = join(logs, "touch-outbox", `${touch.id}.json`);
+  writeFileSync(intent, JSON.stringify({ state: "applied", event: touch }));
+  const id = "c".repeat(32);
+  const meta = { id, kind: "instructions", at: NOW - 5000, runId: "gh-1", scopeId: "a".repeat(64), project: null, groupId: null, reason: "secret-unresolved", triggerIndex: 0, state: "pending" };
+  const proof = { index: 0, before: null, after: "x", triggerDigest: createHash("sha256").update(JSON.stringify(trigger)).digest("hex") };
+  const sent = [];
+  const READS = new Set(["get", "mget", "zrevrangebyscore", "zrange", "zrangebyscore", "zcard", "zscore", "hgetall", "hget", "hlen", "smembers", "exists", "pttl", "ttl", "scan", "type", "lrange", "llen", "eval", "disconnect", "on", "once", "removeListener", "quit"]);
+  const redisFn = () => new Proxy({}, { get(target, name) {
+    if (name === "status") return "ready";
+    if (name === "then") return undefined;
+    return (...args) => {
+      sent.push([String(name), String(args[0] ?? "")]);
+      if (name === "zrevrangebyscore") return Promise.resolve(String(args[0]).startsWith("zero-touch:fixes:") ? [id] : []);
+      if (name === "get") return Promise.resolve(String(args[0]).endsWith(`meta:${id}`) ? JSON.stringify(meta) : String(args[0]).endsWith(`private:${id}`) ? JSON.stringify(proof) : null);
+      if (["disconnect", "on", "once", "removeListener", "quit"].includes(name)) return undefined;
+      return Promise.resolve(null);
+    };
+  } });
+  const service = makeZeroTouchService({ paths: { valkeyUrl: "redis://127.0.0.1:1", logsDir: logs, triggersPath }, redisFn, now: () => NOW });
+  const report = await service.read({ days: 30 });
+  assert.deepEqual(report.waiting, { touches: 1, unknown: 0, fixes: 1 });
+  // Every command is a read: the named ones by name, and each script by the commands it calls (the touch index's read
+  // calls none that write; the run mirror's read holds writes only in helpers it never calls, the named read script
+  // of the wire test). The old repair sent SET (the fix's commit) and the touch index's WRITE script, which calls
+  // SET, ZADD and HDEL; the outbox's begin again sent HSET and PEXPIRE.
+  const WRITES = /redis\.call\(\s*["'](?:SET|HSET|HDEL|ZADD|DEL|PEXPIRE|ZREMRANGEBYSCORE|ZREMRANGEBYRANK|EXPIRE)["']/i;
+  assert.deepEqual(sent.filter(([name, first]) => name === "eval" ? first !== READ_SCRIPT && WRITES.test(first) : !READS.has(name)), [], JSON.stringify(sent.map(([name]) => name)));
+  assert.ok(existsSync(intent), "the intent's file is still there: only a settle publishes and removes it");
 });

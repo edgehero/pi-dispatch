@@ -18,19 +18,30 @@ export const ZERO_TOUCH_NOT_STARTED = "touch-tracking-not-started";
 export const ZERO_TOUCH_UNREAD_REASONS = Object.freeze(["touch-index-unavailable", "touch-index-lost", "touch-actions-unresolved", "touch-events-missing"]);
 /** What the page's own read can say of a failure: the closed set a panel has a sentence for. */
 export const ZERO_TOUCH_FAILURES = Object.freeze(["read-failed"]);
-/** A view with nothing counted: no totals, so a panel has no zero to draw. */
-const nothing = (state, { nowMs, windowDays, failure = null }) => ({ state, ...(failure === null ? {} : { failure }), nowMs, windowDays, coverage: { partial: true, reasons: [] }, totals: {}, projects: [], causes: causes([]), trend: [], groups: [], fixes: [], fixesPartial: true, touchedRunIds: [], waitingRuns: [], ungroupedRunIds: [], grouping: { enabled: false, pending: 0, unassigned: 0, state: "disabled", sources: [] } });
 /**
- * Three states. `ready` holds counts. `unavailable` is a read that failed or evidence that was lost: "could not be
+ * What waits for an operator's settle (issue #1076), from the page's read: actions that ran and whose touch was not
+ * recorded (`touches`), ones interrupted before they said whether they ran (`unknown`, which a settle cannot prove),
+ * and fixes whose change landed and whose accounting did not finish (`fixes`). Counts only.
+ */
+const waitingOf = (raw) => ({ touches: count(raw?.waiting?.touches), unknown: count(raw?.waiting?.unknown), fixes: count(raw?.waiting?.fixes) });
+/** A view with nothing counted: no totals, so a panel has no zero to draw. */
+const nothing = (state, { nowMs, windowDays, failure = null, waiting = waitingOf(null) }) => ({ state, ...(failure === null ? {} : { failure }), nowMs, windowDays, waiting, coverage: { partial: true, reasons: [] }, totals: {}, projects: [], causes: causes([]), trend: [], groups: [], fixes: [], fixesPartial: true, touchedRunIds: [], waitingRuns: [], ungroupedRunIds: [], grouping: { enabled: false, pending: 0, unassigned: 0, state: "disabled", sources: [] } });
+/**
+ * Four states. `ready` holds counts. `unavailable` is a read that failed or evidence that was lost: "could not be
  * read", with `failure` where the page's own read threw. `not-started` (issue #962) is a read that worked and found
  * that no worker has started touch tracking: nothing failed, and there is no interval to count in, so it holds no
- * totals either. A window that collapsed for any other reason, or with one beside it, stays `unavailable`.
+ * totals either. `waiting` (issue #1076) is a read that worked whose window collapsed only on actions still unresolved
+ * (`unresolvedOnly`), with touches this host can settle: the page reads and never settles, so it says what waits.
+ * A window that collapsed for any other reason, or with one beside it, stays `unavailable`.
  */
 export function zeroTouchView(raw, { role = "viewer", windowDays = 30, nowMs = 0 } = {}) {
   const observed = raw?.coverage ?? raw?.window;
   const reasons = Array.isArray(observed?.reasons) ? observed.reasons : [];
   const collapsed = observed?.partial === true && number(observed.fromMs) !== null && observed.fromMs >= (number(raw?.nowMs) ?? nowMs);
   const notStarted = raw?.state === "not-started" || collapsed && reasons.includes(ZERO_TOUCH_NOT_STARTED) && !reasons.some((r) => ZERO_TOUCH_UNREAD_REASONS.includes(r));
+  const waiting = waitingOf(raw);
+  // `state: "waiting"` is this projection's own word, read again: the page projects its data, and the panels project it once more.
+  if (raw && typeof raw === "object" && (raw.unresolvedOnly === true || raw.state === "waiting") && raw.failure === undefined && waiting.touches > 0) return nothing("waiting", { nowMs, windowDays: [7, 30, 90].includes(raw.windowDays ?? raw.days) ? raw.windowDays ?? raw.days : windowDays, waiting });
   if (!raw || typeof raw !== "object" || raw.state === "unavailable" || reasons.includes("touch-index-unavailable") || collapsed && !notStarted) return nothing("unavailable", { nowMs, windowDays, failure: ZERO_TOUCH_FAILURES.includes(raw?.failure) ? raw.failure : null });
   if (notStarted) return nothing("not-started", { nowMs, windowDays: [7, 30, 90].includes(raw.windowDays ?? raw.days) ? raw.windowDays ?? raw.days : windowDays });
   const totals = raw.totals ?? raw.summary ?? {};
@@ -41,7 +52,7 @@ export function zeroTouchView(raw, { role = "viewer", windowDays = 30, nowMs = 0
     projects: Array.isArray(raw.projects) ? raw.projects.map((r) => breakdown(r)) : [], causes: causes(raw.causes),
     trend: Array.isArray(raw.trend) ? raw.trend.slice(-8).map((r) => ({ atMs: number(r?.atMs ?? r?.at), rate: number(r?.rate), runs: count(r?.runs), touched: count(r?.touched), partial: r?.partial === true })) : [],
     waitingRuns: Array.isArray(raw.waitingRuns ?? totals.waitingNow) ? (raw.waitingRuns ?? totals.waitingNow).map((r) => ({ runId: id(r?.runId ?? r?.jobId), parkedAt: number(r?.parkedAt) })).filter((r) => r.runId && r.parkedAt !== null) : [],
-    touchedRunIds: runIds(raw.touchedRunIds), ungroupedRunIds: role === "operator" ? runIds(raw.ungroupedRunIds) : [], groups: [], fixes: [], fixesPartial: raw.fixesPartial === true, fixesOpen: count(raw.fixesOpen), fixesOpenDays: count(raw.fixesOpenDays), grouping: { enabled: raw.grouping?.enabled === true, partial: raw.grouping?.partial === true, pending: count(raw.grouping?.pending), unassigned: count(raw.grouping?.unassigned), state: ["ready", "ok", "disabled", "pending", "partial", "failed", "configuration-unavailable", "unavailable"].includes(raw.grouping?.state) ? raw.grouping.state : "disabled", ...(["invalid", "unreadable"].includes(raw.grouping?.configuration) ? { configuration: raw.grouping.configuration } : {}), sources: role === "operator" && Array.isArray(raw.grouping?.sources ?? raw.groupingStatuses) ? (raw.grouping?.sources ?? raw.groupingStatuses).map((r) => ({ runId: id(r?.runId), status: ["unassigned", "pending", "assigned", "source-expired", "source-unavailable", "source-oversize", "candidates-expired", "group-limit", "stale", "refused", "failed"].includes(r?.status) ? r.status : "source-unavailable" })).filter((r) => r.runId) : [] } };
+    touchedRunIds: runIds(raw.touchedRunIds), ungroupedRunIds: role === "operator" ? runIds(raw.ungroupedRunIds) : [], groups: [], fixes: [], fixesPartial: raw.fixesPartial === true, waiting, fixesOpen: count(raw.fixesOpen), fixesOpenDays: count(raw.fixesOpenDays), grouping: { enabled: raw.grouping?.enabled === true, partial: raw.grouping?.partial === true, pending: count(raw.grouping?.pending), unassigned: count(raw.grouping?.unassigned), state: ["ready", "ok", "disabled", "pending", "partial", "failed", "configuration-unavailable", "unavailable"].includes(raw.grouping?.state) ? raw.grouping.state : "disabled", ...(["invalid", "unreadable"].includes(raw.grouping?.configuration) ? { configuration: raw.grouping.configuration } : {}), sources: role === "operator" && Array.isArray(raw.grouping?.sources ?? raw.groupingStatuses) ? (raw.grouping?.sources ?? raw.groupingStatuses).map((r) => ({ runId: id(r?.runId), status: ["unassigned", "pending", "assigned", "source-expired", "source-unavailable", "source-oversize", "candidates-expired", "group-limit", "stale", "refused", "failed"].includes(r?.status) ? r.status : "source-unavailable" })).filter((r) => r.runId) : [] } };
   // Viewer fix descriptions are generated from closed kinds; instruction text and actor identity are absent for both roles.
   out.fixes = Array.isArray(raw.fixes) ? raw.fixes.map((f) => ({ id: id(f?.id), at: number(f?.at), undoneAt: number(f?.undoneAt), kind: ["instructions", "config"].includes(f?.kind) ? f.kind : "config", groupId: id(f?.groupId), reason: typeof f?.reason === "string" && /^[a-z][a-z0-9-]{0,79}$/.test(f.reason) ? f.reason : null, triggerIndex: Number.isSafeInteger(f?.triggerIndex) && f.triggerIndex >= 0 ? f.triggerIndex : null, beforeCount: number(f?.beforeCount), afterCount: number(f?.afterCount), spanMs: number(f?.spanMs), partial: f?.partial !== false, subsequentRuns: count(f?.subsequentRuns), status: ["observing", "improved", "unchanged", "worse"].includes(f?.status) ? f.status : "observing" })).filter((f) => f.id) : [];
   if (role === "operator") out.groups = Array.isArray(raw.groups) ? raw.groups.map((g) => ({ id: id(g?.id), name: text(g?.name, 120), scopeId: scope(g?.scopeId), repo: text(g?.repo), project: text(g?.project, 64), count: count(g?.count), runIds: runIds(g?.runIds), status: ["open", "fixed", "unassigned"].includes(g?.status) ? g.status : "open", fixedAt: number(g?.fixedAt), triggerIndex: Number.isSafeInteger(g?.triggerIndex) && g.triggerIndex >= 0 ? g.triggerIndex : null })).filter((g) => g.id) : [];

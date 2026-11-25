@@ -4,7 +4,7 @@ import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { zeroTouchView } from "../../zero-touch-view.mjs";
 
-export const ZERO_TOUCH_WORDS = Object.freeze({ unavailable: "Zero touch could not be read. Reload to try again; missing history is never counted as zero touches.", readFailed: "The read itself failed on this console. Its log has the reason.", notStarted: "Touch tracking has not started. A worker turns it on when it starts, and runs are counted from then on. Until then there is no interval to measure, so no rate, count or streak is shown.", empty: "No workload runs ended in the covered interval.", drafts: "Sent by a person, edited or as drafted. Each run still counts as a touch.", draftsPartial: "Partial history; this counts retained runs only.", viewer: "Questions it keeps asking are for operators. Rates, causes, streaks and fixes are shown here.", noGroups: "No question groups yet. Group retained questions with a capped decision job; name each group yourself.", noFixes: "No cause-linked fixes recorded yet. Start a change from a refusal or a question group to measure it here." });
+export const ZERO_TOUCH_WORDS = Object.freeze({ unavailable: "Zero touch could not be read. Reload to try again; missing history is never counted as zero touches.", readFailed: "The read itself failed on this console. Its log has the reason.", notStarted: "Touch tracking has not started. A worker turns it on when it starts, and runs are counted from then on. Until then there is no interval to measure, so no rate, count or streak is shown.", empty: "No workload runs ended in the covered interval.", drafts: "Sent by a person, edited or as drafted. Each run still counts as a touch.", draftsPartial: "Partial history; this counts retained runs only.", viewer: "Questions it keeps asking are for operators. Rates, causes, streaks and fixes are shown here.", noGroups: "No question groups yet. Group retained questions with a capped decision job; name each group yourself.", noFixes: "No cause-linked fixes recorded yet. Start a change from a refusal or a question group to measure it here.", settleBy: "An operator settles what waits from this page, on a writable console. Settling records each once and never runs an action again." });
 export const ZERO_TOUCH_CAUSES = Object.freeze([
   { cause: "question-answer", label: "Questions", short: "Questions", icon: "parked", tone: "parked", detail: "A person answered a parked question and the source session resumed." },
   { cause: "approval-decision", label: "Approvals", short: "Approvals", icon: "shield", tone: "attention", detail: "A person approved or declined a request. System expiry is excluded." },
@@ -35,6 +35,20 @@ const link = (id) => html`<a class="link code" href="${`/run?id=${encodeURICompo
 const fail = (m) => m.state === "unavailable" ? html`<p class="zt-note" role="status">${ZERO_TOUCH_WORDS.unavailable}</p>` : null;
 /** Said once, in the rate card: why the page's own read failed, and (issue #962) that tracking has not started, which is no failure. */
 const once = (m) => m.state === "not-started" ? html`<p class="zt-note" role="status">${ZERO_TOUCH_WORDS.notStarted}</p>` : m.state === "unavailable" && m.failure === "read-failed" ? html`<p class="zt-note" role="status">${ZERO_TOUCH_WORDS.readFailed}</p>` : null;
+/**
+ * What waits for a settle (issue #1076). A page view reads and never settles, so the accounting an earlier write left
+ * pending is said here with the action that records it, for an operator who can act, and with who can for anyone else.
+ */
+const settle = (view) => acts(view) ? guardedForm("zero-touch-settle", { label: "Preview settling", kind: ["sm", "primary"] }) : html`<p class="zt-kps">${ZERO_TOUCH_WORDS.settleBy}</p>`;
+function touchesWaiting(m, view) {
+  const n = m.waiting.touches;
+  if (n === 0) return null;
+  const one = n === 1;
+  const said = m.state === "waiting"
+    ? `Zero touch is waiting for ${plural(n, "action")} to be settled: ${one ? "it" : "they"} ran, and ${one ? "its touch was" : "their touches were"} not recorded. Until then the rate is not shown; missing history is never counted as zero touches.`
+    : `${plural(n, "action")} that ran ${one ? "is" : "are"} waiting to be settled, so ${one ? "its touch is" : "their touches are"} not counted yet.`;
+  return html`<p class="zt-note" role="status">${said}</p>${settle(view)}`;
+}
 /**
  * A card of a page whose tracking has not started, or whose report could not be read (issue #988): its title alone.
  * The page then draws the rate card only (`zeroTouchLayout`), which says why once.
@@ -81,7 +95,7 @@ function compact(m) {
 }
 export function zeroTouchRate(view) {
   const m = model(view);
-  return ui.card({ title: `Touch rate, ${m.windowDays} days`, body: html`${fail(m)}${once(m)}${m.state === "ready" ? html`${ui.kpi(m.totals.runs ? pct(m.totals.rate) : "No runs", `${m.totals.touched} of ${plural(m.totals.runs, "run")} needed a person`)}${spark(m)}<p class="zt-kp"><span class="zt-kt">${ui.icon("flag", { size: "sm" })}goal under 5%</span>${delta(m.totals.deltaPoints, m.totals.previousRate)}</p>${coverage(m)}<p class="zt-kps">${m.totals.stopped} stopped before they ran, outside the rate.${m.totals.stoppedUnattributed > 0 ? html` ${m.totals.stoppedUnattributed} stops have no recorded project or scope, so this selection may have more.` : null}</p><div class="zt-phone-summary">${compact(m)}</div>` : null}` });
+  return ui.card({ title: `Touch rate, ${m.windowDays} days`, body: html`${fail(m)}${once(m)}${touchesWaiting(m, view)}${m.state === "ready" ? html`${ui.kpi(m.totals.runs ? pct(m.totals.rate) : "No runs", `${m.totals.touched} of ${plural(m.totals.runs, "run")} needed a person`)}${spark(m)}<p class="zt-kp"><span class="zt-kt">${ui.icon("flag", { size: "sm" })}goal under 5%</span>${delta(m.totals.deltaPoints, m.totals.previousRate)}</p>${coverage(m)}<p class="zt-kps">${m.totals.stopped} stopped before they ran, outside the rate.${m.totals.stoppedUnattributed > 0 ? html` ${m.totals.stoppedUnattributed} stops have no recorded project or scope, so this selection may have more.` : null}</p><div class="zt-phone-summary">${compact(m)}</div>` : null}` });
 }
 export function zeroTouchStreak(view) {
   const m = model(view), best = longest(m);
@@ -178,12 +192,15 @@ function beforeAfter(label, value, max, tone = "attention") { return html`<p cla
 export function zeroTouchFixes(view) {
   const m = model(view);
   if (m.state !== "ready") return bare(m, "Fixes that worked");
-  // A change whose accounting did not finish and that the page's repair could not settle (issue #987) is said as what
-  // it is: its file does not show it, so no reload settles it, and "Reload to retry" was untrue of it. Nothing is
-  // promised of making the change again: the repair commits such a row the moment its file shows it, whoever wrote that.
+  // A change whose accounting did not finish and that no settle can commit (issue #987) is said as what it is: its file
+  // does not show it, so nothing settles it, and "Reload to retry" was untrue of it. Nothing is promised of making the
+  // change again: a settle commits such a row once its file shows it, whoever wrote that. One whose file does show it
+  // waits for a settle (issue #1076), since the page's read no longer commits it: said with the action.
   const one = m.fixesOpen === 1;
-  const incomplete = !m.fixesPartial ? null : m.fixesOpen > 0
-    ? html`<p class="zt-note" role="status">Fix history is incomplete: the accounting of ${plural(m.fixesOpen, "change")} did not finish and ${one ? "its file does not show it" : "their files do not show them"}, so a reload does not settle it. Left alone, ${one ? "its record ends" : "their records end"} by ${one ? "itself" : "themselves"}${m.fixesOpenDays > 0 ? ` within ${plural(m.fixesOpenDays, "day")} of the attempt` : ""}. Missing changes are not evidence that no fix was made.</p>`
+  const ready = m.waiting.fixes;
+  const waitingFixes = ready > 0 ? html`<p class="zt-note" role="status">${plural(ready, "fix", "fixes")} ${ready === 1 ? "is" : "are"} waiting to be settled: ${ready === 1 ? "its change landed and its" : "their changes landed and their"} accounting did not finish. Until then ${ready === 1 ? "it is" : "they are"} not listed here.</p>${settle(view)}` : null;
+  const open = m.fixesOpen > 0 ? html`<p class="zt-note" role="status">Fix history is incomplete: the accounting of ${plural(m.fixesOpen, "change")} did not finish and ${one ? "its file does not show it" : "their files do not show them"}, so no settle records ${one ? "it" : "them"}. Left alone, ${one ? "its record ends" : "their records end"} by ${one ? "itself" : "themselves"}${m.fixesOpenDays > 0 ? ` within ${plural(m.fixesOpenDays, "day")} of the attempt` : ""}. Missing changes are not evidence that no fix was made.</p>` : null;
+  const incomplete = !m.fixesPartial ? null : waitingFixes || open ? html`${waitingFixes}${open}`
     : html`<p class="zt-note" role="status">Fix history is incomplete. Reload to retry; missing changes are not evidence that no fix was made.</p>`;
   const evidence = html`${incomplete}${m.fixes.length ? html`<ol class="zt-fxs">${m.fixes.map((f) => html`<li class="zt-fx"><p class="zt-fx__d">${date(f.at)} UTC${f.undoneAt === null ? null : html` · Reverted ${date(f.undoneAt)} UTC`}</p><p class="zt-fx__w">${f.kind === "instructions" ? `Trigger ${f.triggerIndex === null ? "not known" : f.triggerIndex + 1}'s instructions gained a sentence` : "Configuration changed to address a refusal"}</p><p class="zt-fx__m">${f.reason ? `${f.reason} refusals` : "Questions in the targeted group"}, equal ${span(f.spanMs)} spans before and after; ${f.subsequentRuns} workload runs after the fix.</p>${beforeAfter("Before", f.beforeCount, Math.max(f.beforeCount ?? 0, f.afterCount ?? 0, 1))}${beforeAfter("After", f.afterCount, Math.max(f.beforeCount ?? 0, f.afterCount ?? 0, 1), fixTone(f))}<p class="zt-kps">${fixObservation(f)}</p>${acts(view) && f.kind === "instructions" && f.undoneAt === null ? guardedForm("zero-touch-undo", { hidden: [["fixId", f.id]], label: "Preview removing the sentence", kind: ["sm", "ghost"] }) : null}</li>`)}</ol>` : html`<p class="zt-kps">${m.fixesPartial ? "Fix history is not known. Reload after the source is available." : ZERO_TOUCH_WORDS.noFixes}</p>`}`;
   const brief = m.fixes.map((f) => `${f.reason ?? "grouped questions"}: ${f.beforeCount ?? "?"} to ${f.afterCount ?? "?"}`).join("; ");
