@@ -678,7 +678,10 @@ while removing an overlay-only declaration refuses jobs still naming it. The scr
 preview/refusal abbreviates resolver/root paths by their last folder. Viewers have tables/help without writes.
 
 The agent read `dispatch_secrets` returns names, source/problem words and variable counts only. It omits even
-variable names, as well as paths, roots, references and values. Declaring/removing a resolver remains a person-only
+variable names, as well as paths, roots, references and values. With Valkey not answering it still names what the
+deployment's files declare: `available` is then false (no run or host fact was read), `filesKnown` says the names were
+read, and `settingsKnown` and `triggersKnown` say whether the settings overlay and the triggers file were among them.
+Over an overlay that was not read, a profile it might declare has the source `unknown`, never `undeclared`. Declaring/removing a resolver remains a person-only
 operation. [Console pages](console.md#secrets) explain the profiles, bundle limits and five exclusions together.
 
 

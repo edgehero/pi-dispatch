@@ -764,6 +764,20 @@ const ENVELOPE_WORDS = Object.freeze({
 });
 export const SPLIT_UNREAD_TEXT =
   "The budget split could not be read: the queue is not answering. Whether a split is in force is not known.";
+/** Where no envelope is configured (`kind: "unset"`): no split can be in force, and no amount is allocated. */
+export const SPLIT_UNSET_TEXT = "No envelope is configured: PI_ENVELOPE_FILE is unset. Delegation is off and no split is in force.";
+/**
+ * Why the budget split's cards draw no amount, by the split's kind (issue #1073), or null where they draw one. An
+ * envelope that does not exist, could not be read or does not load (`problem`) has no total, no floors and no split
+ * this page can know of: its cards said "Floors total $0.00", "0 projects over allocation", "Delegation off" and "No
+ * split yet" of it, each a reading of an envelope nobody read. Each card now says the envelope's own sentence in
+ * place of an amount. An envelope that is not configured (`unset`) says that, and its zeros are true.
+ */
+function splitNoAmountText(a, { short = false } = {}) {
+  if (a?.kind === "problem") return short ? `${ENVELOPE_WORDS[a.fileCase].title}.` : ENVELOPE_WORDS[a.fileCase].body;
+  if (a?.kind === "unset") return short ? "No envelope is configured." : SPLIT_UNSET_TEXT;
+  return null;
+}
 function allocation(v) {
   return normAllocation(payload(v).allocation);
 }
@@ -802,7 +816,9 @@ export function spendSplit(v) {
         : note(
             a?.kind === "unreachable"
               ? SPLIT_UNREAD_TEXT
-              : "No budget split is available.",
+              : a?.kind === "problem"
+                ? ENVELOPE_WORDS[a.fileCase].body
+                : "No budget split is available.",
           )
     }<a class="btn btn--sm" href="${link(v, "/insights/budget-split")}">Open Budget split</a>`,
     null,
@@ -823,6 +839,8 @@ export function envelopeFileFacts(v) {
   return { totalMicros: number(p.totalMicros), delegation: p.delegation === true, projects: floors.length, floorsMicros: floors.reduce((sum, n) => sum + n, 0) };
 }
 export function splitEnvelopeKpi(v) {
+  const none = splitNoAmountText(allocation(v), { short: true });
+  if (none !== null) return kpi("Envelope", allocation(v).kind === "unset" ? "none" : "not known", none);
   const file = envelopeFileFacts(v);
   const a = file ? { ...allocation(v), ...file } : allocation(v);
   return kpi(
@@ -833,6 +851,8 @@ export function splitEnvelopeKpi(v) {
 }
 export function splitAllocatedKpi(v) {
   const a = allocation(v);
+  const none = splitNoAmountText(a, { short: true });
+  if (none !== null) return kpi("Allocated", a.kind === "unset" ? "none" : "not known", none);
   const file = envelopeFileFacts(v);
   if (file)
     return kpi(
@@ -848,6 +868,8 @@ export function splitAllocatedKpi(v) {
 }
 export function splitSpentKpi(v) {
   const a = allocation(v);
+  const none = splitNoAmountText(a, { short: true });
+  if (none !== null) return kpi("Spent this envelope window", a.kind === "unset" ? "none" : "not known", none);
   const file = envelopeFileFacts(v);
   if (file)
     return card(
@@ -861,6 +883,8 @@ export function splitSpentKpi(v) {
 }
 export function splitPlanKpi(v) {
   const a = allocation(v);
+  const none = splitNoAmountText(a, { short: true });
+  if (none !== null) return kpi("Plan in force", a.kind === "unset" ? "No split" : "not known", none);
   if (a?.kind === "unreachable")
     return card(
       "Plan in force",
@@ -895,7 +919,7 @@ export function splitRows(v) {
   if (a?.kind !== "live")
     return empty(
       "Budget split",
-      "No split can be drawn until the envelope and queue can be read.",
+      splitNoAmountText(a) ?? (a?.kind === "unreachable" ? SPLIT_UNREAD_TEXT : "No split can be drawn until the envelope and queue can be read."),
     );
   const hosts = p.hosts ?? payload(v).hosts ?? [];
   // Issue #1062: over a registry read in part the hosts listed are only those whose rows answered, so no agreement is
@@ -1162,9 +1186,10 @@ export function splitEnvelope(v) {
   const e = envelopeForm(p);
   if (!e) {
     // The envelope file in the word of its case (issue #988). One sentence said "missing or could not be read" of every
-    // case, beside a banner that said "does not load" of every case.
+    // case, beside a banner that said "does not load" of every case. A split whose read did not answer is the queue's,
+    // not the file's (issue #1073): the file was read, and the sentence says what was not.
     const a = allocation(v);
-    return empty("Envelope", a?.kind === "problem" ? ENVELOPE_WORDS[a.fileCase].body : a?.kind === "unset" ? "No envelope is configured: PI_ENVELOPE_FILE is unset." : "The envelope could not be read. Check PI_ENVELOPE_FILE.");
+    return empty("Envelope", splitNoAmountText(a) ?? (a?.kind === "unreachable" ? SPLIT_UNREAD_TEXT : "The envelope could not be read. Check PI_ENVELOPE_FILE."));
   }
   return card(
     "Envelope",

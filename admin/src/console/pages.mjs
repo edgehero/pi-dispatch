@@ -38,7 +38,7 @@ import { triggerOn, triggerRuns, triggerRun, triggerEdit, triggerTrust, triggerK
 import { triggerGets, triggerGetsHow } from "./panels/trigger-gets.mjs";
 import { readTriggerGetsEntry } from "../trigger-gets-view.mjs";
 import { configNavigation, configFiles, configUnset, configDescription } from "./panels/config.mjs";
-import { secretsView } from "../secrets-view.mjs";
+import { modelSecrets, secretsView } from "../secrets-view.mjs";
 import { secretsHeadline, secretsProblems, secretsProfiles, secretsBundles, secretsAdd, secretsHelp } from "./panels/secrets.mjs";
 import { updatesDescription, updatesHosts, updatesHow, updatesJobs, updatesProblems, updatesRecent } from "./panels/updates.mjs";
 import { DEVICES_WORDS, devicesEndAll, devicesList, devicesThis } from "./panels/devices.mjs";
@@ -1080,7 +1080,9 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   };
   const modelsRead = async () => {
     if (reads.includes("models")) {
-      try { data.models = typeof deps.modelsView === "function" ? await drawn(() => deps.modelsView(data.snapshot, { within })) : null; }
+      // Issue #1073: with no snapshot the view is handed the file views too, so the files it reads are the ones this
+      // load read (`data.files`, set where the snapshot failed).
+      try { data.models = typeof deps.modelsView === "function" ? await drawn(() => deps.modelsView(data.snapshot, { within, files: data.files ?? null })) : null; }
       catch { data.models = null; }
     }
   };
@@ -1093,7 +1095,8 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   };
   const connectionsRead = async () => {
     if (reads.includes("connections")) {
-      try { data.connections = typeof deps.connections === "function" ? await drawn(() => deps.connections(data.snapshot, { within })) : null; }
+      // Issue #1073: with no snapshot the triggers, the overlay, its MCP servers and the staged packages come from the files.
+      try { data.connections = typeof deps.connections === "function" ? await drawn(() => deps.connections(data.snapshot, { within, files: data.files ?? null })) : null; }
       catch { data.connections = null; }
     }
   };
@@ -1455,8 +1458,16 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // places from it read two keys it was never handed as two reads that failed: an agent's unknown run id answered
   // 503 where an operator's answers 404.
   if (name === "run") data.runPlaces = runPlaces(runPlacesOf(data));
-  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "run" ? { runPlaces: data.runPlaces } : {}), ...(name === "host" && typeof data.hostName === "string" ? { hostName: data.hostName } : {}), ...(name === "setup" ? { setup: setupFacts(data.setup, { role: "agent" }) } : {}), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}) } : data;
+  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "run" ? { runPlaces: data.runPlaces } : {}), ...(name === "host" && typeof data.hostName === "string" ? { hostName: data.hostName } : {}), ...(name === "setup" ? { setup: setupFacts(data.setup, { role: "agent" }) } : {}), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}), ...(name === "secrets" ? { secrets: agentSecretsOf(data.secrets) } : {}) } : data;
 }
+
+/**
+ * An agent's copy of the Secrets page's view (issue #1073): the projection `dispatch_secrets` returns (`modelSecrets`),
+ * marked as an agent's so the page draws it as such, or null where the view itself was not read. The agent's copy of the
+ * data drops `secrets` whole (`agentReadProjection`), so the page said the declarations could not be read on a healthy
+ * deployment; the projection holds no variable name, path, root, reference or run.
+ */
+const agentSecretsOf = (view) => (view !== null && typeof view === "object" ? { agent: true, ...modelSecrets(view) } : null);
 
 // ---- drawing ---------------------------------------------------------------------------------------------------------
 

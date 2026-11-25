@@ -23,7 +23,7 @@ import {
   beatAgeOf,
   progressText,
   workersOnline, plural,
-  hostsUnread, HOSTS_UNREAD, HOSTS_UNREAD_TEXT,
+  hostsUnread, HOSTS_UNREAD, HOSTS_UNREAD_TEXT, hostsAsLastRead, HOSTS_AS_LAST_READ, NO_HOST_AS_LAST_READ,
   killSwitchUnreadForms, pausedStateUnknown,
   NO_BEAT_READ, registryPartText, registryReadInPart, rowLastSeen,
   SCHEDULES_PART_TEXT, WAIT_BUCKETS, WAIT_BUCKET_WORDS, hostQueuesUnasked, schedulesCount, schedulesShort, unaskedQueuesText, waitBucketOf, waitingFloor, waitingPausedUnread } from "./common.mjs";
@@ -220,7 +220,7 @@ export const fleetBar = (v) => {
           )
         : null
     }${statistic(count("active"), "active")}${statistic(count("delayed"), "delayed")}${statistic(held, "held")}${statistic(count("failed"), "awaiting retry", "failed")}</div><div class="fl-bar__btns">${buttons}</div></div>${s.queue?.fleetDegraded ? ui.banner({ status: "attention", title: registryReadInPart(s) ? "Registry read in part" : "Registry not read", body: hostsUnread(s) ? HOSTS_UNREAD_TEXT : html`${registryReadInPart(s) ? registryPartText(s) : REGISTRY_UNREAD_TEXT} Registry rows last read ${s.hostsReadAt ? timeHtml(s.hostsReadAt) : "at an unknown time"}.`, sm: true }) : null}${!paused.length && online.none ? ui.banner({ status: "attention", title: NO_WORKER_TEXT, sm: true }) : online.staleBeats ? html`<p class="muted">${STALE_BEATS_TEXT}</p>` : null}${mismatch?.disagreement ? ui.banner({ status: "attention", title: "Two Valkeys: this console and the service disagree",
-          block: true, body: html`<p>${mismatch.disagreement}</p><p>A pause reaches both; a resume neither until they agree.</p>`, sm: true }) : null}${mismatch?.refused ? html`<div class="pp-refusal tone-refused" role="region" aria-label="Resume refused"><p class="pp-refusal__h">${ui.icon("refused")}Refused: Resume the fleet</p><p>${mismatch.refused}</p>${v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p><b>Nothing was changed.</b> One queue can still be resumed on the Valkey this console read it from.</p></div>` : mismatch?.disagreement && v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p class="pp-src">${ui.icon("beat", { size: "sm" })}<span>Read ${ageText(Math.max(0, v.now - Number(s.at ?? s.readAt ?? v.now)))} ago from ${v.role === "operator" ? html`<span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "the deployment's Valkey"} and ${hostsUnread(s) ? html`no host's registry row: the hosts could not be read` : html`${list(s.hostBudgets).length} hosts' registry rows`}. Live: this panel redraws when the fleet changes.</span></p></div>`,
+          block: true, body: html`<p>${mismatch.disagreement}</p><p>A pause reaches both; a resume neither until they agree.</p>`, sm: true }) : null}${mismatch?.refused ? html`<div class="pp-refusal tone-refused" role="region" aria-label="Resume refused"><p class="pp-refusal__h">${ui.icon("refused")}Refused: Resume the fleet</p><p>${mismatch.refused}</p>${v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p><b>Nothing was changed.</b> One queue can still be resumed on the Valkey this console read it from.</p></div>` : mismatch?.disagreement && v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p class="pp-src">${ui.icon("beat", { size: "sm" })}<span>Read ${ageText(Math.max(0, v.now - Number(s.at ?? s.readAt ?? v.now)))} ago from ${v.role === "operator" ? html`<span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "the deployment's Valkey"} and ${hostsUnread(s) ? html`no host's registry row: the hosts could not be read` : html`${list(s.hostBudgets).length} hosts' registry rows${hostsAsLastRead(s) ? ` ${HOSTS_AS_LAST_READ}` : ""}`}. Live: this panel redraws when the fleet changes.</span></p></div>`,
   });
 };
 
@@ -241,7 +241,7 @@ export const fleetQueues = wrap(
       rows: [...list(s.queueCounts).map((q) => ({
         mark: q.paused ? "attention" : null,
         cells: [
-          html`<span class="code"><b>${q.queue}</b></span><span class="reason">${q.queue === "pi-jobs" ? (hostsUnread(s) ? `shared; its hosts are ${HOSTS_UNREAD}` : `shared by ${list(s.hostBudgets).length} hosts`) : q.paused ? "Its host still takes shared jobs." : "its host's own queue"}</span>`,
+          html`<span class="code"><b>${q.queue}</b></span><span class="reason">${q.queue === "pi-jobs" ? (hostsUnread(s) ? `shared; its hosts are ${HOSTS_UNREAD}` : `shared by ${list(s.hostBudgets).length} hosts${hostsAsLastRead(s) ? ` ${HOSTS_AS_LAST_READ}` : ""}`) : q.paused ? "Its host still takes shared jobs." : "its host's own queue"}</span>`,
           ui.chip(q.paused ? "Paused" : "Running", {
             status: q.paused ? "attention" : "ok",
             icon: q.paused ? "pause" : "play",
@@ -551,20 +551,23 @@ export const fleetVenues = wrap(
   "Venues",
   (s) => {
     const m = venuesView(list(s.hostBudgets));
-    // With nothing read about the hosts, which host blesses a venue is not known: never "no live host".
+    // With nothing read about the hosts, which host blesses a venue is not known: never "no live host". With this read of
+    // the registry failed after one that answered (issue #1073), the hosts are the last read's, and said so.
     const unread = hostsUnread(s);
-    const none = unread ? "not known" : "no live host";
+    const lastRead = hostsAsLastRead(s);
+    const none = unread ? "not known" : lastRead ? NO_HOST_AS_LAST_READ : "no live host";
+    const hostsOf = (names) => names.join(", ") || none;
     const property = (venue, key) =>
       venue.properties.find((p) => p.property === key);
     const feature = (venue, key) => venue.serves.find((s) => s.key === key);
-    return html`${ui.tbl({ label: "Venue properties and what each venue serves", heads: [VENUE_LABEL, "Blessed on", "Default on", "Egress", "Local folders", "Steering", "Live transcript", "Recovery", "Sandbox shell", "Credentials held by"], rows: m.venues.map((x) => [html`<b>${runVenueLink(x.name)}</b><span class="reason">${x.describe}</span>`, x.blessedOn.join(", ") || none, x.defaultOn.join(", ") || none, declarationChip(property(x, "egress")), declarationChip(property(x, "localFolders")), servesChip(feature(x, "steering")), servesChip(feature(x, "liveTranscript")), servesChip(feature(x, "recovery")), servesChip(feature(x, "sandboxShell")), x.custody === "layer" ? "the venue's egress layer" : "the container"]), empty: "No venue in this build." })}<div class="fl-vfoot"><span>${ui.icon("shield", { size: "sm" })}Enforced: the worker builds and verifies the boundary.</span><span>Asserted: relies on a named assertion.</span><span>Absent: promises nothing.</span>${m.floors.map(
+    return html`${ui.tbl({ label: "Venue properties and what each venue serves", heads: [VENUE_LABEL, "Blessed on", "Default on", "Egress", "Local folders", "Steering", "Live transcript", "Recovery", "Sandbox shell", "Credentials held by"], rows: m.venues.map((x) => [html`<b>${runVenueLink(x.name)}</b><span class="reason">${x.describe}</span>`, hostsOf(x.blessedOn), hostsOf(x.defaultOn), declarationChip(property(x, "egress")), declarationChip(property(x, "localFolders")), servesChip(feature(x, "steering")), servesChip(feature(x, "liveTranscript")), servesChip(feature(x, "recovery")), servesChip(feature(x, "sandboxShell")), x.custody === "layer" ? "the venue's egress layer" : "the container"]), empty: "No venue in this build." })}<div class="fl-vfoot"><span>${ui.icon("shield", { size: "sm" })}Enforced: the worker builds and verifies the boundary.</span><span>Asserted: relies on a named assertion.</span><span>Absent: promises nothing.</span>${m.floors.map(
       (f) =>
         html`<span class="fl-floor">Floor on ${f.host}: <span class="code">${Object.entries(
           f.floor,
         )
           .map(([key, word]) => `${key}=${word}`)
           .join(", ")}</span></span>`,
-    )}<a class="link" href="${venueHref("local")}#p-venue-compare">All 14 properties</a></div>${unread ? html`<p class="note">${HOSTS_UNREAD_TEXT}</p>` : null}${m.unpublished.length ? html`<p class="note">Not published by ${m.unpublished.join(", ")}.</p>` : null}<details class="pp-pad"><summary>OpenShell setup published by the hosts</summary>${m.venues.flatMap((x) => list(x.openshell).map((o) => html`<p class="note">${x.name} on ${o.host}: ${o.unpublished ? "not published" : (GATEWAY_TEXT[o.gateway] ?? GATEWAY_TEXT.unknown)}.</p>`))}</details>`;
+    )}<a class="link" href="${venueHref("local")}#p-venue-compare">All 14 properties</a></div>${unread ? html`<p class="note">${HOSTS_UNREAD_TEXT}</p>` : lastRead ? html`<p class="note">${REGISTRY_UNREAD_TEXT}</p>` : null}${m.unpublished.length ? html`<p class="note">Not published by ${m.unpublished.join(", ")}.</p>` : null}<details class="pp-pad"><summary>OpenShell setup published by the hosts</summary>${m.venues.flatMap((x) => list(x.openshell).map((o) => html`<p class="note">${x.name} on ${o.host}: ${o.unpublished ? "not published" : (GATEWAY_TEXT[o.gateway] ?? GATEWAY_TEXT.unknown)}.</p>`))}</details>`;
   },
   {
     flush: true,

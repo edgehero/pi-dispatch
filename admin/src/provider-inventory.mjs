@@ -16,6 +16,9 @@ import { PROVIDER_KEY_NAMES } from "./provider-key-names.mjs";
 export const PROVIDER_KEY_REASONS = Object.freeze({
   "env-unreadable": "Credential metadata could not be read safely. Inspect the deployment on its host.",
   "references-unreadable": "Some provider references could not be read. This list may be incomplete.",
+  // Issue #1073: a source of references that was read and is refused (the triggers file or the allowed-models list does
+  // not load, or PI_TRIGGERS_FILE names no file), apart from one nobody could read: one sentence said both.
+  "references-refused": "A source of provider references does not load. This list may be incomplete.",
   "settings-unreadable": "Provider settings could not be verified. Inspect the deployment settings on the host.",
   "policy-unreadable": "The managed connection policy could not be verified. Use its host instructions.",
   "source-shadowed": "Another host credential source takes precedence. Review it on the host before saving.",
@@ -278,6 +281,7 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
   const model = (entry, why) => { const ref = splitModelEntry(entry); if (!ref) throw Error("invalid model reference"); use(ref.provider, why); };
   const keys = ["PI_PROVIDER", "PI_SETTINGS_FILE", "PI_ALLOWED_MODELS", "PI_TRIGGERS_FILE", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_FROM_PI"];
   const allVariables = [...new Set(Object.values(PROVIDER_KEY_NAMES).flat())];
+  // `referencesUnknown` is "unreadable" (a file nobody could read) or "refused" (one read and refused); the first wins.
   let configured = {}, file = {}, environmentUnknown = false, referencesUnknown = false, policyUnknown = false, configurationUnknown = false, defaultProvider = null, defaultModel = null, envList = null, declared = { slots: new Map(), notes: [] }, declaredInput = null;
   try {
     const got = (reads.environment ?? deploymentServiceEnv)({ env: {}, dir: root, keys: [...keys, ...allVariables], fs, platform, uid });
@@ -300,19 +304,25 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
     defaultModel = overlay?.overlay?.model ?? (ownKeyEnv?.unread.has("PI_MODEL") === false ? ownKeyEnv.value("PI_MODEL") ?? DEFAULT_MODEL : null);
     use(defaultProvider, "default");
   } catch { configurationUnknown = true; defaultProvider = null; }
+  const referencesFailed = (fileCase) => { if (referencesUnknown !== "unreadable") referencesUnknown = fileCase; };
   try {
     const list = allowedModelsFrom(configured) ?? null;
     for (const entry of list ?? []) model(entry, "allowed-model");
     envList = list;
-  } catch { referencesUnknown = true; }
+  } catch { referencesFailed("refused"); }
   try {
     // Paths captured at console startup can name an obsolete file after a host edit.
     // Match the worker/receiver rule: unset defaults here, explicit empty remains invalid.
     const path = configured.PI_TRIGGERS_FILE === "" ? "" : resolve(root, configured.PI_TRIGGERS_FILE ?? "triggers.json");
-    const raw = reads.document ? reads.document(path) : metadataBytes(path, fs, uid);
+    // A read that threw is a file nobody could read (an errno, or metadata this reader will not trust); a parse that
+    // threw is one that was read and is refused (issue #1073).
+    let raw;
+    try { raw = reads.document ? reads.document(path) : metadataBytes(path, fs, uid); }
+    catch (error) { throw Object.assign(new Error("unreadable"), { fileCase: "unreadable", cause: error }); }
     // A triggers file that does not exist is an empty document (issue #988): no trigger names a provider, which is a
     // read's answer and leaves the list whole. It was "Some provider references could not be read." A setting that
-    // names no file at all (explicit empty) is not that: which file the workers run is then not known.
+    // names no file at all (explicit empty) is not that: which file the workers run is then not known, a setting the
+    // worker refuses, so it does not load.
     if (raw === null && path === "") throw Error();
     const doc = raw === null ? { triggers: [], modelRoles: {} } : parseTriggersDocument(typeof raw === "string" ? raw : JSON.stringify(raw), path);
     for (const row of doc.triggers) {
@@ -335,7 +345,7 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
     // Issue #1000: only from the file the deployment names. With its .env unread, PI_TRIGGERS_FILE is not known, and the
     // default file read above may not be the one the workers run, so no trigger is said to bring a key from it.
     if (!environmentUnknown) declaredInput = doc;
-  } catch { referencesUnknown = true; }
+  } catch (error) { referencesFailed(error?.fileCase === "unreadable" ? "unreadable" : "refused"); }
   let bindings = {};
   if (configured.PI_AUTH_CONNECTIONS_FILE) {
     try {
@@ -349,7 +359,7 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
   // After the bindings, for doctor's fallback fence; an unread policy fences nothing, and every row reads unknown then.
   try {
     if (declaredInput) declared = declaredKeyTriggers(declaredInput.triggers, { defaultProvider, defaultModel, envList, modelRoles: declaredInput.modelRoles, projects: Object.keys(declaredInput.modelRoles).length > 0 ? ownKeyProjects(ownKeyEnv, { root, fs, uid, reads }) : [], managed: provider => Object.hasOwn(bindings, provider), answerRules: declaredInput.answerRules ?? [], zeroTouch: declaredInput.zeroTouch ?? null });
-  } catch { referencesUnknown = true; }
+  } catch { referencesFailed("unreadable"); }
   for (const [provider, candidates] of Object.entries(PROVIDER_KEY_NAMES)) if (candidates.some(key => present(file, key) || definedCredential(env, key))) use(provider, "configured");
   const grouped = new Map();
   for (const [provider, usage] of references) {
@@ -368,7 +378,7 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
     const special = !row.key || needsHostAuthentication(row.provider);
     const status = environmentUnknown || policyUnknown || configurationUnknown ? "unknown" : managed ? "managed" : shadowed ? "shadowed" : special ? "unsupported" : hasKey ? "configured" : "missing";
     const source = status === "unknown" ? "unknown" : managed ? "managed" : shadowed ? "shadowed" : special ? "special" : hasKey ? "deployment-env" : "missing";
-    const reason = environmentUnknown ? "env-unreadable" : configurationUnknown ? "settings-unreadable" : policyUnknown ? "policy-unreadable" : managed ? "managed-binding" : shadowed ? "source-shadowed" : special ? known(row.provider) ? "special-auth" : "custom-provider" : !hasKey && configured.PI_AUTH_FROM_PI !== "0" ? "pi-fallback-possible" : referencesUnknown ? "references-unreadable" : null;
+    const reason = environmentUnknown ? "env-unreadable" : configurationUnknown ? "settings-unreadable" : policyUnknown ? "policy-unreadable" : managed ? "managed-binding" : shadowed ? "source-shadowed" : special ? known(row.provider) ? "special-auth" : "custom-provider" : !hasKey && configured.PI_AUTH_FROM_PI !== "0" ? "pi-fallback-possible" : referencesUnknown === "refused" ? "references-refused" : referencesUnknown ? "references-unreadable" : null;
     return { ...row, usage: USAGE.filter(why => row.usage.has(why)), present: hasKey, source, status, mode: ["configured", "missing"].includes(status) ? hasKey ? "replace" : "add" : null, reason };
   }).sort((a, b) => (b.usage.includes("default") - a.usage.includes("default")) || a.provider.localeCompare(b.provider));
   const choices = Object.keys(PROVIDER_KEY_NAMES).map(provider => ({ provider, key: providerCanonicalKey(provider), providers: providerCanonicalKey(provider) ? [...PROVIDER_SLOT_ALIASES[providerCanonicalKey(provider)]] : [provider], mode: "add", supported: Boolean(providerCanonicalKey(provider)) && !needsHostAuthentication(provider) }));

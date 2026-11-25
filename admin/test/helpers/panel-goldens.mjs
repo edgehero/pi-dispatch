@@ -764,10 +764,10 @@ const SETUP_PARTIAL_DOCTOR = Object.freeze([
  * The overview over `snapshot`, as serve draws it for `session` with the stream open (the pill Live): the deployment
  * its folder's last part, as `cli.mjs` passes it.
  */
-async function overviewLive(snapshot, { session = OPERATOR, query = "" } = {}) {
+async function overviewLive(snapshot, { session = OPERATOR, query = "", fleet = null } = {}) {
   const parsed = parsePageQuery("overview", query);
   assert.ok(parsed.query, parsed.refusal);
-  const data = await loadPageData("overview", parsed.query, { fleet: { snapshot: async () => snapshot }, now: () => NOW, deployment: { folder: "pi-dispatch" } });
+  const data = await loadPageData("overview", parsed.query, { fleet: fleet ?? { snapshot: async () => snapshot }, now: () => NOW, deployment: { folder: "pi-dispatch" } }, fleet ? { role: session.role } : {});
   const ctx = { query: parsed.query, session: { name: session.name, role: session.role }, data, readOnly: false, theme: null, flash: null, maxStreams: MAX_STREAMS };
   const page = await renderPage("overview", ctx);
   assert.equal(page.status, 200);
@@ -1166,6 +1166,9 @@ const DRAW = {
   // Issue #962: the active jobs could not be read. Running, the headline and the timeline say so; no 0, no "nothing is
   // running".
   "overview-running-unread.operator": async () => overviewLive(overviewSnapshot({ active: [], activeUnreachable: true })),
+  // Issue #1073: the overview over a Valkey that does not answer, the real reader over the outage's files: no snapshot,
+  // and the kill switch's two forms the one change it offers (issue #1035).
+  "overview-no-snapshot.operator": async () => overviewLive(null, { fleet: noSnapshotFleet({}, { pinned: false }) }),
   // RunsScreen's footer, one state each: the fleet's run mirror off or partly read, the history read cut, the history
   // not read at all, nothing matching, and a reason token this console has no words for.
   "runs-mirror-off.operator": async () => runsLive({ page: { runs: RUNS_PAGE_RUNS, mirror: "off", next: null } }),

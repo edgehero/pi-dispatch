@@ -865,7 +865,7 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     // caller with none (undefined) has the view read its own (issue #962). `within` is a page load's deadline (issue
     // #988), which this view and the ones below pass to their own bounded reads; a caller with none (a tool, an
     // action) leaves each read the bound it has.
-    const modelsView = m.modelsView ? (snapshot, { within } = {}) => m.modelsView.readModelsView({ paths: side.paths, env: side.env, deploymentDir: config.dir, now: now(), snapshot, fleet, fs, redis, within }) : null;
+    const modelsView = m.modelsView ? (snapshot, { within, files = null } = {}) => m.modelsView.readModelsView({ paths: side.paths, env: side.env, deploymentDir: config.dir, now: now(), snapshot, files, fleet, fs, redis, within }) : null;
     const modelRoles = m.modelRolePlans?.createModelRoleActions({
       paths: side.paths, env: side.env, fs, now,
       checkModelsKnown: m.modelCatalog?.checkModelsKnown,
@@ -977,7 +977,7 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       updates: ({ within } = {}) => readUpdatesFacts({ within }),
       // Issue #849: the remembered browsers, for their page. The listing carries each record's hash for the actions; the page needs none of them.
       devices: devices ? () => { const listed = devices.list(); return listed.problem ? listed : { ...listed, devices: listed.devices.map(({ hash, ...rest }) => rest) }; } : null,
-      connections: (snapshot, { within } = {}) => m.connectionsView.readConnections({ snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid, within }),
+      connections: (snapshot, { within, files = null } = {}) => m.connectionsView.readConnections({ snapshot, files, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid, within }),
       projectView: (id, snapshot, { within } = {}) => m.projectView.readProjectView({ id, snapshot, paths: side.paths, env: side.env, deploymentDir: config.dir, pricing, fleet, fs, now: now(), platform: io.platform ?? process.platform, uid, within }),
       triggerCheck: (input) => m.triggerCheck.checkTriggerEvent({ input, triggersPath: side.paths.triggersPath, fs }),
       triggerList: async (snapshot, { within } = {}) => {

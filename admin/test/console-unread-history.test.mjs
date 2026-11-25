@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { NOW } from "../../launch/fixture-deployment.mjs";
 import { childrenOf, loadPageData, parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { HOSTS_UNREAD, HOSTS_UNREAD_TEXT } from "../src/console/panels/common.mjs";
-import { RUNS_EMPTY, RUNS_HOST_UNREADABLE, RUNS_MIRROR_DEGRADED, RUNS_MIRROR_DEGRADED_EMPTY, RUNS_MIRROR_OFF, RUNS_NONE_WITHOUT_HOST, runsFilters, runsFiltersModel, runsSummary, runsSummaryModel, runsTableModel, RUNS_MIRROR_CUT, RUNS_MIRROR_CUT_EMPTY } from "../src/console/panels/runs.mjs";
+import { RUNS_EMPTY, RUNS_HOST_UNREADABLE, RUNS_HOST_MISSING, RUNS_HOST_MISSING_EMPTY, RUNS_HOST_MIRROR_UNREAD, RUNS_MIRROR_DEGRADED, RUNS_MIRROR_DEGRADED_EMPTY, RUNS_MIRROR_OFF, RUNS_NONE_WITHOUT_HOST, runsFilters, runsFiltersModel, runsSummary, runsSummaryModel, runsTableModel, RUNS_MIRROR_CUT, RUNS_MIRROR_CUT_EMPTY } from "../src/console/panels/runs.mjs";
 import { TRANSCRIPT_UNREAD_TEXT, childSearchText, queuedText } from "../src/console/panels/run.mjs";
 import { PROJECT_HOLDS_PART, PROJECT_HOLDS_UNREAD, PROJECT_RUNS_UNREAD, PROJECT_SIZING_PART } from "../src/console/panels/project.mjs";
 import { BREAKDOWN_SCOPE_TEXT, HELD_PART_TEXT, SPEND_PANELS, SPLIT_HOSTS_PART_TEXT, SPLIT_UNREAD_TEXT, heldLabel } from "../src/console/panels/spend.mjs";
@@ -57,14 +57,27 @@ test("/runs: the All chip, the project chips and the settled spend are floors ov
 test("/runs: an empty page over a mirror that was not read says so, and \"No run matches.\" only of sides that answered", async () => {
   const foot = (runsPage) => runsTableModel(runsView({ runsPage })).foot;
   assert.deepEqual(foot({ ...RUNS_PAGE_IN_OUTAGE }), [RUNS_MIRROR_DEGRADED_EMPTY]);
-  // With this host's files unread the real reader lists no run and answers a mirror it never asked as "off": the foot
-  // says nothing of the mirror then, on or off, where it used to say the mirror is off over a fleet that has one.
+  // With this host's files unread the real reader asks the mirror in their place (issue #1073), and the foot says what
+  // that gave and what is missing. A reader with no client answers the mirror "off" unasked: nothing is said of it.
+  const unreadLocal = { records: () => ({ unreachable: "logs dir unreadable (EACCES)" }) };
+  const noClient = await readRunsPage(null, { localIndex: unreadLocal });
+  assert.deepEqual([noClient.runs, noClient.mirror, noClient.unreachable], [[], "off", "logs dir unreadable (EACCES)"], "no client: no run, and a mirror not asked");
+  assert.deepEqual(foot(noClient), [RUNS_HOST_UNREADABLE, RUNS_NONE_WITHOUT_HOST]);
+  assert.ok(!foot(noClient).includes(RUNS_MIRROR_OFF) && !foot(noClient).includes(RUNS_EMPTY));
   let asked = 0;
-  const redis = new Proxy({}, { get: (_, key) => (key === "then" ? undefined : () => { asked += 1; throw new Error("asked"); }) });
-  const unreadHost = await readRunsPage(redis, { localIndex: { records: () => ({ unreachable: "logs dir unreadable (EACCES)" }) } });
-  assert.deepEqual([unreadHost.runs, unreadHost.mirror, asked], [[], "off", 0], "the reader's answer: no run, and a mirror not asked");
-  assert.deepEqual(foot(unreadHost), [RUNS_HOST_UNREADABLE, RUNS_NONE_WITHOUT_HOST]);
-  assert.ok(!foot(unreadHost).includes(RUNS_MIRROR_OFF) && !foot(unreadHost).includes(RUNS_EMPTY));
+  const refusing = new Proxy({}, { get: (_, key) => (key === "then" ? undefined : () => { asked += 1; throw new Error("asked"); }) });
+  const bothUnread = await readRunsPage(refusing, { localIndex: unreadLocal });
+  assert.ok(asked > 0 && bothUnread.runs.length === 0 && /^unreachable/.test(bothUnread.mirror) && bothUnread.unreachable, "the mirror is asked, and did not answer");
+  assert.deepEqual(foot(bothUnread), [RUNS_HOST_UNREADABLE, RUNS_HOST_MIRROR_UNREAD]);
+  // A mirror that answers: its runs are the page, other hosts' and this host's own that it holds, and the foot says
+  // this host's part is missing; with none that matches it is not "No run matches.".
+  const mirrored = (rows) => ({ zrevrangebyscore: async () => rows.flatMap((r) => [r.jobId, String(Date.parse(r.endedAt))]), mgetBuffer: undefined, mget: async (...keys) => keys.map((k) => JSON.stringify(rows.find((r) => k.endsWith(r.jobId)))), exists: async () => 1 });
+  const fromMirror = await readRunsPage(mirrored([record({ jobId: "gh-other", host: "mini2" })]), { localIndex: unreadLocal });
+  assert.deepEqual([fromMirror.runs.map((r) => r.jobId), fromMirror.mirror, fromMirror.unreachable], [["gh-other"], "ok", "logs dir unreadable (EACCES)"]);
+  assert.deepEqual(foot(fromMirror), ["1 run, read from 1 host through the fleet's run mirror.", RUNS_HOST_UNREADABLE, RUNS_HOST_MISSING]);
+  const noneInMirror = await readRunsPage(mirrored([]), { localIndex: unreadLocal });
+  assert.deepEqual(foot(noneInMirror), [RUNS_HOST_UNREADABLE, RUNS_HOST_MISSING_EMPTY]);
+  assert.ok(!foot(noneInMirror).includes(RUNS_EMPTY));
   // A mirror that answered and was cut at its bound is read, and not whole (issue #988): neither sentence above.
   assert.deepEqual(foot({ runs: [], mirror: "truncated", next: null }), [RUNS_MIRROR_CUT_EMPTY]);
   assert.deepEqual(foot({ runs: [record()], mirror: "truncated", next: null }), ["1 run.", RUNS_MIRROR_CUT]);

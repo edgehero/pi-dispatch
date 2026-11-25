@@ -1010,7 +1010,10 @@ still answers is read as before: a page takes its longest chain of reads, and on
 those 6 seconds is cut. While Valkey stays down, a page says "not known" for what it could not read and still shows what the
 deployment's files hold: a host page says the hosts could not be read rather than that the host has gone, Set up counts
 the steps it could not judge as not known, Triggers lists the file's rules without their next fires, Configuration shows
-its files read-only, and Parked and Sandboxes show no count of what they did not read. A page that could not read the
+its files read-only, its two secret cards counted from the files too, Connections shows the triggers, the MCP servers
+and the staged packages the files hold and says the hosts' doctor results and the subscription status are not known,
+and Parked and Sandboxes show no count of what they did not read. Runs lists what the fleet's run mirror holds where
+this host's own run files could not be listed, and says that this host's runs the mirror does not hold are missing. A page that could not read the
 deployment offers no change, with one exception, the kill switch: Fleet and the overview's Hosts card still show an
 operator **Pause the fleet** and **Resume the fleet** under their sentence, with "The kill switch works without a read:
 a pause reaches every queue it finds, and its answer names them." A Valkey that stopped answering is when the fleet has
@@ -1035,7 +1038,9 @@ newest 1,000 runs, when it holds fewer); otherwise it is "at least", and Trigger
 spend are lower bounds: ..."). The three pages count the same runs for a trigger, each over its own window. A refused run's page says its host has no
 live registry row, published no doctor result or has no queue listed where the hosts were read and that is so, and
 "could not be read" only of what was not read. Where the registry answered before and does not now, it says "not
-read this time: the host registry could not be read", and shows no beat's age for a row that is as last seen. Fleet says the hosts could not
+read this time: the host registry could not be read", and shows no beat's age for a row that is as last seen. In the
+same case Fleet and a venue's page say the hosts are as the registry was last read, and a venue no host blessed then is
+"no host when the registry was last read", never "no live host". Fleet says the hosts could not
 be read rather than that none is registered, and with the overview it says the running jobs are not known rather than
 that nothing is running; a schedule's stalls it did not read are "not known". When only some hosts' rows answered in
 time, the pages say the host registry was read in part rather than that it could not be read: a host whose row did not
@@ -3113,6 +3118,14 @@ per job start for a bundle. Only overlay resolvers must sit inside `PI_SECRET_RE
 A relative path is refused under its field. Every preview and refusal shortens resolver/root paths to their
 last folder. No response contains a secret reference, a value or a resolver's full path.
 
+With Valkey not answering, the page draws the declarations from the settings overlay, the triggers file, the projects
+file and the `.env`, read-only, and says what a run last received and which hosts serve a profile are not known. Where
+the settings overlay could not be read or does not load, a profile or bundle resolver the `.env` declares says whether
+the overlay declares it too is not known, and a name the `.env` does not declare is not called undeclared or missing:
+the overlay may declare it. An agent's view of this page shows what `dispatch_secrets` returns: names, sources, the
+roots' words, trigger rows, projects and variable counts, and says that a run's last resolve, the hosts that serve a
+profile and the variables' names are not in that view.
+
 Remove previews the settings diff and effect before its red confirm. Removing an overlay-only profile
 refuses future jobs naming it before spend; removing an env/overlay duplicate ends ambiguity and leaves
 the env resolver in use. It names the affected triggers. The script stays on disk; Undo tells you to declare
@@ -3196,6 +3209,14 @@ these extra file/lease reads.
 - **Staged packages:** exact package versions, receipt time and trigger opt-outs. Stage them using
   `pi-dispatch import-pi --with-packages`; the receipt does not record who staged them.
 
+With Valkey not answering, the page still shows what the deployment's files hold: the forges and the triggers that arm
+them, private endpoint grants, which triggers keep a status comment, the MCP servers and the staged packages. A banner
+says the host registry and doctor's records could not be read. The egress card says the hosts' doctor results could not
+be read, and Subscription authentication says "Subscription status not known" (it says "not published" only where the
+status was read and holds none). Models says the same of its subscription quota. The provider key card says a source of
+provider references "does not load" where a file that names them was read and is refused, and "could not be read" where
+nobody could read it.
+
 Viewers read fixes as sentences without commands to copy. `dispatch_connections` provides a safe agent read
 of names, hosts, receiver counts/times and key presence, with no credentials, references or full paths. See [Egress](egress.md) and
 [Notifications](notifications.md).
@@ -3245,6 +3266,8 @@ no button and a reason. This section moves from Capacity; Capacity keeps host ut
 
 The side column shows allocation weight/floor/share/current split, scoped limits, bundle facts and trigger
 activity. A viewer sees the chart and facts with no copy call, member form, size preview or Delete.
+With Valkey not answering, the page still reads the project from the projects file and its runs from this host's
+files: its counts and spend are "at least", the money held with the hosts is not known, and no form is drawn.
 `dispatch_projects` includes safe spend/share, size suggestions/calls and edit/delete refusal facts; project
 and sizing writes still require a person. See [Projects](projects.md).
 
@@ -3346,7 +3369,7 @@ agents and read-only consoles receive no Edit, Adopt or canary-command controls.
 
 The host policy's `quotaWindows` preference chooses the Models monitoring focus for five-hour and seven-day account windows. Available or unknown unselected account rows are omitted from that card; known exhausted rows remain visible with a mandatory evidence note and still affect pickup. Scoped and other provider window types remain visible because they are not independently selectable. This display preference cannot disable a provider cooldown.
 
-The Subscription quota card shows account and application-bucket observations separately from dollar caps: their freshness, five-hour and seven-day windows, utilization, reset times, extra usage and explicit paid-overage policy. Unknown utilization and resets remain unknown; stale observations do not promise remaining capacity. Retained exhaustion still matters after its observation becomes stale. A resetless exhaustion offers a host trial command only to a writable operator, and a trial does not clear exhaustion or bypass other pickup gates. A connection whose adapter has no usage read (ChatGPT's) is offered no usage refresh, and the card says that its quota is known only from refusals and the automatic retest. Jobs using the same connection and application bucket share its quota. Quota observations cannot prove that separately linked connections belong to the same vendor account.
+The Subscription quota card shows account and application-bucket observations separately from dollar caps: their freshness, five-hour and seven-day windows, utilization, reset times, extra usage and explicit paid-overage policy. Unknown utilization and resets remain unknown; stale observations do not promise remaining capacity. Retained exhaustion still matters after its observation becomes stale. A resetless exhaustion offers a host trial command only to a writable operator, and a trial does not clear exhaustion or bypass other pickup gates. A connection whose adapter has no usage read (ChatGPT's) is offered no usage refresh, and the card says that its quota is known only from refusals and the automatic retest. Jobs using the same connection and application bucket share its quota. Quota observations cannot prove that separately linked connections belong to the same vendor account. With Valkey not answering, or its read of the hosts' status failing, the card says "Subscription status not known" rather than that nothing is published, and the page reads its settings overlay from the files the page's load already read.
 
 The model tool `dispatch_models` shares the reader but receives only bounded machine facts, not doctor prose,
 commands, paths, diffs or repository-agent definitions. Its `waiting` is null when the waiting jobs could not be read

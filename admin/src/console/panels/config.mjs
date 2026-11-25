@@ -555,10 +555,13 @@ export const configPackages = fromSnapshot("Staged pi packages", (s) => html`<p>
  * named by the settings overlay and the triggers file, the bundles bound by the triggers file, and a source that could
  * not be read or does not load leaves its list short. The count is then not known, or a floor, never a zero, and the
  * line says which source and which of the two it was. A file that is not there names and binds nothing: its zero stands.
+ * With no snapshot both cards count from the files (issue #1073): the reader's file views carry the two secret views over
+ * the same files and the deployment's environment, so the counts are the declarations' own, read-only as every card
+ * drawn from the files is. They said the deployment's Valkey could not be read, of counts no Valkey holds.
  */
 const secretCount = (trouble, n, noun) => (trouble ? (n > 0 ? `At least ${n} ${noun} in view; the rest is not known: ${trouble}.` : `${noun[0].toUpperCase()}${noun.slice(1)} not known: ${trouble}.`) : `${n} ${noun} in view.`);
-export const configSecretProfiles = fromSnapshot("Secret profiles", (s) => html`<p>${secretCount(secretCountTrouble(s).profiles, s.secretProfiles?.profiles?.length ?? 0, "profiles")} <a class="link" href="/config/secrets#p-secret-profiles">Open Secrets</a></p>`);
-export const configSecretBundles = fromSnapshot("Secret bundles", (s) => html`<p>${secretCount(secretCountTrouble(s).bundles, s.secretBundles?.bundles?.length ?? 0, "project bundles")} <a class="link" href="/config/secrets#p-secret-bundles">Open Secrets</a></p>`);
+export const configSecretProfiles = fromSnapshot("Secret profiles", (s) => html`<p>${secretCount(secretCountTrouble(s).profiles, s.secretProfiles?.profiles?.length ?? 0, "profiles")} <a class="link" href="/config/secrets#p-secret-profiles">Open Secrets</a></p>`, { files: true });
+export const configSecretBundles = fromSnapshot("Secret bundles", (s) => html`<p>${secretCount(secretCountTrouble(s).bundles, s.secretBundles?.bundles?.length ?? 0, "project bundles")} <a class="link" href="/config/secrets#p-secret-bundles">Open Secrets</a></p>`, { files: true });
 
 const shortFile = (path, fallback) => typeof path === "string" && path ? `…/${path.split(/[\\/]/).filter(Boolean).slice(-2).join("/")}` : fallback;
 export function configDescription(v) {
