@@ -59,7 +59,7 @@ import * as nodeModule from "node:module";
 import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isMainThread } from "node:worker_threads";
-import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_ENTRIES, PI_SUBCOMMANDS } from "./child-route.mjs";
+import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_ENTRIES, PI_SUBCOMMANDS, subscriptionAdapterRoots } from "./child-route.mjs";
 
 export { CHILD_METER_PATH, injectChildMeter, PI_ENTRIES, PI_SUBCOMMANDS };
 
@@ -238,7 +238,8 @@ export async function preload({
 	const kind = entryKind(argv[1], { packageDir, realpath }) ?? nestedRunnerKind(argv[1], { env, pid, realpath });
 	if (kind !== null) {
 		const quick = exitsBeforeExtensions(argv.slice(2));
-		const subcommand = !injectChildMeter(argv, kind);
+		// Issue #1098: a subscription's staged adapter right after the meter, which admits it (child-route.mjs subscriptionAdapterRoots).
+		const subcommand = !injectChildMeter(argv, kind, CHILD_METER_PATH, subscriptionAdapterRoots(env));
 		const state = (global[HANDOFF] ??= { dir });
 		try {
 			state.meter ??= await loadMeter();

@@ -458,7 +458,8 @@ usage is known to be off, so if extra usage is turned on at the provider while a
 `extraUsageCreditMicros` edit, that job's calls past the quota are billed as extra usage and nothing caps them.
 
 The job image decides whether a call is counted, and it trusts the worker's mark only with the subscription's
-adapter admitted and a model list in force, never in a child process. An image from before this release counts every
+adapter admitted and a model list in force. A pi child process that holds an admission of its own (below) has its calls
+on that subscription counted the same way, by the job's runner, from its own verified entries. An image from before this release counts every
 subscription call against the cap, as before, and a worker from before it never marks a connection, so its jobs count
 every call too. See [the upgrade guide](upgrading.md) and [what the cap counts](costs.md#what-the-cap-counts).
 
@@ -474,9 +475,17 @@ package to remain enabled. Compaction and child sessions sharing the admitted ro
 provider/model/account policy. The job's `subagent` tool ([model roles](model-roles.md#on-a-subscription)) is such a
 child: on a subscription, a role child whose model is on the subscription runs inside the runner, on the admitted
 runtime, with pi's built-in tools and the job's skills but no extension tools, and its calls are checked and counted
-as the job's own. A separate pi CLI or Node child process, a staged package's own child among them, still refuses
-subscription dispatch and stops the job; it does not inherit attested subscription admission. A fresh runtime without
-the admitted adapter also refuses. An image from before this release starts every role child as a separate process,
+as the job's own. A separate pi process that the job starts, a staged package's own child among them, holds an
+admission of its own: the child meter, which the job image loads first in every pi child, verifies the subscription's
+entries and the approved adapter's content, loads that adapter right after itself, refuses any other registration of
+the provider and seals it once the child's session exists, as the job's runner does. Its calls then reach the
+subscription with the access token, pass the job's model list, and count as the job's own subscription calls: notional
+with no paid extra usage, against the subscription allowance, and never against the cost cap. A child whose admission
+cannot be established (the adapter missing or not the approved one, a second registration of the provider) has every
+subscription call refused before it is sent, and the job stops as `model-not-allowed`, as before. A Node process that
+loads pi as a library, with no pi session of its own, holds no admission and is refused. A fresh runtime without the
+admitted adapter also refuses. An image from before this release (no `subscriptionChildren`) refuses every such
+child's subscription call, as before; nothing is spent on it. An image from before this release starts every role child as a separate process,
 so a subscription job with a role map is refused on it before it spends (`job-image-subscription-roles-unsupported`).
 Unsupported endpoint/API combinations, OpenAI classifier roles, OpenShell venues and subscription canaries refuse
 before spending. A resurrected sandbox remains credential-free.

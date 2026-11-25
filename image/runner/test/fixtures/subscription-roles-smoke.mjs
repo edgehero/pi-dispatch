@@ -205,7 +205,7 @@ export async function verifySubscriptionRoles(root) {
  * the tool, which latches the guard's conflict before the tool runs. `mayMerge` stages the job's merge permission.
  * Resolves with the exit code, the decisive exit line and what each request carried.
  */
-export async function subscriptionRunnerJob({ root, latch = false, mayMerge = false, ownProcesses = false, timeoutMs = 60_000 }) {
+export async function subscriptionRunnerJob({ root, latch = false, mayMerge = false, ownProcesses = false, tool = "subagent", extension = null, notional = false, allowanceMicros = null, maxCostMicros = null, timeoutMs = 60_000 }) {
 	for (const dir of ["job/pi/skills", "workspace", "session", "outbox", "opt/pi-global/extensions", "opt/pi-dispatch", "home", "tmp"]) mkdirSync(join(root, dir), { recursive: true });
 	writeFileSync(join(root, "job", "prompt.md"), "Run the checker once.\n");
 	// The image's guardrails carry the default merge rule; this file does too, so the merge permission is told as it is.
@@ -215,6 +215,7 @@ export async function subscriptionRunnerJob({ root, latch = false, mayMerge = fa
 	const ref = "openai/gpt-4.1";
 	writeFileSync(join(root, "job", "model-roles.json"), JSON.stringify({ version: 1, roles: {}, parent: ref, models: [ref] }));
 	writeFileSync(join(root, "job", "agents.json"), JSON.stringify({ version: 1, agents: [{ name: "checker", description: "checks the work", content: "AGENT-PROMPT-SENTINEL" }] }));
+	if (extension !== null) writeFileSync(join(root, "opt", "pi-global", "extensions", "job-tool.js"), extension);
 	if (latch) writeFileSync(join(root, "opt", "pi-global", "extensions", "latch.js"), `export default function (pi) {
 	pi.on("tool_call", (event) => {
 		if (event.toolName !== "subagent") return;
@@ -223,33 +224,19 @@ export async function subscriptionRunnerJob({ root, latch = false, mayMerge = fa
 }
 `);
 	const requests = join(root, "requests.jsonl");
-	const preload = join(root, "offline-fetch.mjs");
-	writeFileSync(preload, `import { appendFileSync } from "node:fs";
-const sse = (events) => new Response(events.map((event) => "event: " + event.type + "\\ndata: " + JSON.stringify(event) + "\\n\\n").join(""), { status: 200, headers: { "content-type": "text/event-stream" } });
-globalThis.fetch = async (input, init) => {
-	const request = new Request(input, init);
-	const url = new URL(request.url);
-	if (url.origin + url.pathname !== "https://api.openai.com/v1/responses") throw new Error("offline: no such route");
-	const body = JSON.parse(await request.text());
-	const tools = (body.tools ?? []).map((tool) => tool.name);
-	const answered = (body.input ?? []).some((item) => item.type === "function_call_output");
-	const who = tools.includes("subagent") ? "root" : "child";
-	const text = JSON.stringify(body);
-	appendFileSync(${JSON.stringify(requests)}, JSON.stringify({ who, answered, tools, model: body.model, token: request.headers.get("authorization") === "Bearer " + process.env.OPENAI_API_KEY, guardrails: text.includes("GUARDRAILS-SENTINEL"), agentPrompt: text.includes("AGENT-PROMPT-SENTINEL"), defaultMerge: text.includes(${JSON.stringify(JSON.stringify(DEFAULT_MERGE_RULE.slice(0, 40)).slice(1, -1))}), permittedMerge: text.includes(${JSON.stringify(JSON.stringify(PERMITTED_MERGE_RULE.slice(0, 40)).slice(1, -1))}) }) + "\\n");
-	const item = who === "root" && !answered
-		? { type: "function_call", id: "fc_1", call_id: "call_1", name: "subagent", arguments: JSON.stringify({ agent: "checker", task: "check the work" }) }
-		: { type: "message", id: "msg_" + who, role: "assistant", status: "completed", content: [{ type: "output_text", text: who === "root" ? "parent done" : "checked by the child", annotations: [] }] };
-	const opening = item.type === "function_call" ? { ...item, arguments: "" } : { ...item, content: [] };
-	return sse([
-		{ type: "response.created", response: { id: "resp_" + who } },
-		{ type: "response.output_item.added", output_index: 0, item: opening },
-		{ type: "response.output_item.done", output_index: 0, item },
-		{ type: "response.completed", response: { id: "resp_" + who, status: "completed", output: [item], usage: { input_tokens: 10, output_tokens: 3, total_tokens: 13 } } },
-	]);
-};
-`);
+	// Every request answered in the process and nothing let out (fixtures/offline-fetch.mjs), in the runner and in any pi
+	// child it starts, which inherits the preload and these variables.
+	const preload = fileURLToPath(new URL("./offline-fetch.mjs", import.meta.url));
+	const escaped = (text) => JSON.stringify(text).slice(1, -1);
+	const offline = {
+		OFFLINE_FETCH_LOG: requests,
+		OFFLINE_FETCH_TOOL: tool,
+		OFFLINE_FETCH_ARGS: JSON.stringify(tool === "subagent" ? { agent: "checker", task: "check the work" } : {}),
+		OFFLINE_FETCH_ANSWER: "checked by the child",
+		OFFLINE_FETCH_PROBES: JSON.stringify({ guardrails: "GUARDRAILS-SENTINEL", agentPrompt: "AGENT-PROMPT-SENTINEL", defaultMerge: escaped(DEFAULT_MERGE_RULE.slice(0, 40)), permittedMerge: escaped(PERMITTED_MERGE_RULE.slice(0, 40)) }),
+	};
 	const at = Date.now();
-	const binding = { provider: "openai", adapter: "openai-chatgpt", connectionId: "fixture", generation: 1, expiresAt: at + 2 * 3_600_000, deadlineAt: at + 1_800_000 };
+	const binding = { provider: "openai", adapter: "openai-chatgpt", connectionId: "fixture", generation: 1, expiresAt: at + 2 * 3_600_000, deadlineAt: at + 1_800_000, ...(notional ? { notional: true } : {}) };
 	const child = spawn(process.execPath, [`--import=${fileURLToPath(new URL("./remap-roots.mjs", import.meta.url))}`, fileURLToPath(new URL("../../run-job.mjs", import.meta.url))], {
 		env: {
 			PATH: process.env.PATH,
@@ -267,6 +254,9 @@ globalThis.fetch = async (input, init) => {
 			PI_MODEL_ROLES_FILE: "/job/model-roles.json",
 			PI_AGENTS_FILE: "/job/agents.json",
 			NODE_OPTIONS: `--import=${preload}`,
+			...offline,
+			...(allowanceMicros !== null ? { PI_SUBSCRIPTION_ALLOWANCE_MICROS: String(allowanceMicros) } : {}),
+			...(maxCostMicros !== null ? { PI_MAX_COST_MICROS: String(maxCostMicros) } : {}),
 			// A suite on a Linux host runs other jobs beside this one; the runner's child detector is then shown only this
 			// job's own processes, as in a container (fixtures/remap-roots.mjs). The image's own run, in a container, needs none.
 			...(ownProcesses ? { PI_DISPATCH_TEST_OWN_PROC: "1" } : {}),

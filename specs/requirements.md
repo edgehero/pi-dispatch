@@ -6014,7 +6014,8 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   parent's line carries the child's count and the job settles at the floor; given a subscription entry the worker
   marked notional (issue #1008), then a call on it passes under a 1-micro cap with no hold, its list price lands in
   `cost` and `costNotional`, and an API-key call beside it is refused; given the entry unmarked, no subscription
-  admission, no model list, or a child process, then the same call is counted. Given a list-price allowance (issue
+  admission, no model list, or a child process with no admission of its own, then the same call is counted; a pi child
+  that holds one (#1098) has its call on such an entry counted as notional by the job's runner. Given a list-price allowance (issue
   #1008) and notional calls in flight when it is reached, then each finishes and counts, the next notional call is
   refused, the meter stops as `subscription-allowance` and every later call is braked; given a billed call beside it,
   then the allowance never refuses it and the cap still does; given an allowance the runner cannot apply, then it
@@ -9877,12 +9878,13 @@ instead of drifting.
   usage keeps counting every call against the cap and the windows (nothing tells which calls were billed), and
   `auth-credit-cap-required` still holds its cap to the credit. The worker marks the job's snapshot notional; the
   runner trusts the marker only on its own verified entries, with the parent's subscription admission and a model
-  list, so a child process, an unmarked entry or an older worker counts every call. A job whose every route is
+  list, so an unmarked entry or an older worker counts every call, and so does a child process with no admission of its
+  own; a pi child that holds one (#1098) counts as the runner does, the runner judging its rows by its own verified set. A job whose every route is
   notional or zero-rated reserves nothing in the dollar windows and keeps its real cap. ChatGPT has no modelled paid
   overage, so a ChatGPT connection is notional, an account with purchased credits included; and Claude extra usage
   turned on at the provider during a notional job, with no credit edit, is billed with no dollar bound: both are named
   residuals, where before #1008 those calls were capped at list price. Acceptance: a subscription call passes under a 1-micro cap while an
-  API-key call is refused; an unmarked entry, a child process and a paid connection count; a subscription-only
+  API-key call is refused; an unmarked entry, a child process with no admission of its own and a paid connection count; a subscription-only
   attempt reserves and settles nothing in any window (real Valkey); a mixed attempt settles its billed part; an exit
   line with no `costNotional` settles the whole cost.
 
@@ -9926,8 +9928,12 @@ instead of drifting.
   (2026-11-25, #946): a role child whose model is on the subscription runs inside the runner as such a session, with
   pi's built-in tools and the job's skills but no extension tools and no `subagent` of its own, its calls judged and
   counted as the job's own; one the runner cannot run so returns the named tool error `subscription-child-unsupported`
-  before it starts, and the parent continues. Separate pi CLI and Node child processes, a staged package's own among
-  them, refuse subscription dispatch without attested admission. A subscription job with a role map on an image that
+  before it starts, and the parent continues. A separate pi process the job starts, a staged package's own among them,
+  dispatches on the subscription only through an admission of its own (2026-11-25, #1098), run by the runner's child
+  meter, loaded first in every pi child: the entries and the adapter's content verified, the adapter loaded right after
+  the meter, every other registration of the provider refused, the seal at the child's session start; its calls notional
+  as the runner's own, judged by the job's allowance and never charged to its cap; one whose admission cannot be
+  established is refused before any call is sent, and a Node process that runs pi as a library holds none. A subscription job with a role map on an image that
   does not declare `subscriptionRoles` is refused before spend (`job-image-subscription-roles-unsupported`). No account rotation occurs
   inside a request or running attempt. OpenShell and canary
   subscription paths refuse until their custody and egress contracts support them explicitly.
@@ -9970,7 +9976,9 @@ instead of drifting.
   overage refusal. Actual pickup proves every refusal is free and fallback never bypasses the effective
   ceiling. A role child on a sealed subscription runtime answers in process on the pinned pi, metered and judged,
   with no provider registered after the seal, its exclusions, abort and output limit held, refused by name before the
-  seal or after a conflict, while a separate pi process on a subscription still refuses (#946). Recovery retains its checkpoint model; sandbox remains credential-free. Real Valkey checks the
+  seal or after a conflict (#946). A real pi child started through the runner's preload on a subscription is admitted on
+  its own and answers, its call notional in the job's fold and judged by the allowance, refused with an adapter that is
+  not the approved one or after a second registration, an off-list model still refused (#1098). Recovery retains its checkpoint model; sandbox remains credential-free. Real Valkey checks the
   atomic store; browser checks use actual CSP, roles, both themes, widths and keyboard interactions.
 - **Traces**: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB`,
   `DES-HOST-OWNED-SUBSCRIPTION-AUTH`, `INT-AUTH-CONNECTIONS-FILE-CONTRACT`,
@@ -10101,6 +10109,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-25 (#1098) | **`REQ-SUBSCRIPTION-AUTHENTICATION` AMENDED**, the Execution clause, the billed-calls bullet and the Acceptance: a separate pi process the job starts dispatches on the subscription through an admission of its own, run by the runner's child meter (entries and adapter content verified, the adapter loaded after the meter, any other registration of the provider refused, sealed at session start), its calls notional as the runner's own and judged by the allowance, never charged to the cap; refused before any call without it; a library process holds none; the acceptance names the real child through the preload. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**, clause (d)'s acceptance: a child with an admission of its own has its call on a notional entry counted as notional by the runner. UNCHANGED, checked: `REQ-MODEL-POLICY` (an off-list model is refused in a child and stops the job, as before), `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`. **Code evidence**: image/runner/src/usage-meter.mjs -> startChildMeter, ledgerSettled, ledgerNotional, foldChildLedgers, spentFile, createUsageMeter; image/runner/src/child-route.mjs -> subscriptionAdapterRoots, injectChildMeter; image/runner/src/child-meter.ts; image/runner/src/child-watch.mjs -> createChildWatch. |
 | 2026-11-25 (#946) | **`REQ-SUBSCRIPTION-AUTHENTICATION` AMENDED**, the Execution clause and the Acceptance: the job's `subagent` tool works on a subscription, its role child running inside the runner as a session on the admitted root runtime (pi's built-in tools and the job's skills, no extension tools, no nested `subagent`, judged and counted as the job's own), one it cannot run so refused by name before it starts as `subscription-child-unsupported` with the parent going on; separate pi CLI and Node child processes, a staged package's own included, still refuse, now without "in this initial release"; a subscription job with a role map on an image without `subscriptionRoles` refused before spend (`job-image-subscription-roles-unsupported`); the acceptance names the in-process proof on the pinned pi beside the separate process that still refuses. **`REQ-MODEL-POLICY` AMENDED**, its Model roles bullet: on a subscription the subagent's child runs inside the runner. UNCHANGED, checked: `REQ-PER-TRIGGER-TOOL-EXCLUSIONS` (an in-process child loses what the trigger removes, as a CLI child does), `REQ-TOKEN-ACCOUNTING-AND-CAPS` (the child's calls are one more session on the process meter). **Code evidence**: image/runner/src/model-roles.mjs -> createRoleSubagents; image/runner/src/role-child-session.mjs -> createRoleChildSessions; image/runner/src/loader.mjs -> buildRoleChildResourceLoader; worker/src/image-preflight.mjs -> CAPABILITY_GATES; worker/src/run-history.mjs -> MODEL_ROLE_REFUSAL_REASONS. |
 | 2026-11-25 (#942) | **`REQ-FORGE-JOB-ARTIFACTS` AMENDED**, a dated bullet: one console address works for the whole fleet, the files staying on the host that kept them under its retention, read from that host over its artifacts channel with this host's store first, no file passing through Valkey whole and no key holding its bytes, and `elsewhere` kept for a host that cannot be asked now, saying why. **`REQ-CONSOLE-SECURITY` AMENDED**, a dated bullet and the #920 clause of the Statement: another host's file holds every guarantee of this host's, plus headers from the validated manifest alone and its bytes held to that manifest's size and sha256 before the answer completes; `host` one live worker name, never this host's; fixed refusal sentences; reads unaudited, nothing kept on the console's disk. **Code evidence**: admin/src/console/artifact-api.mjs -> getArtifact, HOST_ARTIFACT_REFUSALS; admin/src/read-model.mjs -> artifacts, hostArtifactFile; admin/src/console/panels/run.mjs -> artifactsBody; admin/test/console-artifacts.test.mjs. |
 | 2026-11-25 (#998) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (c): the run page's Model usage card gains a Credential row from the record's `mainCredential` (the declared key named by its variable and by what declared it, the host's key, the host's pi login, a subscription connection, no key), the card shown for that row alone on a run with no usage ledger, nothing for a record without the field, on an operator's page (a viewer's draws no such card); `/api/run` names the variable to an operator alone. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: a dated bullet, `dispatch_runs` gives the source word alone, never the variable's name, and the agent projection of `/api/run` the same. UNCHANGED, checked: `REQ-TRIGGER-SECRETS` (the rule that decides which key a job spends; the record now says which it did), `REQ-DURABLE-RUN-HISTORY` (one additive record key, `v` stays 1). **Code evidence**: worker/src/run-history.mjs -> recordedMainCredential, buildRecord; admin/src/console/panels/run.mjs -> mainCredentialText, runModels; admin/src/console/run-api.mjs -> safeRunFields; admin/src/agent-read.mjs -> agentReadProjection; admin/src/read-model.mjs -> modelRunRecord. |

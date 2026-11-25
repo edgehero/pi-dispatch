@@ -46,11 +46,13 @@ export default async function childMeter(pi) {
 		} catch {
 			// The compat half then sends a builtin model's legacy call to the registry entry; the runtime half is whole.
 		}
-		child = await state.meter.startChildMeter({ ModelRuntime, compat: { module: piAi, fallbackModels }, env: process.env, dir, name: state.name, state });
+		// `admit` (issue #1098): this route alone holds a subscription admission of its own, sealed at session_start below.
+		child = await state.meter.startChildMeter({ ModelRuntime, compat: { module: piAi, fallbackModels }, env: process.env, dir, name: state.name, admit: true, state });
 	} catch {
 		// startChildMeter never throws; an import that failed leaves the preload's stub, which the parent counts.
 	}
-	// Every session, not only the first: a new, resumed or forked session may come with a runtime of its own.
+	// Every session, not only the first: a new, resumed or forked session may come with a runtime of its own. verify() also
+	// seals the child's subscription admission on that runtime (issue #1098), once every extension has registered.
 	pi.on("session_start", (_event, ctx) => {
 		try {
 			child?.verify(ctx?.modelRegistry?.runtime);

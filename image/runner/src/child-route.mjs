@@ -88,15 +88,39 @@ export function isNestedRunner(env, pid, { pidNamespace = readPidNamespace } = {
 export const CHILD_NO_MCP = "--no-mcp";
 
 /**
- * Insert `-e <meterPath> --no-mcp` first in a pi entry's arguments (argv[2] on), in place. False, and argv untouched,
- * for a CLI whose first argument is a subcommand. First, not last and not before the first `--`: everything after `--`
- * is a message, and in front of the spawner's own `-e`s is what loads the meter before them (measured in both CLIs).
- * `--no-mcp` drops only the `builtin:mcp` path from the final set, so the meter still loads (pinned in
- * child-meter.integration.test.mjs), and a spawner's own `-e builtin:mcp` is dropped with it.
+ * Issue #1098: the staged Anthropic subscription adapters a pi child must load for its own subscription admission, from
+ * PI_SUBSCRIPTION_AUTH (the runner keeps it current for its descendants): each `anthropic` entry's absolute `root`, at
+ * most two, never throwing. A child of a subscription job is admitted, as the job's runner is, only once that provider is
+ * registered by its approved adapter, and nothing else would load it in a child: the job's packages reach the runner
+ * alone (PI_PACKAGES), and a child's agent dir holds none. The child meter checks the adapter's content against the
+ * entry's digest before it admits a call, so a root that is not the approved adapter loads and is never admitted, which
+ * is no more than a spawner's own `-e` could load. An OpenAI subscription has no adapter to load.
  */
-export function injectChildMeter(argv, kind, meterPath = CHILD_METER_PATH) {
+export function subscriptionAdapterRoots(env) {
+	let entries;
+	try {
+		// env-internal PI_SUBSCRIPTION_AUTH: host-approved access snapshot metadata, never an operator override.
+		entries = JSON.parse(env?.PI_SUBSCRIPTION_AUTH ?? "[]");
+	} catch {
+		return [];
+	}
+	if (!Array.isArray(entries)) return [];
+	const roots = entries.filter((row) => row?.provider === "anthropic" && typeof row.root === "string" && isAbsolute(row.root)).map((row) => row.root);
+	return [...new Set(roots)].slice(0, 2);
+}
+
+/**
+ * Insert `-e <meterPath> --no-mcp` first in a pi entry's arguments (argv[2] on), in place, then `-e <root>` for each
+ * of `adapters` (subscriptionAdapterRoots, issue #1098), so a subscription's adapter loads right after the meter and
+ * before every extension of the spawner's. False, and argv untouched, for a CLI whose first argument is a subcommand.
+ * First, not last and not before the first `--`: everything after `--` is a message, and in front of the spawner's own
+ * `-e`s is what loads the meter before them (measured in both CLIs). `--no-mcp` drops only the `builtin:mcp` path from
+ * the final set, so the meter still loads (pinned in child-meter.integration.test.mjs), and a spawner's own
+ * `-e builtin:mcp` is dropped with it.
+ */
+export function injectChildMeter(argv, kind, meterPath = CHILD_METER_PATH, adapters = []) {
 	if (kind === "cli" && PI_SUBCOMMANDS.includes(argv[2])) return false;
-	argv.splice(2, 0, "-e", meterPath, CHILD_NO_MCP);
+	argv.splice(2, 0, "-e", meterPath, CHILD_NO_MCP, ...adapters.flatMap((root) => ["-e", root]));
 	return true;
 }
 
@@ -188,7 +212,7 @@ export async function runAsPiCli({
 		setExitCode(2);
 		return "refused";
 	}
-	if (!hasChildMeter(argv)) injectChildMeter(argv, "cli");
+	if (!hasChildMeter(argv)) injectChildMeter(argv, "cli", CHILD_METER_PATH, subscriptionAdapterRoots(env));
 	await load(cliUrl());
 	return "cli";
 }

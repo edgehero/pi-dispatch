@@ -16,13 +16,15 @@ import { tempDir } from "./helpers/temp-dir.mjs";
  */
 
 /** A ledger row with the ten numerics, zero unless given. */
-const row = (provider, model, fields = {}) => ({ provider, model, calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0, providerBilled: 0, ...fields });
+// `notional` (issue #1098, ledger version 4): the part of its cost the child's own subscription admission let through.
+const row = (provider, model, fields = {}) => ({ provider, model, calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0, providerBilled: 0, notional: 0, ...fields });
 
 /** A well-formed ledger: `calls` settled calls of `each` tokens on one pair, plus `unresolved` calls in flight. */
-function ledger({ state = "running", metered = true, calls = 1, each = 100, provider = "fake", model = "m1", unresolved = 0, spentMicros = 0, inflightMicros = 0, costRefused = 0, modelRefused = 0, cost = 0.001, floor = {} } = {}) {
-	const rows = calls === 0 ? [] : [row(provider, model, { calls, input: calls * each, total: calls * each, cost: calls * cost })];
+function ledger({ state = "running", metered = true, calls = 1, each = 100, provider = "fake", model = "m1", unresolved = 0, spentMicros = 0, inflightMicros = 0, costRefused = 0, modelRefused = 0, cost = 0.001, marked = false, floor = {} } = {}) {
+	// `marked` (issue #1098): the row's cost marked notional, as a child holding its own subscription admission writes it.
+	const rows = calls === 0 ? [] : [row(provider, model, { calls, input: calls * each, total: calls * each, cost: calls * cost, notional: marked ? calls * cost : 0 })];
 	return {
-		v: 3,
+		v: 4,
 		state,
 		metered,
 		totals: { input: calls * each, output: 0, total: calls * each, cost: calls * cost, calls: calls + unresolved, unresolved, unpriced: 0, sessions: calls === 0 ? 0 : 1 },
@@ -1070,4 +1072,110 @@ test("issue #985: a child's cost refusal that stops the job is the job's refusal
 		assert.equal(run.hook.view().unmetered, 0, JSON.stringify(bad));
 		assert.deepEqual(run.hook.refusal(), want, JSON.stringify(bad));
 	}
+});
+
+// --- issue #1098: a child's notional calls, with the job's notional set ---
+
+test("a child's calls on the job's notional providers cost the cap nothing, in the fold and in SPENT, and are the job's notional cost (#1098)", () => {
+	const notional = new Set(["openai"]);
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: 10, rootSessionId: "root", notionalProviders: notional });
+	const guard = createPolicyGuard({ maxCostMicros: 10, env: {} });
+	const { dir, hook } = watch({ meter, guard: () => guard, notional });
+	// 44 micro-dollars on the subscription's provider, four times the cap: notional, so no charge.
+	writeLedger(dir, 4242, ledger({ provider: "openai", model: "gpt-4.1", cost: 0.000044, marked: true }));
+	hook.sample();
+	assert.equal(meter.state.stopReason, null, "under a 10 micro-dollar cap, nothing stops");
+	assert.equal(hook.settled(), 0);
+	assert.equal(JSON.parse(readFileSync(join(dir, "SPENT"), "utf8")).total, 0, "and SPENT charges the children nothing for it");
+	assert.equal(meter.snapshot().costNotional, 0.000044, "it is the job's notional cost");
+	assert.equal(meter.notionalMicros(), 44);
+	// The control: the same ledger with no notional set is charged, and stops the job at the cap.
+	const billed = createUsageMeter({ maxTokens: null, maxCostMicros: 10, rootSessionId: "root" });
+	const plain = watch({ meter: billed, guard: () => createPolicyGuard({ maxCostMicros: 10, env: {} }) });
+	writeLedger(plain.dir, 4242, ledger({ provider: "openai", model: "gpt-4.1", cost: 0.000044, marked: true }));
+	plain.hook.sample();
+	assert.equal(billed.state.stopReason, COST_CAP);
+	// A row on another provider is billed under the same set: only the set's providers are notional.
+	const mixed = createUsageMeter({ maxTokens: null, maxCostMicros: 10, rootSessionId: "root", notionalProviders: notional });
+	const other = watch({ meter: mixed, guard: () => createPolicyGuard({ maxCostMicros: 10, env: {} }), notional });
+	writeLedger(other.dir, 4243, ledger({ provider: "fake", model: "m1", cost: 0.000044, marked: true }));
+	other.hook.sample();
+	assert.equal(mixed.state.stopReason, COST_CAP);
+	assert.equal(mixed.snapshot().costNotional, 0);
+});
+
+test("the subscription allowance is judged on the children's notional calls too: past it, the job stops and STOP brakes every child (#1098)", () => {
+	const notional = new Set(["openai"]);
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root", notionalProviders: notional });
+	const guard = createPolicyGuard({ allowedModels: [{ provider: "openai", model: "gpt-4.1" }], env: {}, subscriptionAdmission: () => true, subscriptions: [], notional, allowanceMicros: 50, settledNotional: () => meter.notionalMicros() });
+	const { dir, hook } = watch({ meter, guard: () => guard, notional });
+	writeLedger(dir, 4242, ledger({ provider: "openai", model: "gpt-4.1", cost: 0.000044, marked: true }));
+	hook.sample();
+	assert.equal(meter.state.stopReason, null, "44 of 50: under the allowance");
+	writeLedger(dir, 4242, ledger({ provider: "openai", model: "gpt-4.1", calls: 2, cost: 0.000044, marked: true }));
+	hook.sample();
+	assert.equal(meter.state.stopReason, "subscription-allowance", "88 of 50: past it, and no call of the parent's had to be refused first");
+	assert.equal(stopOf(dir).reason, "subscription-allowance");
+});
+
+test("a child's row on the job's notional provider that its child did not mark is charged in full: a provider's name is not a subscription (#1098)", () => {
+	const notional = new Set(["openai"]);
+	const meter = createUsageMeter({ maxTokens: null, maxCostMicros: 10, rootSessionId: "root", notionalProviders: notional });
+	const { dir, hook } = watch({ meter, guard: () => createPolicyGuard({ maxCostMicros: 10, env: {} }), notional });
+	// A child with no admission of its own (its spawner dropped the entries) called OpenAI with a key it held: no mark.
+	writeLedger(dir, 4242, ledger({ provider: "openai", model: "gpt-4.1", cost: 0.000044 }));
+	hook.sample();
+	assert.equal(hook.settled(), 44, "charged");
+	assert.equal(meter.state.stopReason, COST_CAP, "and past the 10 micro-dollar cap");
+	assert.equal(meter.snapshot().costNotional, 0, "none of it notional");
+});
+
+/** A subscription job's meter and guard with an allowance, the runner's own notional spend recorded as it is metered. */
+function allowanceJob(allowanceMicros, ownMicros) {
+	const notional = new Set(["openai"]);
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root", notionalProviders: notional });
+	if (ownMicros > 0) meter.record({ input: 10, output: 3, totalTokens: 13, cost: { total: ownMicros / 1e6 } }, { sessionId: "root", provider: "openai", modelId: "gpt-4.1" });
+	const guard = createPolicyGuard({ allowedModels: [{ provider: "openai", model: "gpt-4.1" }], env: {}, subscriptionAdmission: () => true, subscriptions: [], notional, allowanceMicros, settledNotional: () => meter.notionalMicros() });
+	return { meter, guard, notional };
+}
+
+test("a subscription job with no child is never stopped by the child watch for its own allowance: its own guard refuses its next call, and at teardown nothing does (#1098)", () => {
+	const { meter, guard, notional } = allowanceJob(30, 44);
+	const { hook } = watch({ meter, guard: () => guard, notional });
+	assert.equal(meter.notionalMicros(), 44, "the premise: its own call took it past the allowance of 30");
+	hook.sample();
+	hook.sample();
+	hook.teardown();
+	assert.equal(meter.state.stopReason, null, "the job that ends here ends as it did: above its allowance, not stopped by it");
+});
+
+test("a child's notional spend that brings the job exactly to its allowance stops it, as the runner's own guard refuses at the allowance (#1098)", () => {
+	const { meter, guard, notional } = allowanceJob(88, 44);
+	const { dir, hook } = watch({ meter, guard: () => guard, notional });
+	hook.sample();
+	assert.equal(meter.state.stopReason, null, "44 of 88: the runner's own spend, under it");
+	writeLedger(dir, 4242, ledger({ provider: "openai", model: "gpt-4.1", cost: 0.000044, marked: true }));
+	hook.sample();
+	assert.equal(meter.notionalMicros(), 88);
+	assert.equal(meter.state.stopReason, "subscription-allowance", "88 of 88: at the allowance, as the guard's `spent >= allowance`");
+});
+
+test("a child's notional spend first seen at teardown stops nothing: no call follows, so the job ends above its allowance (#1098)", () => {
+	const { meter, guard, notional } = allowanceJob(50, 44);
+	const { dir, hook } = watch({ meter, guard: () => guard, notional });
+	hook.sample();
+	writeLedger(dir, 4242, ledger({ provider: "openai", model: "gpt-4.1", cost: 0.000044, marked: true }));
+	hook.teardown();
+	assert.equal(meter.notionalMicros(), 88, "the premise: 88 of 50");
+	assert.equal(meter.state.stopReason, null);
+});
+
+test("a child that spends after the runner's own spend took the job past its allowance stops it: the child's next call is the one refused (#1098)", () => {
+	const { meter, guard, notional } = allowanceJob(30, 44);
+	const { dir, hook } = watch({ meter, guard: () => guard, notional });
+	hook.sample();
+	assert.equal(meter.state.stopReason, null, "the runner's own crossing is its own guard's business");
+	writeLedger(dir, 4242, ledger({ provider: "openai", model: "gpt-4.1", cost: 0.000044, marked: true }));
+	hook.sample();
+	assert.equal(meter.state.stopReason, "subscription-allowance");
 });

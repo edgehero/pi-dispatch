@@ -127,9 +127,8 @@ Project scope keys use the same lowercase, 1 to 32 character letter/digit/dash i
 ## On a subscription
 
 On a [subscription connection](subscription-auth.md), a role child whose model is on the subscription runs inside the
-runner, in the same process as the job's own agent and on the subscription the runner admitted. A separate pi process
-cannot use the subscription: it holds the access token but not the runner's admission, so before this its first call
-stopped the whole job as `model-not-allowed`. Inside the runner the child's calls pass the same checks as the job's own,
+runner, in the same process as the job's own agent and on the subscription the runner admitted. Before this, it was a
+separate pi process, whose first call was refused and stopped the whole job as `model-not-allowed`. Inside the runner the child's calls pass the same checks as the job's own,
 the model list, the cost cap and the subscription allowance among them, and they count in the job's tokens and cost.
 
 Such a child has pi's built-in tools (by default `read`, `bash`, `edit` and `write`), only those the agent's `tools`
@@ -146,7 +145,9 @@ provider failed says only that it failed.
 A role child on an API-key provider is a pi process as before. A subscription child the runner cannot run inside itself
 (the subscription was not admitted, or the runtime has no such model) returns a named tool error before it starts,
 `subscription-child-unsupported`, and the parent can continue. A separate pi process that a staged package's own tool
-starts still cannot use the subscription and still stops the job.
+starts uses the subscription through an admission of its own, with the extensions it loads
+([subscription authentication](subscription-auth.md#supported-jobs-and-visibility)); the job's own `subagent` tool
+still runs its child inside the runner.
 
 An image from before this release starts every role child as a pi process, so a newer worker refuses a subscription job
 with a role map on it before it spends (`job-image-subscription-roles-unsupported`). See

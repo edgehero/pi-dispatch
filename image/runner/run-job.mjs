@@ -437,7 +437,9 @@ async function main() {
 	// `claim` and `outsideWaiting` the turn every admission takes while anyone in the job waits, as a child's does
 	// (issue #985). From here on the exit line carries childTotal, childProcesses and unmeteredChildren, zeros with no
 	// children.
-	childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });
+	// Issue #1098: with the job's notional set, since a pi child holds a subscription admission of its own: its notional calls
+	// leave the cap and join `costNotional` and the allowance, as this runner's own do.
+	childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log, notional: subscriptionEntries.length > 0 ? notional : null });
 	// Issue #1008: the subscription allowance is the guard's third part, only when the trigger set one. It judges the
 	// same notional set against the meter's own settled notional total, the number the exit line's costNotional carries.
 	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), externalInflight: () => childWatch.externalInflight(), claim: (waited) => childWatch.claim(waited), outsideWaiting: () => childWatch.outsideWaiting(), subscriptionAdmission, subscriptions: subscriptionEntries, refreshCredentials: () => credentialRefresher?.apply(), notional, allowanceMicros: cfg.subscriptionAllowanceMicros, settledNotional: () => meter.notionalMicros() });
