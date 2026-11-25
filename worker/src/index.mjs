@@ -1727,6 +1727,19 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		let maxTimer = null;
 		let claimRefresh = null;
 		let subscriptionDeadlineAt = null;
+		// Issue #1046: whether this attempt asked the subscription runtime to prepare (which may claim a connection's trial),
+		// the job it asked for, and whether it asked for a container. Per job, in this closure: `deps` is shared by
+		// concurrent jobs. An attempt that claimed a trial and then provably never reached the provider gives the trial back
+		// (`releaseUnstartedTrial`, subscription-runtime.mjs), on the runtime's never-started verdict (the catch below) or
+		// on a refusal returned before any container was asked for (the result path below). Never a throw: the job's own
+		// outcome stands, and a release that failed leaves the trial to its next retest, which the log line says.
+		let subscriptionPreparedFor = null;
+		let containerAsked = false;
+		const releaseUnstartedTrial = async () => {
+			if (subscriptionPreparedFor === null || typeof deps?.subscriptionRuntime?.releaseUnstartedTrial !== "function") return;
+			try { await deps.subscriptionRuntime.releaseUnstartedTrial(subscriptionPreparedFor, { attemptId: subscriptionAttemptId }); }
+			catch (cause) { deps.log?.("subscription_trial_release_failed", { jobId: job.id, reason: typeof cause?.code === "string" ? cause.code : "error" }); }
+		};
 		let cancelPoll;
 		let cancelPolling = false;
 		// The poll tick in flight, KEPT (gate round 2 of PR #479), so the error handler can stop the poll and wait for it
@@ -2086,6 +2099,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				} } : {}),
 				...(deps?.subscriptionRuntime ? {
 					prepareSubscriptionAuth: async (j, { renewable = false } = {}) => {
+						subscriptionPreparedFor = j;
 						try { return await deps.subscriptionRuntime.prepare(j, { deadlineAt: subscriptionDeadlineAt, signal, renewable, attemptId: subscriptionAttemptId }); }
 						catch (cause) { throw new InfraRetry("subscription authentication could not be prepared", { cause, reason: "container-never-started", budgetReserved: false }); }
 					},
@@ -2148,6 +2162,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// take also ends its progress key (outcome `unknown`: nothing saw it exit) instead of leaving its heartbeat to
 					// rewrite the key as running for as long as the worker lives.
 					localContainerAttempted = localWorkspace !== null;
+					containerAsked = true;
 					// Issue #920: a forge job's /artifacts folder, made in its job directory before the container starts and
 					// mounted by run-container.mjs on a venue that binds. Nothing when the host keeps no artifacts.
 					deps.artifacts?.stage?.(ctx.job, ctx.prepared);
@@ -2279,6 +2294,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				deps.log?.("cancel_acked_before_result", { jobId: job.id, was: `${result?.outcome}/${result?.reason ?? ""}` });
 				outcome = { ...result, outcome: "policy", reason: signal.reason };
 			}
+			// Issue #1046: a refusal after the subscription prepare and before any container never reached the provider.
+			if (outcome?.outcome === "policy" && !containerAsked) await releaseUnstartedTrial();
 			await settleSteer({ result: outcome });
 			recordAfterGate({ job, result: outcome, startedAt, endedAt: new Date().toISOString() });
 			return outcome;
@@ -2367,6 +2384,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				const reset = await markModelSelectionNeverStarted(redis, randomSelectionId, randomSelection, { proven: true });
 				if (reset.ok) randomSelection = reset.state;
 			}
+			// Issue #1046: the same positive verdict gives back a subscription trial this attempt claimed (exit 125 to 127, a
+			// spawn fault, or a pre-start gate after the prepare). The verdict is the one the dollar and slot refunds trust
+			// (processor.mjs `isNeverStartedRetry`): nothing ran, so the provider was never asked.
+			if (retryable && error.reason === "container-never-started") await releaseUnstartedTrial();
 			if (await operatorCancelled({ readPending: retryable || error instanceof SubscriptionWait || error instanceof LocalEventWait })) return await endCancelled({ retryable });
 			if (error instanceof LocalEventWait) {
 				await releaseAllHolds();

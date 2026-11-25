@@ -11,6 +11,7 @@ import { test } from "node:test";
 import { failoverListUsable } from "../src/model-ref.mjs";
 import { FAILOVER_PRICED_APIS, MODEL_COOLDOWN_MAX_MS, checkFailoverCandidate, failoverEgressRequired, failoverModelView, markModelCooldown, modelCooldownKey, readModelAttempt, readModelCooldown, readModelCooldowns, selectFailoverJob, writeModelAttempt } from "../src/model-failover.mjs";
 import { makeProcessor } from "../src/index.mjs";
+import { InfraRetry } from "../src/processor.mjs";
 import { parseExitProviderFailure, parseExitReplaySafe, parseExitToolsStarted, buildRecord, makeLogSink } from "../src/run-history.mjs";
 import { modelDollarRows, parseScopedLimits, makeInFlight } from "../src/scoped-limits.mjs";
 import { dayKey } from "../src/budget.mjs";
@@ -690,6 +691,56 @@ test("the retry after a ChatGPT usage limit skips an API-key fallback behind the
 	await assert.rejects(fixture.run, { name: "DelayedError" });
 	assert.deepEqual(fixture.seen.filter((entry) => typeof entry === "object").map((entry) => entry.model), ["primary"], "the API-key fallback never ran");
 	assert.equal(fixture.seen.at(-1), "defer");
+});
+
+test("issue #1046: an attempt that claimed a trial and never reached the provider gives it back; a started container, and a wait, keep it", async () => {
+	const snapshot = { provider: "openai", connectionId: "chatgpt", ownerHost: "worker-one", accountGroup: "group", generation: 1, adapter: "openai-chatgpt" };
+	const attemptId = `${modelAttemptIdOf("pi-jobs", "j")}:0:0`;
+	const spawnFault = async () => { throw new InfraRetry("the container could not be spawned", { reason: "container-never-started", budgetReserved: true }); };
+	const cases = [
+		// The runtime's never-started verdict, from the exit code and from a spawn fault.
+		{ name: "exit 125", container: async () => ({ code: 125, aborted: false }), released: 1, outcome: "InfraRetry" },
+		{ name: "exit 127", container: async () => ({ code: 127, aborted: false }), released: 1, outcome: "InfraRetry" },
+		{ name: "a spawn fault", container: spawnFault, released: 1, outcome: "InfraRetry" },
+		// A pre-start gate after the prepare: the snapshot no longer validates.
+		{ name: "a snapshot that no longer validates", validate: async () => false, released: 1, outcome: "InfraRetry", containers: 0 },
+		// Refused after admission, before any container was asked for.
+		{ name: "a refusal from the prepare", prepare: async () => ({ ok: false, managed: true, reason: "auth-binding-changed" }), released: 1, outcome: "policy", containers: 0 },
+		// A container ran: the provider may have been asked, so settleTrial's rule decides, never this one.
+		{ name: "a clean exit", container: async () => ({ code: 0, exitLineCode: 0, exitAuth: "verified", aborted: false }), released: 0, outcome: "completed" },
+		{ name: "a killed container", container: async () => ({ code: 137, aborted: false }), released: 0 },
+		// A wait keeps the attempt, and its claim with it (subscription-quota.mjs re-admits the same attempt).
+		{ name: "a quota wait", prepare: async () => ({ ok: false, managed: true, wait: "subscription-quota", until: NOW + 60_000 }), released: 0, containers: 0 },
+	];
+	for (const c of cases) {
+		const released = [];
+		const runtime = {
+			inspectPolicy: async () => ({ ok: true }), check: async () => ({ ok: true, managed: [{ id: "chatgpt", provider: "openai" }] }),
+			prepare: c.prepare ?? (async () => ({ ok: true, snapshots: [snapshot] })), validate: c.validate ?? (async () => true), observe: async () => {}, settleTrial: async () => [],
+			releaseUnstartedTrial: async (job, options) => { released.push({ job: `${job.provider}/${job.model}`, options }); return []; },
+		};
+		const fixture = pickupFixture({ data: { fallbackModels: undefined }, extraDeps: { subscriptionRuntime: runtime }, container: c.container });
+		const outcome = await fixture.run().then((value) => value, (error) => error);
+		assert.equal(released.length, c.released, c.name);
+		if (c.released) assert.deepEqual(released[0], { job: primary, options: { attemptId } }, c.name);
+		if (c.outcome === "InfraRetry") assert.equal(outcome.name, "InfraRetry", c.name);
+		else if (c.outcome) assert.equal(outcome.outcome, c.outcome, c.name);
+		if (c.containers === 0) assert.equal(fixture.seen.filter((entry) => typeof entry === "object").length, 0, `${c.name}: no container was asked for`);
+	}
+});
+
+test("issue #1046: a release that throws is logged by its code and never changes the job's outcome", async () => {
+	const logs = [];
+	const runtime = {
+		inspectPolicy: async () => ({ ok: true }), check: async () => ({ ok: true, managed: [{ id: "chatgpt", provider: "openai" }] }),
+		prepare: async () => ({ ok: false, managed: true, reason: "auth-binding-changed" }), validate: async () => true, observe: async () => {},
+		releaseUnstartedTrial: async () => { throw Object.assign(new Error("store offline"), { code: "subscription-store-conflict" }); },
+	};
+	const fixture = pickupFixture({ data: { fallbackModels: undefined }, extraDeps: { subscriptionRuntime: runtime, log: (event, fields) => logs.push({ event, fields }) } });
+	const outcome = await fixture.run();
+	assert.equal(outcome.outcome, "policy");
+	assert.equal(outcome.reason, "auth-binding-changed");
+	assert.deepEqual(logs.filter((row) => row.event === "subscription_trial_release_failed"), [{ event: "subscription_trial_release_failed", fields: { jobId: "j", reason: "subscription-store-conflict" } }]);
 });
 
 test("a verified exit hands the trial's attempt to settleTrial after observe; other exits, and a failed settlement, change nothing (issue #960)", async () => {

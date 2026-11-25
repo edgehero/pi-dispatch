@@ -89,9 +89,12 @@ Run management commands in a terminal on the owning host, with the same deployme
 ```sh
 pi-dispatch auth status
 pi-dispatch auth login chatgpt-main
-pi-dispatch auth usage chatgpt-main
 pi-dispatch auth logout chatgpt-main
+pi-dispatch auth usage claude-main
 ```
+
+`auth usage` reads usage only through an adapter that has a usage read, which today means the Claude adapters. On a
+ChatGPT connection it answers `auth-usage-unsupported`, so the console does not offer it there.
 
 Login follows the selected adapter's browser authorization. The browser console does not receive credentials
 or perform renewal. Logout disconnects future snapshots and prints `logout.remoteRevocationConfirmed` separately. A false value means remote revocation is unconfirmed, including when an adapter was removed or changed.
@@ -197,6 +200,9 @@ either: it still prints its result (exit 0) with the status part unavailable, an
 logout finished, but", on stderr. After `auth trial`, the line adds that the grant may or may not have been made only
 when the grant's write itself was sent and got no answer, since Valkey may have run it; when Valkey stopped answering
 before that write, the grant was not asked for and nothing is said of it.
+
+A deployment setting `auth` cannot use (a `PI_GLOBAL_PI_DIR` that does not exist, say) ends it with the same
+`error:` line every other `pi-dispatch` command prints for it, exit 2: fix that setting and run the command again.
 
 The worker adapter requests `http://127.0.0.1:1455/auth/callback` and listens on
 `127.0.0.1:1455`. When the browser runs on another machine, establish a separate callback tunnel first:
@@ -340,9 +346,9 @@ stop, which settle nothing. If the provider answered it (a verified exit 0, 1 or
 provider returned output, and no quota or rate-limit failure ended it, so an overload or a policy stop later in the
 run still counts), the refusal is cleared and every job may use the connection again. If the run provably never
 called that provider (a policy stop before its first call, say, and an exit line whose usage rules the provider
-out), the retest is given back and the next pickup tries again at once. Otherwise (calls that returned nothing, a
-usage record that cannot rule the provider out) the next retest is six hours after it started, and so is it for a
-retest whose container never started. Exhaustion read from a usage window (Claude's) and exhaustion with a known
+out), the retest is given back and the next pickup tries again at once, and so it is for a retest whose container
+never started or that was refused before its container. Otherwise (calls that returned nothing, a usage record that
+cannot rule the provider out) the next retest is six hours after it started. Exhaustion read from a usage window (Claude's) and exhaustion with a known
 reset are never retested. Refresh observations on the owner:
 
 ```sh
@@ -356,8 +362,8 @@ pi-dispatch auth trial claude-main
 ```
 
 The command starts no job and does not clear exhaustion; the job that claims the trial clears a provider's
-refusal the same way a retest does, once the provider answered it, and a job that never called the provider leaves
-the trial for the next pickup. Candidate inspection consumes nothing. Only selected
+refusal the same way a retest does, once the provider answered it, and a job that never called the provider (its
+container never started, say) leaves the trial for the next pickup. Candidate inspection consumes nothing. Only selected
 admission claims the trial atomically for one durable attempt; another attempt cannot use it while that one holds it,
 and gets it only when that attempt gave it back unasked. A known reset,
 newer evidence or stale state prevents the corresponding stale trial grant. The trial bypasses no model,

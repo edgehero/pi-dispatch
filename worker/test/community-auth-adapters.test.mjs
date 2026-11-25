@@ -14,6 +14,7 @@ import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { preparePackage } from "../src/package-stage.mjs";
 import { communityAdapterRevision } from "../src/community-auth-patches.mjs";
 import { COMMUNITY_ADAPTED_SOURCE_PINS } from "../src/community-auth-output-pins.mjs";
+import { COMMUNITY_AUTH_ADAPTERS } from "../src/community-auth-metadata.mjs";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { installSubscriptionCredentials } from "../../image/runner/src/subscription-credentials.mjs";
 import { createCredentialRefresher } from "../../image/runner/src/credential-refresh.mjs";
@@ -243,6 +244,12 @@ for (const primary of [legacyPrimary, "pi-anthropic-oauth@0.3.11"]) test(`${prim
 		fs.appendFileSync(path, "\n// altered\n");
 		assert.throws(() => verifyCommunityAuthAdapter({ adapter: primary, root, digest: approved.digest }), /auth-adapter-unpinned/);
 	});
+});
+
+test("issue #1046: each adapter's `usage` flag is exactly whether the real adapter can read usage", () => {
+	const adapters = createDefaultAuthAdapters({ fetch: async () => { throw new Error("no network in this test"); } });
+	assert.deepEqual(Object.keys(adapters).sort(), Object.keys(COMMUNITY_AUTH_ADAPTERS).sort(), "one adapter per reviewed identity");
+	for (const [id, row] of Object.entries(COMMUNITY_AUTH_ADAPTERS)) assert.equal(row.usage, typeof adapters[id].usage === "function", id);
 });
 
 test("secondary shaping precedes the final hook and never installs a post-check retrying fetch", async () => {

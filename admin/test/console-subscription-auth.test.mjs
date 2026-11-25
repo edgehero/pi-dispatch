@@ -3,7 +3,7 @@ import { SUBSCRIPTION_AUTH_CSS } from "../src/console/subscription-auth-css.mjs"
 import { loadPageData, renderPage } from "../src/console/pages.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { connectionsSubscriptionAuth, modelsSubscriptionQuota } from "../src/console/panels/subscription-auth.mjs";
+import { NO_USAGE_READ_TEXT, connectionsSubscriptionAuth, modelsSubscriptionQuota } from "../src/console/panels/subscription-auth.mjs";
 import { consoleSubscriptionFixture } from "./helpers/subscription-auth-fixture.mjs";
 import { subscriptionAuthForAgent } from "../src/subscription-auth-view.mjs";
 import { readConnections, modelConnections } from "../src/connections-view.mjs";
@@ -56,6 +56,26 @@ test("Models shows observed percentages and resets, preserves exhaustion on stal
   const due = draw("models", consoleSubscriptionFixture(NOW, v => { Object.assign(v.connections[0].quota, { blockedUnknownReset: true, until: null, trialAvailable: false, trialClaimedAt: NOW - 7 * 3_600_000, retestAt: NOW - 3_600_000 }); }));
   assert.match(text(due), /One job retests the connection from 2026-10-31 11:00:00 UTC/);
   for (const bad of ["soon", -1, 1e20]) assert.match(text(draw("models", consoleSubscriptionFixture(NOW, v => { Object.assign(v.connections[0].quota, { blockedUnknownReset: true, trialAvailable: false, retestAt: bad }); }))), /explicit host trial is needed/, String(bad));
+});
+
+test("issue #1046: the usage refresh is offered only where the adapter reads usage; a ChatGPT connection says how its quota is known", () => {
+  const chatgpt = (v) => { Object.assign(v.connections[0], { id: "chatgpt-main", provider: "openai", adapter: "openai-chatgpt" }); };
+  for (const page of ["models", "connections"]) {
+    const claude = text(draw(page, consoleSubscriptionFixture(NOW)));
+    assert.match(claude, /Refresh quota observations/, page); assert.match(claude, /pi-dispatch auth usage claude-work/, page);
+    const openai = text(draw(page, consoleSubscriptionFixture(NOW, chatgpt)));
+    assert.doesNotMatch(openai, /Refresh quota observations|auth usage/, page);
+    // An adapter the page does not know is offered no usage refresh either: it cannot vouch that one works.
+    assert.doesNotMatch(text(draw(page, consoleSubscriptionFixture(NOW, v => { v.connections[0].adapter = "pi-anthropic-oauth@9.9.9"; }))), /auth usage/, page);
+  }
+  assert.ok(text(draw("models", consoleSubscriptionFixture(NOW, chatgpt))).includes(NO_USAGE_READ_TEXT), "the Models card says how a ChatGPT quota is known");
+  assert.ok(!text(draw("models", consoleSubscriptionFixture(NOW))).includes(NO_USAGE_READ_TEXT), "never for a connection that reads usage");
+  // The sentence is for every reader, the commands for a writable operator only; with no usage and no trial, no command block.
+  assert.ok(text(draw("models", consoleSubscriptionFixture(NOW, chatgpt), { role: "viewer" })).includes(NO_USAGE_READ_TEXT));
+  assert.doesNotMatch(draw("models", consoleSubscriptionFixture(NOW, chatgpt)), /sa-commands/);
+  const trial = text(draw("models", consoleSubscriptionFixture(NOW, v => { chatgpt(v); Object.assign(v.connections[0].quota, { blockedUnknownReset: true, until: null, trialAvailable: false }); })));
+  assert.match(trial, /pi-dispatch auth trial chatgpt-main/, "a ChatGPT connection keeps the trial command");
+  assert.doesNotMatch(trial, /auth usage/);
 });
 
 test("viewer, agent and read-only operators read safe facts but receive no commands or authentication controls", () => {
