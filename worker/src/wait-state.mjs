@@ -34,7 +34,8 @@
  * stale panel row, never work that is dropped.
  *
  * The keys, all under one prefix so an operator can see the whole feature with one `KEYS wait:*`:
- *   wait:held                 SET of held job ids -- an index the READER prunes, never a source of truth
+ *   wait:held                 SET of held job ids -- an index the readers and the worker's sweep prune, never a
+ *                             source of truth
  *   wait:job:<jobId>          HASH { since, faults, throttles, checks, target, label, dedupId, after, a:<profile> },
  *                             TTL sized to the hold
  *   wait:done:<dedupId>       STRING jobId -- this target's wait was satisfied, briefly remembered
@@ -59,6 +60,12 @@ const LEASE_MIN_MS = 5 * 60 * 1000;
 // So the index exists and the READER prunes it: a member whose hash is gone is stale by definition, and the
 // reader removes it as it goes. Staleness is bounded by the next read, the hashes remain the source of
 // truth, and the cost of listing held jobs becomes O(held) instead of O(keyspace).
+//
+// "Bounded by the next read" stopped being true once the tools and the web console read without writing (issue #1036):
+// only the `/dispatch` panel and `/dispatch status` prune, so a deployment run from the tools and the console grew the
+// index past what a read looks at (`HELD_LOOK_MAX` in the admin's reader) and every read said it was not whole. So the
+// worker sweeps it too, on the retention timer (`sweepHeld`, issue #1075), and every pruner removes through one script
+// (`pruneHeld`).
 export const HELD_SET = "wait:held";
 export const jobKey = (jobId) => `wait:job:${jobId}`;
 export const leaseKey = (dedupId) => `wait:key:${dedupId}`;
@@ -67,6 +74,66 @@ export const satisfiedKey = (dedupId) => `wait:done:${dedupId}`;
 // How long "this target's wait has been satisfied" is remembered. The backoff ceiling, because that is the
 // longest two jobs that cleared together can wake apart.
 const SATISFIED_MS = 15 * 60 * 1000;
+
+/**
+ * THE ONE PRUNE OF THE HELD INDEX (issue #1075): the look at a member's hold and its removal in one step, so nothing can
+ * land between them. KEYS[1] is HELD_SET, KEYS[2..] each member's hold hash (`jobKey`), ARGV[1..] the members, in the
+ * same order. A member goes only while its hash has no `since` (absent or empty), which is what every reader calls
+ * stale: the hash expired, the hold was released without the index, or only a counter made it (`noteCheck`). `hold`
+ * writes `since` (HSETNX) before it adds the member, so a hold being written or renewed is never removed, on whatever
+ * host, and two pruners at once (a reader and a sweep, the sweeps of several hosts) can do no harm: there is no lock
+ * because there is nothing to serialise. A hash Valkey answers with an error (a key of another type) keeps its member,
+ * as a reader that cannot read it keeps the row out and removes nothing. Answers how many members it removed.
+ * REJECTED: the readers' `HGETALL` and then a separate `SREM`, which removed a member whose hold was written between the
+ * two: a hold renewed after its hash expired lost its row until its next wake re-added it.
+ */
+export const HELD_PRUNE_SCRIPT = "local n = 0; for i = 2, #KEYS do local since = redis.pcall('HGET', KEYS[i], 'since'); if since == false or since == '' then n = n + redis.call('SREM', KEYS[1], ARGV[i - 1]) end end; return n";
+
+/** Remove those of `ids` (members of HELD_SET) whose hold has no `since`, in one step (HELD_PRUNE_SCRIPT): how many went. */
+export async function pruneHeld(redis, ids) {
+	const members = ids.filter((id) => typeof id === "string");
+	if (members.length === 0) return 0;
+	const removed = await redis.eval(HELD_PRUNE_SCRIPT, members.length + 1, HELD_SET, ...members.map(jobKey), ...members);
+	if (!Number.isSafeInteger(removed) || removed < 0) throw new Error("the held index prune answered something other than a count");
+	return removed;
+}
+
+/**
+ * How many members of the held index one sweep looks at (issue #1075). Five times what a reader looks at
+ * (`HELD_LOOK_MAX`, 2,000), so one pass clears a backlog no reader can see past; a larger one is cleared over the
+ * passes that follow, since each pass starts again from the index's start and what it removed is gone.
+ */
+export const HELD_SWEEP_LOOK_MAX = 10_000;
+/** The COUNT each SSCAN page asks for, and so about how many members one prune script is handed. */
+const HELD_SWEEP_PAGE = 64;
+
+/**
+ * The worker's sweep of the held index (issue #1075): SSCAN pages, each through `pruneHeld`, until the index has been
+ * walked, `lookMax` members have been looked at, or `stopped()` (the retention sweep's close) says to stop.
+ * `{ looked, removed, more }`, counts only, `more` true when members remain that this pass did not look at. Throws on a
+ * Valkey fault or an answer of the wrong shape, which the retention sweep logs as `held_index_reaper_skipped`: a
+ * sweep that did not finish leaves members for the next one and decides nothing.
+ * Fleet-wide like the index, from every worker, unlocked: the script is what makes two at once harmless, and the
+ * host-lost sweep is the precedent for a sweep every host runs.
+ */
+export async function sweepHeld({ redis, lookMax = HELD_SWEEP_LOOK_MAX, stopped = () => false }) {
+	let cursor = "0";
+	let looked = 0;
+	let removed = 0;
+	let cut = false;
+	do {
+		const reply = await redis.sscan(HELD_SET, cursor, "COUNT", HELD_SWEEP_PAGE);
+		if (!Array.isArray(reply) || typeof reply[0] !== "string" || !/^\d{1,20}$/.test(reply[0]) || !Array.isArray(reply[1])) throw new Error("the held index answered SSCAN with an unexpected shape");
+		cursor = reply[0];
+		const page = reply[1].filter((id) => typeof id === "string");
+		// A page is a hint's size, not the hint (a small set answers whole): the bound is held to the member.
+		const ids = page.slice(0, Math.max(0, lookMax - looked));
+		if (ids.length < page.length) cut = true;
+		looked += ids.length;
+		removed += await pruneHeld(redis, ids);
+	} while (cursor !== "0" && looked < lookMax && !stopped());
+	return { looked, removed, more: cut || cursor !== "0" };
+}
 
 /** The hold hash's field prefix for a check's last answer: `a:<profile>`. */
 export const WAIT_ANSWER_PREFIX = "a:";
@@ -120,6 +187,9 @@ export function makeWaitState({ redis, now = () => Date.now(), counterTtlMs = 25
 			try {
 				const key = jobKey(jobId);
 				const ttl = leaseMs(untilMs);
+				// `since` FIRST, before the member is added below (issue #1075): the held index's prune removes a member
+				// only while its hash has no `since` (HELD_PRUNE_SCRIPT), so this order is what keeps a hold being written
+				// out of every pruner's reach. A member added first could be pruned before its `since` landed.
 				await redis.hsetnx(key, "since", String(now()));
 				await redis.hset(key, "target", target ?? "", "label", label ?? "", "dedupId", dedupId ?? "", ...(Number.isSafeInteger(afterMs) ? ["after", String(afterMs)] : []));
 				await redis.pexpire(key, ttl);

@@ -70,7 +70,7 @@ import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectOf, pr
 import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs";
 import { FIRST_CALL_MIN_CONTEXT_BYTES, FIRST_CALL_OVERHEAD_TOKENS, boundModelOf, firstCallFloorMicros, isTransientOverlayRead, overlayProviderProblem, serviceTierMultiplier } from "./model-catalog.mjs";
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
-import { failoverListUsable, providerIdProblem, splitModelEntry } from "./model-ref.mjs";
+import { failoverListUsable, modelSelectionShares, modelSelectionWeight, modelShareText, providerIdProblem, splitModelEntry } from "./model-ref.mjs";
 import { notionalConnection } from "./reserve-estimate.mjs";
 import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
 import { resolveConfiguredModelRuns as resolveDoctorModelRuns, cooldownModelRefs, RADIUS_COST_CAP_LABEL, RADIUS_COST_CAP_FIX } from "./model-observation.mjs";
@@ -2147,7 +2147,7 @@ export async function collectChecks(shellVars, seams) {
 	// runTable, blockTable }, jobData: { table } }`, each part the store module's own when absent. This seam is how a test
 	// drives a need above 1 through the real collection, for a store whose table has no row of its own and at a version no row holds yet.
 	const versionTables = seams.versionTables ?? {};
-	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, localEvents, secreting, onceArmed, onceSpent, quotaReserves, secretProfiles, localSecretFolders, secretNames, fileSecretRuns, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, privateRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
+	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, localEvents, secreting, keyHolders, onceArmed, onceSpent, quotaReserves, secretProfiles, localSecretFolders, secretNames, fileSecretRuns, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, privateRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
 	const modelRoleProjects = readProjectFacts(bootEnv, fileExists).projects;
 	const scopedLimitFacts = readScopedLimitFacts(bootEnv, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(bootEnv, fileExists, versionTables.pauseWindows);
@@ -4308,6 +4308,7 @@ export async function collectChecks(shellVars, seams) {
 			if (subjectProvider !== provider && result.managed) checks.push(subscriptionCredentialCheck(subjectProvider, result));
 		}
 		checks.push(...mixedBillingPoolChecks(subjects, { verdictOf: (subjectProvider) => subscriptionChecks.get(subjectProvider) }));
+		checks.push(...weightedPoolChecks(subjects, { verdictOf: (subjectProvider) => subscriptionChecks.get(subjectProvider) }));
 		checks.push(...notionalCapChecks(subjects, { verdictOf: (subjectProvider) => subscriptionChecks.get(subjectProvider) }));
 		const catalog = await (seams.modelCatalog ?? defaultModelCatalog)();
 		if (catalog) {
@@ -4353,8 +4354,11 @@ export async function collectChecks(shellVars, seams) {
 	section("secrets");
 	// REQ-TRIGGER-SECRETS. Only reported when a trigger actually binds one, on the run.resume block's
 	// reasoning below: a deployment that uses no secrets should not be told about a variable it has no
-	// reason to set.
-	if (secreting > 0) {
+	// reason to set. Issue #1013: or an answer rule or the zeroTouch block declares a provider key, whose jobs resolve
+	// it through a profile the same way; the lines name them beside the triggers (`binders`).
+	const binders = [...(secreting > 0 ? [`${secreting} trigger(s)`] : []), ...keyHolders.map((h) => h.label)];
+	const bindersText = `${binders.length > 1 ? `${binders.slice(0, -1).join(", ")} and ${binders.at(-1)}` : binders.join("")} ${binders.length === 1 && secreting === 0 ? "binds" : "bind"}`;
+	if (secreting > 0 || keyHolders.length > 0) {
 		const { profiles: envDeclared, error: parseFailure } = parseSecretProfilesSafe(env.PI_SECRET_PROFILES);
 		const roots = delimitedList(env.PI_SECRET_RESOLVER_ROOTS);
 		if (parseFailure) {
@@ -4414,7 +4418,7 @@ export async function collectChecks(shellVars, seams) {
 			const missing = secretProfiles.filter((name) => !Object.hasOwn(declared, name) && !unusable.includes(name) && !ambiguousNames.includes(name));
 			checks.push({
 				ok: missing.length === 0,
-				label: missing.length === 0 ? `${secreting} trigger(s) bind secrets, and every profile they name is declared` : `${secreting} trigger(s) bind secrets, but ${missing.length} named profile(s) are not declared: ${missing.join(", ")}`,
+				label: missing.length === 0 ? `${bindersText} secrets, and every profile they name is declared` : `${bindersText} secrets, but ${missing.length} named profile(s) are not declared: ${missing.join(", ")}`,
 				fix: `declare them in PI_SECRET_PROFILES as name:/absolute/path pairs (a resolver is one line, e.g. \`exec op read --no-newline "$1"\`), or through the panel with PI_SECRET_RESOLVER_ROOTS set -- these jobs refuse pre-spend until you do`,
 			});
 			// The declared table, so an operator sees what is wired without reading .env. NAMES and paths only:
@@ -4450,6 +4454,9 @@ export async function collectChecks(shellVars, seams) {
 		// trigger's declared credential, is judged by the worker's own rule (`declaredProviderKey`) and the subscription
 		// verdict its gate asks first, and is said as a fact line rather than a failure.
 		//
+		// Issue #1013: and of each answer rule and the zeroTouch block that declares a key (`keySubjects`), its main model
+		// and its decision or grouping model, by the same rule, in lines of their own.
+		//
 		// The candidate list comes from the same oracle the gate uses, through the same dynamic import: one derivation,
 		// or this becomes the hand-copied table issue #286 was about. Guarded on the FUNCTIONS, the way providerKeyCheck
 		// guards, not on an `ok` flag: the oracle returns its functions or `{ loadError }` and never an `ok`, so a
@@ -4460,7 +4467,14 @@ export async function collectChecks(shellVars, seams) {
 		if (secretNames.length > 0 && typeof oracle?.providerKeyCandidates === "function" && typeof oracle?.declaredProviderKey === "function") {
 			let secretEnvList = null;
 			try { secretEnvList = allowedModelsFrom(env); } catch {}
-			const secretSubjects = modelSubjects({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList: secretEnvList, modelRoles: triggerModelRoles, projects: modelRoleProjects, fallbacks: true });
+			const secretDeployment = deploymentSettingsOf(env, settingsFilePath(env, home), fileExists);
+			// Issue #1013: each answer rule and the zeroTouch block that declares a key, one subject each: its main model (the
+			// rule's own; the zeroTouch block's grouping job runs on the deployment default) and its role model.
+			const keySubjects = keyHolders.flatMap((h) => {
+				const main = h.model === null ? { provider: secretDeployment.provider, id: secretDeployment.model } : splitModelEntry(h.model);
+				return main ? [{ label: h.label, main: { provider: main.provider, id: main.id ?? main.model }, decisionModel: h.roleModel, role: h.role, where: h.where, keyOnly: true, secretNames: h.secretNames, secretFileNames: [] }] : [];
+			});
+			const secretSubjects = [...modelSubjects({ runs: parseError ? [] : modelRuns, deployment: secretDeployment, envList: secretEnvList, modelRoles: triggerModelRoles, projects: modelRoleProjects, fallbacks: true }), ...keySubjects];
 			const managed = new Map();
 			for (const subject of secretSubjects) {
 				if (subject.deployment === true || subject.secretNames.length + subject.secretFileNames.length === 0) continue;
@@ -6863,7 +6877,9 @@ export function modelSubjects({ runs = [], deployment, envList = null, modelRole
 		if (run.modelSelection) {
 			// Authorization was checked separately by resolveDoctorModelRuns. Each possible execution is a
 			// singleton: unrelated allowed providers need no forwarded credential and cannot widen its cost bound.
-			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], auxiliaryModels: run.auxiliaryModels ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, named: true, random: true, trigger: run.label, triggerCap: triggerCapOf(run.maxCostUsd), allowance: allowanceOf(run.maxSubscriptionUsd) });
+			// Issue #996: a weighted pool's candidate carries its `weight`, for the shares line (`weightedPoolChecks`).
+			const weighted = run.modelSelection.weights !== undefined;
+			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], auxiliaryModels: run.auxiliaryModels ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, named: true, random: true, trigger: run.label, triggerCap: triggerCapOf(run.maxCostUsd), allowance: allowanceOf(run.maxSubscriptionUsd), ...(weighted ? { weight: modelSelectionWeight(run.modelSelection, `${ref.provider}/${ref.id}`) } : {}) });
 			continue;
 		}
 		const main = { provider: run.provider ?? deployment.provider, id: run.model ?? deployment.model };
@@ -7115,11 +7131,20 @@ export function listedProviderCredentialChecks(subjects, { candidatesOf, forward
  * Subjects with no secret are not judged, nor one whose provider is not a provider id (a malformed PI_PROVIDER the
  * trigger inherits, whose shape row is the one line), nor a fallback the worker never tries (behind a primary bound to
  * a subscription, one whose provider is not). Nothing is said when nothing is judged.
+ *
+ * Issue #1013: an answer rule or the zeroTouch block that declares a key is a subject of its own (`keyOnly`), with its
+ * `role` model's provider judged by the same rule and its own lines, so the triggers' lines read as before. The loader
+ * admits only a provider's API-key variable there, and its job builder passes none that no provider of that job reads,
+ * so a key of a provider none of its models runs on is a warning of its own: it is declared and never passed.
  */
 export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf, auxiliaryOf = () => [], forwarded = [], managed = () => false }) {
 	const providers = new Set();
 	const clashes = [];
 	const declared = [];
+	// Issue #1013: the answer rules' and the zeroTouch block's own lines.
+	const keyClashes = [];
+	const keyDeclared = [];
+	const keyWithheld = [];
 	for (const s of subjects) {
 		if (s.deployment === true) continue;
 		const secretNames = s.secretNames ?? [];
@@ -7130,14 +7155,17 @@ export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf
 		// The walk's one-way fence (model-failover.mjs `selectFailoverJob`): behind a primary bound to a subscription it
 		// skips every fallback that is not (`auth-mixed-billing`), so no attempt ever runs on it.
 		if (s.fallback === true && managed(s.primaryProvider) && !managed(provider)) continue;
-		providers.add(provider);
+		const keyOnly = s.keyOnly === true;
+		if (!keyOnly) providers.add(provider);
 		const candidates = candidatesOf(provider) ?? [];
 		// A watch rule's `decide` model: the worker refuses every variable of its provider in the rule's jobs
 		// (`secondaryCredentialNames`, processor.mjs), whichever provider the investigation runs on, but the API key the
-		// same rule admits for it (issue #997, `roleAdmitted` below).
+		// same rule admits for it (issue #997, `roleAdmitted` below). An answer rule's decision model and the zeroTouch
+		// block's grouping model the same way (issue #1013), named by the subject's `role`.
 		const roleProvider = typeof s.decisionModel === "string" ? splitModelEntry(s.decisionModel)?.provider ?? null : null;
 		const roleNames = roleProvider !== null && providerIdProblem(roleProvider) === null ? candidatesOf(roleProvider) ?? [] : [];
-		if (roleNames.length > 0) providers.add(roleProvider);
+		if (roleNames.length > 0 && !keyOnly) providers.add(roleProvider);
+		const role = s.role ?? "the watch rule's decide model";
 		// The job the worker would judge, with the names only: the rule reads which names are bound where, never a value.
 		const asJob = { provider, secrets: Object.fromEntries(secretNames.map((name) => [name, ""])), secretFiles: Object.fromEntries(fileNames.map((name) => [name, ""])), ...(s.decisionJob === true ? { watch: true } : {}) };
 		// Each auxiliary model's reserved names, asked of the same job with that one model, so the line can name its
@@ -7158,31 +7186,52 @@ export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf
 		// Issue #997: the `decide` model's own declared key, the same rule asked of its provider (a watch job counts since).
 		const roleAdmitted = roleNames.length > 0 && !managed(roleProvider) ? declaredOf({ ...asJob, provider: roleProvider }, { forwardEnv: forwarded }) : null;
 		// Where an admitted key is spent, or a refused one refuses: every job of the trigger, or only the attempts that run
-		// on this subject.
-		const where = s.random === true ? "on its draws" : s.fallback === true ? "on its failover attempts" : "on every job of its trigger";
+		// on this subject, or (issue #1013) the jobs an answer rule or the zeroTouch block starts.
+		const where = s.where ?? (s.random === true ? "on its draws" : s.fallback === true ? "on its failover attempts" : "on every job of its trigger");
+		const [clash, admit] = keyOnly ? [keyClashes, keyDeclared] : [clashes, declared];
 		for (const name of [...new Set([...secretNames, ...fileNames])]) {
-			if (roleNames.includes(name) && name !== roleAdmitted) clashes.push(`${s.label}: ${name} (${printable(roleProvider)}, the watch rule's decide model; refused ${where})`);
+			if (roleNames.includes(name) && name !== roleAdmitted) clash.push(`${s.label}: ${name} (${printable(roleProvider)}, ${role}; refused ${where})`);
 			else if (candidates.includes(name)) {
-				if (name === admitted) declared.push(`${s.label}: ${name} (${printable(provider)}, ${where})`);
-				else clashes.push(`${s.label}: ${name} (${printable(provider)}; refused ${where})`);
-			} else if (roleNames.includes(name)) declared.push(`${s.label}: ${name} (${printable(roleProvider)}, the watch rule's decide model, ${where})`);
-			else if (auxiliary.has(name)) clashes.push(`${s.label}: ${name} (${printable(auxiliary.get(name))}, an auxiliary model's provider; refused ${where})`);
-			else if (auxiliaryDeclared.has(name)) declared.push(`${s.label}: ${name} (${printable(auxiliaryDeclared.get(name))}, an auxiliary model's provider, ${where})`);
+				if (name === admitted) admit.push(`${s.label}: ${name} (${printable(provider)}, ${where})`);
+				else clash.push(`${s.label}: ${name} (${printable(provider)}; refused ${where})`);
+			} else if (roleNames.includes(name)) admit.push(`${s.label}: ${name} (${printable(roleProvider)}, ${role}, ${where})`);
+			else if (auxiliary.has(name)) clash.push(`${s.label}: ${name} (${printable(auxiliary.get(name))}, an auxiliary model's provider; refused ${where})`);
+			else if (auxiliaryDeclared.has(name)) admit.push(`${s.label}: ${name} (${printable(auxiliaryDeclared.get(name))}, an auxiliary model's provider, ${where})`);
+			else if (keyOnly) keyWithheld.push(`${s.label}: ${name} (its models run on ${roleProvider === null || roleProvider === provider ? printable(provider) : `${printable(provider)} and ${printable(roleProvider)}`}; not passed ${where})`);
 		}
 	}
-	if (providers.size === 0) return [];
 	const checks = [];
-	if (clashes.length > 0) {
+	if (providers.size > 0) {
+		if (clashes.length > 0) {
+			checks.push({
+				ok: false,
+				label: `${clashes.length} trigger secret(s) bind a variable pi reads for the provider an attempt runs on, for a watch rule's decide model, or for an auxiliary model's provider: ${clashes.join("; ")}`,
+				fix: "rename them in the triggers file, or bind only the provider's own API-key variable (in run.secrets, not run.secretFiles, not named in PI_FORWARD_ENV, on a provider that needs no host authentication) to make it the credential of the job, of a watch rule's decide model or of an auxiliary model on that provider, and never for a provider bound to a subscription here: until then each job, draw or failover attempt named refuses pre-spend as secret-name-reserved (as provider-unconfigured on a host with no credential of its own for that provider)",
+			});
+		}
+		if (declared.length > 0) {
+			checks.push({ ok: true, label: `${declared.length} trigger secret(s) are the API key of the main model's own provider, of a watch rule's decide model's provider or of an auxiliary model's provider, so each replaces this host's credential for that provider: ${declared.join("; ")}` });
+		}
+		if (checks.length === 0) checks.push({ ok: true, label: `No trigger binds a variable pi reads for ${[...providers].sort().map(printable).join(", ")}` });
+	}
+	if (keyClashes.length > 0) {
 		checks.push({
 			ok: false,
-			label: `${clashes.length} trigger secret(s) bind a variable pi reads for the provider an attempt runs on, for a watch rule's decide model, or for an auxiliary model's provider: ${clashes.join("; ")}`,
-			fix: "rename them in the triggers file, or bind only the provider's own API-key variable (in run.secrets, not run.secretFiles, not named in PI_FORWARD_ENV, on a provider that needs no host authentication) to make it the credential of the job, of a watch rule's decide model or of an auxiliary model on that provider, and never for a provider bound to a subscription here: until then each job, draw or failover attempt named refuses pre-spend as secret-name-reserved (as provider-unconfigured on a host with no credential of its own for that provider)",
+			label: `${keyClashes.length} secret(s) an answer rule or the zeroTouch block declares bind a variable pi reads for a provider its jobs run on that the worker does not admit as that model's key: ${keyClashes.join("; ")}`,
+			fix: "declare only the provider's own API-key variable, not named in PI_FORWARD_ENV, for a provider that needs no host authentication and that this host does not bind to a subscription: until then each of those jobs refuses pre-spend as secret-name-reserved",
 		});
 	}
-	if (declared.length > 0) {
-		checks.push({ ok: true, label: `${declared.length} trigger secret(s) are the API key of the main model's own provider, of a watch rule's decide model's provider or of an auxiliary model's provider, so each replaces this host's credential for that provider: ${declared.join("; ")}` });
+	if (keyDeclared.length > 0) {
+		checks.push({ ok: true, label: `${keyDeclared.length} secret(s) an answer rule or the zeroTouch block declares are the API key of a provider its jobs run on, so each replaces this host's credential for that provider: ${keyDeclared.join("; ")}` });
 	}
-	if (checks.length === 0) checks.push({ ok: true, label: `No trigger binds a variable pi reads for ${[...providers].sort().map(printable).join(", ")}` });
+	if (keyWithheld.length > 0) {
+		checks.push({
+			ok: false,
+			warn: true,
+			label: `${keyWithheld.length} secret(s) an answer rule or the zeroTouch block declares are the API key of a provider no model of it runs on here, so the worker does not pass them to its jobs: ${keyWithheld.join("; ")}`,
+			fix: "remove the name, or declare the API-key variable of the rule's model or decision model, or of the zeroTouch grouping model or the deployment's default provider (the grouping job's main model)",
+		});
+	}
 	return checks;
 }
 
@@ -7407,6 +7456,38 @@ export function mixedBillingPoolChecks(subjects, { verdictOf = () => undefined }
 }
 
 /**
+ * Issue #996: one fact line per WEIGHTED random pool, naming each candidate's share of the whole pool in whole percent
+ * (`modelSelectionShares`, the console's rule too). For a pool that mixes billing classes on this host (the verdicts
+ * `mixedBillingPoolChecks` reads), the candidates are grouped by class, each class with its own total: a draw bills
+ * its candidate's class, and a quota reselection stays in the class it drew, among that class's weights. An unweighted
+ * pool says nothing new. Every line says once that a candidate that cannot run at pickup leaves that draw and the
+ * others keep their relative shares, since the shares are of the whole pool and a pickup draws among the ones that can
+ * run. `subjects` are `modelSubjects'` (a weighted pool's candidate carries `weight`).
+ */
+export function weightedPoolChecks(subjects, { verdictOf = () => undefined } = {}) {
+	const pools = new Map();
+	for (const subject of subjects) {
+		if (subject.random !== true || typeof subject.trigger !== "string" || !Number.isSafeInteger(subject.weight)) continue;
+		const pool = pools.get(subject.trigger) ?? [];
+		pool.push({ ref: `${subject.main.provider}/${subject.main.id}`, weight: subject.weight, subscription: verdictOf(subject.main.provider)?.managed === true });
+		pools.set(subject.trigger, pool);
+	}
+	const checks = [];
+	for (const [trigger, pool] of pools) {
+		const selection = { candidates: pool.map((row) => row.ref), weights: Object.fromEntries(pool.map((row) => [row.ref, row.weight])) };
+		const shares = new Map(modelSelectionShares(selection).map((row) => [row.ref, row.share]));
+		const named = (rows) => rows.map((row) => `${row.ref} ${modelShareText(shares.get(row.ref))}`).join(", ");
+		const subscription = pool.filter((row) => row.subscription);
+		const api = pool.filter((row) => !row.subscription);
+		const total = pool.reduce((sum, row) => sum + row.weight, 0);
+		const classShare = (rows) => modelShareText(Math.round((100 * rows.reduce((sum, row) => sum + row.weight, 0)) / total));
+		const listed = subscription.length > 0 && api.length > 0 ? `, by billing class on this host: subscription ${classShare(subscription)} (${named(subscription)}); API key ${classShare(api)} (${named(api)})` : `: ${named(pool)}`;
+		checks.push({ ok: true, label: `${trigger}: its random pool is weighted; each candidate's share of the pool${listed}. A candidate that cannot run at pickup leaves that draw, and the others keep their relative shares` });
+	}
+	return checks;
+}
+
+/**
  * Issue #1008: a trigger whose OWN positive `run.maxCostUsd` bounds nothing on THIS host. Every model it may call (its
  * main model or each random candidate, its allowed-model list, its auxiliary models and a watch rule's decision model)
  * is on a provider bound here to a subscription connection with no paid extra usage (reserve-estimate.mjs
@@ -7586,7 +7667,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables = {}) {
-	const none = { privateRuns: [], watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, localEvents: [], secreting: 0, onceArmed: 0, onceSpent: 0, quotaReserves: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], fileSecretRuns: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
+	const none = { privateRuns: [], watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, localEvents: [], secreting: 0, keyHolders: [], onceArmed: 0, onceSpent: 0, quotaReserves: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], fileSecretRuns: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -7598,7 +7679,14 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 		if (!statSync(path).isFile()) return { ...none, parseError: `triggers file is not a regular file: ${path}`, path };
 		const text = readFileSync(path, "utf8");
 		// The document parser, so the file's `secretBundles` (issue #704) is judged by the loaders' one rule too.
-		const { triggers, secretBundles, modelRoles, watchSources } = parseTriggersDocument(text, path, versionTables.triggers);
+		const { triggers, secretBundles, modelRoles, watchSources, answerRules, zeroTouch } = parseTriggersDocument(text, path, versionTables.triggers);
+		// Issue #1013: each answer rule and the zeroTouch block that declares its models' provider keys, for the secret lines:
+		// its label, its main and role model (the zeroTouch block's main model is the deployment default, the grouping job's,
+		// so null here), the names, and the profile the worker resolves them through.
+		const keyHolders = [
+			...(answerRules ?? []).filter((r) => r.secrets !== undefined).map((r) => ({ label: `answer rule ${JSON.stringify(r.id)}`, model: r.model, roleModel: r.decisionModel, role: "its decision model", where: "on its drafts", secretNames: Object.keys(r.secrets), secretsProfile: r.secretsProfile ?? "default" })),
+			...(zeroTouch?.secrets !== undefined ? [{ label: "zeroTouch", model: null, roleModel: zeroTouch.model, role: "its grouping model", where: "on its grouping jobs", secretNames: Object.keys(zeroTouch.secrets), secretsProfile: zeroTouch.secretsProfile ?? "default" }] : []),
+		];
 		// The one-shot facts are counted from the RAW entries, not the parsed records, because the
 		// validator collapses a disarmed entry to a sentinel that carries neither `once` nor
 		// `disarmed` -- exactly so nothing can match it -- which also erases it from every parsed
@@ -7656,10 +7744,12 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			// REQ-TRIGGER-SECRETS. Counted beside `instructing` for its reason: a per-trigger choice that
 			// changes what every job of it can reach, and one that lives only in triggers.json.
 			secreting: triggers.filter((t) => (t.run.secrets !== undefined || t.run.secretFiles !== undefined)).length,
+			keyHolders,
 			// The distinct profile NAMES the file selects, deduped like `images`/`skillsDirs`: the checks below
 			// cost a stat each, and two triggers naming one profile are one question. `default` is substituted
-			// for an absent field so the table answers what the worker will actually look up.
-			secretProfiles: [...new Set(triggers.filter((t) => (t.run.secrets !== undefined || t.run.secretFiles !== undefined)).map((t) => t.run.secretsProfile ?? "default"))].sort(),
+			// for an absent field so the table answers what the worker will actually look up. Issue #1013: an answer
+			// rule's and the zeroTouch block's profile too, which their jobs resolve through the same way.
+			secretProfiles: [...new Set([...triggers.filter((t) => (t.run.secrets !== undefined || t.run.secretFiles !== undefined)).map((t) => t.run.secretsProfile ?? "default"), ...keyHolders.map((h) => h.secretsProfile)])].sort(),
 			// LOCAL triggers that bind secrets, by folder. A local job's /workspace IS this folder, bind-mounted
 			// read-write with no clone, so a credential an agent writes into .env lands in the operator's real
 			// repository rather than a temp dir that gets swept. Deduped for skillsDirs' reason.
@@ -7667,8 +7757,9 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			// Issue #309. The distinct variable NAMES the file binds, deduped like the profiles above. The
 			// pre-spend gate refuses a name pi reads for the job's provider, and unlike the version that gate
 			// replaced, that question no longer needs host state to answer -- so doctor can answer it at setup
-			// rather than leaving the operator to meet it as a public refusal on a live job.
-			secretNames: [...new Set(triggers.flatMap((t) => [...Object.keys(t.run.secrets ?? {}), ...Object.keys(t.run.secretFiles ?? {})]))].sort(),
+			// rather than leaving the operator to meet it as a public refusal on a live job. With the names an answer
+			// rule or the zeroTouch block declares (issue #1013), judged by the same lines.
+			secretNames: [...new Set([...triggers.flatMap((t) => [...Object.keys(t.run.secrets ?? {}), ...Object.keys(t.run.secretFiles ?? {})]), ...keyHolders.flatMap((h) => h.secretNames)])].sort(),
 			fileSecretRuns: triggers.map((t, index) => ({ label: triggerLabel(t, index), provider: t.run.provider, secretsProfile: t.run.secretsProfile, secretFiles: t.run.secretFiles })).filter((run) => run.secretFiles !== undefined),
 			// Issue #242: every local run.folder, CANONICALIZED the way the scoped-limits matcher
 			// canonicalizes a job's folder (one derivation -- canonicalScope, never re-spelled here), so

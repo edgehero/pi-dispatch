@@ -77,9 +77,16 @@ Capture is opt-in. Add a reviewed `zeroTouch` section beside `triggers` in the d
 Use a typed classifier model available to the pinned runtime, with explicit finite input pricing, zero output
 pricing and a known context window. The configured cap must cover its conservative full-context input bound. The
 ordinary deployment text model remains the primary model for admission; no text-agent session executes. Configure
-both providers' normal credentials and declared endpoints as appropriate: the host's environment or pi's `auth.json`,
-since these settings carry no `run.secrets` and a key a trigger declares as a run secret does not reach a grouping job.
-No new credential is stored in this file.
+both providers' normal credentials and declared endpoints as appropriate: the host's environment or pi's `auth.json`.
+A key a trigger declares in its `run.secrets` does not reach a grouping job. To give the grouping job keys of its own,
+add `secrets` (and `secretsProfile`) to this section as on a trigger: a provider's API-key variable mapped to a
+reference your resolver reads, never the key itself. A name that is not a provider's API-key variable (an OAuth or
+bearer variable, a typo, an unrelated variable) is refused when the file loads. The job receives the keys its
+classifier's provider or the deployment's default provider (its primary model's, known only when the job starts)
+reads; the worker withholds another provider's key and logs `declared_key_withheld`. A declared key is that model's
+only key: the host's key for that provider never reaches the job, and an empty value refuses it before anything
+spends. The file needs triggers file version 12, and a grouping queued before a change to these fields is refused as
+`question-group-config-changed`. The rules are those of [secrets](secrets.md).
 
 After capture, **Group question** previews the classifier and cap. Confirm queues an ordinary budgeted job. Page
 loads make no provider calls. The container gets only frozen private input, no Valkey credential or writable forge
@@ -113,6 +120,9 @@ The fixes log compares occurrences of the same refusal reason or question group 
 and after the change. Untouched refusals and unanswered questions still count. It shows workload exposure and
 incomplete coverage. No subsequent runs means observing, not proof that a fix worked. Reverted instruction fixes
 remain visible as reverted. Viewers see safe change descriptions and counts, without instruction text or actors.
+A fix stays in the log for the history's retention (`PI_LOG_RETENTION_DAYS`, at most 365 days, and 365 when history
+is kept forever), counted from its change; settling it or undoing it does not extend that. Then it leaves the log,
+and the page does not count it as missing (2026-11-25, #1072).
 
 Accounting publication can fail after a successful action. Pending intents and exact-proof settling make that visible
 without repeating the action. Read the returned warning, restore the unavailable source and settle it from the Zero
@@ -121,7 +131,8 @@ partial.
 
 Opening the page never settles anything (2026-11-25, #1076): a page view is a read. The page counts what waits, and an
 operator settles it with **Preview settling** and **Confirm** on a writable console. A settle records an action that
-ran and whose touch was not recorded, once, and completes a fix whose change landed and whose completion was lost.
+ran and whose touch was not recorded, once, completes a fix whose change landed and whose completion was lost, and
+closes one whose change the console knows was not made (see below).
 It never runs an action again, and settling twice records nothing twice. The worker's daily sweep also records
 unfinished touches on a host that shares the logs folder. An action interrupted before it said whether it ran stays
 unknown: no settle can prove it, and while it is pending the touch rate is not shown.
@@ -134,6 +145,16 @@ change did not finish and its file does not show it, so no settle records it", w
 (the history's retention). If the same bytes are written later, by the same change made again or by hand, a settle
 completes the open entry too, so one change can read as two fixes; that needs Valkey silent exactly at a refusal's
 accounting.
+
+Since 2026-11-25 (#1072) the console also writes how a change ended to a small file on its own disk,
+`<PI_LOGS_DIR>/zero-touch-outcomes/<fix id>.json`, before it writes that accounting to Valkey, and removes the file once
+Valkey has answered. A settle reads the file first. A change that was made is completed whatever its file reads by
+then. A change that was not made is closed and never listed as a fix, whatever bytes are written later; until the
+settle the page says "1 change that was not made is waiting to be settled". An entry with no such file keeps the rule
+above: one staged before the upgrade, one whose console stopped before it knew how the change ended, one whose file
+could not be written (the console's log says `zero_touch_outcome_unwritten`), and one settled from another console
+that does not share the logs folder. The worker's daily sweep removes a file whose entry is gone once it is older than
+the history's retention.
 
 ## Roles and interaction
 

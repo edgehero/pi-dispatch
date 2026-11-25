@@ -17,6 +17,8 @@ import { sandboxInventoryKey, SANDBOX_INVENTORY_HOSTS } from "../src/sandbox-inv
 import { hookRunsKey, HOOK_HOSTS } from "../src/hook-runs.mjs";
 import { makeTouchStore } from "../src/touch-state.mjs";
 import { stageSecretFiles, sweepSecretFiles } from "../src/secret-files.mjs";
+import { makeAnswerDraftRuntime } from "../src/answerer-runtime.mjs";
+import { providerKeyCandidates } from "../src/env-allowlist.mjs";
 
 // start.mjs imports index.mjs (bullmq), connection.mjs (ioredis), and the octokit-backed auth/host
 // modules, so this skips below the node floor / without deps and runs in CI, where
@@ -1530,8 +1532,14 @@ test("issue #967: a run secret declaring the main provider's key is the credenti
 	assert.equal((await gate({ ...declared, secrets: undefined })).ok, false, "without the binding the host is asked, and has no key");
 	assert.equal((await gate({ ...declared, secrets: {}, secretFiles: { OPENROUTER_API_KEY: "op://ci/or/key" } })).ok, false, "a file secret is no credential");
 	assert.equal((await gate({ ...declared, provider: "anthropic", model: "m", secrets: { ANTHROPIC_OAUTH_TOKEN: "op://ci/a/oauth" } })).ok, false, "nor the OAuth variable");
-	assert.equal((await gate({ ...declared, answerDraft: { runId: "r" } })).ok, false, "an answer draft keeps the host's credential");
 	assert.deepEqual(await gate({ ...declared, watch: { findingId: "f" } }), { ok: true, declared: "OPENROUTER_API_KEY" }, "issue #997: a watch job declares a key like any trigger's job");
+	// Issue #1013: and an answer draft and a question grouping, each with the secrets its answer rule or the zeroTouch block
+	// declares, for its main model and for its decision or grouping model asked as the job on that provider.
+	for (const decision of [{ answerDraft: { runId: "r" } }, { questionGrouping: { runId: "r" } }]) {
+		assert.deepEqual(await gate({ ...declared, ...decision }), { ok: true, declared: "OPENROUTER_API_KEY" }, Object.keys(decision)[0]);
+		assert.equal((await gate({ ...declared, ...decision }, { secrets: { OPENROUTER_API_KEY: "" } })).ok, false, "an empty value refuses, and the host is not asked");
+		assert.equal((await gate({ ...declared, ...decision, secrets: undefined })).ok, false, "without the binding the host is asked, and has no key");
+	}
 	// The candidate gate of a random pool or a fallback: the candidate carries the job's secrets.
 	const candidate = { ...declared, models: ["openrouter/deepseek/deepseek-chat"] };
 	assert.equal(await deps.checkFailoverCandidate(candidate, { models: null, endpoints: [] }), null, "the declared key makes the candidate eligible");
@@ -3094,10 +3102,28 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	assert.equal(constructions[0].intervalMs, 24 * 3600000, "24h by default, in ms");
 	// The allocation audit files (issue #504 part B) second: boot reaps them right after the logs, and a tick re-runs that
 	// same closure in the same place.
-	// Issue #645: the host-lost sweep on every host, last; the checkpoint store's retention only where there is a store.
-	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "touch_outbox", "sandbox", "artifacts", "session", "recovery_host_lost"], "boot's own order (issue #920: the artifacts store beside the sandbox store)");
+	// Issue #645: the host-lost sweep on every host; the checkpoint store's retention only where there is a store.
+	// Issue #1075: the held index's sweep after it, on the timer alone (boot runs no such pass).
+	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "touch_outbox", "zero_touch_outcomes", "sandbox", "artifacts", "session", "recovery_host_lost", "held_index"], "boot's own order (issue #920: the artifacts store beside the sandbox store; issue #1072: the zero touch outcome files beside the touch outbox), then the held index");
 	assert.equal(captured.extraClosers.length, 9 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the sandbox follow-ups + the sweep + the doctor runs (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
+});
+
+test("the held index's reaper sweeps through the worker's own client and says what it did in counts alone (issue #1075)", { skip }, async () => {
+	let handed;
+	const out = await runStart({ makeRetentionSweep: (args) => ((handed = args), { start() {}, sweepOnce: async () => {}, close: async () => {} }) });
+	// The harness has closed the boot's client by now, so its two commands are this test's: nothing reaches the shared
+	// test Valkey's index, where other files plant stale members and count them.
+	const sent = [];
+	Object.assign(out.captured.redis, {
+		sscan: async (...args) => (sent.push(["sscan", ...args]), ["0", ["gone-1", "live-1"]]),
+		eval: async (_script, numKeys, ...args) => (sent.push(["eval", numKeys, ...args]), 1),
+	});
+	const from = out.logsNow().length;
+	await handed.reapers.find((r) => r.name === "held_index").reap({ stopped: () => false });
+	assert.deepEqual(sent, [["sscan", "wait:held", "0", "COUNT", 64], ["eval", 3, "wait:held", "wait:job:gone-1", "wait:job:live-1", "gone-1", "live-1"]]);
+	const lines = out.logsNow().slice(from).filter((l) => l.event === "held_index_swept");
+	assert.deepEqual(lines.map(({ event, host, time, ...fields }) => fields), [{ looked: 2, removed: 1, more: false }], "counts only: no member, no target");
 });
 
 // ── issue #978: the boot sweep in bounded passes ────────────────────────────────────────────────────
@@ -3382,9 +3408,11 @@ test("the sweep re-runs the SAME closures boot already built, so one config read
 	assert.equal(logReaperCalls[0].logsDir, "/x/logs");
 	assert.equal(logReaperCalls[0].retentionDays, 9);
 
-	// Driving the handed reapers must reach those same closures, which is what "no drift" means.
+	// Driving the handed reapers must reach those same closures, which is what "no drift" means. The held index's reaper
+	// (issue #1075) asks the boot's Valkey client, which the harness has closed by now: its rejection is what the
+	// retention sweep logs as `held_index_reaper_skipped`, and it constructs nothing either.
 	const before = logReaperCalls.length + sandboxReaperCalls.length;
-	for (const r of handed.reapers) await r.reap();
+	for (const r of handed.reapers) await Promise.resolve(r.reap()).catch((error) => assert.equal(r.name, "held_index", `${r.name} threw: ${error?.message}`));
 	assert.equal(logReaperCalls.length + sandboxReaperCalls.length, before, "a sweep constructs nothing");
 });
 
@@ -7833,7 +7861,7 @@ test("Zero touch boot shares tracking and private grouping dependencies, rereads
 	const outbox = { repair: async () => (calls.push("repair"), { repaired: 0, pending: 0, invalid: 0 }) };
 	const groupStore = { sentinel: "private grouping store" };
 	const groupRuntime = { sentinel: "grouping runtime" };
-	let storeOptions, runtimeOptions, outboxOptions;
+	let storeOptions, runtimeOptions, outboxOptions, answerOptions;
 	const boot = await runStart({
 		env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath, PI_LOGS_DIR: join(dir, "logs"), PI_SWEEP_INTERVAL_HOURS: "0" },
 		now: () => nowMs,
@@ -7843,6 +7871,7 @@ test("Zero touch boot shares tracking and private grouping dependencies, rereads
 			makeTouchOutbox: (options) => (outboxOptions = options, outbox),
 			makeQuestionGroupStore: (options) => { assert.equal(options.redis, storeOptions.redis); assert.equal(options.now(), nowMs); return groupStore; },
 			makeQuestionGroupRuntime: (options) => (runtimeOptions = options, groupRuntime),
+			makeAnswerDraftRuntime: (options) => (answerOptions = options, makeAnswerDraftRuntime(options)),
 		},
 		whileRunning: async ({ captured, deps }) => {
 			assert.deepEqual(calls, ["initialize", "repair"], "tracking starts and repairs before work is handed off");
@@ -7865,6 +7894,11 @@ test("Zero touch boot shares tracking and private grouping dependencies, rereads
 	assert.equal(runtimeOptions.getSettings().provider, boot.captured.getSettings().provider);
 	const classifier = runtimeOptions.resolveClassifier({ provider: "openrouter", id: "typesafe/jev-1.13" });
 	assert.equal(classifier.type, "classifier", "the real pinned catalog, not a text-model-only lookup, reaches grouping preflight");
+	// Issue #1013: both builders keep a block's declared keys by pi's own variable list, the one the credential gate reads.
+	for (const options of [runtimeOptions, answerOptions]) {
+		assert.equal(options.providerKeyNames, providerKeyCandidates);
+		assert.equal(typeof options.log, "function");
+	}
 	assert.equal(written.at(-1).purpose, "zero-touch-grouping");
 	assert.equal(written.at(-1).touchTrackingVersion, 1);
 });

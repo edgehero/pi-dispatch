@@ -1302,11 +1302,12 @@ test("full local paths are an operator's opt-in (?paths=full); a viewer always g
   const { loadPageData } = await import("../src/console/pages.mjs");
   for (const [role, want] of [["operator", true], ["viewer", false], [undefined, false]]) {
     const asked = [];
-    await loadPageData("insights", full, { insights: async (w, o) => (asked.push([w, o]), {}), now: NOW }, { role });
+    // The load's deadline rides beside the boundaries (issue #1073): a function, held apart from them here.
+    await loadPageData("insights", full, { insights: async (w, { within, ...o }) => (assert.equal(typeof within, "function"), asked.push([w, o]), {}), now: NOW }, { role });
     assert.deepEqual(asked, [["30d", { fullPaths: want, project: null, role: role ?? "viewer", view: "spend" }]], String(role));
   }
   const asked = [];
-  await loadPageData("insights", plain, { insights: async (w, o) => (asked.push(o), {}), now: NOW }, { role: "operator" });
+  await loadPageData("insights", plain, { insights: async (w, { within, ...o }) => (asked.push(o), {}), now: NOW }, { role: "operator" });
   assert.deepEqual(asked, [{ fullPaths: false, project: null, role: "operator", view: "spend" }], "an operator who did not ask gets names too");
 });
 

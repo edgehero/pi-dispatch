@@ -27,6 +27,8 @@ import { recordReasonOf } from "./record-reason.mjs";
 import { recordedArtifacts } from "./artifacts-record.mjs";
 import { WATCH_ID_RE } from "./watch-contract.mjs";
 import { recordedWatchDecision } from "./watch-record.mjs";
+// pi's provider key variables, the generated data-only table (issue #998: the one names a `run-secret` source may carry).
+import { PROVIDER_KEY_NAMES } from "./provider-key-names.mjs";
 
 export { EARLIER_MAX, recordedEarlier };
 
@@ -1153,6 +1155,29 @@ function recordedNotionalProviders(value) {
 	return kept.length > 0 ? kept : null;
 }
 
+/**
+ * Where a record's `mainCredential` may say its main model's credential came from (issue #998): the host's environment,
+ * the host's pi login (`auth.json`), a subscription connection's access snapshot, a key the trigger declared in its
+ * `run.secrets` (or an answer rule's or the zeroTouch block's `secrets`, issue #1013), or no key at all, a declared
+ * keyless endpoint. The words `buildContainerEnvAndSource` (env-allowlist.mjs) answers, held to it by a test.
+ */
+export const MAIN_CREDENTIAL_SOURCES = Object.freeze(["host-env", "pi-login", "subscription", "run-secret", "keyless"]);
+
+/** Every variable pi reads for a provider, the only names a `run-secret` source's `variable` may be. */
+const PROVIDER_KEY_VARIABLES = new Set(Object.values(PROVIDER_KEY_NAMES).flat());
+
+/**
+ * `mainCredential` REBUILT (issue #998): `{ source }` for a word of MAIN_CREDENTIAL_SOURCES, with `variable` for
+ * `run-secret` alone and only when it is a variable pi reads for some provider (pi's generated table), so the field holds
+ * a closed word and a known variable NAME and never a value, a reference or a job's text. Null for anything else, an
+ * unknown word included, which drops the key.
+ */
+export function recordedMainCredential(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value) || !MAIN_CREDENTIAL_SOURCES.includes(value.source)) return null;
+	if (value.source !== "run-secret") return { source: value.source };
+	return { source: "run-secret", ...(typeof value.variable === "string" && PROVIDER_KEY_VARIABLES.has(value.variable) ? { variable: value.variable } : {}) };
+}
+
 export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null, earlier = null, maxTurns = null, limits = null, touchTracking = false }) {
 	const data = job.data ?? {};
 	const fork = recordedFork(data.fork, sourceModel(result, error));
@@ -1483,6 +1508,13 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// by construction. CONDITIONAL, after `costRefusal` (the tail when it was added): present only for a run whose
 		// container held such a connection, so every other record is byte-identical. Additive, so `v` stays.
 		...(recordedNotionalProviders(source.notionalProviders) !== null ? { notionalProviders: recordedNotionalProviders(source.notionalProviders) } : {}),
+		// Where the main model's credential came from (issue #998, INT-RUN-HISTORY-FILE-CONTRACT): `{ source, variable? }`, the
+		// container builder's answer for this attempt's container (the processor's `withMainCredential`), so a reader can
+		// tell a spend on the deployment's key from one on the trigger's own. A closed word and, for `run-secret`, the
+		// declared variable's name, REBUILT (`recordedMainCredential`), never a value. CONDITIONAL, after
+		// `notionalProviders`: present only for a run whose container was built, so a refusal before it and every older
+		// record are byte-identical. Additive, so `v` stays.
+		...(recordedMainCredential(source.mainCredential) !== null ? { mainCredential: recordedMainCredential(source.mainCredential) } : {}),
 		// The record's version (issue #761, `RUN_RECORD_VERSION`), the LAST key on every record and after every conditional
 		// key, so it stays last whatever a record carries and every earlier position is untouched. Unconditional: a reader
 		// asks one key, and a missing one reads as 1.

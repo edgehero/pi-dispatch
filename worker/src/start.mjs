@@ -10,6 +10,7 @@ import { makeReadModelRoles } from "./model-roles-file.mjs";
 import { makeWatchStore } from "./watch-store.mjs";
 import { makeTouchStore } from "./touch-state.mjs";
 import { makeTouchOutbox } from "./touch-outbox.mjs";
+import { makeZeroTouchOutcomeReaper } from "./zero-touch-outcomes.mjs";
 import { makeQuestionGroupStore } from "./question-groups.mjs";
 import { makeQuestionGroupRuntime } from "./question-group-runtime.mjs";
 import { makeAnswerDraftStore } from "./answerer.mjs";
@@ -116,7 +117,7 @@ import { optionalUsdMicros } from "./money.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeHookRunsPublisher } from "./hook-runs.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
-import { makeWaitState } from "./wait-state.mjs";
+import { makeWaitState, sweepHeld } from "./wait-state.mjs";
 import { hostQueueName, makeQueue, enqueueWatchJob, discoverHostQueuesReporting, QUEUE } from "./queue.mjs";
 import { endpointShown, execDockerBounded, makeDockerEndpointResolver, makeJobContainerLister, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
@@ -977,6 +978,8 @@ export async function startWorker(
 		makeTouchOutbox: makeTouchOutboxFn = makeTouchOutbox,
 		makeQuestionGroupStore: makeQuestionGroupStoreFn = makeQuestionGroupStore,
 		makeQuestionGroupRuntime: makeQuestionGroupRuntimeFn = makeQuestionGroupRuntime,
+		// Issue #1013: the answer draft's builder too, so a wiring test sees the provider variable list each builder is handed.
+		makeAnswerDraftRuntime: makeAnswerDraftRuntimeFn = makeAnswerDraftRuntime,
 		// Issue #712: the worker's own doctor runs, a seam so a wiring test sees the interval and never spawns a doctor.
 		makeDoctorSpawner: makeDoctorSpawnerFn = makeDoctorSpawner,
 		// Issue #1040: the bounded runtime runner the CPU reserve's helper steps and the rm after a killed doctor go through,
@@ -1733,6 +1736,12 @@ export async function startWorker(
 	// re-runs this closure, so boot and every tick read the one value.
 	const reapConsoleAudit = makeConsoleAuditReaper({ logsDir: config.logsDir, retentionDays: config.consoleAuditRetentionDays, log });
 	await reapConsoleAudit();
+	// Issue #1072: the console's zero touch outcome files (`zero-touch-outcomes/<fixId>.json`). A settle removes the file of
+	// every row it settles; what is left belongs to a row that is gone, removed here once it is older than the fix
+	// history's retention, by which time that row has expired too. The worker runs it for the console's reason above.
+	// Never throws.
+	const reapZeroTouchOutcomes = makeZeroTouchOutcomeReaper({ logsDir: config.logsDir, retentionDays: config.logRetentionDays, log });
+	await reapZeroTouchOutcomes();
 
 	// REQ-RESURRECTABLE-SANDBOX: sweep retained per-job directories past their window, so what `cleanup`
 	// kept for re-opening stays bounded. Third in the row and deliberately its own sweep -- a different
@@ -2305,7 +2314,9 @@ export async function startWorker(
 		reportClose: async (outcome, mapping) => { if (mapping?.ruleId) await watchStore.recordIssueOutcome(mapping.ruleId, outcome); },
 	});
 	const watchRuntime = makeWatchRuntime({ store: watchStore, triggersPath: onceTriggersFile, now, log, getSettings, pauseUntil: (job, at) => pauseUntilMs(pauseWindows.current, job, at), enqueue: (fields, opts) => enqueueWatchJob(cronQueue, fields, { now, ...opts }), publishIssue: watchPublisher });
-	const questionGroupRuntime = makeQuestionGroupRuntimeFn({ store: questionGroupStore, triggersPath: onceTriggersFile, getSettings,
+	// Issue #1013: `providerKeyNames` is pi's variable list for a provider, the one the credential gate reads, so each builder
+	// hands a job the declared keys of its own providers and no other.
+	const questionGroupRuntime = makeQuestionGroupRuntimeFn({ store: questionGroupStore, triggersPath: onceTriggersFile, getSettings, providerKeyNames: providerKeyCandidates, log,
 		resolveClassifier: ({ provider, id }) => {
 			const models = readOverlayModels(config.globalPiDir);
 			const entry = models?.providers?.[provider];
@@ -2317,7 +2328,7 @@ export async function startWorker(
 		},
 	});
 	const answerDraftStore = makeAnswerDraftStore({ redis, now, retentionDays: config.logRetentionDays });
-	const answerDraftRuntime = makeAnswerDraftRuntime({ store: answerDraftStore, triggersPath: onceTriggersFile, now, log,
+	const answerDraftRuntime = makeAnswerDraftRuntimeFn({ store: answerDraftStore, triggersPath: onceTriggersFile, now, log, providerKeyNames: providerKeyCandidates,
 		enqueue: fields => enqueueAnswerDraftJob(runtimeQueue, fields),
 		readParkedInfo: sessionStore.readParkedInfo,
 		readApproval: source => approvalStore.find(source),
@@ -4063,6 +4074,14 @@ export async function startWorker(
 		const reapForkSources = forkStore ? (options) => forkStore.sweep(options) : null;
 		const reapCheckpoints = workspaceCheckpointer ? async (options) => void (await workspaceCheckpointer.sweep(options)) : null;
 		const reapHostLost = async () => void (await sweepHostLost());
+		// Issue #1075: the held index's stale members (`wait:held`, a SET, so nothing expires them), which before this only
+		// the `/dispatch` panel and `/dispatch status` removed: a deployment run from the tools and the web console, which
+		// write nothing, grew it until no read was whole. Counts only in its line. On the TIMER and not at boot, unlike
+		// the host-lost sweep beside it: nothing at boot needs the index short (a read walks past stale members, issue
+		// #1036), and the index is fleet-wide, so a pass at every start would also run in every test that boots a worker
+		// against the shared test Valkey, beside the tests that plant stale members there and count them. At
+		// PI_SWEEP_INTERVAL_HOURS=0 it never runs, and the person's surfaces are its only pruners, as before.
+		const reapHeldIndex = async (options) => void log("held_index_swept", await sweepHeld({ redis, stopped: options?.stopped }));
 		// NOT awaited: the host-lost sweep's first command waits for Valkey however long it is away, and the boot must not.
 		// Each settles into its own log line; neither can reject unhandled.
 		for (const [name, reap] of [["recovery_host_lost", reapHostLost], ...(reapForkSources ? [["fork_source", reapForkSources]] : []), ...(reapCheckpoints ? [["checkpoint", reapCheckpoints]] : [])]) {
@@ -4084,6 +4103,7 @@ export async function startWorker(
 					{ name: "allocation_log", reap: reapAllocationLogs },
 					{ name: "console_audit", reap: reapConsoleAudit },
 					{ name: "touch_outbox", reap: () => touchOutbox.repair() },
+					{ name: "zero_touch_outcomes", reap: (options) => reapZeroTouchOutcomes(options) },
 					// Its result goes to the follow-ups (issue #978), which run outside this sweep's in-flight guard.
 					{ name: "sandbox", reap: async (options) => sandboxFollowUps.after(await reapSandboxes(options)) },
 					// Issue #920: the artifacts store, its own retention, beside the sandbox store it is kept apart from.
@@ -4091,6 +4111,7 @@ export async function startWorker(
 					{ name: "session", reap: (options) => sessionStore.reapSessions(options) },
 					...(reapForkSources ? [{ name: "fork_source", reap: reapForkSources }] : []),
 					{ name: "recovery_host_lost", reap: reapHostLost },
+					{ name: "held_index", reap: reapHeldIndex },
 					...(reapCheckpoints ? [{ name: "checkpoint", reap: reapCheckpoints }] : []),
 				],
 				intervalMs: config.sweepIntervalHours * 3600000,

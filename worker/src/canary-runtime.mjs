@@ -7,7 +7,7 @@ import { loadConfig, ensureJobsDir } from "./config.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
 import { readManifest, sandboxExpiry, sandboxManifestNewer } from "./sandbox-store.mjs";
 import { builtinModel, isBuiltinModel } from "./model-catalog.mjs";
-import { resolveProviderCredential } from "./env-allowlist.mjs";
+import { resolveProviderCredentialAndSource } from "./env-allowlist.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { makeRunContainer } from "./run-container.mjs";
@@ -108,7 +108,9 @@ export async function createCanaryRuntime({ env, options, now = Date.now, execCo
 	const policy = canaryProxyPolicy(provider);
 	const builtin = builtinModel(provider, model);
 	if (!isBuiltinModel(provider, model, { chatOnly: true }) || new URL(builtin.baseUrl).hostname !== PROVIDER_HOSTS[provider]) fail("canary candidate must be a pinned first-party chat model");
-	const credential = resolveProviderCredential({ provider, hostEnv: env, authFromPi: config.authFromPi });
+	// Issue #998: and where it came from. The replay's container is handed it as its whole host environment, so its own
+	// builder would call any key `host-env`; the record says the source this host read it from instead.
+	const { env: credential, source: credentialSource } = resolveProviderCredentialAndSource({ provider, hostEnv: env, authFromPi: config.authFromPi });
 	if (!credential || !Object.values(credential).some(Boolean)) fail("canary provider credential is missing; configure the first-party provider key");
 	const providerEnv = credential;
 	let records;
@@ -231,9 +233,13 @@ export async function createCanaryRuntime({ env, options, now = Date.now, execCo
 						try { return await runContainer({ ...args, name: jobId, signal: controller.signal, exitAuth: true, jobId, user: `${process.getuid()}:${process.getgid()}`, home: CONTAINER_HOME }); }
 						finally { stops.delete(stop); clearTimeout(timer); clearInterval(pausePoll); process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); await removeContainer(jobId).then(() => active.delete(jobId), () => {}); }
 					}, comment: async () => {}, collectChain: async () => ({ enqueued: 0, refused: 0 }), cleanup: async () => {} });
-					if (result) result = { ...result, modelRole: options.role };
+					if (result) result = { ...result, modelRole: options.role, ...(result.mainCredential ? { mainCredential: { source: credentialSource } } : {}) };
 					return result;
-				} catch (e) { error = e; throw new Error("canary replay failed; inspect its run record before retrying"); }
+				} catch (e) {
+					error = e;
+					try { if (e?.mainCredential) e.mainCredential = { source: credentialSource }; } catch {}
+					throw new Error("canary replay failed; inspect its run record before retrying");
+				}
 				finally {
 					await writer(buildRecord({ job: { id: jobId, data: job }, result, error, startedAt, endedAt: new Date(now()).toISOString(), host: config.workerName, defaultBackend: "local" }));
 					if (!active.has(jobId)) fs.rmSync(jobDir, { recursive: true, force: true });

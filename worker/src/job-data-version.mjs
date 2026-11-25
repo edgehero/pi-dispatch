@@ -17,7 +17,7 @@
 import { neededVersion, valueNeededVersion } from "./store-version.mjs";
 
 /** The highest job data version this build reads. */
-export const JOB_DATA_VERSION = 12;
+export const JOB_DATA_VERSION = 13;
 
 /**
  * Each job data field that needs a version above 1, with the version that introduced it.
@@ -44,9 +44,15 @@ export const JOB_DATA_FIELD_VERSIONS = Object.freeze({ packageCanary: 2, exclude
  * Each EXISTING top-level field whose range a later release widens, as `field -> (value) => version` (the shared rule,
  * `valueNeededVersion`): a new condition kind in `waitFor`, say, or a new `kind` (a forge this build has no credentials
  * for, refused `config-refused` at the mint). An older worker meeting the wider value would refuse the job (a comment, a
- * record, a disarmed one-shot) where a stamp makes it defer. Empty until one does.
+ * record, a disarmed one-shot) where a stamp makes it defer.
+ *
+ * `modelSelection` (issue #996), at 13 when it holds `weights`: an older worker reads the pool's unknown field as a
+ * malformed pool and refuses the job, where a stamp makes it wait for a worker that draws with the weights. A pool
+ * without weights keeps the field table's 7, so no queued job's stamp moves.
  */
-export const JOB_DATA_VALUE_VERSIONS = Object.freeze({});
+export const JOB_DATA_VALUE_VERSIONS = Object.freeze({
+	modelSelection: (selection) => selection !== null && typeof selection === "object" && Object.hasOwn(selection, "weights") ? 13 : 1,
+});
 
 /** The field that carries the version. */
 export const JOB_DATA_VERSION_FIELD = "dataVersion";

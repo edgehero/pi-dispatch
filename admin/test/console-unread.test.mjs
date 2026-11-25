@@ -44,7 +44,14 @@ test("fileViews answers the files under the snapshot's own keys and asks Valkey 
   const refuse = (what) => new Proxy({}, { get: (_, key) => (key === "on" ? () => {} : key === "then" ? undefined : (...args) => { asked.push(`${what}.${String(key)}`); throw new Error("Valkey was asked"); }) });
   const reader = createFleetReader(paths, { redisFn: () => refuse("redis"), makeQueueFn: () => refuse("queue"), parseConnectionFn: () => ({}) });
   const views = reader.fileViews();
-  assert.deepEqual(Object.keys(views).sort(), ["envelopeSet", "overlayMcp", "pauseWindows", "projects", "schedulerStallMax", "scopedLimits", "settings", "stagedPackages", "triggers"]);
+  assert.deepEqual(Object.keys(views).sort(), ["envelopeSet", "overlayMcp", "pauseWindows", "projects", "schedulerStallMax", "scopedLimits", "secretBundles", "secretProfiles", "settings", "stagedPackages", "triggers"]);
+  // Issue #1073: the secret views over the same files and the environment, no run and no host among them: the triggers
+  // here name no profile and bind no bundle, and the reader's environment is empty, so there is none of either.
+  assert.equal(views.secretProfiles, null);
+  assert.equal(views.secretBundles, null);
+  const withSecrets = createFleetReader(paths, { redisFn: () => refuse("redis"), makeQueueFn: () => refuse("queue"), parseConnectionFn: () => ({}), dollarEnvFn: () => ({ PI_SECRET_PROFILES: "default:/opt/default" }) }).fileViews();
+  assert.deepEqual(withSecrets.secretProfiles.profiles.map((p) => [p.name, p.source, p.last, p.hosts]), [["default", "env", null, []]]);
+  assert.equal(withSecrets.secretProfiles.hostsUnreadable, true, "a profile's hosts are not read, never none");
   assert.equal(views.triggers.triggers.length, 2);
   assert.deepEqual(views.triggers.triggers.map((t) => t.type), ["cron", "label"]);
   assert.deepEqual(views.projects.projects.map((p) => p.id), ["web"]);
@@ -63,7 +70,7 @@ test("the outage fixtures are the real reader's answers over a Valkey that does 
   // Issue #988. What only the reader's own parsers add says the views came through them: a project's name, a limit's
   // other windows, a pause window's minutes and zone, a cron rule's task mark. A view written out by hand had none.
   const read = fileViewsFixture({ pinned: false });
-  assert.deepEqual(Object.keys(read).sort(), ["envelopeSet", "overlayMcp", "pauseWindows", "projects", "schedulerStallMax", "scopedLimits", "settings", "stagedPackages", "triggers"]);
+  assert.deepEqual(Object.keys(read).sort(), ["envelopeSet", "overlayMcp", "pauseWindows", "projects", "schedulerStallMax", "scopedLimits", "secretBundles", "secretProfiles", "settings", "stagedPackages", "triggers"]);
   assert.ok(!Object.hasOwn(read.triggers, "path"), "the reader's triggers view names no path");
   assert.ok(!read.triggers.doesNotLoad, "the fixture's triggers file is one the worker loads");
   assert.deepEqual(read.triggers.triggers.map((t) => [t.type, t.index, t.task ?? null]), [["cron", 0, true], ["label", 1, null]]);
@@ -222,8 +229,10 @@ test("/config with no snapshot: counts and read-only cards from the files, no nu
   assert.match(words, /Settings 2 Triggers 2 Pause windows 1 Scoped limits 1 Projects 1 Files 2 Unset 0 MCP servers 0 /);
   assert.match(words, /cron nightly/);
   assert.match(words, /Allocation envelope not set/);
-  assert.equal(words.split("Valkey could not be read, so this shows what the file holds and offers no change.").length - 1, 9);
-  assert.equal(words.split("The deployment's Valkey could not be read. Reload to try again.").length - 1, 2, "the two secret cards, whose facts are not the files' alone");
+  // Issue #1073: the two secret cards count from the files too, so every card is drawn from them.
+  assert.equal(words.split("Valkey could not be read, so this shows what the file holds and offers no change.").length - 1, 11);
+  assert.equal(words.split("The deployment's Valkey could not be read. Reload to try again.").length - 1, 0, "no card says the deployment could not be read over what the files hold");
+  assert.ok(words.includes("0 profiles in view.") && words.includes("0 project bundles in view."), "the files declare and bind none");
   assert.ok(!page.includes('data-action="') && !words.includes("Add a trigger"), "no change is offered");
   // No file views at all: every card says it could not be read, and no tab draws a count.
   const data = await loadPageData("config", {}, { now: () => NOW, fleet: { snapshot: async () => { throw new Error("down"); } } });

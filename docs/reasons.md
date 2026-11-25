@@ -1109,12 +1109,13 @@ project's bundle.
 
 One name is allowed: the API-key variable of the job's own provider, in `run.secrets`, which becomes the job's key in
 place of the host's. On a watch rule the API-key variable of its `decide` model's provider may be bound the same way,
-as that model's key. Either is still refused here when it is bound in `run.secretFiles` instead, when it is on `PI_FORWARD_ENV`, from a project's
+as that model's key, and an answer rule's or the `zeroTouch` section's own `secrets` may bind the API-key variable of
+the provider of a model its draft or grouping job runs. Each is still refused here when it is bound in `run.secretFiles` instead, when it is on `PI_FORWARD_ENV`, from a project's
 bundle, on a provider that needs host authentication
 (`amazon-bedrock`, `github-copilot`, `google-vertex`, `openai-codex`), or when the provider is bound to a subscription
 on this host (also one bound after the job was picked up). The provider's other variables, such as
 `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_OAUTH_TOKEN`, are always refused, and so is every other variable of a watch
-rule's `decide` model's provider. On a host with no credential of its own for that provider, the worker refuses
+rule's `decide` model's provider, of an answer draft's decision model's and of a grouping job's classifier's. On a host with no credential of its own for that provider, the worker refuses
 such a job earlier, as [`provider-unconfigured`](#provider-unconfigured); both refuse before anything is spent. Every
 variable of the provider of a model in `run.auxiliaryModels` is refused too, except its API-key variable bound in
 `run.secrets` on the same terms as the job's own provider's, which is that model's key; a project's bundle may carry

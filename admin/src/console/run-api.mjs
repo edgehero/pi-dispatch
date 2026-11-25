@@ -8,8 +8,9 @@
  * charset-checked ids, integers and booleans: never a record's free text (`why`, a failure reason), never a Job's
  * `.data`, never a transcript entry, never a session key (the key names a directory of UNREDACTED transcript, and a
  * host-local fork re-derives it on its own host, `sessionKeyOfRecord`). A viewer gets the same shape as an operator,
- * which is why the route is a viewer's: there is nothing in it to withhold. `says` is one of `chatModeOf`'s fixed
- * sentences.
+ * which is why the route is a viewer's, with one name taken out: `run.mainCredential`'s `variable` (issue #998), a
+ * declared secret's name, since a viewer's run page shows no secret name and this route names no other. `says` is one
+ * of `chatModeOf`'s fixed sentences.
  *
  * `?url=` RESOLVES THROUGH `forgeTargetOf`, the inverse of the link the console draws (`forgeLinkOf`), then through the
  * run history: the newest run on that target is the run. An Azure work item's URL names no repository, so its target is
@@ -30,10 +31,10 @@ import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { SESSION_NOT_SAVED } from "@edgehero/pi-dispatch/record-reason";
-import { modelRolesTelemetryOf, approvalRecordOf, recordedProgress } from "@edgehero/pi-dispatch/run-history";
+import { modelRolesTelemetryOf, approvalRecordOf, recordedMainCredential, recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { chatModeOf, pendingFactsOf, runStateOf } from "@edgehero/pi-dispatch/chat-mode";
 import { repoOfTarget } from "../costs.mjs";
-import { activeProgressOf, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, PENDING_STATES, pendingScanFor, recordRecovery, RUN_RECORD_UNREAD, RUNS_PAGE_EXAMINE_MAX, runAbsent, runPlaces, runPlacesText, targetKeyOf } from "../read-model.mjs";
+import { activeProgressOf, FAILED_READ_KEEP_MS, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, PENDING_STATES, pendingScanFor, recordRecovery, RUN_RECORD_UNREAD, RUNS_PAGE_EXAMINE_MAX, runAbsent, runPlaces, runPlacesText, targetKeyOf } from "../read-model.mjs";
 import { recordReason } from "../words.mjs";
 import { loadedOf, outcomeNote } from "../loaded-words.mjs";
 import { coreRecordOf, fromNewerRelease, NEWER_RECORD_SENTENCE } from "../newer-release.mjs";
@@ -58,7 +59,8 @@ export const NEWER_CACHE_MS = 30_000;
  * How long the run page's live loop reuses a park's pending-answer scan (`fleet.pendingAnswer`, a queue listing) and its
  * planner check (`fleet.parkedAnswerCheck`, a job read and the triggers file), per run id (review round 2: both ran on
  * every 2 s tick). The parked inbox's own refresh of the same scan (the snapshot's DOLLAR_RECORDS_TTL_MS), so the two
- * screens see a newly queued answer within one window; the planner reads both afresh before anything is queued.
+ * screens see a newly queued answer within one window; the planner reads both afresh before anything is queued. An
+ * answer that could not be read, and a planner's refusal, are kept `FAILED_READ_KEEP_MS` alone (issue #1073).
  */
 export const PARK_CHECK_CACHE_MS = 15_000;
 
@@ -151,6 +153,10 @@ function safeRunFields(id, record) {
     ...(modelRolesTelemetryOf(r.modelRoles) ? { modelRoles: modelRolesTelemetryOf(r.modelRoles) } : {}),
     ...(MODEL_WHY.includes(r.modelWhy) ? { modelWhy: r.modelWhy } : {}),
     ...(providerFailureOf(r.providerFailure) ? { providerFailure: providerFailureOf(r.providerFailure) } : {}),
+    // Issue #998: where the main model's credential came from, the worker's closed word and, for a declared key, its
+    // variable's name (never a value), rebuilt by the worker's own rule. A viewer's copy keeps the word alone (`getRun`),
+    // and so does an agent's (`agentReadProjection`).
+    ...(recordedMainCredential(r.mainCredential) ? { mainCredential: recordedMainCredential(r.mainCredential) } : {}),
     host: str(r.host, WORKER_NAME_RE),
     backend: str(r.backend, BACKEND_RE),
     project: str(r.project, PROJECT_ID_RE),
@@ -299,23 +305,28 @@ const answerCheckCache = new WeakMap();
 /**
  * `read()`, reused for `PARK_CHECK_CACHE_MS` while the record is the same one: `{ got, answerLeft }`, `answerLeft` true
  * when an earlier read of this run saw a job id (`got.jobId`) and this fresh one reads none (`jobId: null`), which is
- * the moment the answer run has ended. EVERY answer is kept for the window, an unreadable one as long as a good one
- * (issue #737): one that was read again on every tick sent a Valkey that was already failing a queue lookup per run per
- * tick, and the Parked page has twenty runs. The live page says the check could not be read until the window ends. A request retries an unreadable
- * answer: the live load may have asked an incomplete set of queues (#747).
+ * the moment the answer run has ended. A good answer is kept for the window. An unreadable one, and a planner's
+ * refusal, are kept for the short floor from when they came (`FAILED_READ_KEEP_MS`, issue #1073), never the window:
+ * a refusal such as "the triggers file does not load" or "does not exist" is an operator's to fix, and was said under a
+ * Live pill for up to 15 s after the fix. Not dropped at once (issue #737): one read again on every tick sent a Valkey
+ * that was already failing a queue lookup per run per tick, and the Parked page has twenty runs. A request retries an
+ * unreadable answer: the live load may have asked an incomplete set of queues (#747).
  */
 async function parkCheckCached(cache, fleet, id, record, now, read, { reuseUnreachable = true } = {}) {
-  const at = typeof now === "function" ? now() : Date.now();
+  const clock = typeof now === "function" ? now : Date.now;
+  const at = clock();
   const recordKey = recordKeyOf(record);
   let byId = cache.get(fleet);
   if (!byId) cache.set(fleet, (byId = new Map()));
   const hit = byId.get(id);
-  if (hit && (reuseUnreachable || hit.got?.unreachable !== true) && hit.recordKey === recordKey && at >= hit.at && at - hit.at < PARK_CHECK_CACHE_MS) return { got: hit.got, answerLeft: false };
+  if (hit && (reuseUnreachable || hit.got?.unreachable !== true) && hit.recordKey === recordKey && at >= hit.at && at < hit.until) return { got: hit.got, answerLeft: false };
   const got = await read();
   const seen = str(got?.jobId, RUN_ID_RE);
   const answerLeft = typeof hit?.sawJobId === "string" && got !== null && typeof got === "object" && Object.hasOwn(got, "jobId") && got.jobId === null;
+  const floored = got?.unreachable === true || typeof got?.refusal === "string";
+  const until = floored ? Math.min(at + PARK_CHECK_CACHE_MS, clock() + FAILED_READ_KEEP_MS) : at + PARK_CHECK_CACHE_MS;
   if (!hit && byId.size >= 256) byId.delete(byId.keys().next().value);
-  byId.set(id, { at, recordKey, got, sawJobId: seen ?? (answerLeft ? null : (hit?.sawJobId ?? null)) });
+  byId.set(id, { at, until, recordKey, got, sawJobId: seen ?? (answerLeft ? null : (hit?.sawJobId ?? null)) });
   return { got, answerLeft };
 }
 
@@ -331,7 +342,8 @@ async function pendingRead(fleet, id, record) {
 /**
  * The planner's own check on whether parked run `id` can take a console answer (`fleet.parkedAnswerCheck`: `{ refusal }`,
  * `{ ok: true }` or `{ unreachable: true }`), reused by the run page loop and the Parked page for `PARK_CHECK_CACHE_MS`
- * per run id while `record` is the same one (`now` the clock), an unreadable answer as long as a good one. `lookup` is
+ * per run id while `record` is the same one (`now` the clock), an unreadable answer and a refusal for the short floor
+ * alone (`parkCheckCached`, issue #1073). `lookup` is
  * the load's question for the reader's by-id lookup (`{ live }` or `{ asked }`, pages.mjs `loadPageData`). Null without
  * the reader.
  */
@@ -368,7 +380,7 @@ async function actionCheckOf(cache, fleet, method, id, record, now, lookup = {})
  * Whether run `id` (with `record`) can be offered a re-run (issue #710): `fleet.rerunCheck`, the planner's own cheap
  * refusals over the record and the job's retained data (`rerunRefusalOf`), reused by the run page's live loop for
  * `PARK_CHECK_CACHE_MS` per run id while `record` is the same one, as `parkedAnswerCheckOf` is (an unreadable answer
- * too), and asked with the load's `lookup` as it is. `{ refusal }`, `{ ok: true }`, `{ unreachable: true }`, or null
+ * and a refusal for the short floor), and asked with the load's `lookup` as it is. `{ refusal }`, `{ ok: true }`, `{ unreachable: true }`, or null
  * without the reader.
  */
 export async function rerunCheckOf(fleet, id, record, { now = Date.now, lookup = {} } = {}) {
@@ -564,6 +576,9 @@ export async function getRun(ctx) {
     delete projected.transcriptMeta; delete projected.runProgress;
     return ctx.json(200, projected);
   }
+  // Issue #998: the declared variable's name is an operator's, as every secret name a run page shows; a viewer keeps the word.
+  const credential = got.doc.run?.mainCredential;
+  if (ctx.session?.role !== "operator" && credential?.variable !== undefined) return ctx.json(200, { ...got.doc, run: { ...got.doc.run, mainCredential: { source: credential.source } } });
   return ctx.json(200, got.doc);
 }
 

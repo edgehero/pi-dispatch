@@ -60,7 +60,7 @@ test("a page that could not read the deployment offers no change and says so; on
           assert.deepEqual([actionsOf(got.whole), addButton(got.whole)], [[], false], `${where}: no form over a deployment that was not read`);
           // In the words of the cause (`deploymentUnreadWhy`): the sentence of another cause is not on the page.
           assert.equal(got.words.split(noChangeText({ data: got.data }, file)).length - 1, role === "operator" ? SAID[page] : 0, `${where}: said to the one who would have been offered it, where each form was`);
-          assert.equal(got.words.split("offers no change. The").length - 1, role === "operator" ? SAID[page] : 0, `${where}: and in no other words`);
+          assert.equal(got.words.split("offers no change.").length - 1, role === "operator" ? SAID[page] : 0, `${where}: and in no other words`);
         } else {
           assert.ok(!got.words.includes("offers no change"), `${where}: a page that read the deployment does not say it offers none`);
         }
@@ -283,14 +283,17 @@ test("the two pages the rule had missed: Parked's standing answer form, which st
 });
 
 test("the sentence is true of its cause: a Valkey that did not answer, one that answered with an error, and a page whose deadline cut the read", async () => {
-  assert.deepEqual(DEPLOYMENT_UNREAD_WORDS, { silent: "Valkey could not be read", error: "Valkey answered this page's read with an error", late: "This page could not read the deployment in time" });
+  assert.deepEqual(DEPLOYMENT_UNREAD_WORDS, { silent: "Valkey could not be read", error: "Valkey answered this page's read with an error", late: "This page could not read the deployment in time", fault: "This console failed while it read the deployment" });
   const says = (why, file = "triggers file") => `${DEPLOYMENT_UNREAD_WORDS[why]}, so ${why === "late" ? "it" : "this page"} offers no change. The ${file} can still be changed by hand. Reload to try again.`;
+  // Issue #1073: an error names its code and its class, and a code whose cause waiting does not end asks for no reload.
+  const saysCode = (code, file = "triggers file") => `Valkey answered this page's read with ${code}, so this page offers no change. ${code} is a key of another type: the key holds another kind of value. Waiting does not change that: an operator has to remove or repair that key first. The ${file} can still be changed by hand.`;
   // Nothing answered.
   const silent = await drawn("trigger", "index=0", on(DOWN()), "operator");
   assert.deepEqual([deploymentUnreadWhy({ data: silent.data }), silent.words.split(says("silent")).length - 1], ["silent", 2]);
   // Valkey answered, with an error (a key of another type): the same rule, and its own words.
   const error = await drawn("trigger", "index=0", on({ redis: failingKey(healthy(HOST), /^budget:/) }), "operator");
-  assert.deepEqual([error.data.snapshotFailure, deploymentUnreadWhy({ data: error.data }), error.words.split(says("error")).length - 1, error.words.includes("Valkey could not be read, so this page offers no change")], ["error", "error", 2, false]);
+  assert.deepEqual([error.data.snapshotFailure, deploymentUnreadWhy({ data: error.data }), error.words.split(saysCode("WRONGTYPE")).length - 1, error.words.includes("Valkey could not be read, so this page offers no change")], [{ kind: "error", code: "WRONGTYPE" }, "error", 2, false]);
+  assert.ok(!error.words.includes(`${saysCode("WRONGTYPE")} Reload to try again.`), "no reload over a cause that waiting does not end");
   assert.deepEqual(actionsOf(error.whole), [], "no form either");
   // The page's deadline cut the read of a Valkey that answers late: it could not read the deployment IN TIME.
   // (The snapshot answers a quarter of a second on, whole; the page's deadline here is 40 ms.)
@@ -299,7 +302,7 @@ test("the sentence is true of its cause: a Valkey that did not answer, one that 
   for (const [page, qs, file] of [["trigger", "index=0", "triggers file"], ["triggers", "", "triggers file"], ["project", "id=web", "projects file"], ["models", "", "triggers file"]]) {
     const query = parsePageQuery(page, new URLSearchParams(qs)).query;
     const data = await loadPageData(page, query, { ...slow, fleet: { ...slow.fleet, snapshot: late, fileViews: slow.fleet.fileViews }, deadline: { ms: 40 } }, { role: "operator" });
-    assert.deepEqual([data.snapshot, data.readFailed, data.snapshotFailure, deploymentUnreadWhy({ data })], [null, true, "late", "late"], page);
+    assert.deepEqual([data.snapshot, data.readFailed, data.snapshotFailure, deploymentUnreadWhy({ data })], [null, true, { kind: "late" }, "late"], page);
     const words = wordsOf(String((await renderPage(page, { query, session: { name: "ada", role: "operator" }, data, readOnly: false })).html));
     assert.ok(words.includes(says("late", file)), `${page}: ${words.match(/[^.]{0,60}offers no change[^.]{0,20}/)?.[0]}`);
     assert.ok(!words.includes("Valkey could not be read, so this page offers no change"), `${page}: not said of a Valkey that answered late`);

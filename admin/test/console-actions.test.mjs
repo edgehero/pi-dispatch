@@ -11,7 +11,10 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { freezingProxy } from "../../worker/test/helpers/freezing-proxy.mjs";
+import { trippingProxy } from "./helpers/tripping-proxy.mjs";
+import { executeToolAction } from "../src/tool-actions.mjs";
 import { CONSOLE_STOPPING, makeWritesInFlight, STOPPED_UNCONFIRMED } from "../src/console/writes-in-flight.mjs";
+import { PAGE_DEADLINE_MS, PAGE_VIEW_GRACE_MS } from "../src/console/page-deadline.mjs";
 import { makeConsoleAudit, verifyConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { DEFER_BUCKET_WORDS, DEFER_TIME_MAX_MS, DEFER_WHYS } from "@edgehero/pi-dispatch/defer-reasons";
@@ -21,7 +24,7 @@ import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dis
 import { requestSandboxEnd } from "@edgehero/pi-dispatch/sandbox-sessions";
 import { ENVELOPE_EXPECTED_LINES, PACKAGE_MOVED_SENTENCE, PACKAGE_NOT_TAKEN_SENTENCE, UPDATES_UNREAD_SENTENCE } from "../src/console/actions.mjs";
 import { switchPartialWords, actionNamed, agentFailure, AGENT_QUEUES_SHORT, AGENT_QUEUES_SHORT_LASTING, agentShortWord, AGENT_REFUSED, AGENT_UNCONFIRMED, PAUSE_SNAPSHOT_TIMEOUT_MS, START_USED } from "../src/console/actions.mjs";
-import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueErroredRefusal, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_ERRORED_LINE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, SWITCH_UNREAD_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
+import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueErroredRefusal, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_ERRORED_LINE, SWITCH_QUEUES_NAMED, SWITCH_SILENT_LINE, SWITCH_SHORT_LINES, SWITCH_UNREAD_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { CONFIRM_SLOT_ID, doneBannerHtml, PARTIAL_NOTE } from "../src/console/confirm-view.mjs";
@@ -2639,7 +2642,7 @@ test("a switch read that Valkey answered with an error for one queue names it: t
     assert.equal(own.status, 400, own.text);
     assert.equal(own.json().error, queueErroredRefusal("pi-jobs@hostb", "WRONGTYPE"));
   }
-  assert.equal(queueErroredRefusal("pi-jobs@hostb", "WRONGTYPE"), "pi-jobs@hostb could not be read: Valkey answered its read with an error (WRONGTYPE), so whether it is paused is not known here; nothing was changed");
+  assert.equal(queueErroredRefusal("pi-jobs@hostb", "WRONGTYPE"), "pi-jobs@hostb could not be read: Valkey answers bull:pi-jobs@hostb:meta with WRONGTYPE, so whether it is paused is not known here. Remove or repair that key first; nothing was changed");
   // Another queue's preview goes on, and its switch is made.
   const other = await c.both("queue-pause", { queue: "pi-jobs" });
   assert.equal(other.confirm.status, 200, other.confirm.text);
@@ -2757,11 +2760,11 @@ test("a queue whose paused flag was read and whose counts alone Valkey answers w
     // where it was not.
     const c = await start({ paths, a: { fleet: { snapshot: (opts) => reader.snapshot(opts), pauseQueue: async () => ({ ok: true }) }, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
     const counts = await c.act("queue-resume", { queue: "pi-jobs@hostb" });
-    assert.deepEqual([counts.status, counts.json().error], [400, "the counts of pi-jobs@hostb could not be read: Valkey answered that read with an error (ERR). It is paused, and what the switch would change there is not known here; nothing was changed"]);
+    assert.deepEqual([counts.status, counts.json().error], [400, "the counts of pi-jobs@hostb could not be read: Valkey answers the read of its counts with ERR. It is paused, and what the switch would change there is not known here; nothing was changed"]);
     const running = await c.act("queue-pause", { queue: "pi-jobs@hostd" });
-    assert.equal(running.json().error, "the counts of pi-jobs@hostd could not be read: Valkey answered that read with an error (WRONGTYPE). It is running, and what the switch would change there is not known here; nothing was changed");
+    assert.equal(running.json().error, "the counts of pi-jobs@hostd could not be read: Valkey answers the read of its counts with WRONGTYPE. It is running, and what the switch would change there is not known here. Waiting does not change that; nothing was changed");
     const flag = await c.act("queue-resume", { queue: "pi-jobs@hostc" });
-    assert.equal(flag.json().error, "pi-jobs@hostc could not be read: Valkey answered its read with an error (WRONGTYPE), so whether it is paused is not known here; nothing was changed");
+    assert.equal(flag.json().error, "pi-jobs@hostc could not be read: Valkey answers bull:pi-jobs@hostc:meta with WRONGTYPE, so whether it is paused is not known here. Remove or repair that key first; nothing was changed");
   } finally {
     await reader.dispose();
   }
@@ -3725,6 +3728,75 @@ test("a console started on a Valkey that does not answer: its pause says first t
   } finally {
     proxy.thaw();
     await Promise.race([fleet.dispose(), sleep(3_000)]);
+    proxy.close();
+    await v.done();
+  }
+});
+
+// Issue #1072, on a real Valkey: one that answers every reply 150 ms late, as a healthy and slow deployment does, then
+// the same one stopped. #1035's two seconds gave up the queue list on the first (a preview on a reader that had read
+// nothing: 2.0 s with no list, measured), and on the second were waited in full before the confirm's own bound, on
+// every press. Here the slow one lists every queue, and the stopped one costs a preview its registry read once, then
+// nothing; the tool, whose reader is new on each call, pays the registry read and the confirm's bound.
+test("a fleet switch's preview on a slow Valkey lists every queue, and on a stopped one waits only for its own registry read, once, before the confirm's bound (#1072)", live, async () => {
+  const v = await freshValkey();
+  const hosts = ["hosta", "hostb", "hostc", "hostd"];
+  const names = ["pi-jobs", ...hosts.map((h) => `pi-jobs@${h}`)];
+  for (const name of names) await v.q(name);
+  for (const h of hosts) {
+    await v.redis.hset(`host:h:${h}`, "name", h, "routes", "true", "beatAt", String(Date.now()));
+    await v.redis.sadd("host:live", h);
+  }
+  const proxy = await trippingProxy(URL13);
+  const { paths } = deployment(proxy.url);
+  const plan = () => ({ urls: [paths.valkeyUrl], disagreement: null, context: null });
+  const ctxOf = (fleet) => ({ a: { fleet, paths, killSwitchPlanFn: plan, urlShown: (u) => u } });
+  const queuesLine = `Queues: ${names.join(", ")}`;
+  const readers = [];
+  const reader = (seams = {}) => {
+    const fleet = RM.createFleetReader(paths, { readOnly: true, ...seams });
+    readers.push(fleet);
+    return fleet;
+  };
+  try {
+    proxy.slow(150);
+    // A reader that has read nothing, as a console just started and every tool call have: the slowest preview there is.
+    const slow = reader();
+    const pause = await clocked(actionNamed("fleet-pause").preview({}, ctxOf(slow)));
+    assert.ok(pause.res.summary.includes(queuesLine), `${pause.ms} ms: ${JSON.stringify(pause.res.summary)}`);
+    assert.ok(pause.ms < PAUSE_SNAPSHOT_TIMEOUT_MS, `${pause.ms} ms`);
+    assert.ok(!pause.res.summary.includes(SWITCH_SILENT_LINE));
+    const resume = await actionNamed("fleet-resume").preview({}, ctxOf(slow));
+    assert.equal(resume.count, 0, JSON.stringify(resume.summary));
+    // Through the tool, whose reader is new on each call: its dialog names every queue too.
+    const dialogs = [];
+    const tool = { paths, env: {}, grantsEnv: {}, granted: true, audit: { append() {} }, actor: { name: "ops", role: "operator", session: null }, readModel: { ...RM, killSwitchPlan: plan } };
+    const person = { hasUI: true, ui: { confirm: async (_title, message) => (dialogs.push(message), true) } };
+    assert.equal((await executeToolAction("dispatch_pause", {}, person, tool)).applied, true);
+    assert.ok(dialogs[0].includes(queuesLine), dialogs[0]);
+    assert.deepEqual(await Promise.all(names.map(async (n) => (await v.redis.hget(`bull:${n}:meta`, "paused")) === "1")), names.map(() => true), "the tool paused every queue");
+    // Stopped. The registry read's own bound (two seconds) is all a preview pays, and only until the reader knows.
+    proxy.slow(0);
+    const fleet = reader({ parseConnectionFn: boundedHere, switchStepTimeoutMs: FROZEN_STEP_MS });
+    assert.ok(Array.isArray((await fleet.snapshot({ switchQueues: true })).queueCounts), "it read the fleet while Valkey answered");
+    proxy.freeze();
+    const first = await clocked(actionNamed("fleet-pause").preview({}, ctxOf(fleet)));
+    assert.ok(first.res.summary.includes(SWITCH_SILENT_LINE), JSON.stringify(first.res.summary));
+    assert.ok(first.ms >= 1_900 && first.ms < 3_000, `the registry read's bound, not the preview's: ${first.ms} ms`);
+    assert.equal(fleet.knownSilent(), true);
+    const known = await clocked(actionNamed("fleet-pause").preview({}, ctxOf(fleet)));
+    assert.ok(known.res.summary.includes(SWITCH_SILENT_LINE) && known.ms < 200, `${known.ms} ms`);
+    const knownResume = await clocked(actionNamed("fleet-resume").preview({}, ctxOf(fleet)));
+    assert.ok(knownResume.res.summary.includes(SWITCH_SILENT_LINE) && knownResume.ms < 200, `the resume's ten seconds are not waited either: ${knownResume.ms} ms`);
+    const confirmed = await clocked(actionNamed("fleet-pause").apply({ payload: {} }, ctxOf(fleet)));
+    assert.ok(confirmed.ms < FROZEN_STEP_MS + 1_000, `the confirm's one bound: ${confirmed.ms} ms`);
+    // The tool's reader is new, so it never already knows: its registry read and the confirm's bound, as before.
+    const viaTool = { ...tool, readModel: { ...RM, killSwitchPlan: plan, createFleetReader: (p, o) => RM.createFleetReader(p, { ...o, parseConnectionFn: boundedHere, switchStepTimeoutMs: FROZEN_STEP_MS }) } };
+    const headless = await clocked(executeToolAction("dispatch_pause", {}, { hasUI: false }, viaTool).catch((err) => err));
+    assert.ok(headless.ms >= 1_900 && headless.ms < 2_000 + FROZEN_STEP_MS + 1_500, `${headless.ms} ms`);
+  } finally {
+    proxy.thaw();
+    for (const fleet of readers) await Promise.race([fleet.dispose(), sleep(3_000)]);
     proxy.close();
     await v.done();
   }
@@ -4890,10 +4962,19 @@ test("what the tracking of a fix could not take back is logged with its cause, a
     failing = null;
     assert.equal(refused.status, 409, refused.text);
     assert.deepEqual(await states(), ["pending"]);
-    // The page says what is so of it: its file does not show it, so no settle records it. It said "Reload to retry".
+    // Issue #1072: the console knew the change was not made, and recorded so on its disk before the refusal it could not
+    // write. The page says a settle closes it; nothing is open.
+    const outcomes = join(paths.logsDir, "zero-touch-outcomes");
     let page = await service.read({ days: 30 });
-    assert.deepEqual([page.fixesPartial, page.fixesOpen, page.fixesOpenDays, page.fixes.length, page.waiting.fixes], [true, 1, 30, 0, 0]);
+    assert.deepEqual([page.fixesPartial, page.fixesOpen, page.fixes.length, page.waiting.fixes, page.waiting.refused], [true, 0, 0, 0, 1]);
     assert.deepEqual(logged.splice(0), [["zero_touch_fix_reject_pending", { cause: "Error: fix-store-timeout" }]]);
+    // A row with no outcome recorded (staged before that release, or by a console that stopped before it knew) is said as
+    // what is so of it: its file does not show it, so no settle records it. It said "Reload to retry".
+    const [recorded] = readdirSync(outcomes);
+    assert.deepEqual(JSON.parse(read(join(outcomes, recorded))), { v: 1, outcome: "refused", at: T0 });
+    rmSync(join(outcomes, recorded));
+    page = await service.read({ days: 30 });
+    assert.deepEqual([page.fixesPartial, page.fixesOpen, page.fixesOpenDays, page.fixes.length, page.waiting.fixes, page.waiting.refused], [true, 1, 30, 0, 0, 0]);
     // Only a proof that ran to its end says so (issue #1076: the page proves and never commits). One that failed has
     // looked at nothing, a reload does retry it, and the page keeps "Reload to retry": the same row was reported as one
     // no reload settles.
@@ -5080,7 +5161,7 @@ test("a settle records what an earlier write left pending, and only an operator'
     const c = await start({ paths, a: { zeroTouch: service } });
     const census = async () => [readdirSync(dir).length, await f.redis.hlen("touch:pending"), JSON.parse(await f.redis.get(`zero-touch:fixes:meta:${(await f.redis.zrange("zero-touch:fixes:index", 0, -1))[0]}`)).state];
     const page = await service.read({ days: 30 });
-    assert.deepEqual(page.waiting, { touches: 1, unknown: 0, fixes: 1 });
+    assert.deepEqual(page.waiting, { touches: 1, unknown: 0, fixes: 1, refused: 0 });
     // The window collapsed on the unresolved action alone (the runs were read, with no mirror beside them): the page
     // says it waits for a settle, where it said "could not be read".
     assert.deepEqual([page.state, page.unresolvedOnly, zeroTouchView(page, { role: "operator", nowMs: T0 }).state], ["unavailable", true, "waiting"]);
@@ -5103,7 +5184,7 @@ test("a settle records what an earlier write left pending, and only an operator'
     assert.deepEqual(await census(), [0, 0, "applied"]);
     assert.equal((await touches.read()).events.length, 1);
     const settledPage = await service.read({ days: 30 });
-    assert.deepEqual([settledPage.unresolvedOnly, settledPage.waiting, settledPage.fixes.length, settledPage.fixesPartial], [undefined, { touches: 0, unknown: 0, fixes: 0 }, 1, false]);
+    assert.deepEqual([settledPage.unresolvedOnly, settledPage.waiting, settledPage.fixes.length, settledPage.fixesPartial], [undefined, { touches: 0, unknown: 0, fixes: 0, refused: 0 }, 1, false]);
     // A touch Valkey does not take at the settle stays for the next one, and the banner says what is left.
     const later = await lost.begin({ runId: "gh-rerun", cause: "rerun", at: T0 - 500, nonce: "two" });
     await lost.applied(later);
@@ -5114,6 +5195,86 @@ test("a settle records what an earlier write left pending, and only an operator'
     assert.equal(left.status, 200, left.text);
     assert.match(left.json().change.summary, /^Settled the pending Zero touch accounting, but 1 touch could not be recorded: Valkey did not take it\. Settle again once Valkey answers/);
     assert.equal(readdirSync(dir).length, 1);
+    assert.deepEqual(logged, []);
+  } finally { await f.done(); }
+});
+
+test("a fix's outcome the console knew settles its row whatever its file reads later: a lost commit is committed after the file moved on, a lost refusal is refused when the same bytes are written later (#1072)", live, async () => {
+  const f = await freshValkey();
+  try {
+    const { paths } = deployment(URL13);
+    let t = T0;
+    const now = () => t;
+    const record = buildRecord({ job: { id: "gh-refusal", data: { kind: "github", repo: "acme/web", target: { type: "issue", number: 42 }, trigger: { matched: { index: 0, type: "label" } } } }, result: { outcome: "policy", reason: "secret-unresolved" }, startedAt: new Date(T0 - 2000).toISOString(), endedAt: new Date(T0 - 1000).toISOString() });
+    record.touchScopeId = "a".repeat(64);
+    makeRecordWriter({ logsDir: paths.logsDir })(record);
+    // The real stores over a real Valkey, on a client whose writes of a fix's mark get no answer while `silent` is set:
+    // the commit or the refusal that follows a change. Its stage is a transaction and is not touched.
+    let silent = false;
+    const logged = [];
+    const redisFn = (url, options) => {
+      const real = makeRedisClient(url, options);
+      return new Proxy(real, { get(target, name) {
+        const value = Reflect.get(target, name);
+        if (typeof value !== "function") return value;
+        return name === "set" ? (...args) => (silent && String(args[0]).startsWith("zero-touch:fixes:meta:") ? Promise.reject(new Error("fix-store-timeout")) : value.apply(target, args)) : value.bind(target);
+      } });
+    };
+    const service = makeZeroTouchService({ paths, now, redisFn, log: (event, detail) => logged.push([event, detail]) });
+    const c = await start({ paths, a: { zeroTouch: service } });
+    const outcomes = join(paths.logsDir, "zero-touch-outcomes");
+    const files = () => (existsSync(outcomes) ? readdirSync(outcomes) : []).map((name) => JSON.parse(read(join(outcomes, name))).outcome).sort();
+    const rows = async () => {
+      const ids = await f.redis.zrevrange("zero-touch:fixes:index", 0, -1);
+      return Promise.all(ids.reverse().map(async (id) => ({ id, ...JSON.parse(await f.redis.get(`zero-touch:fixes:meta:${id}`)), proof: JSON.parse(await f.redis.get(`zero-touch:fixes:private:${id}`)) })));
+    };
+    const base = read(paths.settingsFile);
+    const change = (value) => ({ key: "maxTurns", value, becauseRun: "gh-refusal" });
+
+    // A change that landed and whose commit Valkey did not answer: its outcome is on the console's disk.
+    silent = true;
+    const made = await c.both("setting-set", change("35"));
+    silent = false;
+    assert.deepEqual([made.confirm.status, made.confirm.json().warning], [200, "tracking-incomplete"], made.confirm.text);
+    assert.deepEqual(files(), ["applied"]);
+    assert.deepEqual(logged.splice(0), [["zero_touch_fix_pending", { cause: "Error: fix-store-timeout" }]]);
+    // Someone changes the file again by hand: its bytes no longer show the change, and the byte rule alone left it open.
+    writeFileSync(paths.settingsFile, base);
+    t += 60_000;
+
+    // A change refused (the file moved between its preview and its confirm) whose refusal Valkey did not answer.
+    const p = await c.act("setting-set", change("36"));
+    assert.equal(p.status, 200, p.text);
+    writeFileSync(paths.settingsFile, `${JSON.stringify({ maxTurns: 31, maxCostUsd: "2" }, null, 2)}\n`);
+    silent = true;
+    const refused = await c.confirm("setting-set", p.json().ticket);
+    silent = false;
+    assert.equal(refused.status, 409, refused.text);
+    assert.deepEqual(files(), ["applied", "refused"]);
+    assert.deepEqual(logged.splice(0), [["zero_touch_fix_reject_pending", { cause: "Error: fix-store-timeout" }]]);
+    // And later the same change is made again, from the same file: the refused row's bytes are now the file's.
+    writeFileSync(paths.settingsFile, base);
+    t += 60_000;
+    const again = await c.both("setting-set", change("36"));
+    assert.equal(again.confirm.status, 200, again.confirm.text);
+    const [lost, cut, remade] = await rows();
+    assert.deepEqual([lost.state, cut.state, remade.state], ["pending", "pending", "applied"]);
+    assert.equal(cut.proof.afterDigest, sha256(read(paths.settingsFile)), "the refused change's bytes are in the file: the byte rule would commit it as a second fix");
+    assert.notEqual(lost.proof.afterDigest, sha256(read(paths.settingsFile)), "the lost commit's bytes are not: the byte rule would leave it open");
+    assert.deepEqual(files(), ["applied", "refused"], "the change made again wrote its outcome and removed it once its commit was answered");
+
+    // The page says what a settle does with each: one fix waits, one change that was not made waits, nothing is open.
+    const page = await service.read({ days: 30 });
+    assert.deepEqual([page.waiting.fixes, page.waiting.refused, page.fixesOpen, page.fixes.length], [1, 1, 0, 1]);
+    const settle = await c.act("zero-touch-settle", {});
+    assert.equal(settle.status, 200, settle.text);
+    assert.deepEqual(settle.json().summary.slice(1), ["1 fix whose change landed and whose accounting did not finish: each is listed under Fixes that worked.", "1 change that was not made and whose accounting did not finish: each is closed, and none is listed as a fix."]);
+    const settled = await c.confirm("zero-touch-settle", settle.json().ticket);
+    assert.equal(settled.status, 200, settled.text);
+    assert.deepEqual((await rows()).map((row) => row.state), ["applied", "refused", "applied"]);
+    assert.deepEqual(files(), [], "a settle removes the outcome of every row it settled");
+    const after = await service.read({ days: 30 });
+    assert.deepEqual([after.waiting.fixes, after.waiting.refused, after.fixesOpen, after.fixes.length, after.fixesPartial], [0, 0, 0, 2, false], "two fixes, never three");
     assert.deepEqual(logged, []);
   } finally { await f.done(); }
 });
@@ -5175,6 +5336,11 @@ test("a fix's stage that Valkey answered with one command's error says its row m
     const rows = await f.redis.keys("zero-touch:fixes:meta:*");
     assert.equal(rows.length, 1, "the row was written all the same");
     assert.equal(JSON.parse(await f.redis.get(rows[0])).state, "pending");
+    // Issue #1072: the change was not made, which the console knows, so it recorded that under the row's own id: a
+    // settle that finds the row refuses it, whatever its file reads by then.
+    const id = rows[0].slice("zero-touch:fixes:meta:".length);
+    assert.deepEqual(readdirSync(join(paths.logsDir, "zero-touch-outcomes")), [`${id}.json`]);
+    assert.equal(JSON.parse(read(join(paths.logsDir, "zero-touch-outcomes", `${id}.json`))).outcome, "refused");
   } finally { await f.done(); }
 });
 
@@ -5993,8 +6159,9 @@ test("a priorities plan or a revert that Valkey stops answering while it has onl
   }
 });
 
-test("the pause preview waits two seconds for its snapshot, the resume ten (#961, #1035)", async () => {
-  assert.deepEqual([PAUSE_SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_MS], [2_000, 10_000]);
+test("the pause preview waits the page's deadline less its grace for its snapshot, the resume ten (#961, #1035, #1072)", async () => {
+  assert.deepEqual([PAUSE_SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_MS], [5_000, 10_000]);
+  assert.equal(PAUSE_SNAPSHOT_TIMEOUT_MS, PAGE_DEADLINE_MS - PAGE_VIEW_GRACE_MS, "a preview answers within the time a page load has");
   const { paths } = deployment();
   // A snapshot that never answers: the pause is previewed without it, at the bound this console was given.
   const fleet = { snapshot: () => new Promise(() => {}) };
@@ -6004,34 +6171,110 @@ test("the pause preview waits two seconds for its snapshot, the resume ten (#961
   assert.equal(p.status, 200, p.text);
   assert.ok(Date.now() - t0 < 3000, `${Date.now() - t0} ms`);
   assert.ok(p.json().summary.includes(SWITCH_UNREAD_LINES.pause), p.text);
+  assert.ok(!p.json().summary.includes(SWITCH_SILENT_LINE), "a snapshot past its bound is not a Valkey known to be silent");
   assert.equal(SWITCH_UNREAD_LINES.pause, "The queues and running, delayed and held counts could not be read; a pause still reaches every queue the kill switch finds, and its answer says when the list of queues may be short");
 });
 
-// Issue #1035: the six seconds were waited in full on a Valkey that answers nothing, which is when the kill switch is
-// pressed, and through the tool they were waited twice.
-test("a pause on a Valkey that never answers is previewed at two seconds by the clock, without its snapshot, and a resume waits its ten (#1035)", async (t) => {
+/** Whether `promise` has settled after the microtasks a mocked clock's tick leaves to run. */
+const settledYet = async (promise) => {
+  let done = false;
+  promise.then(() => { done = true; }, () => { done = true; });
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  return done;
+};
+
+// Issue #1072: a preview and a confirm are two requests with a person between them, so the kill switch's "one bound" is
+// that a preview does not wait on a Valkey the reader already knows is silent. #1035's two seconds were still waited in
+// full on such a Valkey, and the confirm's bound after them.
+test("a fleet switch's preview on a reader that already knows Valkey is silent asks it nothing and answers at once, with why it has no counts (#1072)", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const settled = async (promise) => {
-    let done = false;
-    promise.then(() => { done = true; }, () => { done = true; });
-    for (let i = 0; i < 20; i += 1) await Promise.resolve();
-    return done;
+  let asked = 0;
+  const ctx = (knownSilent) => ({ a: { fleet: { knownSilent: () => knownSilent, snapshot: () => (asked += 1, new Promise(() => {})) }, paths: { valkeyUrl: "redis://h/0" }, urlShown: (u) => u } });
+  const pause = actionNamed("fleet-pause").preview({}, ctx(true));
+  assert.equal(await settledYet(pause), true, "no bound is waited");
+  assert.deepEqual((await pause).summary.slice(2), [SWITCH_SILENT_LINE, SWITCH_UNREAD_LINES.pause, "Audited as fleet-pause"]);
+  const resume = actionNamed("fleet-resume").preview({}, ctx(true));
+  assert.equal(await settledYet(resume), true);
+  const out = await resume;
+  assert.deepEqual([out.count, out.pausedBefore, out.summary.slice(2)], [null, null, [RESUME_WAITING_UNKNOWN.unread, SWITCH_SILENT_LINE, SWITCH_UNREAD_LINES.resume]]);
+  assert.equal(asked, 0, "neither asked the fleet for a snapshot");
+  // A reader that does not know is read, under the bounds: the pause's five seconds and the resume's ten.
+  const unknown = actionNamed("fleet-pause").preview({}, ctx(false));
+  t.mock.timers.tick(PAUSE_SNAPSHOT_TIMEOUT_MS - 1);
+  assert.equal(await settledYet(unknown), false, "not before the bound");
+  t.mock.timers.tick(1);
+  assert.equal(await settledYet(unknown), true, "at the bound");
+  assert.deepEqual((await unknown).summary.slice(2), [SWITCH_UNREAD_LINES.pause, "Audited as fleet-pause"], "a bound that fired says nothing of silence");
+  const later = actionNamed("fleet-resume").preview({}, ctx(false));
+  t.mock.timers.tick(SNAPSHOT_TIMEOUT_MS - 1);
+  assert.equal(await settledYet(later), false);
+  t.mock.timers.tick(1);
+  assert.ok((await later).summary.includes(RESUME_WAITING_UNKNOWN.timeout));
+  assert.equal(asked, 2);
+  // A fleet with no `knownSilent` (an older reader, a test's) is read as before.
+  const plain = actionNamed("fleet-pause").preview({}, { a: { fleet: { snapshot: async () => null }, paths: { valkeyUrl: "redis://h/0" }, urlShown: (u) => u } });
+  assert.deepEqual((await plain).summary.slice(2), [SWITCH_UNREAD_LINES.pause, "Audited as fleet-pause"]);
+});
+
+test("a fleet switch's preview asks its snapshot to stop at a registry read that got no answer, and says so when it did, never for any other failure (#1072)", async () => {
+  const opts = [];
+  const ctx = (snapshot) => ({ a: { fleet: { knownSilent: () => false, snapshot: (o) => (opts.push(o), snapshot()) }, paths: { valkeyUrl: "redis://h/0" }, urlShown: (u) => u } });
+  const silent = () => Promise.reject(RM.registryUnansweredError());
+  for (const name of ["fleet-pause", "fleet-resume"]) {
+    const out = await actionNamed(name).preview({}, ctx(silent));
+    assert.ok(out.summary.includes(SWITCH_SILENT_LINE), `${name}: ${JSON.stringify(out.summary)}`);
+    assert.equal(out.refusal, undefined, `${name}: previewed without its counts, never refused`);
+    const failed = await actionNamed(name).preview({}, ctx(() => Promise.reject(new Error("Command timed out"))));
+    assert.ok(!failed.summary.includes(SWITCH_SILENT_LINE), `${name}: a snapshot that failed otherwise is a read that failed`);
+  }
+  assert.deepEqual(opts.at(-1), { switchQueues: true, stopUnanswered: true });
+  // One queue's switch refuses without its queue's state, so it reads on past the registry as it did.
+  await actionNamed("queue-pause").preview({ queue: "pi-jobs" }, ctx(async () => ({ queueCounts: [{ queue: "pi-jobs", paused: false, counts: {} }], held: { rows: [] }, queue: {} })));
+  assert.equal(opts.at(-1).stopUnanswered, undefined);
+});
+
+test("the fleet reader knows its Valkey is silent only from a registry read that got no answer, and only for SILENCE_KNOWN_MS; a switch snapshot asked to stop there reads no queue (#1072)", async () => {
+  const { paths } = deployment();
+  let how = {};
+  let now = T0;
+  const asked = [];
+  const make = quietQueue();
+  const makeQueueFn = (conn, opts) => {
+    const q = make(conn, opts);
+    return { ...q, isPaused: async () => (asked.push(q.name), false), client: Promise.resolve({ status: "ready", once() {} }), disconnect() {} };
   };
-  const ctx = () => ({ a: { fleet: { snapshot: () => new Promise(() => {}) }, paths: { valkeyUrl: "redis://h/0" }, urlShown: (u) => u } });
-  const pause = actionNamed("fleet-pause").preview({}, ctx());
-  t.mock.timers.tick(1_999);
-  assert.equal(await settled(pause), false, "not before the bound");
-  t.mock.timers.tick(1);
-  assert.equal(await settled(pause), true, "at two seconds");
-  const out = await pause;
-  assert.ok(out.summary.includes(SWITCH_UNREAD_LINES.pause), JSON.stringify(out.summary));
-  assert.equal(out.refusal, undefined, "previewed without its counts, never refused");
-  const resume = actionNamed("fleet-resume").preview({}, ctx());
-  t.mock.timers.tick(9_999);
-  assert.equal(await settled(resume), false, "a resume keeps the ten: what it starts is read from the snapshot");
-  t.mock.timers.tick(1);
-  assert.equal(await settled(resume), true);
-  assert.ok((await resume).summary.includes(RESUME_WAITING_UNKNOWN.timeout));
+  const fleet = RM.createFleetReader({ valkeyUrl: "redis://unused", logsDir: paths.logsDir, triggersPath: paths.triggersPath }, { makeQueueFn, parseConnectionFn: () => ({}), redisFn: () => discoveryRedis(() => how, { beatAt: T0 }), nowFn: () => now, readOnly: true });
+  try {
+    assert.equal(fleet.knownSilent(), false, "a reader that has read nothing knows nothing");
+    how = { index: noAnswer };
+    await fleet.snapshot();
+    assert.equal(fleet.knownSilent(), true, "the registry read got no answer");
+    now += RM.SILENCE_KNOWN_MS - 1;
+    assert.equal(fleet.knownSilent(), true);
+    now += 1;
+    assert.equal(fleet.knownSilent(), false, "a verdict that old is no longer known");
+    now -= 60_000;
+    assert.equal(fleet.knownSilent(), false, "a clock that went back is no proof the verdict is fresh");
+    now = T0;
+    // Valkey ANSWERED each of these, so none is silence: an error reply to the index, a row's, a read in part.
+    for (const reads of [{ index: answeredWith("WRONGTYPE") }, { rows: { "host:h:hostw": answeredWith("WRONGTYPE") } }, { rows: { "host:h:hostw": noAnswer } }, {}]) {
+      how = reads;
+      await fleet.snapshot();
+      assert.equal(fleet.knownSilent(), false, JSON.stringify(Object.keys(reads)));
+    }
+    // A switch snapshot asked to stop on silence: its own registry read decides, before the scan and every queue read.
+    how = { index: noAnswer };
+    asked.length = 0;
+    await assert.rejects(fleet.snapshot({ switchQueues: true, stopUnanswered: true }), (err) => err.registryUnanswered === true && err.code === "REGISTRY_UNANSWERED");
+    assert.deepEqual(asked, [], "no queue was read");
+    // Without the ask it reads on, as the page's snapshot and a one-queue switch's do.
+    const read = await fleet.snapshot({ switchQueues: true });
+    assert.ok(Array.isArray(read.queueCounts) && asked.length > 0, "the queues it knows are read");
+    how = {};
+    assert.ok(Array.isArray((await fleet.snapshot({ switchQueues: true, stopUnanswered: true })).queueCounts), "a registry that answers reads on");
+  } finally {
+    await fleet.dispose();
+  }
 });
 
 // Issue #1035: a preview without a snapshot said "Undo: Resume the fleet" twice, its own line and the confirm view's.
@@ -6083,7 +6326,9 @@ test("a fleet pause or resume over a list that may be short says why in its bann
     ["this Valkey user may not read the index", { index: answeredWith("NOPERM") }, "the list of queues may be short: Valkey answers host:live with NOPERM. Waiting does not change that: fix this Valkey user's ACL, then pause again; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:live with NOPERM), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short-permission", "permission"],
     ["Valkey is busy for a moment", { index: answeredWith("BUSY") }, "the list of queues may be short: Valkey answers host:live with BUSY. A later read may succeed: pause the fleet again; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:live with BUSY), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short", undefined],
     ["a code of no class", { index: answeredWith("READONLY") }, "the list of queues may be short: Valkey answers host:live with READONLY. Pause the fleet again once the list can be read whole; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:live with READONLY), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short", undefined],
-    ["the index got no answer", { index: noAnswer }, "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers", "The host registry could not be read whole, so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short", undefined],
+    // Issue #1072: a registry read that got no answer is a preview that reads nothing more, so it has no registry line,
+    // and says why it has no counts (`SWITCH_SILENT_LINE`); the switch itself is what it was.
+    ["the index got no answer", { index: noAnswer }, "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers", null, "queues-may-be-short", undefined],
     ["one host's row holds another kind of value", { rows: { "host:h:hostw": answeredWith("WRONGTYPE") } }, "the list of queues may be short: Valkey answers host:h:hostw with WRONGTYPE. Waiting does not change that: remove or repair that key, then pause again; other queues may exist and were not paused", "The host registry could not be read whole (Valkey answers host:h:hostw with WRONGTYPE), so a host's queue may be missing here and these counts are floors; the switch flips every queue it finds", "queues-may-be-short-key", "key"],
     ["this Valkey user may not look for queues", { scan: answeredWith("NOPERM") }, "the list of queues may be short: Valkey answers the look for queues with NOPERM. Waiting does not change that: fix this Valkey user's ACL, then pause again; other queues may exist and were not paused", null, "queues-may-be-short-permission", "permission"],
     ["the look for queues got no answer", { scan: noAnswer }, "the list of queues may be short: the host registry or the look for queues could not be read whole, so other queues may exist and were not paused. Pause the fleet again once Valkey answers", null, "queues-may-be-short", undefined],
@@ -6093,6 +6338,10 @@ test("a fleet pause or resume over a list that may be short says why in its bann
     for (const [what, reads, note, registryLine, word, lasting] of CASES) {
       how = reads;
       const resumeNote = note.replace("Pause the fleet again", "Resume the fleet again").replace("pause the fleet again", "resume the fleet again").replace("then pause again", "then resume again").replace("were not paused", "were not resumed");
+      // The page the switch is pressed on reads the fleet first (issue #1072): what the reader knows of its Valkey is
+      // that read's, never the case before this one's.
+      await fleet.snapshot();
+      const silent = reads.index === noAnswer;
       // A person: the banner says it after "Paused the fleet", and the second row keeps the sentence.
       const paused = await rowsOf(() => c.both("fleet-pause", {}));
       assert.equal(paused.res.confirm.status, 200, `${what}: ${paused.res.confirm.text}`);
@@ -6101,12 +6350,15 @@ test("a fleet pause or resume over a list that may be short says why in its bann
       assert.deepEqual([paused.res.confirm.json().queuesMayBeShort, paused.res.confirm.json().queuesShortLasting], [true, lasting], what);
       // The preview's own line for the registry (the look for queues has had its line since issue #964).
       assert.equal(paused.res.preview.summary.find((line) => line.startsWith("The host registry")) ?? null, registryLine, `${what}: ${JSON.stringify(paused.res.preview.summary)}`);
+      assert.equal(paused.res.preview.summary.includes(SWITCH_SILENT_LINE), silent, `${what}: ${JSON.stringify(paused.res.preview.summary)}`);
+      await fleet.snapshot();
       const resumed = await rowsOf(() => c.both("fleet-resume", {}));
       assert.equal(resumed.res.confirm.json().change.summary, `Resumed the fleet, but ${resumeNote}`, what);
       assert.deepEqual(resumed.rows, [["write", "ok", null], ["write", "ok", kept(resumeNote)], ["write-applied", "ok", null]], what);
       // What to put right is inside what the row keeps, whatever follows it.
       if (lasting !== undefined) assert.match(kept(resumeNote), /Waiting does not change that: (?:remove or repair that key|fix this Valkey user's ACL|fix the Valkey user and password)[,.]/, what);
       assert.equal(resumed.res.preview.summary.find((line) => line.startsWith("The host registry")) ?? null, registryLine, what);
+      assert.equal(resumed.res.preview.summary.includes(SWITCH_SILENT_LINE), silent, what);
       // An agent's session: a closed word in its row, by the class where the cause stays, and the class in its answer.
       const byAgent = await rowsOf(async () => c.confirm("fleet-pause", (await c.act("fleet-pause", {}, agent)).json().ticket, agent));
       assert.equal(byAgent.res.status, 200, `${what}: ${byAgent.res.text}`);
@@ -6116,6 +6368,7 @@ test("a fleet pause or resume over a list that may be short says why in its bann
     }
     // A whole discovery is the flat success it always was, with one row and no line of the registry.
     how = {};
+    await fleet.snapshot();
     const whole = await rowsOf(() => c.both("fleet-pause", {}));
     assert.equal(whole.res.confirm.json().change.summary, "Paused the fleet");
     assert.deepEqual([whole.rows, whole.res.preview.summary.some((line) => line.startsWith("The host registry")), whole.res.confirm.json().queuesShortLasting], [[["write", "ok", null], ["write-applied", "ok", null]], false, undefined]);

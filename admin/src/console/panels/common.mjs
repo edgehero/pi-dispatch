@@ -152,6 +152,18 @@ export const HOSTS_UNREAD_TEXT = "The hosts could not be read, so what they hold
  */
 export const hostsUnread = (snapshot) => !snapshot || (Boolean(snapshot.queue?.fleetDegraded) && snapshot.queue?.registryReadInPart !== true && snapshot.hostsReadAt === null);
 
+/**
+ * Whether THIS read of the registry failed after an earlier one succeeded (issue #1073): `queue.fleetDegraded`, not a
+ * read in part, with `hostsReadAt` set. The rows the reader holds are then as they were last read, which every list of
+ * hosts drawn from them says ("as last read"), and none of them is "no live host": that was the last read's answer, not
+ * this one's. `hostsUnread` is false here, which is why it cannot be the test.
+ */
+export const hostsAsLastRead = (snapshot) => Boolean(snapshot?.queue?.fleetDegraded) && snapshot?.queue?.registryReadInPart !== true && snapshot.hostsReadAt !== null;
+
+/** A list of hosts' names over such a read, or none, with the words that say so (issue #1073). */
+export const HOSTS_AS_LAST_READ = "as the registry was last read";
+export const NO_HOST_AS_LAST_READ = "no host when the registry was last read";
+
 /** Whether the snapshot's registry was read in part (issue #1062): it answered, some hosts' rows did not in time. */
 export const registryReadInPart = (snapshot) => Boolean(snapshot?.queue?.fleetDegraded) && snapshot?.queue?.registryReadInPart === true;
 
@@ -834,19 +846,89 @@ export const deploymentUnread = (view) => view?.data?.readFailed === true && (vi
 export const changesOffered = (view) => canAct(view) && !deploymentUnread(view);
 
 /**
- * Why a page could not read the deployment (issue #988), so a sentence can be true of the cause: "late", the page's
- * deadline cut the read, of a Valkey that may well be answering; "error", Valkey answered the read with an error;
- * "silent", nothing answered (stopped, killed, refused, not reached). Null for a page that read it. The loader says
- * the first two (`snapshotFailure`), and what is left is the third.
+ * The causes a page's snapshot read can fail by (issue #988, and issue #1073's fourth): "silent", nothing answered
+ * (stopped, killed, refused, not reached); "error", Valkey answered the read with an error reply, whose code the loader
+ * keeps; "late", the page's deadline cut the read of a Valkey that may well be answering; "fault", the console's own
+ * code failed while it read (an engine error: a TypeError and its kin), which is no fact about Valkey at all.
  */
-export const deploymentUnreadWhy = (view) => (!deploymentUnread(view) ? null : view.data.snapshotFailure === "late" ? "late" : view.data.snapshotFailure === "error" ? "error" : "silent");
+export const UNREAD_CAUSES = Object.freeze(["silent", "error", "late", "fault"]);
+
+const REPLY_CODE_RE = /^[A-Z][A-Z0-9_]{0,31}$/;
+
+/**
+ * What a load says of its failed snapshot read (`data.snapshotFailure`, issue #1073): `{ kind, code }`, `code` the reply's
+ * code for an "error" (null where the reply had none) and null for every other kind. The loader sets it for every kind
+ * but "silent", so no mark is "silent". A string is the shape before issue #1073 (`"late"`, `"error"`), read the same.
+ * Not gated on whether the page could not read (`deploymentUnread`): a panel drawn with no snapshot asks it too.
+ */
+export function unreadCauseOf(data) {
+  const f = data?.snapshotFailure;
+  const kind = typeof f === "string" ? f : typeof f?.kind === "string" ? f.kind : "silent";
+  if (!UNREAD_CAUSES.includes(kind)) return { kind: "silent", code: null };
+  return { kind, code: kind === "error" && typeof f?.code === "string" && REPLY_CODE_RE.test(f.code) ? f.code : null };
+}
+
+/**
+ * Why a page could not read the deployment (issue #988), so a sentence can be true of the cause: one of
+ * `UNREAD_CAUSES`, or null for a page that read it.
+ */
+export const deploymentUnreadWhy = (view) => (!deploymentUnread(view) ? null : unreadCauseOf(view.data).kind);
 
 /** The start of a sentence for each cause. "Valkey could not be read" was said of a Valkey that answered late. */
 export const DEPLOYMENT_UNREAD_WORDS = Object.freeze({
   silent: "Valkey could not be read",
   error: "Valkey answered this page's read with an error",
   late: "This page could not read the deployment in time",
+  fault: "This console failed while it read the deployment",
 });
+
+/** The class of a reply's code in a few words, for a sentence that names the code and its class (issue #1073). */
+const REPLY_CLASS_WORDS = Object.freeze({ key: "a key of another type", permission: "a permission or sign-in refusal", passing: "a state that passes", other: "a reply of no class this console knows" });
+
+/**
+ * The start of a sentence for a cause, with the reply's code where Valkey answered with one: "Valkey answered this
+ * page's read with WRONGTYPE".
+ */
+export const unreadLead = (cause) => (cause.kind === "error" && cause.code !== null ? `Valkey answered this page's read with ${cause.code}` : DEPLOYMENT_UNREAD_WORDS[cause.kind] ?? DEPLOYMENT_UNREAD_WORDS.silent);
+
+/**
+ * What a sentence adds after its lead, by the cause (issue #1073): of an error, the code's class and what the class
+ * may claim (`replyErrorWords`, the worker's table: what it means and whether waiting ends it), and of a fault, that
+ * it is the console's and not Valkey's, and that its log names it. Null for the other two, whose lead says it all.
+ */
+export function unreadAfter(cause) {
+  if (cause.kind === "fault") return UNREAD_FAULT_TEXT;
+  if (cause.kind !== "error" || cause.code === null) return null;
+  const w = replyErrorWords(cause.code);
+  const named = `${cause.code} is ${REPLY_CLASS_WORDS[w.class]}`;
+  if (w.class === "key" || w.class === "permission") return `${named}: ${w.means}. ${w.waiting}: an operator has to ${w.first} first.`;
+  if (w.class === "passing") return `${named}: ${w.means}. ${w.waiting}.`;
+  return `${named}, so nothing is said here of how long it lasts.`;
+}
+
+/** After a fault's lead: whose failure it is, and where its cause is named. */
+export const UNREAD_FAULT_TEXT = "Valkey is not the cause known here: the console's own code failed, and its log names the error.";
+
+/** Whether waiting cannot end the cause: a reply of a lasting class (a key of another type, a permission). */
+const lastingCause = (cause) => cause.kind === "error" && cause.code !== null && replyErrorWords(cause.code).lasting === true;
+
+/**
+ * THE ONE SENTENCE A PAGE SAYS OF A SNAPSHOT IT COULD NOT READ (issue #1073), by its cause (`unreadCauseOf`). The five
+ * banners said "Valkey could not be read" of a Valkey that did not answer, one that answered with an error, a read the
+ * page's deadline cut and a console fault alike. A site gives its own words for the case it was written for, the
+ * silent one (`lead`, `prefix`, `then`), which are kept byte for byte, and its own next step (`retry`), which a lasting
+ * reply drops: waiting does not end a key of another type or a permission. `more` is said before that step.
+ */
+export function unreadText(view, { lead = DEPLOYMENT_UNREAD_WORDS.silent, prefix = "", then = null, more = null, retry = null } = {}) {
+  const cause = unreadCauseOf(view?.data);
+  const said = cause.kind === "silent" ? lead : unreadLead(cause);
+  const head = prefix === "" || /^Valkey\b/.test(said) ? `${prefix}${said}` : `${prefix}${said.charAt(0).toLowerCase()}${said.slice(1)}`;
+  return [`${head}${then ? `, ${then}` : ""}.`, unreadAfter(cause), more, lastingCause(cause) ? null : retry].filter(Boolean).join(" ");
+}
+
+/** The step a live page gives, and the one a page drawn once gives. */
+export const NEXT_REFRESH_TEXT = "The next refresh tries again.";
+export const RELOAD_TEXT = "Reload to try again.";
 
 /**
  * Said on a page whose forms are left out because it could not read the deployment (`changesOffered`), where each
@@ -855,7 +937,7 @@ export const DEPLOYMENT_UNREAD_WORDS = Object.freeze({
  */
 export function noChangeText(view, file = "triggers file") {
   const why = deploymentUnreadWhy(view) ?? "silent";
-  return `${DEPLOYMENT_UNREAD_WORDS[why]}, so ${why === "late" ? "it" : "this page"} offers no change. The ${file} can still be changed by hand. Reload to try again.`;
+  return unreadText(view, { then: `so ${why === "late" ? "it" : "this page"} offers no change`, more: `The ${file} can still be changed by hand.`, retry: RELOAD_TEXT });
 }
 
 /** The sentence that sends an operator to /setup's doctor on this console's own host (issue #849). */
@@ -910,14 +992,17 @@ function facts(pairs) {
   return html`<dl class="facts">${pairs.filter(([, v]) => v !== null && v !== undefined).map(([k, v]) => html`<dt>${k}</dt><dd>${v}</dd>`)}</dl>`;
 }
 
-/** The sentence a panel shows when the snapshot could not be read at all. */
-const SNAPSHOT_MISSING = "The deployment's Valkey could not be read, so this panel has nothing to show. The next refresh tries again.";
+/** The sentence a panel shows when the snapshot could not be read at all, for a Valkey that did not answer. */
+export const SNAPSHOT_MISSING = "The deployment's Valkey could not be read, so this panel has nothing to show. The next refresh tries again.";
+
+/** The same in the words of the cause (`unreadText`, issue #1073): `SNAPSHOT_MISSING` for a Valkey that did not answer. */
+export const snapshotMissingText = (view) => unreadText(view, { lead: "The deployment's Valkey could not be read", then: "so this panel has nothing to show", retry: NEXT_REFRESH_TEXT });
 
 /** Wrap a snapshot panel: the fixed sentence when there is no snapshot, else the renderer. */
 function fromSnapshot(title, render) {
   return (view) => {
     const snap = view.data?.snapshot;
-    if (!snap) return titled(title, html`<p class="warn">${SNAPSHOT_MISSING}</p>`);
+    if (!snap) return titled(title, html`<p class="warn">${snapshotMissingText(view)}</p>`);
     return titled(title, render(snap, view));
   };
 }

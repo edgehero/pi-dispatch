@@ -54,7 +54,7 @@ test("the panel goldens are the states the cards name, by name: the ledgers and 
   const link = ["login-code-used.anonymous", "login-code-expired.anonymous", "login-code-signed-in.anonymous", "login-code-nocode.anonymous", ...["rate", "tokens", "audit", "other"].map((k) => `login-code-refused-${k}.anonymous`), "login-code-unreachable.anonymous"];
   // The overview's states (issue #737): all clear and the first run for both roles where the role changes the page, the
   // waitlists with each kind of wait alone (`DEFER_BUCKETS`), and the two hosts the registry has something to say of.
-  const overview = ["overview-all-clear.operator", "overview-all-clear.viewer", "setup-nothing-ready.operator", "setup-partial.operator", "setup-partial.viewer", ...DEFER_BUCKETS.map((b) => `waitlist-${b}.operator`), "overview-host-skew.operator", "overview-host-no-expiry.operator", "overview-host-long-names.operator", "overview-running-unread.operator"];
+  const overview = ["overview-all-clear.operator", "overview-all-clear.viewer", "setup-nothing-ready.operator", "setup-partial.operator", "setup-partial.viewer", ...DEFER_BUCKETS.map((b) => `waitlist-${b}.operator`), "overview-host-skew.operator", "overview-host-no-expiry.operator", "overview-host-long-names.operator", "overview-running-unread.operator", "overview-no-snapshot.operator", "overview-snapshot-error.operator"];
   // The runs page's footer states, the parked page's answer states, the run-not-found page for both roles and for a
   // short link (issue #882: none found, and a queue that could not be read), and three
   // more bars: a preview the fleet did not answer in time, a resume over a scan that did not finish, and one over more

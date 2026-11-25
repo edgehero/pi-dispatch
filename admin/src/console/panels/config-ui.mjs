@@ -3,6 +3,7 @@ import { html as escapedHtml } from "../html.mjs";
 // Keep indented source readable without emitting whitespace-only lines when an optional fragment is absent.
 const html = (strings, ...values) => escapedHtml(strings.map(s => s.replace(/[ \t]*\n[ \t]*/g, "\n")), ...values);
 import * as ui from "../kit.mjs";
+import { RELOAD_TEXT, unreadText } from "./common.mjs";
 export function field(
   name,
   label,
@@ -141,6 +142,8 @@ export const table = (label, heads, rows, empty) =>
 export const facts = (pairs) => ui.facts(pairs);
 /** Above a card drawn from the files alone (issue #844): what it shows, and why it offers no change. */
 export const FILES_ONLY_TEXT = "Valkey could not be read, so this shows what the file holds and offers no change. Reload to try again.";
+/** The same in the words of the cause (issue #1073): `FILES_ONLY_TEXT` for a Valkey that did not answer. */
+export const filesOnlyText = (view) => unreadText(view, { then: "so this shows what the file holds and offers no change", retry: RELOAD_TEXT });
 /**
  * The snapshot a file-backed card draws from where the snapshot itself failed (issue #844): the reader's `fileViews`
  * under the snapshot's own keys, or null where there is none (they are only read when the snapshot failed). Nothing
@@ -160,10 +163,8 @@ export const fromSnapshot = (title, render, { files = false } = {}) => (view) =>
     body: view.data?.snapshot
       ? render(view.data.snapshot, view)
       : only
-        ? html`<p class="muted">${FILES_ONLY_TEXT}</p>${render(only, { ...view, readOnly: true })}`
-        : html`<p class="muted">
-          The deployment's Valkey could not be read. Reload to try again.
-        </p>`,
+        ? html`<p class="muted">${filesOnlyText(view)}</p>${render(only, { ...view, readOnly: true })}`
+        : html`<p class="muted">${unreadText(view, { lead: "The deployment's Valkey could not be read", retry: RELOAD_TEXT })}</p>`,
   });
 };
 export const rowDelete = (action, index) =>

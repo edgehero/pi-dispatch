@@ -939,8 +939,16 @@ const SILENT_CODES = Object.freeze(["ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "
  */
 const UNREACHED_CODES = Object.freeze(["ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "EHOSTDOWN", "ECONNABORTED", "EPROTO", "CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_GET_ISSUER_CERT", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "UNABLE_TO_VERIFY_LEAF_SIGNATURE"]);
 const TLS_CODE = /^ERR_(?:SSL|TLS)_[A-Z0-9_]{1,60}$/;
+/**
+ * ioredis' refusal of a command on a client that has no offline queue and no stream it can write to (issue #1072): a
+ * connection that is closed, reconnecting, or still in its handshake. Read at the pinned ioredis (5.11.1,
+ * `built/Redis.js`, `sendCommand`): it is raised in the branch for a stream that is not writable, which rejects the
+ * command and returns before the branch that writes it, and nowhere else in the client. So a command refused with it
+ * was never written, and `admin/test/job-actions.test.mjs` holds that text to the installed copy.
+ */
+export const STREAM_NOT_WRITABLE = "Stream isn't writeable and enableOfflineQueue options is false";
 /** ioredis' words for the same, where it gives no code: a command its bound ended, one on a connection that closed, one on a client with no connection and no offline queue. */
-const SILENT_WORDS = Object.freeze(["Command timed out", "Connection is closed.", "Stream isn't writeable and enableOfflineQueue options is false"]);
+const SILENT_WORDS = Object.freeze(["Command timed out", "Connection is closed.", STREAM_NOT_WRITABLE]);
 
 /**
  * Whether `err` is KNOWN to be Valkey's silence (issue #987): a mark this project set (`valkeyNotSent`,
@@ -979,6 +987,43 @@ const CONNECT_LATE = Symbol("connect-late");
 
 /** What `connectedQueue` answers for a queue whose connection ended before it was ever ready (issue #987). */
 export const CONNECT_ENDED = "the queue's connection closed before it was ready; nothing was queued";
+
+/** Why a paid enqueue queued nothing when its connection died between the connect and the add (issue #1072, `addNeverLeft`). */
+export const ADD_NOT_SENT_WHY = "the queue's connection closed after it was ready and before the add was sent";
+/** The same as a whole answer, `{ unreachable }`'s words. */
+export const ADD_NOT_SENT = `${ADD_NOT_SENT_WHY}; nothing was queued`;
+
+/**
+ * Whether the error the FIRST add of a paid enqueue threw proves that add never left the console (issue #1072): a
+ * connection that died in the moment after `connectedQueue` found it ready. Such an add is refused by its client with
+ * `STREAM_NOT_WRITABLE`, before anything is written, and was answered "may or may not have been queued", since the
+ * rule after an add was started took every error but Valkey's own reply as an answer that was lost.
+ *
+ * What makes it proof, each read at the pins: ioredis raises those words only for a command it did not write (above);
+ * the error is made for that one command, never shared, and a command that WAS written carries `valkeyMayStillRun`
+ * from the bounded client's hook (`connection.mjs`), checked here as well; and BullMQ 5.80.4's `Queue.add` of a job
+ * with no parent and no repeat sends ONE command, its add script (`Job.create`, `Scripts.addJob`, `execCommand`), so
+ * the add's first command is the one refused and nothing of it was sent. Only the first add: a forge job's semantic
+ * repair releases a window key between its adds, so a later one refused this way leaves that release behind.
+ * "Connection is closed." stays an answer that may have been lost: ioredis also rejects with it every command that was
+ * on a connection that closed, written ones included.
+ */
+export const addNeverLeft = (err) => err !== null && typeof err === "object" && err.message === STREAM_NOT_WRITABLE && err.valkeyMayStillRun !== true && !refusedByValkey(err);
+
+/**
+ * Drop the queue of an add that `addNeverLeft` (issue #1072), beside the close every enqueue starts: that close sends
+ * QUIT, which the client refuses as it refused the add (its connection is reconnecting), and BullMQ 5.80.4's
+ * `RedisConnection.close` swallows a refusal of that kind and takes the client's listeners away. The client then
+ * reconnected on its own and held a connection nobody owned, and printed ioredis' "Unhandled error event" for each
+ * attempt that failed. A disconnect ends the reconnecting. Started, never awaited; never throws.
+ */
+export function dropDeadQueue(queue) {
+  try {
+    Promise.resolve(queue?.disconnect?.()).catch(() => {});
+  } catch {
+    // nothing left to drop
+  }
+}
 
 /**
  * The first phase of a paid enqueue (issue #961): one queue of the console's bounded kind (`consoleQueueConnection`),
@@ -1736,7 +1781,8 @@ export async function planRerun({
  * queued, `{ refusal, deduplicated: true, jobId, survivingJobId? }` naming why: the local one-minute window, the cron
  * minute's, or a forge job's 10-minute semantic window (the same target and flow ran or is running). `{ refusal }` for a
  * plan that is not one, and for a forge job its helper refused before any add (`forgeUnsent`, issue #987);
- * `{ unreachable }` for Valkey, with nothing sent; `{ invalid, partial }` once an add was started and not confirmed.
+ * `{ unreachable }` for Valkey, with nothing sent (an add its client refused before it left among them, issue #1072:
+ * `addNeverLeft`); `{ invalid, partial }` once an add was started and not confirmed.
  * A fork of a run is queued through here as a forge plan (`enqueueRunFork`), so all of it holds for a fork. `queue` is
  * the queue the job is on: the plan's, or the queue of an approval's owner host when the helper routed the job there.
  * `counted` (issue #987): the caller counted this start against the hour's `dispatch_run` allowance (an agent's
@@ -1764,6 +1810,8 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
   let sent = false;
   let lost = false;
   let forging = false;
+  // How many adds were started (issue #1072): only the first one refused before it left says nothing was queued.
+  let adds = 0;
   const done = async (result) => {
     if (!intent) return result;
     const pending = intent;
@@ -1786,6 +1834,7 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
     // only say less than its error does.
     if (kind === "local" || kind === "cron") {
       sent = true;
+      adds = 1;
       const { id, existing } = kind === "local"
         ? await enqueueLocalJobReporting(queue, { folder: plan.job.folder, flow: plan.job.flow, task: plan.job.task, ...randomRerunFields(plan.job), now: new Date(now()) })
         : await enqueueTriggerRunReporting(queue, plan.schedule, { now: new Date(now()) });
@@ -1799,7 +1848,7 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
     // A forge job's mark is set by the helper, right before each add (issue #987): its builder, its read of a durable
     // approval and its routed queue's connect come first, and each throws with nothing sent (`forgeUnsent`).
     forging = true;
-    const res = await enqueueForgeJob(queue, plan.forge, plan.job, { routeFn: route.open, onAdd: () => { sent = true; } });
+    const res = await enqueueForgeJob(queue, plan.forge, plan.job, { routeFn: route.open, onAdd: () => { sent = true; adds += 1; } });
     if (res.deduplicated) return { refusal: `the same target and flow ran or is running within the last 10 minutes (job ${res.survivingJobId}), so the queue's semantic window took this re-run as a duplicate and nothing was queued. Try again once that window has passed`, deduplicated: true, jobId: res.jobId, survivingJobId: res.survivingJobId };
     // The queue the job is on: the routed one where the helper sent it to an approval's owner host, which is where its
     // cancel (the banner's Undo) has to look.
@@ -1813,6 +1862,11 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
       // did not answer, the abort is started and not waited for, as after a lost answer.
       lost = unansweredBeforeAdd(err);
       return forgeUnsent(err);
+    }
+    // Issue #1072: the add was refused by its client before it left, on a connection that died after the connect.
+    if (adds === 1 && addNeverLeft(err)) {
+      dropDeadQueue(queue);
+      return { unreachable: ADD_NOT_SENT };
     }
     // Only Valkey's own reply is an answer: after any other throw no further command is waited for.
     lost = !refusedByValkey(err);
@@ -2056,8 +2110,8 @@ async function answeredWindow(redis, { logsDir, fs, now, timeoutMs }) {
  * What it says is what was sent (issue #987). Before any add: `{ unreachable }` for a queue that did not connect, its
  * own or the one an approval is routed to, and `{ refusal }` for an approval that is no longer the pending one
  * (`APPROVAL_NOT_PENDING`), one whose state could not be read (`APPROVAL_UNREAD`) and a job its builder refused, each
- * ending "nothing was queued". Once an add was started only Valkey's own reply says that; anything else is
- * `enqueueUnconfirmed`.
+ * ending "nothing was queued". Once an add was started only Valkey's own reply says that, and since issue #1072 a first
+ * add its client refused before it left (`addNeverLeft`, `ADD_NOT_SENT`); anything else is `enqueueUnconfirmed`.
  */
 export async function enqueueParkedAnswer(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS } = {}) {
   if (plan?.kind !== "parked-answer" || !(plan.job?.parkedReply === true || /^[a-f0-9]{64}$/.test(plan.job?.approvalRequestId ?? "")) || !COMMENT_DELIVERY[plan.forge]) return { refusal: "not a parked-answer plan" };
@@ -2071,13 +2125,19 @@ export async function enqueueParkedAnswer(plan, { url, queueFn = makeQueue, pars
   // approval and its routed queue's connect come first, and each throws with nothing sent (`forgeUnsent`). Set before
   // the helper was called, a stale approval read as "may or may not have been queued".
   let sent = false;
+  // How many adds were started (issue #1072): only the first one refused before it left says nothing was queued.
+  let adds = 0;
   try {
-    const res = await enqueueForgeJob(queue, plan.forge, plan.job, { routeFn: route.open, onAdd: () => { sent = true; } });
+    const res = await enqueueForgeJob(queue, plan.forge, plan.job, { routeFn: route.open, onAdd: () => { sent = true; adds += 1; } });
     if (res.deduplicated) return { refusal: `an answer to this issue is already queued or running (job ${res.survivingJobId}), so the queue's semantic window took this one as a duplicate and nothing was queued`, deduplicated: true, jobId: res.jobId, survivingJobId: res.survivingJobId };
     return { ok: true, jobIds: [res.jobId], queue: res.queue ?? plan.queue };
   } catch (err) {
     if (!sent) return forgeUnsent(err);
     if (refusedByValkey(err)) return { unreachable: `${boundedText(err?.message ?? String(err))}; nothing was queued` };
+    if (adds === 1 && addNeverLeft(err)) {
+      dropDeadQueue(queue);
+      return { unreachable: ADD_NOT_SENT };
+    }
     return enqueueUnconfirmed(`the answer to ${String(plan.jobId)}`);
   } finally {
     // Started, never awaited: the routed queue the console opened, and its first.

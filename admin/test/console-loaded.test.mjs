@@ -518,3 +518,16 @@ test("the page CSS is the exact published generator source, served on the pages 
   assert.equal(PAGE_CSS.project, LOADED_CSS);
   assert.doesNotMatch(LOADED_CSS, /\.c2-/, "nothing of the sample pages' stylesheet: the console ships none of it");
 });
+
+test("issue #998: dispatch_runs gives the credential source as its word alone, by id and as a list, never the declared variable's name", () => {
+  const declared = { ...S.noFlow(), mainCredential: { source: "run-secret", variable: "OPENAI_API_KEY" } };
+  for (const read of [modelRunRecord(declared), modelRunRecord(declared, { list: true }), runForAgent(declared)]) {
+    assert.deepEqual(read.mainCredential, { source: "run-secret" });
+    assert.equal(JSON.stringify(read).includes("OPENAI_API_KEY"), false);
+  }
+  // A record that carries nothing else this read reshapes is reshaped for the source alone.
+  const plain = { jobId: "gh-plain", outcome: "completed", mainCredential: { source: "run-secret", variable: "ANTHROPIC_API_KEY" } };
+  assert.deepEqual(modelRunRecord(plain), { jobId: "gh-plain", outcome: "completed", mainCredential: { source: "run-secret" } });
+  assert.deepEqual(modelRunRecord({ ...plain, mainCredential: { source: "pi-login" } }).mainCredential, { source: "pi-login" });
+  assert.equal(Object.hasOwn(modelRunRecord({ ...plain, mainCredential: { source: "vault", variable: "X" } }), "mainCredential"), false);
+});

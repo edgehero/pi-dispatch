@@ -632,6 +632,19 @@
       "shows": [
         "not known: the hosts could not be read"
       ]
+    },
+    {
+      "el": "venue-registry-unreadable.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueSummary",
+      "golden": [
+        "panels/venue-registry-unreadable.operator"
+      ],
+      "panel": "p-venue",
+      "shows": [
+        "The host registry could not be read; this shows the fleet as it was last seen."
+      ]
     }
   ]
 }

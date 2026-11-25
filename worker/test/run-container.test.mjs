@@ -74,6 +74,29 @@ test("issue #997: the declared role credential's name reaches the env builder, s
 	for (const call of [{ job }, { job: { ...job, secondaryCredential: "OPENROUTER_API_KEY" } }]) await assert.rejects(() => run({ ...call, prepared: { ...PREPARED }, secrets: { OPENROUTER_API_KEY: "sk-or-role" }, name: "host-env", signal: new AbortController().signal }), (error) => error.piDispatchConfig === true);
 });
 
+test("issue #998: a container's answer says where its main credential came from on every way out after the spawn, and never before it", { skip }, async () => {
+	const job = { kind: "local", provider: "openrouter", model: "deepseek/deepseek-chat", maxTurns: 5 };
+	const declared = { secrets: { OPENROUTER_API_KEY: "sk-or-declared-private" }, mainCredential: "OPENROUTER_API_KEY" };
+	const call = (over = {}) => ({ job, prepared: { ...PREPARED }, ...declared, name: "credential", signal: new AbortController().signal, ...over });
+	// Each exit of a spawned container: a clean one, a policy stop, an infra exit, a kill the worker did not ask for.
+	for (const code of [0, 2, 1, 137]) {
+		const result = await mod.makeRunContainer({ image: "pi-job:x", hostEnv: { PATH: "/usr/bin" }, authFromPi: false, spawnFn: fakeSpawn({}, code) })(call());
+		assert.deepEqual([result.code, result.mainCredentialSource], [code, { source: "run-secret", variable: "OPENROUTER_API_KEY" }], `exit ${code}`);
+		assert.equal(JSON.stringify(result).includes("private"), false, "a name, never the value");
+	}
+	// The host's own key on the same paths, and a copying venue's collect: its answer carries it, and so does its throw.
+	const hosted = mod.makeRunContainer({ image: "pi-job:x", hostEnv: { OPENROUTER_API_KEY: "sk-or-host" }, authFromPi: false, spawnFn: fakeSpawn({}, 0), collectRun: async (result) => ({ code: result.code, aborted: result.aborted, collected: true }) });
+	const collected = await hosted(call({ secrets: {}, mainCredential: null }));
+	assert.deepEqual([collected.collected, collected.mainCredentialSource], [true, { source: "host-env" }]);
+	const failing = mod.makeRunContainer({ image: "pi-job:x", hostEnv: { OPENROUTER_API_KEY: "sk-or-host" }, authFromPi: false, spawnFn: fakeSpawn({}, 0), collectRun: async () => { throw new Error("output collection failed"); } });
+	await assert.rejects(() => failing(call({ secrets: {}, mainCredential: null })), (error) => error.message === "output collection failed" && error.mainCredentialSource?.source === "host-env");
+	// A job stopped before its container, and one whose builder refused, carry none.
+	const ac = new AbortController();
+	ac.abort();
+	assert.equal("mainCredentialSource" in await mod.makeRunContainer({ image: "pi-job:x", hostEnv: { PATH: "/usr/bin" }, spawnFn: fakeSpawn({}, 0) })(call({ signal: ac.signal })), false);
+	await assert.rejects(() => mod.makeRunContainer({ image: "pi-job:x", hostEnv: { PATH: "/usr/bin" }, authFromPi: false, spawnFn: fakeSpawn({}, 0) })(call({ secrets: {}, mainCredential: null })), (error) => error.piDispatchConfig === true && error.mainCredentialSource === undefined);
+});
+
 /** A fake `docker` child: records argv, lets the test drive its exit. */
 function fakeSpawn(recorder, exitCode = 0) {
 	return (cmd, args) => {
@@ -180,20 +203,20 @@ test("launches docker with the isolation argv and returns the container's exit c
 test("exit 1 (infra) is returned, not thrown -- it is retryable, not a spawn error", { skip }, async () => {
 	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn({}, 1) });
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
-	assert.deepEqual(result, { code: 1, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null });
+	assert.deepEqual(result, { code: 1, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null, mainCredentialSource: { source: "host-env" } });
 });
 
 test("close 137 while the worker aborted => {code:137, aborted:true} (our docker stop is POLICY)", { skip }, async () => {
 	const ac = new AbortController();
 	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnAbortedThenClose(ac, 137) });
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: ac.signal });
-	assert.deepEqual(result, { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null });
+	assert.deepEqual(result, { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null, mainCredentialSource: { source: "host-env" } });
 });
 
 test("close 137 with a signal that never aborted => {code:137, aborted:false} (kernel OOM stays infra)", { skip }, async () => {
 	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn({}, 137) });
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
-	assert.deepEqual(result, { code: 137, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null });
+	assert.deepEqual(result, { code: 137, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null, mainCredentialSource: { source: "host-env" } });
 });
 
 test("refuses before spawning if the provider is unconfigured (pre-spend guard)", { skip }, async () => {
@@ -459,7 +482,7 @@ test("hostile sink: a throwing write and a rejecting close neither hang nor cras
 		spawnFn: fakeSpawnWithData({}, { chunks: ["x"], exitCode: 0 }),
 	});
 	const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
-	assert.deepEqual(result, { code: 0, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null }, "the swallowed sink faults leave code/aborted intact and turns/tokens/session/usage/context/exitReason null");
+	assert.deepEqual(result, { code: 0, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null, mainCredentialSource: { source: "host-env" } }, "the swallowed sink faults leave code/aborted intact and turns/tokens/session/usage/context/exitReason null");
 });
 
 test("never-started: the sink is still closed (best-effort teardown) and the reject reason is unchanged", { skip }, async () => {
@@ -692,6 +715,19 @@ test("a never-started exit whose container is still there is stopped and removed
 	assert.ok(!other.calls.some((a) => a[0] === "ps"), "exit 1 is the runner's own code: never checked");
 	const declared = await runWith({ runCode: 125, steps: { ps: psOf("running") }, neverStartedExits: [] });
 	assert.equal("detached" in declared.result, false, "an adapter that declares no never-started exits is never checked");
+});
+
+test("issue #998: a container that never started names no credential source, and one found detached after that exit does", { skip }, async () => {
+	// Nothing created, or the ID no longer listed: the runtime's never-started exit, with nothing spent on any key.
+	for (const opts of [{ runCode: 125, cid: null }, { runCode: 127, steps: { ps: psOf("created") } }, { runCode: 126, steps: { ps: { code: 0, stdout: "" } } }]) {
+		const { result } = await runWith(opts);
+		assert.deepEqual([result.code, "detached" in result, "mainCredentialSource" in result], [opts.runCode, false, false], JSON.stringify(opts));
+	}
+	// A container still there after that exit did start: it is stopped, reported detached, and keeps its source.
+	const detached = await runWith({ runCode: 125, steps: { ps: psOf("running") } });
+	assert.deepEqual([detached.result.detached, detached.result.mainCredentialSource], [true, { source: "host-env" }]);
+	// The same code from a venue that declares it no never-started exit is the job's own, and keeps it.
+	assert.deepEqual((await runWith({ runCode: 125, neverStartedExits: [] })).result.mainCredentialSource, { source: "host-env" });
 });
 
 test("the detached check is bounded: a ps that never answers is given up on and still stops the container (#345)", { skip, timeout: 10_000 }, async () => {
@@ -1166,7 +1202,7 @@ test("exitAuth: a sink that verified nothing (or predates the field) nulls every
 	for (const closed of [{ turns: 3, tokens: { total: 0 }, exitLineCode: 0, exitAuth: "unverified", ...refused }, { turns: 3, tokens: { total: 0 }, exitLineCode: 0, ...refused }]) {
 		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnStdin({}), mintExitKey: () => MINTED, openJobLog: () => ({ write() {}, close: async () => closed }) });
 		const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
-		assert.deepEqual(result, { code: 0, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null, exitAuth: "unverified" }, JSON.stringify(closed));
+		assert.deepEqual(result, { code: 0, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null, exitAuth: "unverified", mainCredentialSource: { source: "host-env" } }, JSON.stringify(closed));
 	}
 });
 
@@ -1188,7 +1224,7 @@ test("exitAuth off (an image that does not declare it): stdin ignored, no -i, no
 	assert.equal(rec.args.some((a) => a.startsWith("PI_EXIT_AUTH=")), false);
 	assert.equal(minted, 0);
 	assert.deepEqual(opened, [{ exitKey: null }]);
-	assert.deepEqual(result, { code: 1, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null });
+	assert.deepEqual(result, { code: 1, aborted: false, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: null, mainCredentialSource: { source: "host-env" } });
 });
 
 test("exitAuth: the default key is 32 random bytes of hex, fresh per run", { skip }, async () => {

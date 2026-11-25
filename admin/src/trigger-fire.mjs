@@ -11,7 +11,7 @@ import { loadSchedules } from "@edgehero/pi-dispatch/schedules";
 import { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 import { withJobDataVersion } from "@edgehero/pi-dispatch/job-data-version";
 import { ALLOWANCE_UNREAD, checkDispatchRun, QUEUE_CLOSE_TIMEOUT_MS } from "./read-model.mjs";
-import { ALREADY_MATCH, boundedClient, connectedQueue, CONFIRM_READ_TIMEOUT_MS, LOOK_FIRST, PAID_PLAN_TIMEOUT_MS, queuedAlready, within } from "./job-actions.mjs";
+import { ADD_NOT_SENT_WHY, addNeverLeft, ALREADY_MATCH, dropDeadQueue, boundedClient, connectedQueue, CONFIRM_READ_TIMEOUT_MS, LOOK_FIRST, PAID_PLAN_TIMEOUT_MS, queuedAlready, within } from "./job-actions.mjs";
 import { FILE_WORDS, fileCaseOfError } from "./file-case.mjs";
 
 const digest = (s) => createHash("sha256").update(s).digest("hex");
@@ -177,6 +177,12 @@ export async function enqueueTriggerFire(plan, options = {}) {
     if (existing) return { refusal: `${swallowedRunSentence(jobId, existing)} ${ALLOWANCE_USED}`, deduplicated: true, jobId };
     return { ok: true, jobId, queue: current.queue };
   } catch (err) {
+    // Issue #1072: the add was refused by its client before it left, on a connection that died after the connect. The
+    // start was counted and the minute's latch is set, so this says what was used and when to try again.
+    if (sent && addNeverLeft(err)) {
+      dropDeadQueue(queue);
+      return { invalid: `Nothing was queued and one start of this hour was used: ${ADD_NOT_SENT_WHY}, and this minute's ${minutes} is taken. Try again next minute.`, partial: true };
+    }
     if (sent) return { invalid: canary ? CANARY_UNCONFIRMED : FIRE_UNCONFIRMED, partial: true };
     // The latch's SET was sent and not answered: nothing was queued, and the minute may be taken now or when Valkey wakes.
     if (latching && err?.valkeyMayStillRun === true) return { invalid: `Nothing was queued, one start of this hour was used, and this minute's ${minutes} may be taken: its latch was sent and did not answer. Try again next minute.`, partial: true };

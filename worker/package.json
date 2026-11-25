@@ -49,6 +49,7 @@
     "./setup-host-entry": "./src/setup-host-entry.mjs",
     "./setup-lock": "./src/setup-lock.mjs",
     "./provider-key": "./src/provider-key.mjs",
+    "./provider-key-names": "./src/provider-key-names.mjs",
     ".": "./src/index.mjs",
     "./config": "./src/config.mjs",
     "./job-limit-rules": "./src/job-limit-rules.mjs",
@@ -211,6 +212,7 @@
     "./question-groups": "./src/question-groups.mjs",
     "./question-group-runtime": "./src/question-group-runtime.mjs",
     "./zero-touch-fixes": "./src/zero-touch-fixes.mjs",
+    "./zero-touch-outcomes": "./src/zero-touch-outcomes.mjs",
     "./local-event": "./src/local-event.mjs",
     "./local-event-store": "./src/local-event-store.mjs",
     "./local-job": "./src/local-job.mjs"

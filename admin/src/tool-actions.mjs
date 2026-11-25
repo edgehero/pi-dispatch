@@ -74,9 +74,11 @@ async function cancelActionById(fleet, jobId, snapshot) {
  * an error every cancel of a job that was not seen running was refused, the fix for that never having run in the
  * registered tool; and a bulk retry found no `supersededOf`, so it retried, and paid for, the failed jobs whose work
  * a later run had already done, which the console leaves out. A test holds this list equal to what the two files ask
- * for (`ctx.a.fleet.<method>` there, `fleet.<method>` here).
+ * for (`ctx.a.fleet.<method>` there, `fleet.<method>` here). `knownSilent` (issue #1072) is the fleet switch's preview
+ * asking what the reader already knows of its Valkey: a tool builds its reader on each call, so it answers false and
+ * the preview reads, stopping at its own registry read when that gets no answer, as a console's does.
  */
-export const TOOL_FLEET_METHODS = Object.freeze(["snapshot", "pause", "resume", "cancelActive", "pauseQueue", "jobStatus", "supersededOf"]);
+export const TOOL_FLEET_METHODS = Object.freeze(["snapshot", "pause", "resume", "knownSilent", "cancelActive", "pauseQueue", "jobStatus", "supersededOf"]);
 
 /** The tool's vocabulary is translated once; all validation and writes belong to the action. */
 export async function toolActionRequest(name, params = {}, { fleet } = {}) {

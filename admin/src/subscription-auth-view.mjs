@@ -43,7 +43,13 @@ function quotaOf(value, now) {
   };
 }
 
-/** @returns {{state:string,partial:boolean,now:number,connections:Array<object>}} */
+/**
+ * `unread` (issue #1073) is set only where the published status was not read: no value at all (null: a snapshot that
+ * failed, a read seam that threw), the snapshot's own `{ state: "unavailable" }` for a status read that failed, or a
+ * view already marked so. A page then says the status is not known, where it said "not published" of hosts nobody
+ * read. An undefined value is a caller that holds no status field, and keeps the words it had.
+ * @returns {{state:string,partial:boolean,now:number,connections:Array<object>,unread?:true}}
+ */
 export function subscriptionAuthView(value, { now = Date.now() } = {}) {
   now = typeof now === "function" ? now() : now;
   if (!Number.isSafeInteger(now) || now < 0) throw new TypeError("subscription view needs a valid clock");
@@ -71,7 +77,8 @@ export function subscriptionAuthView(value, { now = Date.now() } = {}) {
       reservePercent: Number.isInteger(row.reservePercent) && row.reservePercent >= 1 && row.reservePercent <= 99 ? row.reservePercent : null,
     }];
   });
-  return { now, state: value && (Array.isArray(value) || value.state === "ready") ? "ready" : "unknown", partial: value?.partial !== false || truncated || connections.length < Math.min(rows.length, SUBSCRIPTION_VIEW_LIMITS.connections), truncated: value?.truncated === true || truncated, connections };
+  const unread = value === null || value?.state === "unavailable" || value?.unread === true;
+  return { now, state: value && (Array.isArray(value) || value.state === "ready") ? "ready" : "unknown", partial: value?.partial !== false || truncated || connections.length < Math.min(rows.length, SUBSCRIPTION_VIEW_LIMITS.connections), truncated: value?.truncated === true || truncated, connections, ...(unread ? { unread: true } : {}) };
 }
 
 /**
@@ -98,7 +105,8 @@ export function notionalBoundProviders(value, { now = Date.now() } = {}) {
 
 /** Optional reader seam: the console observes published safe status and never opens a host credential file. */
 export async function readSubscriptionAuthView({ snapshot = null, read = null, now = Date.now() } = {}) {
-  try { return subscriptionAuthView(typeof read === "function" ? await read() : snapshot?.subscriptionAuth, { now }); }
+  // No snapshot is a status nobody read (issue #1073): null, so the view says so, never "not published".
+  try { return subscriptionAuthView(typeof read === "function" ? await read() : snapshot === null ? null : snapshot?.subscriptionAuth, { now }); }
   catch { return subscriptionAuthView(null, { now }); }
 }
 

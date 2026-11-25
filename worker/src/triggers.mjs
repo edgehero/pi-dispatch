@@ -49,6 +49,10 @@ import { validateApprovalConfig } from "./approval-policy.mjs";
 // The project id rule, from its import-free module, so a bundle's `project` is held to the one rule projects.json is.
 import { PROJECT_ID_RE } from "./project-id.mjs";
 import { PROVIDER_STEERING_VARS } from "./provider-steering.mjs";
+// The rules for which provider variable is an API key, from their import-free module, and pi's provider key variables as
+// a generated data-only table (issue #1013), so a declared key is judged at load with no provider SDK loaded.
+import { apiKeyVariable, needsHostAuthentication, nonApiKeyKind } from "./provider-key.mjs";
+import { PROVIDER_KEY_NAMES } from "./provider-key-names.mjs";
 import { normalizeWatchSources, normalizeWatchRule, watchDurationMs } from "./watch-contract.mjs";
 import { validateWatchDecision } from "./watch-decision.mjs";
 import { builtinModel } from "./model-catalog.mjs";
@@ -354,7 +358,7 @@ function isNonEmptyString(value) {
  * `version`, absent meaning 1, which `writeTriggers` owns and writes only when the content needs more than 1, so every
  * file of today's fields stays byte-identical.
  */
-export const TRIGGERS_FILE_VERSION = 11;
+export const TRIGGERS_FILE_VERSION = 12;
 
 /**
  * Each `run` key whose ABSENCE an older build would misread, with the version that introduced it. The raw `run` keys
@@ -372,6 +376,9 @@ export const TRIGGERS_FILE_VERSION = 11;
  * under the deployment's limits, which for a ceiling the trigger set is a longer run than the file allows.
  * `maxSubscriptionUsd` (issue #1008), at 11: an older loader drops the list-price allowance and runs a subscription job
  * with no dollar limit at all, on a clean record.
+ *
+ * Version 12 is a value rule's, not a row here (issue #1013): `secrets` and `secretsProfile` on an answer rule or on the
+ * `zeroTouch` block (`TRIGGERS_BLOCK_VALUE_VERSIONS`).
  */
 export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3, mayMerge: 4, worker: 5, modelSelection: 6, privateEndpoints: 7, secretFiles: 8, auxiliaryModels: 9, maxSubscriptionUsd: 11 });
 
@@ -391,8 +398,16 @@ export const TRIGGER_VALUE_VERSIONS = Object.freeze({
 /**
  * Each EXISTING `run` key whose range a later release widens (a new `run.waitFor` condition kind, or a new `run.kind`,
  * say), as above.
+ *
+ * `modelSelection` (issue #996), at 12 when it holds `weights`: an older loader refuses the unknown field, so the whole
+ * file, as broken. Stamped, it defers instead. A pool without weights needs nothing new, so no existing file moves.
  */
-export const TRIGGER_RUN_VALUE_VERSIONS = Object.freeze({});
+export const TRIGGER_RUN_VALUE_VERSIONS = Object.freeze({
+	modelSelection: (selection) => selection !== null && typeof selection === "object" && Object.hasOwn(selection, "weights") ? 12 : 1,
+});
+
+/** Whether an answer rule or the zeroTouch block declares a provider key (issue #1013), either of its two fields. */
+const declaresKey = (holder) => holder !== null && typeof holder === "object" && (Object.hasOwn(holder, "secrets") || Object.hasOwn(holder, "secretsProfile"));
 
 /**
  * Each EXISTING top-level block whose range a later release widens, keyed by the block's name (`secretBundles`,
@@ -402,6 +417,10 @@ export const TRIGGER_RUN_VALUE_VERSIONS = Object.freeze({});
 export const TRIGGERS_BLOCK_VALUE_VERSIONS = Object.freeze({
 	// An older loader refuses this nested field as broken; the version makes it wait for an upgrade instead.
 	secretBundles: (bundles) => bundles && typeof bundles === "object" && Object.values(bundles).some((bundle) => bundle && typeof bundle === "object" && Object.hasOwn(bundle, "files")) ? 8 : 1,
+	// Issue #1013: a declared provider key on an answer rule or on the zeroTouch block. An older loader refuses either
+	// field as undeclared, the whole file with it; the version makes it keep what it had and wait for an upgrade instead.
+	answerRules: (rules) => Array.isArray(rules) && rules.some(declaresKey) ? 12 : 1,
+	zeroTouch: (block) => declaresKey(block) ? 12 : 1,
 });
 
 /**
@@ -540,24 +559,31 @@ export function parseTriggersDocument(text, path, { supported = TRIGGERS_FILE_VE
 	}
 	let answerRules, standingAnswers;
 	try { answerRules = validateAnswerRules(parsed.answerRules); standingAnswers = validateStandingAnswers(parsed.standingAnswers); } catch (error) { throw configError(error.message); }
+	// Issue #1013: each rule's declared provider keys, judged by the code that judges `run.secrets`.
+	for (const rule of answerRules) validateDeclaredKeys(rule, `answer rule ${JSON.stringify(rule.id)}`, path);
 	const secretBundles = validateSecretBundles(parsed.secretBundles, path);
 	const modelRoles = validateModelRoles(parsed.modelRoles);
 	for (const key of Object.keys(parsed)) if (key !== "modelRoles" && isModelRolesField(key)) throw configError("triggers file: use modelRoles");
 	let zeroTouch;
 	try { zeroTouch = validateZeroTouchConfig(parsed.zeroTouch); } catch (error) { throw configError(error.message); }
+	// Issue #1013: the block's declared provider keys, the same way, on the file's own value (the normalized copy keeps them).
+	if (zeroTouch !== null) validateDeclaredKeys(parsed.zeroTouch, "zeroTouch", path);
 	// Issue #761: a block, a `run` key or a value that needs a higher version than the file declares, after every other
 	// check so a broken file names its first broken entry as it always did. Such a file was hand-edited or written by a
 	// writer that dropped the stamp, and an older loader would read it without the key, or refuse the value as broken
-	// rather than newer: refused like any malformed entry.
+	// rather than newer: refused like any malformed entry. A key the field table names is refused first, and its sentence
+	// names the larger of what the key and its value need (issue #996): naming the key's alone sent a person who wrote that
+	// version straight to a second refusal, for the value.
 	const { version: _version, ...blocks } = parsed;
+	const needOf = (short, record, valueTable) => Math.max(short.needs, valueNeededVersion({ [short.field]: record[short.field] }, valueTable));
 	const shortBlock = underDeclared(Object.keys(blocks), blockTable, parsed.version);
-	if (shortBlock) throw configError(`triggers file: top-level ${JSON.stringify(shortBlock.field)} needs triggers file version ${shortBlock.needs}, and the file declares ${parsed.version ?? 1}: ${path}`);
+	if (shortBlock) throw configError(`triggers file: top-level ${JSON.stringify(shortBlock.field)} needs triggers file version ${needOf(shortBlock, blocks, blockValueTable)}, and the file declares ${parsed.version ?? 1}: ${path}`);
 	const shortBlockValue = valueUnderDeclared(blocks, blockValueTable, parsed.version);
 	if (shortBlockValue) throw configError(`triggers file: top-level ${JSON.stringify(shortBlockValue.field)} holds a value that needs triggers file version ${shortBlockValue.needs}, and the file declares ${parsed.version ?? 1}: ${path}`);
 	entries.forEach((entry, index) => {
 		const declared = parsed.version ?? 1;
 		const short = underDeclared(Object.keys(entry.run), runTable, parsed.version);
-		if (short) throw configError(`trigger at index ${index}: run.${short.field} needs triggers file version ${short.needs}, and the file declares ${declared}: ${path}`);
+		if (short) throw configError(`trigger at index ${index}: run.${short.field} needs triggers file version ${needOf(short, entry.run, runValueTable)}, and the file declares ${declared}: ${path}`);
 		const shortEntry = valueUnderDeclared(entry, entryValueTable, parsed.version);
 		if (shortEntry) throw configError(`trigger at index ${index}: ${shortEntry.field} holds a value that needs triggers file version ${shortEntry.needs}, and the file declares ${declared}: ${path}`);
 		const shortRun = valueUnderDeclared(entry.run, runValueTable, parsed.version);
@@ -1602,24 +1628,27 @@ function validateReplicas(run, at, path) {
  * hazard (an agent that writes a credential into `.env` writes it into the operator's real repository),
  * and `doctor` warns about exactly that rather than this validator refusing the use case outright.
  *
+ * Issue #1013: also an answer rule's and the zeroTouch block's own `secrets` (`validateDeclaredKeys`), where `prefix` is
+ * empty, so each sentence names the field where the file holds it rather than a `run` it does not have.
+ *
  * Returns the map, undefined when absent, so an unflagged trigger normalizes byte-identically.
  */
-function validateSecrets(run, at, path, field = "secrets") {
+function validateSecrets(run, at, path, field = "secrets", prefix = "run.") {
 	const secrets = run[field];
 	if (secrets === undefined) return undefined;
 	if (secrets === null || typeof secrets !== "object" || Array.isArray(secrets)) {
-		throw configError(`${at}: run.${field} must be an object mapping environment variable names to references when present ${field === "secrets" ? `(got ${JSON.stringify(secrets)})` : ""}: ${path}`);
+		throw configError(`${at}: ${prefix}${field} must be an object mapping environment variable names to references when present ${field === "secrets" ? `(got ${JSON.stringify(secrets)})` : ""}: ${path}`);
 	}
 	const names = Object.keys(secrets);
 	if (names.length === 0) {
-		throw configError(`${at}: run.${field} is empty -- an empty map is a field that does nothing, and this trigger reads as though it binds a secret: ${path}`);
+		throw configError(`${at}: ${prefix}${field} is empty -- an empty map is a field that does nothing, and ${prefix === "run." ? "this trigger" : at} reads as though it binds a secret: ${path}`);
 	}
 	if (names.length > SECRETS_MAX) {
-		throw configError(`${at}: run.${field} names ${names.length} variables, over the ${SECRETS_MAX} cap -- each one is resolved before the container starts, holding a concurrency slot while it runs: ${path}`);
+		throw configError(`${at}: ${prefix}${field} names ${names.length} variables, over the ${SECRETS_MAX} cap -- each one is resolved before the container starts, holding a concurrency slot while it runs: ${path}`);
 	}
 	for (const name of names) {
 		if (!ENV_NAME.test(name)) {
-			throw configError(`${at}: run.${field} key ${JSON.stringify(name)} is not an environment variable name (letters, digits and underscore, not starting with a digit): ${path}`);
+			throw configError(`${at}: ${prefix}${field} key ${JSON.stringify(name)} is not an environment variable name (letters, digits and underscore, not starting with a digit): ${path}`);
 		}
 		// `__proto__` passes ENV_NAME and is in no reserved set, and it is the one name that cannot survive the
 		// journey: `JSON.parse` gives it as an own property and the spread below preserves it, but every later
@@ -1630,7 +1659,7 @@ function validateSecrets(run, at, path, field = "secrets") {
 		// everywhere else. Refused here rather than repaired downstream, because a name that cannot be carried
 		// is a fact about the file, and the file is the reviewed artifact.
 		if (name === "__proto__") {
-			throw configError(`${at}: run.${field} key "__proto__" cannot be carried into a container -- it is swallowed by the prototype setter on every object between here and the job, so the resolver would run and the variable would still be unset: ${path}`);
+			throw configError(`${at}: ${prefix}${field} key "__proto__" cannot be carried into a container -- it is swallowed by the prototype setter on every object between here and the job, so the resolver would run and the variable would still be unset: ${path}`);
 		}
 		if (isReservedEnvName(name)) {
 			// TWO reasons a name can be in here, opposite in direction, and the message asserts NEITHER,
@@ -1641,22 +1670,22 @@ function validateSecrets(run, at, path, field = "secrets") {
 			// even use, and a few (`OPENAI_LOG`, `PI_CACHE_RETENTION`) steer nothing dangerous at all and
 			// are reserved only because the set is a derivation rather than a judgement. The one thing
 			// true of every member is that the runtime already owns the name.
-			throw configError(`${at}: run.${field} key ${JSON.stringify(name)} is reserved: this deployment's own runtime reads or writes it, so a value bound here would not do what the trigger intends: ${path}`);
+			throw configError(`${at}: ${prefix}${field} key ${JSON.stringify(name)} is reserved: this deployment's own runtime reads or writes it, so a value bound here would not do what ${prefix === "run." ? "the trigger" : "the file"} intends: ${path}`);
 		}
 		const reference = secrets[name];
 		if (!isNonEmptyString(reference)) {
-			throw configError(`${at}: run.${field}.${name} must be a non-empty string reference for your resolver to read ${field === "secrets" ? `(got ${JSON.stringify(reference)})` : ""}: ${path}`);
+			throw configError(`${at}: ${prefix}${field}.${name} must be a non-empty string reference for your resolver to read ${field === "secrets" ? `(got ${JSON.stringify(reference)})` : ""}: ${path}`);
 		}
 		if (reference !== reference.trim()) {
-			throw configError(`${at}: run.${field}.${name} must not have leading or trailing whitespace -- the file is the reviewed artifact and silently trimming it would make the file disagree with what the resolver is asked for: ${path}`);
+			throw configError(`${at}: ${prefix}${field}.${name} must not have leading or trailing whitespace -- the file is the reviewed artifact and silently trimming it would make the file disagree with what the resolver is asked for: ${path}`);
 		}
 		if (field === "secretFiles" && reference.includes("\0")) throw configError(`${at}: run.secretFiles.${name} reference must not contain a NUL: ${path}`);
 		if (reference.startsWith("-")) {
-			throw configError(`${at}: run.${field}.${name} must not start with "-" -- it is passed as the resolver's first argument, where a leading dash parses as a flag: ${path}`);
+			throw configError(`${at}: ${prefix}${field}.${name} must not start with "-" -- it is passed as the resolver's first argument, where a leading dash parses as a flag: ${path}`);
 		}
 	}
 	if (run.resume === true) {
-		throw configError(`${at}: run.${field} and run.resume cannot be combined -- a resumed job replays a transcript kept on host disk, and any command the agent ran that echoed a resolved value wrote it into that transcript, which is then prefilled into every later job on the same key: ${path}`);
+		throw configError(`${at}: ${prefix}${field} and run.resume cannot be combined -- a resumed job replays a transcript kept on host disk, and any command the agent ran that echoed a resolved value wrote it into that transcript, which is then prefilled into every later job on the same key: ${path}`);
 	}
 	return { ...secrets };
 }
@@ -1713,20 +1742,77 @@ function validateSecretFiles(run, at, path) {
  * where the file answers what the file knows and `doctor` plus a per-delivery refusal carry the rest.
  *
  * Absent selects the profile named `default`, so a single-manager deployment never writes the field.
+ *
+ * `prefix` as `validateSecrets`' (issue #1013): empty for an answer rule's and the zeroTouch block's own field, which
+ * have no `secretFiles` beside it.
  */
-function validateSecretsProfile(run, at, path) {
+function validateSecretsProfile(run, at, path, prefix = "run.") {
 	const profile = run.secretsProfile;
 	if (profile === undefined) return undefined;
 	if (!isNonEmptyString(profile)) {
-		throw configError(`${at}: run.secretsProfile must be a non-empty string naming one of the resolver profiles this deployment declares (got ${JSON.stringify(profile)}): ${path}`);
+		throw configError(`${at}: ${prefix}secretsProfile must be a non-empty string naming one of the resolver profiles this deployment declares (got ${JSON.stringify(profile)}): ${path}`);
 	}
 	if (!ID_CHARSET.test(profile)) {
-		throw configError(`${at}: run.secretsProfile ${JSON.stringify(profile)} may use letters, digits, dot, dash and underscore only -- PI_SECRET_PROFILES is a comma-separated list of name:path pairs, so a name carrying either separator cannot be declared: ${path}`);
+		throw configError(`${at}: ${prefix}secretsProfile ${JSON.stringify(profile)} may use letters, digits, dot, dash and underscore only -- PI_SECRET_PROFILES is a comma-separated list of name:path pairs, so a name carrying either separator cannot be declared: ${path}`);
 	}
 	if (run.secrets === undefined && run.secretFiles === undefined) {
-		throw configError(`${at}: run.secretsProfile is set but run.secrets names nothing and run.secretFiles names nothing -- a profile that resolves no references is a field that does nothing: ${path}`);
+		throw configError(`${at}: ${prefix}secretsProfile is set but ${prefix}secrets names nothing${prefix === "run." ? " and run.secretFiles names nothing" : ""} -- a profile that resolves no references is a field that does nothing: ${path}`);
 	}
 	return profile;
+}
+
+/**
+ * The declared provider keys of an answer rule or of the top-level `zeroTouch` block (issue #1013): `secrets`, and
+ * `secretsProfile` beside it, the two `run` fields a trigger declares its main model's key with. Neither block has a
+ * `run`, and their jobs are internal decision jobs built at pickup, so the fields sit on the rule and on the block.
+ *
+ * The SAME code as `run.secrets` (`validateSecrets`, `validateSecretsProfile`): the same map shape, cap, names,
+ * reserved set and references, so a name refused there is refused here in the same words. One rule narrower: each
+ * name must be a provider's API-key variable, the only name the worker admits as a declared credential
+ * (`declaredProviderKey`, env-allowlist.mjs). These fields exist for nothing else, so an OAuth or a bearer variable
+ * (`nonApiKeyKind`, provider-key.mjs, the suffix rule the worker keeps them reserved by) is refused here by name rather
+ * than at every job: a declared key is exclusive, and those two carry a subscription login or a credential pi sends in
+ * another header.
+ *
+ * And each name must be a variable the worker can admit as some provider's declared key (`DECLARABLE_PROVIDER_KEYS`,
+ * from pi's generated table, data only, so this validator stays pure and SDK-free for the receiver and the console): a
+ * typo (`OPENAI_APIKEY`) or an unrelated variable (`DATABASE_URL`) is no key any model could take, and its jobs would
+ * spend this host's key on a file that reads as though they did not. Which of the jobs' providers a name belongs to is
+ * left to pickup: a grouping job's main model is the settings file's, not this file's, so the job builders keep only
+ * the names a provider of that job reads (answerer-runtime.mjs, question-group-runtime.mjs), and doctor names the rest.
+ */
+function validateDeclaredKeys(holder, at, path) {
+	const secrets = validateSecrets(holder, at, path, "secrets", "");
+	for (const name of Object.keys(secrets ?? {})) {
+		const kind = nonApiKeyKind(name);
+		if (kind !== null) throw configError(`${at}: secrets key ${JSON.stringify(name)} is ${kind === "oauth" ? "a subscription login (an OAuth token variable)" : "a bearer token variable"}, not a provider's API key -- these secrets declare only the API-key variable of a provider the jobs run on, and the worker keeps every other provider variable reserved: ${path}`);
+		if (!DECLARABLE_PROVIDER_KEYS.includes(name)) throw configError(`${at}: secrets key ${JSON.stringify(name)} ${undeclarableReason(name)} -- these secrets declare only a provider's API-key variable, the one name the worker admits as a model's own key: ${path}`);
+	}
+	validateSecretsProfile(holder, at, path, "");
+}
+
+/**
+ * Each variable the worker can admit as a declared provider key (issue #1013), the static half of `declaredProviderKey`
+ * (env-allowlist.mjs): the API-key variable of a provider that needs no host authentication, never an OAuth or bearer
+ * variable, over pi's generated table (`PROVIDER_KEY_NAMES`, from the pinned pi by .github/scripts/provider-key-names.mjs,
+ * held to `providerKeyCandidates` by worker/test/provider-key-names.test.mjs). A custom provider has none: pi reads no key
+ * variable for it, and an endpoint it serves is keyless. So an answer rule or the zeroTouch block that names anything
+ * else names a key no model of it could take, and its jobs would run on this host's key while the file reads as though
+ * they did not: refused at load, where the file is the reviewed artifact.
+ */
+export const DECLARABLE_PROVIDER_KEYS = Object.freeze([...new Set(Object.entries(PROVIDER_KEY_NAMES).filter(([provider]) => !needsHostAuthentication(provider)).map(([, names]) => apiKeyVariable(names)).filter((name) => name !== null && nonApiKeyKind(name) === null))].sort());
+
+/** Why `name` is not in `DECLARABLE_PROVIDER_KEYS`, as the end of a sentence, from the table alone: never a guess. */
+function undeclarableReason(name) {
+	const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
+	const readers = Object.keys(PROVIDER_KEY_NAMES).filter((provider) => PROVIDER_KEY_NAMES[provider].includes(name));
+	const own = readers.filter((provider) => !needsHostAuthentication(provider));
+	if (readers.length > 0 && own.length === 0) return `is the key variable of ${listed(readers)}, which ${readers.length === 1 ? "needs" : "need"} host authentication, so it is never a declared key`;
+	if (own.length > 0) return `is a variable pi reads for ${listed(own)}, not the one ${own.length === 1 ? "its API key is" : "their API keys are"} written under (${listed([...new Set(own.map((provider) => apiKeyVariable(PROVIDER_KEY_NAMES[provider])))])})`;
+	// A near miss by case or underscores alone (`OPENAI_APIKEY`), named only when exactly one declarable name fits.
+	const folded = (text) => text.toUpperCase().replace(/_/g, "");
+	const meant = DECLARABLE_PROVIDER_KEYS.filter((key) => folded(key) === folded(name));
+	return `is no provider's API-key variable${meant.length === 1 ? ` (did you mean ${JSON.stringify(meant[0])}?)` : ""}`;
 }
 
 /**
@@ -2115,6 +2201,9 @@ const RUN_MODEL_NEAR_MISS_TARGETS = Object.freeze({
 	fallbackmodels: "run.fallbackModels", fallbackmodel: "run.fallbackModels", fallbackmodelid: "run.fallbackModels", fallbackmodelids: "run.fallbackModels", fallbackmodelname: "run.fallbackModels", fallbackmodelnames: "run.fallbackModels",
 	auxiliarymodels: "run.auxiliaryModels", auxiliarymodel: "run.auxiliaryModels", auxiliarymodelid: "run.auxiliaryModels", auxiliarymodelids: "run.auxiliaryModels",
 	modelselection: "run.modelSelection", modelselections: "run.modelSelection", modelselectiongeneration: "run.modelSelection",
+	// Issue #996: a pool's weights belong inside `run.modelSelection`. Written beside it they would be dropped, and the pool
+	// would draw at equal shares while the file reads as weighted.
+	weights: "run.modelSelection.weights", weight: "run.modelSelection.weights", modelweights: "run.modelSelection.weights", modelweight: "run.modelSelection.weights", candidateweights: "run.modelSelection.weights", candidateweight: "run.modelSelection.weights", modelselectionweights: "run.modelSelection.weights", modelselectionweight: "run.modelSelection.weights", poolweights: "run.modelSelection.weights", poolweight: "run.modelSelection.weights",
 	maxturns: "run.maxTurns", maxturn: "run.maxTurns",
 	maxcostusd: "run.maxCostUsd", maxcost: "run.maxCostUsd",
 	// Issue #1008: the list-price allowance for subscription calls. Its own name, the dollar-less and plural steps, and the
@@ -2155,6 +2244,7 @@ function validateRunModel(on, run, at, path) {
 			if (exactIsLegal && exact.has(key)) continue;
 			const meant = runModelFieldNearMiss(key);
 			if (meant === null) continue;
+			if (meant === "run.modelSelection.weights") throw configError(`${at}: ${label}.${key} is not a field -- did you mean ${meant}? Weights the loader drops leave every candidate an equal share while the file reads as weighted, so a near miss is refused rather than dropped: ${path}`);
 			throw configError(`${at}: ${label}.${key} is not a field -- did you mean ${meant}? A model choice the loader drops runs the job on the deployment default while the file reads as though it chose, so a near miss is refused rather than dropped: ${path}`);
 		}
 	}

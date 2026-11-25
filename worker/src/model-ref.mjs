@@ -86,7 +86,7 @@ export function validateModelRef(run, at, path) {
 			if (Object.hasOwn(run, key) && run[key] !== undefined) throw configError(`${at}: run.modelSelection cannot be combined with run.${key}: ${path}`);
 		}
 		if (run.command !== undefined) throw configError(`${at}: run.modelSelection is not supported on command-only jobs: ${path}`);
-		out.modelSelection = { strategy: "random", candidates: [...run.modelSelection.candidates] };
+		out.modelSelection = copyModelSelection(run.modelSelection);
 	}
 	// The shape checks (ASCII on the original, then the pattern on the lowercased value) are `providerIdProblem`
 	// and `modelIdProblem`, shared with PI_MODEL, PI_PROVIDER, the settings overlay and `pi-dispatch run` (#673).
@@ -243,15 +243,68 @@ export function modelOnList(list, provider, model) {
 	});
 }
 
-/** Reviewed physical candidates, distinct from the allowed-model ceiling. No defaults or roles enter a draw. */
+/** The most one random candidate may weigh (issue #996). With at most 16 candidates a pool's weights sum to at most 1,600. */
+export const MAX_MODEL_WEIGHT = 100;
+
+/**
+ * Reviewed physical candidates, distinct from the allowed-model ceiling. No defaults or roles enter a draw.
+ *
+ * `weights` (issue #996) is optional: an object from a candidate, spelled EXACTLY as in `candidates`, to a whole number
+ * from 1 to `MAX_MODEL_WEIGHT`; a candidate it does not name weighs 1. An empty object is refused rather than read as
+ * equal shares, which leaving the key out already says. A key that names no candidate is refused by its position, never
+ * echoed (the rule `modelListProblem` keeps), and one that differs from a candidate only in case says so: the draw
+ * matches exactly, so that weight would apply to nothing.
+ */
 export function modelSelectionProblem(value) {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return "must be an object with strategy and candidates";
-	if (Object.keys(value).some((key) => key !== "strategy" && key !== "candidates")) return "has an unknown field (only strategy and candidates are supported)";
+	if (Object.keys(value).some((key) => key !== "strategy" && key !== "candidates" && key !== "weights")) return "has an unknown field (only strategy, candidates and weights are supported)";
 	if (value.strategy !== "random") return 'strategy must be "random"';
 	const problem = modelListProblem(value.candidates);
 	if (problem !== null) return `candidates ${problem}`;
 	if (value.candidates.some((entry) => splitModelEntry(entry).model.toLowerCase().startsWith("role:"))) return "candidates must name physical models, not roles";
+	if (value.weights !== undefined) {
+		const weights = value.weights;
+		if (weights === null || typeof weights !== "object" || Array.isArray(weights)) return `weights must be an object from a candidate to a whole number from 1 to ${MAX_MODEL_WEIGHT} (leave it out for equal shares)`;
+		const keys = Object.keys(weights);
+		if (keys.length === 0) return "weights must not be empty (leave it out for equal shares)";
+		for (let i = 0; i < keys.length; i++) {
+			if (!value.candidates.includes(keys[i])) {
+				const caseOnly = value.candidates.some((entry) => entry.toLowerCase() === keys[i].toLowerCase());
+				return `weights entry ${i + 1} ${caseOnly ? "differs from a candidate only in case" : "names no candidate"}: each key must be one of candidates, spelled exactly the same`;
+			}
+			if (!Number.isSafeInteger(weights[keys[i]]) || weights[keys[i]] < 1 || weights[keys[i]] > MAX_MODEL_WEIGHT) return `weights entry ${i + 1} must be a whole number from 1 to ${MAX_MODEL_WEIGHT}`;
+		}
+	}
 	return null;
+}
+
+/**
+ * A fresh copy of a pool `modelSelectionProblem` accepts, `weights` kept when present (issue #996). Every place that
+ * rebuilds a pool copies it through here: one that spelled out strategy and candidates alone would drop the weights
+ * silently, and the job would draw at equal shares while the file says otherwise.
+ */
+export function copyModelSelection(value) {
+	return { strategy: "random", candidates: [...value.candidates], ...(value.weights !== undefined ? { weights: { ...value.weights } } : {}) };
+}
+
+/** A candidate's weight in a valid pool (issue #996): its `weights` entry, else 1, so every candidate of an unweighted pool weighs 1. */
+export function modelSelectionWeight(value, ref) {
+	return value?.weights !== undefined && Object.hasOwn(value.weights, ref) ? value.weights[ref] : 1;
+}
+
+/**
+ * Each candidate of a valid pool with its share of the WHOLE pool in whole percent, rounded (issue #996), in authored
+ * order. The share a draw gives is of the candidates that can run at pickup: one that cannot leaves that draw, and the
+ * others keep their relative shares, so this is what each gets while all of them can.
+ */
+export function modelSelectionShares(value) {
+	const total = value.candidates.reduce((sum, ref) => sum + modelSelectionWeight(value, ref), 0);
+	return value.candidates.map((ref) => ({ ref, share: Math.round((100 * modelSelectionWeight(value, ref)) / total) }));
+}
+
+/** A share in words: a whole percent, and "under 1%" for one that rounds to 0, which a draw can still pick. */
+export function modelShareText(share) {
+	return share < 1 ? "under 1%" : `${share}%`;
 }
 
 /** Auxiliary calls need their own finite physical grant within the reviewed overall ceiling. */

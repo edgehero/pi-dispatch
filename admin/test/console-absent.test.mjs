@@ -550,14 +550,17 @@ test("a key an agent's copy does not hold is not a read that failed: an unknown 
     assert.equal((await drawn("run", "id=gh-1", consoleOn({ redis: healthy(HOST), records: [RUN] }), role)).status, 200, role);
   }
   // A host's slots: why they are not drawn, by its cause. One sentence said "this host is late or its running-job list
-  // was not read whole" of a healthy host on an agent's page, whose copy of the row holds no slot count.
+  // was not read whole" of a healthy host on an agent's page, whose copy of the row held no slot count. Since issue
+  // #1073 the copy holds it, so an agent's healthy host is drawn as an operator's is.
   const row = (over) => registryKeys({ build3: { version: "5.4.2", image: "pi-job:latest", concurrency: "2", pid: "1", beatAt: String(Date.now() - 2_000), startedAt: String(NOW - 3_600_000), jobs: "[]", jobsMore: "0", ...over } });
   const slots = async (keys, role) => (await drawn("host", "name=build3", consoleOn({ redis: healthy(keys), records: [RUN] }), role)).words;
   const WHY = { count: "Free slots are not known: its slot count is not known here.", late: "Free slots are not known: this host is late.", list: "Free slots are not known: its running-job list was not published whole." };
   const said = (words) => Object.entries(WHY).filter(([, sentence]) => words.includes(sentence)).map(([why]) => why);
   assert.deepEqual(said(await slots(HOST, "operator")), [], "an operator's healthy host: its slots are drawn");
   assert.deepEqual(said(await slots(HOST, "viewer")), []);
-  assert.deepEqual(said(await slots(HOST, "agent")), ["count"], "an agent's copy holds no slot count, and the page says that and nothing else");
+  assert.deepEqual(said(await slots(HOST, "agent")), [], "an agent's copy holds the slot count (issue #1073): its slots are drawn");
+  // A row whose slot count is no whole number is the one case left of the "count" sentence, for every role.
+  for (const role of ["operator", "agent"]) assert.deepEqual(said(await slots(row({ concurrency: "two" }), role)), ["count"], role);
   for (const role of ["operator", "agent"]) {
     assert.deepEqual(said(await slots(row({ beatAt: String(Date.now() - 300_000) }), role)), ["late"], role);
     for (const over of [{ jobsMore: "3" }, { jobs: "{ not json" }]) {

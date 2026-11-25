@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { collectModelPolicies, modelsViewOf, readModelsView, modelsForAgent, readModelsHistory, canaryComparisonLines, MODELS_LIMITS } from "../src/models-view.mjs";
+import { modelsInUse } from "../src/console/panels/models.mjs";
 import { dayKey } from "@edgehero/pi-dispatch/budget";
 import { modelDollarKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 
@@ -286,6 +287,30 @@ test("random pools show observed blockers without a default primary or predicted
   const agent = modelsForAgent(view);
   assert.equal(agent.randomPools[0].candidates.length, 2);
   assert.equal(agent.recentRandom[0].modelWhy, "random");
+});
+
+test("a weighted random pool's candidates carry their share of the whole pool, and the panel says equal probability only without weights (issue #996)", () => {
+  const now = Date.parse("2026-11-16T12:00:00Z");
+  const candidates = ["anthropic/claude-haiku-4-5", "openai/gpt-5", "openai/gpt-5-mini"];
+  const weighted = { strategy: "random", candidates, weights: { [candidates[0]]: 6, [candidates[2]]: 3 } };
+  const plain = { strategy: "random", candidates: candidates.slice(0, 2) };
+  const view = modelsViewOf({ now, entries: [{ run: { kind: "github", flow: "fix", modelSelection: weighted } }, { run: { kind: "github", flow: "fix", modelSelection: plain } }], deployment: { provider: "fake", model: "default" }, status: () => ({ known: true, priced: true }), cooldowns: [] });
+  assert.deepEqual(view.randomPools, [
+    { index: 0, number: 1, weighted: true, candidates: [{ ref: candidates[0], state: "available", share: 60 }, { ref: candidates[1], state: "available", share: 10 }, { ref: candidates[2], state: "available", share: 30 }] },
+    { index: 1, number: 2, candidates: [{ ref: candidates[0], state: "available" }, { ref: candidates[1], state: "available" }] },
+  ]);
+  const agent = modelsForAgent(view);
+  assert.deepEqual(agent.randomPools.map(pool => [pool.weighted, pool.candidates.map(candidate => candidate.share)]), [[true, [60, 10, 30]], [false, [null, null]]]);
+  // The projection never passes a share it did not compute: off a weighted pool, out of range, or not a whole number.
+  assert.deepEqual(modelsForAgent({ randomPools: [{ index: 0, candidates: [{ ref: candidates[0], share: 60 }] }, { index: 1, weighted: true, candidates: [{ ref: candidates[0], share: 101 }, { ref: candidates[1], share: 1.5 }, { ref: candidates[2], share: "PRIVATE" }] }] }).randomPools.map(pool => pool.candidates.map(candidate => candidate.share)), [[null], [null, null, null]]);
+  const words = (markup) => String(markup).replace(/<[^>]+>/g, "").replace(/\s+/g, " ");
+  const text = words(modelsInUse({ data: { models: { ...view, state: "ready" } } }));
+  assert.match(text, /A new run chooses one eligible candidate: by the share shown beside each candidate of a weighted pool, and with equal probability in a pool without weights\. A share is of the whole pool; a candidate that cannot run at pickup leaves that draw, and the others keep their relative shares\./);
+  assert.ok(text.includes("anthropic/claude-haiku-4-5 · 60% share · No observed price or model-window blocker"), text);
+  assert.ok(text.includes("openai/gpt-5 · No observed price or model-window blocker"), "a pool without weights shows no share beside the weighted one");
+  const unweightedOnly = words(modelsInUse({ data: { models: { ...view, randomPools: [view.randomPools[1]], state: "ready" } } }));
+  assert.match(unweightedOnly, /A new run chooses one eligible candidate with equal probability\./);
+  assert.ok(!unweightedOnly.includes("% share"));
 });
 
 test("model policy facts preserve an auxiliary grant without turning it into root candidates", () => {

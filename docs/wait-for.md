@@ -237,8 +237,10 @@ held · 4 waiting · h view
 Three rows and a count of the rest, always. (The `dispatch_waits` tool lists the same rows as data: each job's
 id, its target, how long it has waited and how many checks it has had. It leaves out the label, which is your own
 words and is not given to a model.) The index behind them can hold entries whose hold is gone. The panel and `/dispatch status` remove
-those as they read, and nothing else does; the tool and the web console write nothing, skip them, and still list the
-real holds, looking at up to 2,000 entries. Past that the tool says its list is not `complete`.
+those as they read, and the worker removes them on its retention sweep, every `PI_SWEEP_INTERVAL_HOURS` (24 by
+default; at `0` it does not). The tool and the web console write nothing, skip them, and still list the real holds,
+looking at up to 2,000 entries. Past that the tool says its list is not `complete`. The worker logs
+`held_index_swept` with how many entries it looked at and removed.
 
 Every cell is chosen by the worker: an id-only target, the operator-authored condition label, and an honest
 duration. No issue title and no issue body reaches the panel, which is why the reader takes the worker's own

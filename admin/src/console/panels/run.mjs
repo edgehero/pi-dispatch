@@ -15,7 +15,7 @@ import { recordNotionalMicros, recordNotionalProviders, refusedBeforeSpend } fro
 import { FORK_THINKING_LEVELS } from "../../run-fork.mjs";
 import { forkArchiveFact } from "@edgehero/pi-dispatch/fork-job";
 import { modelIdProblem } from "@edgehero/pi-dispatch/model-ref";
-import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
+import { recordedMainCredential, recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { UNATTRIBUTED_BACKEND, servesOf, SERVES, declarationOf, BACKENDS } from "@edgehero/pi-dispatch/backends";
 import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleReceivedText, checkpointsText, isProgressSnapshot, progressStaleFor, recordBundle, recordRecovery, recoveredText, openshellCountsText, openshellHostsText, recordOpenshell, recordPrivateEndpoints, privateEndpointsText, recordSecretsProfile, RUN_RECORD_UNREAD, runPlaces, runPlacesText, SERVES_TEXT, CUSTODY_TEXT, venueCustody, transcriptAbsentText, forgeBaseLinkOf, forgeLinkOf } from "../../read-model.mjs";
 import { CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
@@ -38,7 +38,7 @@ import { ARTIFACT_DROP_REASONS, ARTIFACT_DROP_TEXT, artifactSizeText } from "@ed
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { STEER_MAX_MESSAGES, STEER_TOTAL_MAX_BYTES } from "@edgehero/pi-dispatch/steer-inbox";
-import { changesOffered, plural, SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread, registryReadInPart, rowLastSeen, SHELLS_SHOWN, shellsShort } from "./common.mjs";
+import { changesOffered, plural, SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread, registryReadInPart, hostPartCase, rowLastSeen, SHELLS_SHOWN, shellsShort } from "./common.mjs";
 import { windowFloor } from "./runs.mjs";
 
 const titled = (title, body) => ui.card({ title, body });
@@ -1137,14 +1137,33 @@ export function runSecrets(view) {
   return titled("Secrets", html`${facts([["Secrets profile", recordSecretsProfile(r)], ...bundleRows(r)])}${Array.isArray(names) && names.length ? html`<p>${names.map((name) => ui.chip(`${name}${Array.isArray(b.placeholderNames) ? b.placeholderNames.includes(name) ? " (placeholder)" : " (value)" : ""}`))}</p>` : null}${b?.shadowed?.length ? html`<p>The trigger's value won; the bundle's was not passed: ${b.shadowed.join(", ")}.</p>` : null}<p class="card__sub">Names only: no secret value reaches a log, a record or this page.</p>`);
 }
 
+/**
+ * Where the run's main model got its credential (issue #998), from the record's `mainCredential` (the worker's closed word
+ * and, for a declared key, its variable's name, never a value), or null for a record without one: a run refused before
+ * its container, or one an earlier release wrote. A declared key is named by what declared it, the record's purpose
+ * telling an answer draft and a question grouping from a trigger's job.
+ */
+export function mainCredentialText(record) {
+  const c = recordedMainCredential(record?.mainCredential);
+  if (c === null) return null;
+  if (c.source === "run-secret") {
+    const owner = record.purpose === "answer-draft" ? "the answer rule's" : record.purpose === "zero-touch-grouping" ? "the zeroTouch block's" : "the trigger's";
+    return `${owner} declared key${c.variable ? ` ${c.variable}` : ""}`;
+  }
+  return { "host-env": "the host's key", "pi-login": "the host's pi login", subscription: "a subscription connection", keyless: "no key (keyless)" }[c.source];
+}
+
 export function runModels(view) {
   const r = recordOf(view), u = r?.usage;
-  if (hiddenRecord(view) || !u) return html``;
+  // Issue #998: a run with no usage still says where its credential came from, when its record knows.
+  const credential = r ? mainCredentialText(r) : null;
+  if (hiddenRecord(view) || (!u && credential === null)) return html``;
+  if (!u) return titled("Model usage", facts([["Credential", credential]]));
   // A damaged ledger row (not an object) is skipped, as the cost fold skips it (costs.mjs `hasLedger`).
   const models = Array.isArray(u.models) ? u.models.filter((m) => m !== null && typeof m === "object" && !Array.isArray(m)) : [];
   // Issue #1008: a row of a provider the record names notional is its list price, not billed, and says so.
   const notional = recordNotionalProviders(r);
-  return titled("Model usage", html`${table("Model usage", ["Provider", "Model", "Calls", "Input", "Output", "Cost"], models.map((m) => html`<tr><td>${m.provider}</td><td>${m.model}</td><td>${count(m.calls)}</td><td>${count(m.input)}</td><td>${count(m.output)}</td><td>${usdText(Number.isFinite(m.cost) ? Math.round(m.cost * 1e6) : null)}${notional?.has(m.provider) ? " notional" : ""}</td></tr>`), "No per-model usage was recorded.")}${facts([["Cache reads", models.reduce((n, m) => n + (m.cacheRead ?? 0), 0)], ["Cache writes", models.reduce((n, m) => n + (m.cacheWrite ?? 0) + (m.cacheWrite1h ?? 0), 0)], ["Unpriced calls", r.tokens?.unpriced], ["No model resolved", r.tokens?.unresolved]])}<p>Priced by pi-ai ${u.piAi ?? "unknown"} at stream time.</p>`);
+  return titled("Model usage", html`${table("Model usage", ["Provider", "Model", "Calls", "Input", "Output", "Cost"], models.map((m) => html`<tr><td>${m.provider}</td><td>${m.model}</td><td>${count(m.calls)}</td><td>${count(m.input)}</td><td>${count(m.output)}</td><td>${usdText(Number.isFinite(m.cost) ? Math.round(m.cost * 1e6) : null)}${notional?.has(m.provider) ? " notional" : ""}</td></tr>`), "No per-model usage was recorded.")}${facts([["Credential", credential], ["Cache reads", models.reduce((n, m) => n + (m.cacheRead ?? 0), 0)], ["Cache writes", models.reduce((n, m) => n + (m.cacheWrite ?? 0) + (m.cacheWrite1h ?? 0), 0)], ["Unpriced calls", r.tokens?.unpriced], ["No model resolved", r.tokens?.unresolved]])}<p>Priced by pi-ai ${u.piAi ?? "unknown"} at stream time.</p>`);
 }
 
 export function runTail(view) {
@@ -1207,7 +1226,10 @@ function hostFacts(view, name) {
   const doctor = doctorHostsOf(s).filter((d) => d.name === name).sort((a, b) => (a.ageMs ?? Infinity) - (b.ageMs ?? Infinity))[0] ?? null;
   // "No live registry row" is said only over a registry read THIS time (`rowLastSeen`): after one good read a registry
   // that fails shows its rows as last seen, and the cards said "none" of a host that had registered since.
-  const kind = !read ? "unread" : registryReadInPart(s) && (!host || host.notRead === true) ? "part" : hostsUnread(s) ? "hosts" : rowLastSeen(s, host) ? "last" : host ? null : "none";
+  // A host with no row over a registry read in part (issue #1073): "part" only where that read may have missed its row
+  // (`hostPartCase`: it names this host, or does not name every host it missed); a read that names every host it missed
+  // and not this one found no row, so the host has none, as over a registry read whole. It said "part" of any such host.
+  const kind = !read ? "unread" : registryReadInPart(s) && (host?.notRead === true || (!host && hostPartCase(s, name) !== null)) ? "part" : hostsUnread(s) ? "hosts" : rowLastSeen(s, host) ? "last" : host ? null : "none";
   const hostGap = { unread: REFUSED_WORDS.unread, part: REFUSED_WORDS.inPart, hosts: HOSTS_UNREAD, last: REFUSED_WORDS.lastSeen, none: REFUSED_WORDS.noRow(name) }[kind] ?? null;
   const floorGap = { unread: HOSTS_UNREAD, part: REFUSED_WORDS.inPart, hosts: HOSTS_UNREAD, last: REFUSED_WORDS.lastSeen, none: `not known: ${REFUSED_WORDS.noRow(name)}` }[kind] ?? null;
   // A row that is as last seen has a beat, and its age is not this read's to tell.
