@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assembleInsightsView, heldMoneyOf, spendSummaryOf, spendChartsOf, recordSpendOf, assembleBudgetView, assembleGraph } from "../src/insights-assembly.mjs";
+import { assembleInsightsView, heldMoneyOf, spendSummaryOf, spendChartsOf, recordSpendOf, assembleBudgetView, assembleGraph, INSIGHTS_CAPACITY_READ_MS, INSIGHTS_READ_MS } from "../src/insights-assembly.mjs";
 import { costsSinceMs, whatIfRuns } from "../src/costs.mjs";
 import { makeWhatIfReader } from "../src/console/whatif.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { valkeyEndpointTag } from "@edgehero/pi-dispatch/dollar-budget";
 import { join } from "node:path";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const NOW = Date.parse("2026-10-29T12:00:00Z");
 const DAY = 86_400_000;
@@ -27,12 +28,114 @@ function readsFixture() {
 
 for (const [view, expected] of [
   ["capacity", ["capacity", "hosts"]],
-  ["budget-split", ["projects", "allocation", "hosts", "scan"]],
+  // Its Valkey reads first, together, then the files (issue #1073).
+  ["budget-split", ["allocation", "hosts", "projects", "scan"]],
   ["breakdown", ["projects", "costs"]],
 ]) test(`${view} reads only its own slices`, async () => {
   const { reads, calls } = readsFixture();
   await assembleInsightsView({}, "7d", { view, pricing, nowMs: NOW, envFn: () => ({}), reads });
   assert.deepEqual(calls.map((c) => c.name), expected);
+});
+
+test("each view's Valkey reads go out together and before its folds, each handed its own bound or what is left of the page's deadline (#1073)", async () => {
+  // On a Valkey that does not answer, `/insights` took the sum of five reads' bounds (11.3 s measured): one after
+  // another, each waited out before the next was asked. Here every read is held until the test lets it answer.
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  for (const [view, valkey, files] of [
+    ["spend", ["budget", "hosts", "allocation"], ["costs", "scan"]],
+    ["capacity", ["capacity", "hosts"], []],
+    ["budget-split", ["allocation", "hosts"], ["scan"]],
+  ]) {
+    const { reads, calls } = readsFixture();
+    const held = [];
+    for (const name of valkey) {
+      const answer = reads[name];
+      reads[name] = (...args) => new Promise((resolve) => held.push({ name, open: () => resolve(answer(...args)) }));
+    }
+    const asked = [];
+    const within = (own) => (asked.push(own), own - 1);
+    const assembling = assembleInsightsView({}, "7d", { view, pricing, nowMs: NOW, envFn: () => ({}), reads, within });
+    await tick();
+    assert.deepEqual(held.map((h) => h.name).sort(), [...valkey].sort(), `${view}: every Valkey read is asked before any answers`);
+    assert.deepEqual(calls.filter((c) => files.includes(c.name)), [], `${view}: no fold over the records before they answer`);
+    for (const h of held) h.open();
+    const got = await assembling;
+    assert.equal(got.partsUnread, undefined, `${view}: every read answered`);
+    // Each read's bound: its own (`within`'s argument), or what is left of the deadline (what `within` answers).
+    const bounds = Object.fromEntries(calls.filter((c) => valkey.includes(c.name)).map((c) => [c.name, c.name === "hosts" ? c.args[0].timeoutMs : c.name === "capacity" ? c.args[3].timeoutMs : c.args.at(-1).timeoutMs]));
+    assert.deepEqual(bounds, Object.fromEntries(valkey.map((name) => [name, (name === "capacity" ? INSIGHTS_CAPACITY_READ_MS : INSIGHTS_READ_MS) - 1])), `${view}: each read is handed within's answer`);
+    assert.deepEqual(asked.sort(), valkey.map((name) => (name === "capacity" ? INSIGHTS_CAPACITY_READ_MS : INSIGHTS_READ_MS)).sort(), `${view}: and asks it with its own bound`);
+  }
+  // A caller with no deadline (the TUI's, a test's) names no bound, and each reader keeps its own.
+  const { reads, calls } = readsFixture();
+  await assembleInsightsView({}, "7d", { pricing, nowMs: NOW, envFn: () => ({}), reads });
+  assert.deepEqual(calls.filter((c) => ["budget", "hosts", "allocation"].includes(c.name)).map((c) => c.args.some((a) => a && typeof a === "object" && Object.hasOwn(a, "timeoutMs"))), [false, false, false]);
+});
+
+test("a view with a part not read says so to the console's cache (partsUnread), never to the page, and a view read whole does not (#1073)", async () => {
+  const cases = [
+    ["spend", "the budget counters", { budget: { unreachable: "timed out reaching the queue", tokens: {}, dollars: { windows: [] } } }],
+    ["spend", "a scoped row's counters", { budget: { scopedUnreachable: "timed out reaching the queue", tokens: {}, dollars: { windows: [] } } }],
+    ["spend", "the dollar counters", { budget: { tokens: {}, dollars: { windows: [], countersUnreachable: "timed out reaching the queue" } } }],
+    ["spend", "the registry", { hosts: { unreachable: "timed out reaching the registry" } }],
+    ["spend", "the registry, read in part", { hosts: { hosts: [], incomplete: "1 of 2 host rows not read" } }],
+    ["spend", "the split", { allocation: { window: "week", unreachable: "timed out" } }],
+    ["spend", "this host's run records", { scan: { unreachable: "EACCES" } }],
+    ["capacity", "the report", { capacity: { unreachable: "the capacity report could not be read" } }],
+    ["capacity", "the report's registry or mirror", { capacity: { hosts: [], sourcesRead: false } }],
+    ["capacity", "the registry", { hosts: { unreachable: "not answering" } }],
+    ["budget-split", "the split", { allocation: { window: "week", unreachable: "timed out" } }],
+    ["budget-split", "the registry", { hosts: { unreachable: "not answering" } }],
+    ["breakdown", "this host's run records", { costs: { unreachable: "EACCES" } }],
+  ];
+  for (const [view, what, answers] of cases) {
+    const { reads } = readsFixture();
+    // The files are read synchronously, Valkey's answers are promises: each fake as its read is.
+    for (const [name, answer] of Object.entries(answers)) reads[name] = ["costs", "scan"].includes(name) ? () => answer : async () => answer;
+    const got = await assembleInsightsView({}, "7d", { view, pricing, nowMs: NOW, envFn: () => ({}), reads });
+    assert.equal(got.partsUnread, true, `${view}: ${what} not read`);
+    assert.equal(Object.hasOwn(got.capacity ?? {}, "sourcesRead"), false, `${view}: the report's own mark stays out of the page's payload`);
+  }
+  for (const view of ["spend", "capacity", "budget-split", "breakdown", "flows"]) {
+    const { reads } = readsFixture();
+    reads.capacity = async () => ({ hosts: [], sourcesRead: true });
+    const got = await assembleInsightsView({}, "7d", { view, pricing, nowMs: NOW, envFn: () => ({}), reads });
+    assert.equal(Object.hasOwn(got, "partsUnread"), false, `${view}: read whole`);
+  }
+  // The flows' one Valkey read goes through a seam that sees its answer: a schedulers list that was not read.
+  const { reads } = readsFixture();
+  reads.schedulers = async () => ({ unreachable: "timed out reading the job schedulers" });
+  reads.graph = async (_paths, opts) => (await opts.readSchedulersFn({}), {});
+  assert.equal((await assembleInsightsView({}, "7d", { view: "flows", pricing, nowMs: NOW, envFn: () => ({}), reads })).partsUnread, true);
+});
+
+test("the bounds the assembly hands under a deadline are the readers' own defaults, read from their signatures (#1073)", () => {
+  const source = readFileSync(fileURLToPath(new URL("../src/read-model.mjs", import.meta.url)), "utf8");
+  const defaultOf = (name) => {
+    const at = source.indexOf(`export async function ${name}(`);
+    assert.ok(at >= 0, name);
+    const bound = /timeoutMs = (\d+)/.exec(source.slice(at, source.indexOf("} = {}) {", at)));
+    assert.ok(bound, `${name} has a bound of its own`);
+    return Number(bound[1]);
+  };
+  for (const name of ["readBudget", "readScopedBudget", "readDollarWindows", "readHosts", "readAllocations", "readSchedulers"]) assert.equal(defaultOf(name), INSIGHTS_READ_MS, name);
+  assert.equal(defaultOf("readCapacity"), INSIGHTS_CAPACITY_READ_MS, "readCapacity");
+});
+
+test("assembleBudgetView asks for the job-slot counters, the scoped rows' and the dollar windows' at once, each with the bound it is handed (#1073)", async () => {
+  const dir = tempDir("pd-1073-budget-");
+  const paths = { valkeyUrl: "redis://127.0.0.1:1", settingsFile: join(dir, "settings.json"), scopedLimitsPath: join(dir, "scoped-limits.json"), logsDir: join(dir, "logs") };
+  writeFileSync(paths.scopedLimitsPath, JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 10 }] }));
+  const sent = [];
+  const never = () => new Promise(() => {});
+  const redisFn = () => ({ on() {}, disconnect() {}, get: (key) => (sent.push(["get", key]), never()), mget: (...keys) => (sent.push(["mget", ...keys]), never()) });
+  const started = performance.now();
+  const assembling = assembleBudgetView(paths, { redisFn, env: { PI_DAILY_COST_USD: "10", PI_MAX_COST_USD: "1" }, nowMs: NOW, timeoutMs: 40 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual([sent.filter(([cmd]) => cmd === "get").length >= 5, sent.filter(([cmd]) => cmd === "mget").length], [true, 1], "the four counters, a scoped row's and the dollar windows' MGET, before any bound fired");
+  const got = await assembling;
+  assert.ok(performance.now() - started < 3 * 40 + 500, "one bound, not three in turn");
+  assert.deepEqual([Boolean(got.unreachable), got.scopedUnreachable, got.dollars.countersUnreachable], [true, "timed out reaching the queue", "timed out reaching the queue"], "each says it was not read");
 });
 
 test("allocation reasons are requested only for operator loads, viewer full paths stay off and counts use envelope window", async () => {

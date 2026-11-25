@@ -22,7 +22,7 @@ import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { VALKEY_UNREACHABLE } from "../src/console/actions.mjs";
 import { DRAFT_DROP_UNCONFIRMED } from "../src/answerer-data.mjs";
 import { runCli } from "../src/console/cli.mjs";
-import { ALLOWANCE_UNREAD } from "../src/read-model.mjs";
+import { ALLOWANCE_UNREAD, FAILED_READ_KEEP_MS } from "../src/read-model.mjs";
 import { SANDBOX_REQUEST_UNCONFIRMED } from "../src/sandbox-data.mjs";
 import { FIX_STAGE_UNCONFIRMED } from "../src/zero-touch-data.mjs";
 import { CANARY_UNCONFIRMED } from "../src/trigger-fire.mjs";
@@ -151,6 +151,23 @@ async function valkeyFront(target) {
   };
 }
 
+/** A page's GET, as a signed-in browser asks it: `{ status, text, ms }`. */
+function pageFrom(port) {
+  return (path, cookie) => new Promise((resolve, reject) => {
+    const started = performance.now();
+    const req = request({ host: "127.0.0.1", port, method: "GET", path, headers: { host: `127.0.0.1:${port}`, cookie } }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString(), ms: performance.now() - started }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+/** A page's words, without its markup, scripts and styles. */
+const wordsOf = (html) => String(html).replace(/<(script|style|template)\b[^]*?<\/\1>/g, " ").replace(/<[^>]+>/g, " ").replace(/&#39;/g, "'").replace(/\s+/g, " ");
+
 function httpTo(port) {
   return (path, { body, cookie } = {}) => new Promise((resolve, reject) => {
     const data = JSON.stringify(body ?? {});
@@ -188,7 +205,7 @@ function repository(prefix) {
  * socket is opened inside the try, so a failure anywhere leaves none open and the file ends. `files(dir)` writes what the
  * deployment needs and answers extra environment.
  */
-async function withConsole(fn, { files = () => ({}) } = {}) {
+async function withConsole(fn, { files = () => ({}), startFrozen = false, realClock = false } = {}) {
   let direct = null, front = null, running = null;
   let stop = () => {};
   const cleanup = [];
@@ -210,7 +227,9 @@ async function withConsole(fn, { files = () => ({}) } = {}) {
     writeFileSync(env.PI_TRIGGERS_FILE, JSON.stringify({ triggers: [] }));
     Object.assign(env, files({ dir, folder, host, env }) ?? {});
     const err = [];
-    const io = { env, now: () => now, uid: process.geteuid?.(), err: (line) => err.push(line) };
+    // `realClock` (issue #1073): the console's caches on the wall clock, for a test that waits out how long one keeps a
+    // read; the hour of this console's own then names no allowance key, which such a test does not use.
+    const io = { env, ...(realClock ? {} : { now: () => now }), uid: process.geteuid?.(), err: (line) => err.push(line) };
     const tokenFor = async (name, role) => {
       const printed = [];
       assert.equal(await runCli(["token", "add", "--name", name, "--role", role, "--deployment", dir], { ...io, out: (line) => printed.push(line) }), 0, err.join("\n"));
@@ -222,8 +241,12 @@ async function withConsole(fn, { files = () => ({}) } = {}) {
     const until = new Promise((resolve) => (stop = resolve));
     let listening;
     const up = new Promise((resolve) => (listening = resolve));
+    // `startFrozen` (issue #1073): Valkey connected and not answering from before the console starts.
+    if (startFrozen) front.freeze();
     running = runCli(["serve", "--deployment", dir], { ...io, out: () => {}, until, onListening: listening });
-    const call = httpTo((await up).address().port);
+    const port = (await up).address().port;
+    const call = httpTo(port);
+    const getPage = pageFrom(port);
     const signIn = async (token) => {
       const login = await call("/login", { body: { token } });
       assert.equal(login.status, 200, login.text.slice(0, 200));
@@ -240,6 +263,8 @@ async function withConsole(fn, { files = () => ({}) } = {}) {
     await fn({
       dir, folder, host, env, err, now, hourKey, queueName, direct, front, cookies, cleanup,
       act: (name, step, body, who = "operator") => call(`/api/act/${name}/${step}`, { cookie: cookies[who], body }),
+      /** A page as `who` loads it: `{ status, text, ms }`. */
+      page: (path, who = "operator") => getPage(path, cookies[who]),
       /** The audit rows of the console's log, newest last. */
       rows: () => readConsoleAudit({ logsDir: env.PI_LOGS_DIR, limit: 50 }).rows.slice().reverse(),
       /** How many jobs this console's own queue holds, read on a connection the front is not on. */
@@ -684,5 +709,74 @@ test("a sandbox pin on a real console whose Valkey stops answering: at the reque
     assert.deepEqual(atAdd.rows, [["sandbox-pin", "ok", null], ["sandbox-pin", "failed", SANDBOX_REQUEST_UNCONFIRMED]]);
     assert.ok(atAdd.ms > 2000 && atAdd.ms < 7000, `the helper's own bound decided (${Math.round(atAdd.ms)} ms)`);
     assert.deepEqual(atAdd.after, [1, 1], "the slot is held and the request was made at the wake");
+  });
+});
+
+// Issue #1073. The words a page has for a Valkey it could not read, on the two pages these tests load.
+const UNREAD = /could not be read|could not be reached|did not answer|not read this time|Valkey could not be read/;
+
+test("a console started while Valkey does not answer reads a trigger's page once it answers, with no restart, and offers its forms again (#1073)", live, async () => {
+  // Measured live in #988 and held by no named test until now: a console whose first reads fell in a freeze.
+  await withConsole(async (c) => {
+    const frozen = await c.page("/config/trigger?index=0");
+    assert.equal(frozen.status, 200, frozen.text.slice(0, 300));
+    assert.ok(frozen.ms < 8_500, `drawn inside the page's deadline (${Math.round(frozen.ms)} ms)`);
+    assert.match(wordsOf(frozen.text), UNREAD, "it says what it could not read");
+    assert.doesNotMatch(frozen.text, /data-action="trigger-delete"/, "and offers no change over a deployment it could not read");
+    c.front.thaw();
+    const thawed = performance.now();
+    let page = null;
+    while (performance.now() - thawed < 20_000) {
+      page = await c.page("/config/trigger?index=0");
+      if (page.status === 200 && !UNREAD.test(wordsOf(page.text))) break;
+      await sleep(250);
+    }
+    const ms = performance.now() - thawed;
+    assert.doesNotMatch(wordsOf(page.text), UNREAD, `read whole after the thaw: ${(wordsOf(page.text).match(new RegExp(`[^.]{0,80}(?:${UNREAD.source})[^.]{0,60}`)) ?? [""])[0]}`);
+    assert.ok(ms < 8_000, `within a few seconds of Valkey answering (${Math.round(ms)} ms)`);
+    assert.match(page.text, /data-action="trigger-delete"/, "with its forms again");
+  }, {
+    startFrozen: true,
+    realClock: true,
+    files: ({ env, folder, host }) => void writeFileSync(env.PI_TRIGGERS_FILE, JSON.stringify({ triggers: [{ on: { type: "cron", id: `nightly-${host}`, pattern: "0 6 * * *" }, run: { kind: "local", folder, flow: "fix", task: "t", maxCostUsd: "1" } }] })),
+  });
+});
+
+test("/insights on a Valkey that stops answering is drawn inside the page's deadline, and reads whole again within the short floor of its answering (#1073)", live, async () => {
+  // Its five reads went one after another, each with a bound of its own: 11.3 s measured with an envelope, a scoped
+  // limit and a dollar cap, where every other page is drawn within about 8. Its cache then kept that assembly for 30 s.
+  await withConsole(async (c) => {
+    const words = async (path) => {
+      const got = await c.page(path);
+      assert.equal(got.status, 200, got.text.slice(0, 300));
+      return { ...got, words: wordsOf(got.text) };
+    };
+    const whole = await words("/insights?range=7d");
+    assert.doesNotMatch(whole.words, /counters could not be read|budget split could not be read/, "every part read while Valkey answers");
+    c.front.freeze();
+    // Another window, so the load assembles its own and does not take the one above from the cache.
+    const frozen = await words("/insights?range=30d");
+    assert.ok(frozen.ms < 7_000, `drawn inside the page's deadline (${Math.round(frozen.ms)} ms; one read after another took 11.3 s)`);
+    assert.match(frozen.words, /counters could not be read/, "it says what it could not read");
+    c.front.thaw();
+    const thawed = performance.now();
+    let page = frozen;
+    while (performance.now() - thawed < 30_000 && /counters could not be read/.test(page.words)) {
+      await sleep(250);
+      page = await words("/insights?range=30d");
+    }
+    const ms = performance.now() - thawed;
+    assert.doesNotMatch(page.words, /counters could not be read|budget split could not be read/);
+    assert.ok(ms < FAILED_READ_KEEP_MS + 3_000, `read whole within the floor of Valkey answering (${Math.round(ms)} ms; the cache kept it 30 s)`);
+  }, {
+    realClock: true,
+    files: ({ dir, env }) => {
+      const files = { PI_SETTINGS_FILE: join(dir, "settings.json"), PI_SCOPED_LIMITS_FILE: join(dir, "scoped-limits.json"), PI_ENVELOPE_FILE: join(dir, "envelope.json") };
+      writeFileSync(env.PI_PROJECTS_FILE, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }, { id: "platform", members: ["github:acme/infra"] }] }));
+      writeFileSync(files.PI_SETTINGS_FILE, JSON.stringify({ maxCostUsd: "2", dailyCostUsd: "20", dailyCap: 50 }));
+      writeFileSync(files.PI_SCOPED_LIMITS_FILE, JSON.stringify({ version: 1, limits: [{ scope: "acme/web", day: 10, week: 30 }] }));
+      writeFileSync(files.PI_ENVELOPE_FILE, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", platform: "10", _other: "0" }, defaultWeights: { shop: 1, platform: 1, _other: 0 } }));
+      return files;
+    },
   });
 });
