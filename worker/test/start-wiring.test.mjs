@@ -17,6 +17,8 @@ import { sandboxInventoryKey, SANDBOX_INVENTORY_HOSTS } from "../src/sandbox-inv
 import { hookRunsKey, HOOK_HOSTS } from "../src/hook-runs.mjs";
 import { makeTouchStore } from "../src/touch-state.mjs";
 import { stageSecretFiles, sweepSecretFiles } from "../src/secret-files.mjs";
+import { makeAnswerDraftRuntime } from "../src/answerer-runtime.mjs";
+import { providerKeyCandidates } from "../src/env-allowlist.mjs";
 
 // start.mjs imports index.mjs (bullmq), connection.mjs (ioredis), and the octokit-backed auth/host
 // modules, so this skips below the node floor / without deps and runs in CI, where
@@ -1530,8 +1532,14 @@ test("issue #967: a run secret declaring the main provider's key is the credenti
 	assert.equal((await gate({ ...declared, secrets: undefined })).ok, false, "without the binding the host is asked, and has no key");
 	assert.equal((await gate({ ...declared, secrets: {}, secretFiles: { OPENROUTER_API_KEY: "op://ci/or/key" } })).ok, false, "a file secret is no credential");
 	assert.equal((await gate({ ...declared, provider: "anthropic", model: "m", secrets: { ANTHROPIC_OAUTH_TOKEN: "op://ci/a/oauth" } })).ok, false, "nor the OAuth variable");
-	assert.equal((await gate({ ...declared, answerDraft: { runId: "r" } })).ok, false, "an answer draft keeps the host's credential");
 	assert.deepEqual(await gate({ ...declared, watch: { findingId: "f" } }), { ok: true, declared: "OPENROUTER_API_KEY" }, "issue #997: a watch job declares a key like any trigger's job");
+	// Issue #1013: and an answer draft and a question grouping, each with the secrets its answer rule or the zeroTouch block
+	// declares, for its main model and for its decision or grouping model asked as the job on that provider.
+	for (const decision of [{ answerDraft: { runId: "r" } }, { questionGrouping: { runId: "r" } }]) {
+		assert.deepEqual(await gate({ ...declared, ...decision }), { ok: true, declared: "OPENROUTER_API_KEY" }, Object.keys(decision)[0]);
+		assert.equal((await gate({ ...declared, ...decision }, { secrets: { OPENROUTER_API_KEY: "" } })).ok, false, "an empty value refuses, and the host is not asked");
+		assert.equal((await gate({ ...declared, ...decision, secrets: undefined })).ok, false, "without the binding the host is asked, and has no key");
+	}
 	// The candidate gate of a random pool or a fallback: the candidate carries the job's secrets.
 	const candidate = { ...declared, models: ["openrouter/deepseek/deepseek-chat"] };
 	assert.equal(await deps.checkFailoverCandidate(candidate, { models: null, endpoints: [] }), null, "the declared key makes the candidate eligible");
@@ -7853,7 +7861,7 @@ test("Zero touch boot shares tracking and private grouping dependencies, rereads
 	const outbox = { repair: async () => (calls.push("repair"), { repaired: 0, pending: 0, invalid: 0 }) };
 	const groupStore = { sentinel: "private grouping store" };
 	const groupRuntime = { sentinel: "grouping runtime" };
-	let storeOptions, runtimeOptions, outboxOptions;
+	let storeOptions, runtimeOptions, outboxOptions, answerOptions;
 	const boot = await runStart({
 		env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath, PI_LOGS_DIR: join(dir, "logs"), PI_SWEEP_INTERVAL_HOURS: "0" },
 		now: () => nowMs,
@@ -7863,6 +7871,7 @@ test("Zero touch boot shares tracking and private grouping dependencies, rereads
 			makeTouchOutbox: (options) => (outboxOptions = options, outbox),
 			makeQuestionGroupStore: (options) => { assert.equal(options.redis, storeOptions.redis); assert.equal(options.now(), nowMs); return groupStore; },
 			makeQuestionGroupRuntime: (options) => (runtimeOptions = options, groupRuntime),
+			makeAnswerDraftRuntime: (options) => (answerOptions = options, makeAnswerDraftRuntime(options)),
 		},
 		whileRunning: async ({ captured, deps }) => {
 			assert.deepEqual(calls, ["initialize", "repair"], "tracking starts and repairs before work is handed off");
@@ -7885,6 +7894,11 @@ test("Zero touch boot shares tracking and private grouping dependencies, rereads
 	assert.equal(runtimeOptions.getSettings().provider, boot.captured.getSettings().provider);
 	const classifier = runtimeOptions.resolveClassifier({ provider: "openrouter", id: "typesafe/jev-1.13" });
 	assert.equal(classifier.type, "classifier", "the real pinned catalog, not a text-model-only lookup, reaches grouping preflight");
+	// Issue #1013: both builders keep a block's declared keys by pi's own variable list, the one the credential gate reads.
+	for (const options of [runtimeOptions, answerOptions]) {
+		assert.equal(options.providerKeyNames, providerKeyCandidates);
+		assert.equal(typeof options.log, "function");
+	}
 	assert.equal(written.at(-1).purpose, "zero-touch-grouping");
 	assert.equal(written.at(-1).touchTrackingVersion, 1);
 });

@@ -1,21 +1,13 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { join } from "node:path";
 import { test } from "node:test";
-import { piOwnPackageDir } from "../../image/runner/src/usage-meter.mjs";
-import { providerKeyCandidates, piProviders } from "../../worker/src/env-allowlist.mjs";
-import { generateProviderKeys } from "../../.github/scripts/provider-key-names.mjs";
-import { PROVIDER_KEY_NAMES, PROVIDER_KEYS_SOURCE_SHA256, providerKeyNames } from "../src/provider-key-names.mjs";
+import * as worker from "@edgehero/pi-dispatch/provider-key-names";
+import * as admin from "../src/provider-key-names.mjs";
 
-test("the console's provider-key source hash is the installed pinned artifact, not upstream HEAD", () => {
-  const source = readFileSync(join(piOwnPackageDir("pi-ai"), "dist/env-api-keys.js"));
-  assert.equal(createHash("sha256").update(source).digest("hex"), PROVIDER_KEYS_SOURCE_SHA256, "Read the new pinned env-api-keys.js before regenerating the catalogue");
-});
-test("every generated provider and key order equals the worker's discovery against pinned pi", async () => {
-  assert.deepEqual(Object.keys(PROVIDER_KEY_NAMES), piProviders().sort());
-  for (const provider of piProviders()) assert.deepEqual(providerKeyNames(provider), providerKeyCandidates(provider), provider);
-  assert.deepEqual(providerKeyNames("__proto__"), []);
-  assert.deepEqual(providerKeyNames("unknown-custom-provider"), []);
-  assert.equal(readFileSync(new URL("../src/provider-key-names.mjs", import.meta.url), "utf8"), await generateProviderKeys());
+// Issue #1013: the generated table is the worker's leaf (worker/test/provider-key-names.test.mjs holds it to pinned pi);
+// the console reads that one table, never a copy of its own.
+test("the console's provider-key table is the worker's generated leaf, re-exported", () => {
+  assert.deepEqual(Object.keys(admin).sort(), ["PROVIDER_KEYS_SOURCE_SHA256", "PROVIDER_KEY_NAMES", "providerKeyNames"]);
+  assert.equal(admin.PROVIDER_KEY_NAMES, worker.PROVIDER_KEY_NAMES);
+  assert.equal(admin.PROVIDER_KEYS_SOURCE_SHA256, worker.PROVIDER_KEYS_SOURCE_SHA256);
+  assert.equal(admin.providerKeyNames, worker.providerKeyNames);
 });

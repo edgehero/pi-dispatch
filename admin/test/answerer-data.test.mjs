@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { DRAFT_DROP_UNCONFIRMED, makeAnswererService, answererStats } from "../src/answerer-data.mjs";
 import { planStandingAnswerAdd, applyStandingAnswerAdd, planAnswerDraftDrop } from "../src/answerer-actions.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { answererRules } from "../src/console/panels/answerer.mjs";
 import { answererFixture } from "./helpers/answerer-goldens.mjs";
 
 const AT = Date.parse("2026-10-31T12:00:00Z");
@@ -45,6 +46,24 @@ test("viewer and agent answerer projections never read or contain private questi
     const serialized = JSON.stringify(got);
     for (const privateText of [fixture.privateDraft.question, fixture.privateDraft.draft, "CONTRIBUTING", "confidence", "category", "standing", "known-conventions"]) assert.ok(!serialized.includes(privateText), privateText);
   }
+});
+
+test("an operator's rule view names a rule's declared provider keys, apart the ones its draft jobs do not receive, and never their references (issue #1013)", async () => {
+  const { paths, service } = setup();
+  const doc = JSON.parse(readFileSync(paths.triggersPath));
+  const reference = "op://ci/rule-openai-reference";
+  doc.answerRules[0] = { ...doc.answerRules[0], model: "openai/gpt-5-mini", decisionModel: "openrouter/typesafe/jev-1.13", secrets: { OPENAI_API_KEY: reference, OPENROUTER_API_KEY: "op://ci/or", ANTHROPIC_API_KEY: "op://ci/anthropic" }, secretsProfile: "vault" };
+  writeFileSync(paths.triggersPath, JSON.stringify({ version: 12, ...doc }));
+  const got = await service.read({ role: "operator" });
+  assert.deepEqual(got.rules[0].secretNames, ["OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"]);
+  assert.deepEqual(got.rules[0].secretsNotPassed, ["ANTHROPIC_API_KEY"], "neither model runs on anthropic");
+  assert.equal(got.rules[0].secretsProfile, "vault");
+  assert.equal(JSON.stringify(got).includes(reference), false);
+  const page = String(answererRules({ role: "operator", page: "answer-rules", data: { answerer: got } }));
+  assert.equal(page.includes(reference), false, "the rule's JSON on its page carries the names alone");
+  assert.match(page, /<dt>Keys<\/dt><dd>OPENAI_API_KEY and OPENROUTER_API_KEY, declared in the rule&#39;s own secrets and passed to its draft jobs; references are not shown<\/dd>/);
+  assert.match(page, /<dt>Not passed<\/dt><dd>ANTHROPIC_API_KEY: declared, but neither of the rule&#39;s models runs on a provider that reads it, so the draft jobs do not receive it<\/dd>/);
+  assert.equal(page.includes("secretsNotPassed"), false, "the rule's JSON is the rule's fields, not the page's reading of them");
 });
 
 test("only an operator's selected run receives draft bytes; its draft run resolves the same retained source", async () => {

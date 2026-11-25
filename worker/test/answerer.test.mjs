@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FORGE_KINDS } from "../src/forges.mjs";
-import { parseTriggersDocument } from "../src/triggers.mjs";
-import { ANSWER_CLASSIFICATIONS, validateAnswerRules, validateStandingAnswers, answerStandingSource, answerConfigDigest, makeAnswerDraftStore } from "../src/answerer.mjs";
+import { parseTriggersDocument, triggersFileVersionFor } from "../src/triggers.mjs";
+import { ANSWER_CLASSIFICATIONS, validateAnswerRules, validateStandingAnswers, answerStandingSource, answerConfigDigest, answerRuleConfigDigest, makeAnswerDraftStore } from "../src/answerer.mjs";
 import { consoleDraftOf, answerTrailComment } from "../src/console-answer.mjs";
 import { enqueueAnswerDraftJob, enqueueForgeJob } from "../src/queue.mjs";
 import { makeAnswerDraftRuntime, readAnswerPending, stageAnswerDraft } from "../src/answerer-runtime.mjs";
@@ -23,6 +23,71 @@ test("reviewed answer rules and standing answers have strict scope and execution
 	for (const adoptedAt of ["yesterday", "2026-10-31", "2026-10-31T12:00:00Z", "2026-02-30T12:00:00.000Z"]) assert.throws(() => validateStandingAnswers([{ ...standing, adoptedAt }]));
 	for (const key of ["answer_rules", "AnswerRules", "standing_answers"]) assert.throws(() => parseTriggersDocument(JSON.stringify({ triggers: [], [key]: [] }), "/config"));
 	const source = answerStandingSource(standing); assert.equal(source.id, answerConfigDigest({ kind: "standing", name: standing.title, revision: answerConfigDigest(standing) }));
+});
+
+// Issue #1013: an answer rule declares its models' provider keys as a trigger declares its main model's, in `secrets`.
+const keyed = { ...rule, model: "openai/gpt-5-mini", decisionModel: "anthropic/claude-haiku-4-5", secrets: { OPENAI_API_KEY: "op://ci/openai", ANTHROPIC_API_KEY: "op://ci/anthropic" }, secretsProfile: "vault" };
+const loadRules = (rules, version = 12) => parseTriggersDocument(JSON.stringify({ version, triggers: [], answerRules: rules }), "/config");
+
+test("issue #1013: an answer rule's declared provider keys load by run.secrets' own rules, OAuth and bearer variables refuse, and each refusal names the rule and the variable", () => {
+	assert.deepEqual(loadRules([keyed]).answerRules, [keyed]);
+	assert.deepEqual(validateAnswerRules([keyed]), [keyed], "the rule validator admits both fields");
+	for (const [changed, message] of [
+		[{ secrets: { ANTHROPIC_OAUTH_TOKEN: "op://ci/oauth" } }, 'answer rule "help": secrets key "ANTHROPIC_OAUTH_TOKEN" is a subscription login (an OAuth token variable), not a provider\'s API key'],
+		[{ secrets: { EXAMPLE_AUTH_TOKEN: "op://ci/bearer" } }, 'answer rule "help": secrets key "EXAMPLE_AUTH_TOKEN" is a bearer token variable, not a provider\'s API key'],
+		// No key any model could take: the jobs would run on this host's key while the file reads as though they did not.
+		[{ secrets: { OPENAI_APIKEY: "op://ci/openai" } }, 'answer rule "help": secrets key "OPENAI_APIKEY" is no provider\'s API-key variable (did you mean "OPENAI_API_KEY"?) --'],
+		[{ secrets: { DATABASE_URL: "op://ci/db" } }, 'answer rule "help": secrets key "DATABASE_URL" is no provider\'s API-key variable --'],
+		[{ secrets: { COPILOT_GITHUB_TOKEN: "op://ci/copilot" } }, 'answer rule "help": secrets key "COPILOT_GITHUB_TOKEN" is the key variable of github-copilot, which needs host authentication, so it is never a declared key'],
+		[{ secrets: { QWEN_TOKEN_PLAN_API_KEY: "op://ci/qwen" } }, 'answer rule "help": secrets key "QWEN_TOKEN_PLAN_API_KEY" is a variable pi reads for qwen-token-plan and qwen-token-plan-individual, not the one their API keys are written under (QWEN_TOKEN_PLAN_TEAM_API_KEY and QWEN_TOKEN_PLAN_INDIVIDUAL_API_KEY)'],
+		[{ secrets: { GITHUB_TOKEN: "op://ci/forge" } }, 'answer rule "help": secrets key "GITHUB_TOKEN" is reserved'],
+		[{ secrets: { ANTHROPIC_AUTH_TOKEN: "op://ci/bearer" } }, 'answer rule "help": secrets key "ANTHROPIC_AUTH_TOKEN" is reserved'],
+		[{ secrets: ["OPENAI_API_KEY"] }, 'answer rule "help": secrets must be an object'],
+		[{ secrets: {} }, 'answer rule "help": secrets is empty'],
+		[{ secrets: { OPENAI_API_KEY: "" } }, 'answer rule "help": secrets.OPENAI_API_KEY must be a non-empty string reference'],
+		[{ secrets: { OPENAI_API_KEY: "-op" } }, 'answer rule "help": secrets.OPENAI_API_KEY must not start with "-"'],
+		[{ secrets: { "OPENAI-KEY": "op://ci/openai" } }, 'answer rule "help": secrets key "OPENAI-KEY" is not an environment variable name'],
+		[{ secretsProfile: "vault,two" }, 'answer rule "help": secretsProfile "vault,two" may use letters, digits, dot, dash and underscore only'],
+		[{ secretsProfile: 7 }, 'answer rule "help": secretsProfile must be a non-empty string'],
+		[{ secrets: undefined }, 'answer rule "help": secretsProfile is set but secrets names nothing --'],
+	]) {
+		assert.throws(() => loadRules([{ ...keyed, ...changed }]), (error) => error.piDispatchConfig === true && error.message.startsWith(message) && error.message.endsWith(": /config") && !error.message.includes("run."), `${JSON.stringify(changed)} -> ${message}`);
+	}
+	// A provider-key name is the rule's to declare only through the two fields: anything else is still an unknown field.
+	assert.throws(() => validateAnswerRules([{ ...rule, secretFiles: { OPENAI_API_KEY: "op://ci/openai" } }]));
+});
+
+test("issue #1013: a rule declaring a key needs triggers file version 12, so an older loader keeps the file it had, and the writer stamps it", () => {
+	assert.throws(() => loadRules([keyed], 11), (error) => error.message === 'triggers file: top-level "answerRules" holds a value that needs triggers file version 12, and the file declares 11: /config');
+	assert.throws(() => parseTriggersDocument(JSON.stringify({ triggers: [], answerRules: [{ ...keyed, secretsProfile: undefined }] }), "/config"), /"answerRules" holds a value that needs triggers file version 12, and the file declares 1:/);
+	assert.equal(triggersFileVersionFor({ triggers: [], answerRules: [rule, keyed] }), 12);
+	assert.equal(triggersFileVersionFor({ triggers: [], answerRules: [rule] }), 1, "a rule without either field keeps the file's version");
+	assert.throws(() => loadRules([keyed], 13), (error) => error.newer === true, "a file a newer build wrote defers");
+});
+
+test("issue #1013: an answer draft job carries its rule's declared keys of its main and decision providers, and withholds the rest by name", async () => {
+	const keyNames = (provider) => ({ openai: ["OPENAI_API_KEY"], anthropic: ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] })[provider] ?? [];
+	const draft = (secrets) => {
+		const doc = { version: 12, triggers: [], answerRules: [{ ...keyed, secrets }], standingAnswers: [] };
+		const parsed = parseTriggersDocument(JSON.stringify(doc), "/t.json"), at = 1_900_000_000_000;
+		const source = { kind: "github", repo: "acme/web", target: { type: "issue", number: 7 }, selfId: 99, apiUrl: "https://api.github.com", questionCommentId: "123", startedAt: at - 1000, parkedAt: at };
+		const input = { version: 1, runId: "parent", ruleId: "help", configDigest: answerRuleConfigDigest(parsed, parsed.answerRules[0]), project: "web", source };
+		const logs = [];
+		const runtime = makeAnswerDraftRuntime({ triggersPath: "/t.json", readFile: () => JSON.stringify(doc), providerKeyNames: keyNames, log: (event, fields) => logs.push({ event, fields }),
+			store: { privateInput: async () => input, readMeta: async () => ({ draftRunId: "draft-1", status: "queued" }), update: async () => true },
+			identity: async () => ({ selfId: 99, apiUrl: "https://api.github.com" }), readParkedInfo: async () => ({ runId: "parent", at }), readApproval: async () => ({ ok: true, request: null }), readPendingAnswer: async () => ({ jobId: null }) });
+		return runtime.resolve({ kind: "answer-draft", answerDraft: { runId: "parent", ruleId: "help" } }, "draft-1").then((got) => ({ got, logs }));
+	};
+	const both = await draft({ OPENAI_API_KEY: "op://ci/openai", ANTHROPIC_API_KEY: "op://ci/anthropic", GROQ_API_KEY: "op://ci/groq" });
+	assert.equal(both.got.data.provider, "openai");
+	assert.deepEqual(both.got.data.answerDecisionModel, { provider: "anthropic", id: "claude-haiku-4-5" });
+	assert.deepEqual(both.got.data.secrets, { OPENAI_API_KEY: "op://ci/openai", ANTHROPIC_API_KEY: "op://ci/anthropic" });
+	assert.equal(both.got.data.secretsProfile, "vault");
+	assert.equal(both.got.data.secretBundle, false, "a project bundle still never reaches a draft");
+	assert.deepEqual(both.logs, [{ event: "declared_key_withheld", fields: { rule: "help", names: ["GROQ_API_KEY"] } }], "names only, never a reference");
+	// A rule naming no key either provider reads gives the job neither field, so it keeps the host's credentials.
+	const none = await draft({ GROQ_API_KEY: "op://ci/groq" });
+	assert.equal("secrets" in none.got.data || "secretsProfile" in none.got.data, false);
 });
 
 test("a standing answer's forge prefix is FORGE_KINDS itself: every forge loads, anything else refuses, and no copy of the list is written out", () => {

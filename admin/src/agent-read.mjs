@@ -1,5 +1,5 @@
 import { recordedModelSelection } from "@edgehero/pi-dispatch/model-selection-record";
-import { recordedSecretFiles } from "@edgehero/pi-dispatch/run-history";
+import { recordedMainCredential, recordedSecretFiles } from "@edgehero/pi-dispatch/run-history";
 /** Model-facing reads are rebuilt before rendering or caching. New prose fields are withheld by default (#766). */
 import { basename } from "node:path";
 import { REASONS, SESSION_REASON_TEXT, PLAN_REASON_TEXT } from "@edgehero/pi-dispatch/reason-catalog";
@@ -64,6 +64,9 @@ export function agentReadProjection(value, key = "", depth = 0) {
   // Console APIs also project raw records, without passing through modelRunRecord first. Keep its count-only rule
   // here too, and preserve an already projected count without exposing a malformed map's reference values.
   if (key === "secretFiles") return Number.isSafeInteger(value) && value >= 0 && value <= 80 ? value : recordedSecretFiles(value)?.length;
+  // Issue #998: where a run's main credential came from, as its closed word alone: never the declared variable's name,
+  // as a model reads secret names as counts. `modelRunRecord` (dispatch_runs) keeps the same rule.
+  if (key === "mainCredential") { const c = recordedMainCredential(value); return c === null ? undefined : { source: c.source }; }
   if (value === null || typeof value === "boolean") return value;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value === "string") {

@@ -437,5 +437,9 @@
   "notionalProviders": [
     "anthropic"
   ],
+  "mainCredential": {
+    "source": "run-secret",
+    "variable": "ANTHROPIC_API_KEY"
+  },
   "v": 1
 }

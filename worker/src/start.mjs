@@ -978,6 +978,8 @@ export async function startWorker(
 		makeTouchOutbox: makeTouchOutboxFn = makeTouchOutbox,
 		makeQuestionGroupStore: makeQuestionGroupStoreFn = makeQuestionGroupStore,
 		makeQuestionGroupRuntime: makeQuestionGroupRuntimeFn = makeQuestionGroupRuntime,
+		// Issue #1013: the answer draft's builder too, so a wiring test sees the provider variable list each builder is handed.
+		makeAnswerDraftRuntime: makeAnswerDraftRuntimeFn = makeAnswerDraftRuntime,
 		// Issue #712: the worker's own doctor runs, a seam so a wiring test sees the interval and never spawns a doctor.
 		makeDoctorSpawner: makeDoctorSpawnerFn = makeDoctorSpawner,
 		// Issue #1040: the bounded runtime runner the CPU reserve's helper steps and the rm after a killed doctor go through,
@@ -2312,7 +2314,9 @@ export async function startWorker(
 		reportClose: async (outcome, mapping) => { if (mapping?.ruleId) await watchStore.recordIssueOutcome(mapping.ruleId, outcome); },
 	});
 	const watchRuntime = makeWatchRuntime({ store: watchStore, triggersPath: onceTriggersFile, now, log, getSettings, pauseUntil: (job, at) => pauseUntilMs(pauseWindows.current, job, at), enqueue: (fields, opts) => enqueueWatchJob(cronQueue, fields, { now, ...opts }), publishIssue: watchPublisher });
-	const questionGroupRuntime = makeQuestionGroupRuntimeFn({ store: questionGroupStore, triggersPath: onceTriggersFile, getSettings,
+	// Issue #1013: `providerKeyNames` is pi's variable list for a provider, the one the credential gate reads, so each builder
+	// hands a job the declared keys of its own providers and no other.
+	const questionGroupRuntime = makeQuestionGroupRuntimeFn({ store: questionGroupStore, triggersPath: onceTriggersFile, getSettings, providerKeyNames: providerKeyCandidates, log,
 		resolveClassifier: ({ provider, id }) => {
 			const models = readOverlayModels(config.globalPiDir);
 			const entry = models?.providers?.[provider];
@@ -2324,7 +2328,7 @@ export async function startWorker(
 		},
 	});
 	const answerDraftStore = makeAnswerDraftStore({ redis, now, retentionDays: config.logRetentionDays });
-	const answerDraftRuntime = makeAnswerDraftRuntime({ store: answerDraftStore, triggersPath: onceTriggersFile, now, log,
+	const answerDraftRuntime = makeAnswerDraftRuntimeFn({ store: answerDraftStore, triggersPath: onceTriggersFile, now, log, providerKeyNames: providerKeyCandidates,
 		enqueue: fields => enqueueAnswerDraftJob(runtimeQueue, fields),
 		readParkedInfo: sessionStore.readParkedInfo,
 		readApproval: source => approvalStore.find(source),

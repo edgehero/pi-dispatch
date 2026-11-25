@@ -1638,8 +1638,10 @@ it; a watch rule takes no role), a random candidate or a fallback the trigger ma
 model or an auxiliary model, a cron trigger by its id and any other, a watch rule included, by its row, with the
 variable's name and never a value ([the provider key as a run secret](secrets.md#the-provider-key-as-a-run-secret)).
 A trigger that reaches the slot only through its `decide` or auxiliary model says so ("for its decide model", "for its
-auxiliary model"). Every call their jobs make to that provider spends that key instead of this host's credential, so
-a slot can read Not set while they spend. Where this host refuses those jobs before they spend, because the row is a managed subscription or this host's
+auxiliary model"). After the triggers it names an answer rule (by its id) or the `zeroTouch` section whose own
+`secrets` declare the variable ([a key of the rule's own](answer-rules.md#a-key-of-the-rules-own)), with "for its
+decision model" or "for its grouping model" where only that model runs on the provider. Every call their jobs make to
+that provider spends that key instead of this host's credential, so a slot can read Not set while they spend. Where this host refuses those jobs before they spend, because the row is a managed subscription or this host's
 `PI_FORWARD_ENV` names the variable, the line says that instead. A line under the list says once that another host
 refuses them where its own forward list or bindings do, which no host publishes to the console, and, when it applies,
 that the projects file or a `PI_MODEL` line could not be read, which widens or leaves out what the lines say.
@@ -1954,6 +1956,19 @@ run page is a live page: its panels and transcript share one connection and one 
   "This run continues as" and a link to the recovery job.
 
 The `/dispatch` panel's running rows show the same, with the phase name clipped.
+
+### Which key a run spent
+
+A run's **Model usage** card has a **Credential** row: where its main model got its key. "the trigger's declared key
+OPENAI_API_KEY" is a key the trigger named in `run.secrets` (an answer draft says "the answer rule's", a question grouping
+"the zeroTouch block's"), "the host's key" a key in the worker's environment, "the host's pi login" a key from pi's
+`auth.json` on the host, "a subscription connection" a connection's access, and "no key (keyless)" a keyless endpoint
+([secrets](secrets.md#the-provider-key-as-a-run-secret)). It names the variable and never its value. The row is on an
+operator's run page; a viewer's run page draws no Model usage card, as it draws no Cost or Secrets panel. `/api/run`
+carries it as `mainCredential`: to an operator with the variable's name, to a viewer and an agent token as the word alone,
+since neither is shown a secret's name; `dispatch_runs` gives the word alone. A run refused before its container
+started, one whose container never started (the runtime's never-started exit, with nothing spent), and one an earlier
+release recorded, show no row.
 
 ### A run's artifacts
 
@@ -2897,7 +2912,7 @@ newer one could not say, that run and why. A row with nothing to quote reads "No
 
 | Row | What a person changes | What it shows and leaves |
 |---|---|---|
-| Model | `provider`, `model`, `maxCostUsd`, `maxSubscriptionUsd`, `models`, `fallbackModels`, `modelSelection` | Blank uses the deployment's, and where the deployment has no amount for the cap, a blank cap means no cap of its own. The subscription allowance (issue #1008) is the trigger's alone, the list price its subscription calls may use, so a blank one means no allowance, and removing or raising it is said as a widening. The pickers offer the catalog's priced models for the providers in use, and anything else can be typed, for the preview to judge. |
+| Model | `provider`, `model`, `maxCostUsd`, `maxSubscriptionUsd`, `models`, `fallbackModels`, `modelSelection` | Blank uses the deployment's, and where the deployment has no amount for the cap, a blank cap means no cap of its own. The subscription allowance (issue #1008) is the trigger's alone, the list price its subscription calls may use, so a blank one means no allowance, and removing or raising it is said as a widening. The pickers offer the catalog's priced models for the providers in use, and anything else can be typed, for the preview to judge. A random pool's [weights](triggers.md#weighting-the-pool) (issue #996) are set by hand in the file: the row names each candidate's share of the whole pool, where a pool without weights says each has an equal chance, and a pool edit keeps the weight of each candidate that stays, drops a removed one's and adds a candidate with none. |
 | Flow and skills | `flow` | Doctor's answer for each host, which cannot see a forge's repository, with a warning where it found the flow nowhere, and `run.skillsDir`, a folder on each host, set in the file. Each answer is for the triggers file as that host's last doctor run read it: after an edit to `run.flow`, `run.folder`, `run.skillsDir`, `run.packages` or `run.excludeExtensions`, or where that host's own triggers file differs, the host "answered for another version of the triggers file, so it is unknown there", and no warning stands on that answer. A later doctor run need not answer either: doctor publishes none for a spent one-shot or a file the worker refuses, and a host whose own triggers file differs answers for its own. Each published answer carries a short digest of those fields, which the page compares with its own reading of the file. A `run.command` is shown, set in the file. The picker is not the whole list: "It leaves out what is in a skills folder, or in a repository not on this host, and any other name can be typed." The skills it offers from the overlay and staged packages are those of the console's own host, so another host may hold different ones, which Doctor's answer shows. |
 | Extensions | `packages`, `excludeExtensions` | One switch for all the staged packages, then one per name, for each staged package and overlay extension a host publishes, with where it is, and a host that lacks it says so. Each row quotes what the newest run that loaded it brought, "as gh-9575 loaded it", also when it is switched off; one no run has loaded says what it brings is known once a run has loaded it, since hosts publish no counts of a package's contents, and an overlay entry has no manifest at all. Off leaves it out of these jobs by name: a package with its tools, skills, prompt templates and themes, an overlay extension before its code runs. A name means every extension of that name, so a package and an overlay entry of one name, or two versions on two hosts, are one row. Two names in the file that mean one entry (`git-guard` and `git-guard.ts`) are a row each, and each says the file also names the other. A name the file holds that no host shows keeps its row, so it can be turned back on, and turning the last one back on removes the key. Under `"packages": false` a package has no switch of its own, and one the file names stays listed, off. The repository's own are shown too, with no switch: merge-gated, changed in the repository. A new extension, or another version, goes through [Updates](#updates). |
 | MCP servers | `mcp` | A switch per server a host publishes, this host's overlay offers or the trigger names, with its transport, where it is, its exposure and its key by name, and which hosts have it, lack it, have it off or have not said. Where hosts define a server two ways, one it names reads "defined differently by host" and one it does not reads "not on for these jobs; turning it on would differ by host". `forge` is the job's own, in no overlay. |
@@ -3352,7 +3367,7 @@ commands, paths, diffs or repository-agent definitions. Its `waiting` is null wh
 says why. See [Model roles](model-roles.md),
 [Model failover](model-failover.md), [Proposals](model-proposals.md) and [Canaries](canary.md).
 
-Random model pools use the existing Model row: Fixed model, Ordered fallback or Random model pool. The pool has no primary or predicted next model. Models shows observed blockers; run details show the actual model and selection reason. Retry keeps the run's choice, while fresh Re-run chooses anew. Subscription-limit replacement follows the [random-pool rules](triggers.md#choosing-randomly-from-a-reviewed-pool).
+Random model pools use the existing Model row: Fixed model, Ordered fallback or Random model pool. The pool has no primary or predicted next model. Models shows observed blockers and, for a [weighted pool](triggers.md#weighting-the-pool), each candidate's share of the whole pool (`dispatch_models` gives a pool's `weighted` and each candidate's `share`, null without weights); run details show the actual model and selection reason. Retry keeps the run's choice, while fresh Re-run chooses anew. Subscription-limit replacement follows the [random-pool rules](triggers.md#choosing-randomly-from-a-reviewed-pool).
 
 Fleet host rows and the host page show queue consumer health separately from the heartbeat (#924): responding,
 stopped, stalled or unknown. The host page includes per-consumer state, last fetch and last job taken. An older
