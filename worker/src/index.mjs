@@ -111,16 +111,23 @@ export const SCOPE_BUSY_RECHECK_MAX_MS = 20_000;
 // probably changed hands since. Without this a fleet lease's cadence stayed at the ceiling behind a waiter another
 // host had run: a job that came to wait for it six hours later was deferred 20s at once.
 export const SCOPE_BUSY_QUIET_MS = SCOPE_BUSY_RECHECK_MAX_MS + 10_000;
-/** How many jobs' waits for a busy scope a worker remembers at once (`scopeWaits`), over all its queues. */
-export const SCOPE_WAITS_MAX = 1000;
 /**
- * What a worker remembers of the jobs waiting for a busy scope (issue #1023): `scopeWaits`, the waiting jobs, and
- * `scopeBusy`, the scopes they wait for (`makeProcessor` says what each holds). Built ONCE per worker and handed to
- * every processor, as the in-flight map is and for its reason: a worker with a host queue runs two processors over
- * one set of slots, so two memories were two cadences on one scope, and a take on one queue left the other queue's
- * waiters at the ceiling.
+ * The gates whose wait is one episode in the log (issues #1023 and #1074): a busy scope (any of the five scope gates), a
+ * busy model endpoint, a busy private endpoint and the host budget. Each is its own episode, so a job remembered
+ * waiting at one gate says its first line again when another gate defers it: one entry for all four would take an
+ * endpoint wait's first deferral for the middle of the scope wait before it and say nothing.
  */
-export const makeScopeWaitState = () => ({ scopeWaits: new Map(), scopeBusy: new Map() });
+export const WAIT_EPISODE_GATES = Object.freeze(["scope", "endpoint", "private-endpoint", "host-budget"]);
+/** How many waits a worker remembers at once (`waits`), over all its queues and all four gates. */
+export const WAIT_EPISODES_MAX = 1000;
+/**
+ * What a worker remembers of its waiting jobs (issue #1023, every gate in WAIT_EPISODE_GATES since issue #1074):
+ * `waits`, one entry per gate, queue and job id, and `scopeBusy`, the scopes the scope waits are for (`makeProcessor`
+ * says what each holds). Built ONCE per worker and handed to every processor, as the in-flight map is and for its
+ * reason: a worker with a host queue runs two processors over one set of slots, so two memories were two cadences on
+ * one scope, and a take on one queue left the other queue's waiters at the ceiling.
+ */
+export const makeWaitEpisodes = () => ({ waits: new Map(), scopeBusy: new Map() });
 
 // The newer-release re-check (issue #761, DES-STORE-VERSION-WHEN-NEEDED): a job this worker cannot read, or one whose
 // settings, triggers or pause windows file a newer pi-dispatch wrote, waits for this host's upgrade. Nothing here can
@@ -134,6 +141,11 @@ export const NEWER_RELEASE_RECHECK_MS = 600_000;
 // test keeps all four apart. Since issue #737 every deferral records its reason (`defer-write.mjs`), and the
 // distinct instants stay the evidence for a reader older than that record, and for a job whose record could not
 // be written. Short, because a local model run is often short too.
+// Fixed, where the scope re-check backs off (issue #1074 kept it so): nothing wakes a delayed job when a slot frees,
+// so every second added to the delay is a freed slot left idle for that second, and a delay that doubled would pass
+// the wait gate's 30s floor at its third step, the floor that tells a polled wait deferral from this one by its
+// instant (INT-WAIT-PROFILES-CONTRACT). What the scope's backoff also cured, a log line per wake, is cured here by the
+// episode alone (`noteWaitEpisode` in `makeProcessor`): one line when the wait starts, one when the job holds its slots.
 export const ENDPOINT_BUSY_RECHECK_MS = 7_000;
 
 // How long a job waits before re-asking whether a target's holder is still alive (issue #230). Reached only
@@ -367,16 +379,16 @@ function makeBeforePickupRecorder({ projects, settleSteerBeforePickup, recordRun
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, privateEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, jobLimits = () => ({}), claimRefreshMs = CLAIM_REFRESH_MS, minuteMs = 60_000, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs(), valkeyTag = null, scopeWaitState = makeScopeWaitState() }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, privateEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, jobLimits = () => ({}), claimRefreshMs = CLAIM_REFRESH_MS, minuteMs = 60_000, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs(), valkeyTag = null, waitEpisodes = makeWaitEpisodes() }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
 	// is about 100 of them. The verdict cannot change between them (same record, same attempt), so one line says it.
 	// Bounded, oldest out first, so a long-lived worker holds at most REJECTED_SEEN_MAX keys.
 	const rejectedSeen = new Set();
-	// WAITING FOR A BUSY SCOPE (issue #1023), two maps that `deferScope` keeps. They are the WORKER's
-	// (`makeScopeWaitState`): `createWorker` builds them once and every processor of the worker reads and writes the same
-	// two, so a scope has one cadence whichever queue its waiters came from.
+	// WAITING (issue #1023 for a busy scope; issue #1074 for a busy model endpoint, a busy private endpoint and the host
+	// budget), two maps. They are the WORKER's (`makeWaitEpisodes`): `createWorker` builds them once and every processor
+	// of the worker reads and writes the same two, so a scope has one cadence whichever queue its waiters came from.
 	// `scopeBusy`: what is waited for (a slot's key or a fleet lease's, `busyKey`) to `{ key, since, last, waiters }`.
 	// `since` is the first deferral on that scope while it had no entry, and the re-check backs off from it, the same
 	// for every job waiting there. `last` is the newest deferral on it. The cadence starts over three ways: a job takes
@@ -386,25 +398,31 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 	// worker sees no take, and the job another host ran stays remembered here until the bound drops it. A quiet scope's
 	// entry is REPLACED, not emptied: a job remembered on the old one that does come back (a pause window held it, or
 	// the worker had no free slot) moves to the new one and goes on with its episode.
-	// `scopeWaits`: queue and job id (`waitKey`) to `{ timestamp, deferrals, waitedMs, busy }`, from the first deferral
-	// a scope gate gave the job until it holds every scope slot it needs. It is what makes a wait ONE episode in the
-	// log, `scope_busy_deferred` at its first deferral and `scope_busy_ended` when the job takes its scope, where every
-	// wake used to say a line. The queue is in the key because a job id is only unique within its queue. `waitedMs`
-	// adds up the delays the scope gates gave this job, so a pause window that held it meanwhile is not in it.
-	// `timestamp` is the job's own (BullMQ's creation time): a job added again under an id whose earlier job was removed
-	// while it waited is another job, and starts its own episode. `busy` is the `scopeBusy` entry it last waited on,
-	// counted there once.
+	// `waits`: gate (WAIT_EPISODE_GATES), queue and job id (`waitKey`) to `{ timestamp, deferrals, waitedMs, busy,
+	// cause }`, from the first deferral that gate gave the job until the job gets through it holding what it guards
+	// (every scope slot it needs, every endpoint slot, every private endpoint slot, its room in the budget). It is what
+	// makes a wait ONE episode in the log, the gate's line at its first deferral and its `_ended` line when the job gets
+	// through, where every wake used to say a line. The gate is in the key because the gates are passed in order and
+	// each can hold the job up: a job that waited for its scope and then waits for its endpoint is in two waits, and one
+	// entry for both took the endpoint's first deferral for the scope wait going on, and said nothing. The queue is in
+	// the key because a job id is only unique within its queue. `waitedMs` adds up the delays that gate gave this job,
+	// so a pause window or another gate that held it meanwhile is not in it. `timestamp` is the job's own (BullMQ's
+	// creation time): a job added again under an id whose earlier job was removed while it waited is another job, and
+	// starts its own episode. `busy` is the `scopeBusy` entry a scope wait last waited on, counted there once (null at
+	// the other gates). `cause` is what an endpoint or budget wait is waiting for (the endpoint, the budget's `why`): a
+	// wait whose cause changes says its first line again, since the line it said no longer says why the job waits (a
+	// budget wait that starts `workspace-unseeded` and goes on for `memory`). A scope wait has none and is said once.
 	// Process memory, as the slot count itself is and for its reason (DES-SCOPED-LIMITS-AND-FOLDER-MUTEX, "Why the count
 	// is process memory": one worker per daemon, so one process sees every pickup of a host's jobs), and because nothing
-	// decides on it: it shapes a delay and two log lines. A restart forgets it; the scopes then start over at the short
-	// re-check and a waiting job says its first line again.
-	// Bounded: `scopeWaits` holds at most SCOPE_WAITS_MAX jobs over the worker's queues, the one deferred longest ago
-	// dropped first (a job can end where this worker never sees it: cancelled or removed while delayed, or run by
+	// decides on it: it shapes the scope's delay and the log lines. A restart forgets it; the scopes then start over at
+	// the short re-check and a waiting job says its first line again.
+	// Bounded: `waits` holds at most WAIT_EPISODES_MAX waits over the worker's queues and gates, the one deferred longest
+	// ago dropped first (a job can end where this worker never sees it: cancelled or removed while delayed, or run by
 	// another host), and `scopeBusy` holds no entry without a remembered waiter, so it can hold no more entries than
 	// that.
-	const { scopeWaits, scopeBusy } = scopeWaitState;
+	const { waits, scopeBusy } = waitEpisodes;
 	const busyKey = (where, key) => `${where}\u0000${key}`;
-	const waitKey = (job) => `${job.queueName ?? QUEUE}\u0000${job.id}`;
+	const waitKey = (gate, job) => `${gate}\u0000${job.queueName ?? QUEUE}\u0000${job.id}`;
 	// One job fewer waits on `busy`; the entry goes with its last one. By identity: an entry a take removed or a quiet
 	// spell replaced may have a successor under the same key, which is not this one.
 	const leaveBusy = (busy) => {
@@ -412,13 +430,62 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		busy.waiters -= 1;
 		if (busy.waiters <= 0 && scopeBusy.get(busy.key) === busy) scopeBusy.delete(busy.key);
 	};
-	/** Forget what is remembered of a job's wait (by its `waitKey`), and return it (null where nothing was). */
-	const endScopeWait = (key) => {
-		const wait = scopeWaits.get(key) ?? null;
+	/** Forget a remembered wait (by its `waitKey`), and return it (null where nothing was). */
+	const forgetWait = (key) => {
+		const wait = waits.get(key) ?? null;
 		if (wait === null) return null;
-		scopeWaits.delete(key);
+		waits.delete(key);
 		leaveBusy(wait.busy);
 		return wait;
+	};
+	/**
+	 * The job's wait at `gate` as it stands before this deferral, not counted yet: `{ key, wait, first }`. A new one where
+	 * nothing is remembered, or where what is remembered under this id is an earlier job's (another `timestamp`), which
+	 * is dropped first.
+	 */
+	const waitAt = (gate, job) => {
+		const key = waitKey(gate, job);
+		const wait = waits.get(key);
+		if (wait && wait.timestamp === job.timestamp) return { key, wait, first: false };
+		if (wait) forgetWait(key);
+		return { key, wait: { timestamp: job.timestamp, deferrals: 0, waitedMs: 0, busy: null, cause: null }, first: true };
+	};
+	/** Count one deferral of `delayMs` into a wait `waitAt` gave, set again so that it is the newest: the bound drops the oldest. */
+	const countWait = ({ key, wait }, delayMs) => {
+		wait.deferrals += 1;
+		wait.waitedMs += delayMs;
+		waits.delete(key);
+		waits.set(key, wait);
+		if (waits.size > WAIT_EPISODES_MAX) forgetWait(waits.keys().next().value);
+	};
+	/**
+	 * One deferral by the endpoint, private endpoint or budget gate (issue #1074), counted into the job's wait there:
+	 * `event` with `fields` is logged at the wait's first deferral, and again only when its `cause` changes, never at a
+	 * wake that changed nothing. The delay is the caller's and stays fixed (ENDPOINT_BUSY_RECHECK_MS and
+	 * BUDGET_RECHECK_MS say why neither backs off). The scope gates count through `deferScope`, which also sets the delay.
+	 */
+	const noteWaitEpisode = (gate, job, event, fields, { delayMs, cause }) => {
+		const at = waitAt(gate, job);
+		const say = at.first || at.wait.cause !== cause;
+		at.wait.cause = cause;
+		countWait(at, delayMs);
+		if (say) deps?.log?.(event, fields);
+	};
+	/**
+	 * The job got through `gate` holding what it guards, so a wait it had there is over: `event` says it ONCE, with what
+	 * the lines per wake used to add up to (`{ jobId, kind, waitedMs, deferrals }`). The entry goes first, so a later wait
+	 * of the same job at that gate (a later gate can defer it and give these holds back) is an episode of its own; one
+	 * left under this id by an earlier job says nothing. Every caller holds slots here and no `try` around it gives them
+	 * back, so a logger that throws must not get past this line.
+	 */
+	const endWaitEpisode = (gate, job, event) => {
+		const wait = forgetWait(waitKey(gate, job));
+		if (wait === null || wait.timestamp !== job.timestamp) return;
+		try {
+			deps?.log?.(event, { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", waitedMs: wait.waitedMs, deferrals: wait.deferrals });
+		} catch {
+			// The line is lost; the job goes on.
+		}
 	};
 	// Watch producer refusals finish before pickup and cannot carry a steering session.
 	const recordWatchOutcome = recordRun;
@@ -1188,13 +1255,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			await releaseAllHolds();
 			// Issue #1023, the job's episode first: only its FIRST deferral is logged. What is remembered under this id for a
 			// job of another `timestamp` is an earlier job's, and is dropped before anything is counted.
-			const key = waitKey(job);
-			let wait = scopeWaits.get(key);
-			const first = !wait || wait.timestamp !== job.timestamp;
-			if (first) {
-				leaveBusy(wait?.busy);
-				wait = { timestamp: job.timestamp, deferrals: 0, waitedMs: 0, busy: null };
-			}
+			const at = waitAt("scope", job);
+			const { wait } = at;
 			// Then the delay: by how long the scope this gate names (`fields.on`) has been busy with someone waiting, 5s,
 			// then 10s, then 20s (SCOPE_BUSY_RECHECK_MAX_MS says why per scope and why it stops there). An entry nobody
 			// has been deferred on for SCOPE_BUSY_QUIET_MS is a past wait's and is replaced, so this one starts at 5s.
@@ -1208,13 +1270,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				busy.waiters += 1;
 				wait.busy = busy;
 			}
-			wait.deferrals += 1;
-			wait.waitedMs += delayMs;
-			// Set again on every deferral so that it is the newest in the map: the bound drops the one deferred longest ago.
-			scopeWaits.delete(key);
-			scopeWaits.set(key, wait);
-			if (scopeWaits.size > SCOPE_WAITS_MAX) endScopeWait(scopeWaits.keys().next().value);
-			if (first) deps?.log?.(fields.event, { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs, ...fields.extra });
+			countWait(at, delayMs);
+			if (at.first) deps?.log?.(fields.event, { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", delayMs, ...fields.extra });
 			// The defer record is still written on EVERY deferral, never once per wait: its `until` is the instant the job
 			// moves to, and the console's reader holds a record to its job's due time (INT-DEFER-REASON-KEY).
 			await deferTo(job, token, nowMs + delayMs, why, { project, ...(why === "chained" ? { holder: job.data.parentJobId } : {}) });
@@ -1293,18 +1350,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			scopeBusy.delete(busyKey("slot", hold.key));
 			if (hold.fleet) scopeBusy.delete(busyKey("fleet", hold.key));
 		}
-		// And a wait that brought this job here is over: one line for the whole episode, with what the lines per wake used
-		// to add up to. The entry goes first, so a later wait of the same job (another gate below can defer it and give
-		// these slots back) is an episode of its own; one left under this id by an earlier job says nothing. The job holds
-		// its slots here and no `try` around this gives them back, so a logger that throws must not get past this line.
-		const scopeWait = endScopeWait(waitKey(job));
-		if (scopeWait && scopeWait.timestamp === job.timestamp) {
-			try {
-				deps?.log?.("scope_busy_ended", { jobId: job.id, kind: job.data?.kind === "local" ? "local" : "forge", waitedMs: scopeWait.waitedMs, deferrals: scopeWait.deferrals });
-			} catch {
-				// The line is lost; the job runs.
-			}
-		}
+		// And a wait that brought this job here is over: one line for the whole episode (`endWaitEpisode` says why the
+		// entry goes first and why a logger that throws must not get past it).
+		endWaitEpisode("scope", job, "scope_busy_ended");
 
 		// THE ONE SETTINGS READ (issue #503), hoisted here from the top of the main `try` below because the
 		// endpoint gate after it needs the effective provider and model, which the overlay can supply. Still ONE
@@ -1614,11 +1662,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				}
 				if (where !== null) {
 					await releaseAllHolds();
-					deps?.log?.("endpoint_busy_deferred", { jobId: job.id, endpoint: endpoint.id, where, delayMs: ENDPOINT_BUSY_RECHECK_MS });
+					// Issue #1074: a line when the wait starts, and again only if the job comes to wait for another endpoint.
+					noteWaitEpisode("endpoint", job, "endpoint_busy_deferred", { jobId: job.id, endpoint: endpoint.id, where, delayMs: ENDPOINT_BUSY_RECHECK_MS }, { delayMs: ENDPOINT_BUSY_RECHECK_MS, cause: endpoint.id });
 					await deferTo(job, token, nowMs + ENDPOINT_BUSY_RECHECK_MS, "endpoint", { project, endpoint: endpoint.id });
 				}
 				endpointHolds.push({ id: endpoint.id, fleet });
 			}
+			// Every endpoint slot the job needs is its own: a wait for one is over (issue #1074).
+			endWaitEpisode("endpoint", job, "endpoint_busy_ended");
 		}
 
 		// THE PRIVATE ENDPOINT GATE (issue #918, INT-PRIVATE-ENDPOINTS-FILE-CONTRACT). The private endpoints a job's trigger
@@ -1679,11 +1730,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					}
 					if (where !== null) {
 						await releaseAllHolds();
-						deps?.log?.("private_endpoint_busy_deferred", { jobId: job.id, endpoint: endpoint.id, where, delayMs: ENDPOINT_BUSY_RECHECK_MS });
+						noteWaitEpisode("private-endpoint", job, "private_endpoint_busy_deferred", { jobId: job.id, endpoint: endpoint.id, where, delayMs: ENDPOINT_BUSY_RECHECK_MS }, { delayMs: ENDPOINT_BUSY_RECHECK_MS, cause: endpoint.id });
 						await deferTo(job, token, nowMs + ENDPOINT_BUSY_RECHECK_MS, "private-endpoint", { project, endpoint: endpoint.id });
 					}
 					endpointHolds.push({ id: key, fleet });
 				}
+				endWaitEpisode("private-endpoint", job, "private_endpoint_busy_ended");
 			}
 		}
 
@@ -1713,12 +1765,15 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			if (!verdict.admitted) {
 				await releaseAllHolds();
 				budgetState.budgetDeferred = true;
-				deps?.log?.("host_budget_deferred", { jobId: job.id, project, why: verdict.why, rank: verdict.rank, memMiB: size.memMiB, cpuCenti: size.cpuCenti, delayMs: BUDGET_RECHECK_MS });
+				// Issue #1074: a line when the wait starts, and again only when its `why` changes (the boot listing read, the
+				// share no longer the obstacle), never at a wake that changed nothing: 400 lines an hour a job before.
+				noteWaitEpisode("host-budget", job, "host_budget_deferred", { jobId: job.id, project, why: verdict.why, rank: verdict.rank, memMiB: size.memMiB, cpuCenti: size.cpuCenti, delayMs: BUDGET_RECHECK_MS }, { delayMs: BUDGET_RECHECK_MS, cause: verdict.why });
 				if (verdict.why === "workspace-unseeded") await deferTo(job, token, nowMs + BUDGET_RECHECK_MS, "workspace-unseeded", { project });
 				if (verdict.why === "workspace-orphan") await deferTo(job, token, nowMs + BUDGET_RECHECK_MS, "workspace-orphan", { project });
 				await deferTo(job, token, nowMs + BUDGET_RECHECK_MS, "host-budget", { project, budgetWhy: verdict.why });
 			}
 			budgetHeld = true;
+			endWaitEpisode("host-budget", job, "host_budget_ended");
 		}
 
 		let startedAt;
@@ -2703,12 +2758,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		}
 	};
 	return async function processor(job, token, signal) {
-		// Issue #1023: a job that leaves here any other way than by a deferral waits for no scope any more (it ran, it was
-		// refused, or it failed into a retry or for good), so what `scopeWaits` holds for it goes, and with it the job's
-		// place among those waiting for its scope. ONE place around every exit, as the host budget's waiter bookkeeping is
-		// in `processJob`. A job that took its scope has no entry by now; this is for one that ended before the scope
-		// gates on a later pickup, or whose move to the delayed set was refused. A deferral keeps the entry: that job is
-		// still waiting.
+		// Issue #1023: a job that leaves here any other way than by a deferral waits at no gate any more (it ran, it was
+		// refused, or it failed into a retry or for good), so what `waits` holds for it goes, at every gate (issue #1074),
+		// and with it the job's place among those waiting for its scope. ONE place around every exit, as the host budget's
+		// waiter bookkeeping is in `processJob`. A job that got through a gate has no entry there by now; this is for one
+		// that ended before that gate on a later pickup, or whose move to the delayed set was refused. A deferral keeps
+		// every entry: that job is still waiting.
 		let deferred = false;
 		try {
 			// One boundary covers pre-pickup refusals, ordinary results and a cancel that replaced a retry. Waiting for
@@ -2740,7 +2795,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			deferred = error instanceof DelayedError;
 			throw error;
 		} finally {
-			if (!deferred) endScopeWait(waitKey(job));
+			if (!deferred) for (const gate of WAIT_EPISODE_GATES) forgetWait(waitKey(gate, job));
 		}
 	};
 }
@@ -2780,7 +2835,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, readModelRoles, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, pauseWindowsNewer, triggersNewer, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, jobLimits, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, privateEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs(), scopeWaitState = makeScopeWaitState() }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, readModelRoles, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, pauseWindowsNewer, triggersNewer, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, jobLimits, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, privateEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs(), waitEpisodes = makeWaitEpisodes() }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -2911,8 +2966,9 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			// HOST runs, and two maps would each list half.
 			runningJobs,
 			// Issue #1023: SHARED across both workers, for the in-flight map's reason: the two queues' jobs wait for the same
-			// slots, so the memory of who waits for a scope, and for how long it has been busy, is the worker's.
-			scopeWaitState,
+			// slots, so the memory of who waits for a scope, and for how long it has been busy, is the worker's. Since issue
+			// #1074 it remembers the endpoint and host budget waits too, under the one bound.
+			waitEpisodes,
 		});
 
 		// Issue #464: only a connection `parseConnection` built, which judges and pins the Valkey it dials.

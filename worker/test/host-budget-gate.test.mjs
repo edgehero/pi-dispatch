@@ -54,7 +54,7 @@ const localJob = (id, folder = "/srv/shop", opts) => spyJob(id, { kind: "local",
 const HOST_QUEUE = { queueName: "pi-jobs@mini1" };
 const ghJob = (id, repo = "acme/web", opts) => spyJob(id, { kind: "github", repo, target: { number: 1 }, flow: "fix", trigger: { deliveryId: id, sender: { id: 1 } } }, opts);
 
-function harness({ hostBudget, limits = [], projects = SHOP, hostBound = null, jobSizeEnv = { PI_JOB_MEMORY: "8g", PI_JOB_CPUS: "2" }, inFlight = makeInFlight(), clock = { t: NOW }, hold = true, extra = {} } = {}) {
+function harness({ hostBudget, limits = [], projects = SHOP, hostBound = null, jobSizeEnv = { PI_JOB_MEMORY: "8g", PI_JOB_CPUS: "2" }, inFlight = makeInFlight(), clock = { t: NOW }, hold = true, extra = {}, extraDeps = {} } = {}) {
 	const seen = { started: 0, records: [], logs: [], comments: [], sizes: [] };
 	const releases = [];
 	const processor = mod.makeProcessor({
@@ -85,6 +85,7 @@ function harness({ hostBudget, limits = [], projects = SHOP, hostBound = null, j
 			cleanup: async () => {},
 			comment: async (_data, text) => seen.comments.push(text),
 			log: (event, fields) => seen.logs.push({ event, fields }),
+			...extraDeps,
 		},
 		...extra,
 	});
@@ -686,4 +687,79 @@ test("the budget's two deferrals record their reasons: the budget's verdict, and
 	// The refusal on the host's own queue is no deferral, and records no reason.
 	await nf.processor(localJob("big-own", "/srv/shop", HOST_QUEUE).job, "tok", signal());
 	assert.equal(deferRecordOf(big, "big-own"), null);
+});
+
+test("a wait for the host budget is one episode in the log: a line at its first deferral and when its why changes, one at admission, at the fixed 9s (#1074)", { skip }, async () => {
+	// 36g, and a project whose hostShare is half of it: two of its 16g jobs never run together, and three 16g jobs of
+	// any project never do.
+	const clock = { t: NOW };
+	const { b } = await budgetOf({ clock });
+	const limits = limitsOf([{ scope: "project:shop", memory: "16g", cpus: 2, hostShare: 50 }]);
+	const h = harness({ hostBudget: b, clock, limits, jobSizeEnv: { PI_JOB_MEMORY: "16g", PI_JOB_CPUS: "2" } });
+	const first = h.processor(ghJob("a").job, "tok", signal());
+	await h.untilStarted(1);
+	const waiter = ghJob("b");
+	/** One pickup of the waiting job at `at` that the budget defers: the delay it was given. */
+	const deferredAt = async (at) => {
+		clock.t = at;
+		await assert.rejects(() => h.processor(waiter.job, "tok", signal()), (e) => e.name === "DelayedError");
+		return waiter.moves.at(-1).ts - at;
+	};
+	const lines = (event) => h.seen.logs.filter((l) => l.event === event && l.fields.jobId === "b").map((l) => l.fields);
+	// Its project's share stops it while the first job runs: three wakes, one line.
+	for (const at of [NOW, NOW + 9_000, NOW + 18_000]) assert.equal(await deferredAt(at), BUDGET_RECHECK_MS);
+	assert.deepEqual(lines("host_budget_deferred").map((f) => f.why), ["share"]);
+	// The first job ends and two jobs of no project take 32g: the share is no longer what stops it, the memory is. The
+	// line is said again, since the one it said no longer says why the job waits; then not at the next wake.
+	h.releaseNext();
+	await first;
+	const others = [h.processor(ghJob("c", "acme/one").job, "tok", signal()), h.processor(ghJob("d", "acme/two").job, "tok", signal())];
+	await h.untilStarted(3);
+	for (const at of [NOW + 27_000, NOW + 36_000]) assert.equal(await deferredAt(at), BUDGET_RECHECK_MS);
+	assert.deepEqual(lines("host_budget_deferred"), [
+		{ jobId: "b", project: "shop", why: "share", rank: 0, memMiB: 16384, cpuCenti: 200, delayMs: BUDGET_RECHECK_MS },
+		{ jobId: "b", project: "shop", why: "memory", rank: 0, memMiB: 16384, cpuCenti: 200, delayMs: BUDGET_RECHECK_MS },
+	]);
+	assert.deepEqual(lines("host_budget_ended"), [], "nothing ends while the job still waits");
+	// One of them ends: the waiter is admitted at its next wake, and its wait is said to be over once, whole.
+	h.releaseNext();
+	await others[0];
+	clock.t = NOW + 45_000;
+	const admitted = h.processor(waiter.job, "tok", signal());
+	await h.untilStarted(4);
+	assert.deepEqual(lines("host_budget_ended"), [{ jobId: "b", kind: "forge", waitedMs: 5 * BUDGET_RECHECK_MS, deferrals: 5 }]);
+	assert.deepEqual(waiter.moves.map((m, i) => m.ts - [NOW, NOW + 9_000, NOW + 18_000, NOW + 27_000, NOW + 36_000][i]), Array(5).fill(BUDGET_RECHECK_MS), "every wake at the fixed re-check, never backed off");
+	h.releaseNext();
+	h.releaseNext();
+	await Promise.all([others[1], admitted]);
+	assert.equal(b.entries().length, 0);
+});
+
+test("a logger that throws on host_budget_ended leaves the admitted job its room and its run (#1074)", { skip }, async () => {
+	const clock = { t: NOW };
+	const { b } = await budgetOf({ clock });
+	const h = harness({ hostBudget: b, clock, jobSizeEnv: { PI_JOB_MEMORY: "20g", PI_JOB_CPUS: "4" }, extraDeps: { log: (event) => {
+		if (event === "host_budget_ended") throw new Error("EPIPE");
+	} } });
+	const first = h.processor(ghJob("a", "acme/one").job, "tok", signal());
+	await h.untilStarted(1);
+	const c = ghJob("c", "acme/two");
+	await assert.rejects(() => h.processor(c.job, "tok", signal()), (e) => e.name === "DelayedError");
+	h.releaseNext();
+	await first;
+	clock.t = NOW + BUDGET_RECHECK_MS;
+	const again = h.processor(c.job, "tok", signal());
+	// Not `untilStarted`: a pickup the throw ended never starts a container, and that wait would never return.
+	let threw = null;
+	again.catch((error) => (threw = error));
+	for (let i = 0; i < 1000 && h.seen.started < 2 && threw === null; i++) await new Promise((r) => setImmediate(r));
+	try {
+		assert.equal(threw, null, "the logger's throw did not end the pickup");
+		assert.equal(h.seen.started, 2, "the job reached its container");
+		assert.equal(b.snapshot().usedMemMiB, 20480, "and its room is held while it runs");
+	} finally {
+		h.releaseNext();
+	}
+	assert.equal((await again).outcome, "completed");
+	assert.equal(b.entries().length, 0);
 });
