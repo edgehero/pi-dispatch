@@ -34,6 +34,7 @@ import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:p
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { ARTIFACTS_FILES_DIR, ARTIFACTS_MANIFEST, ARTIFACTS_MANIFEST_MAX_BYTES, ARTIFACT_NAME_RE, artifactRunDirOf, artifactsManifestOf, recordedArtifacts } from "@edgehero/pi-dispatch/artifacts-record";
+import { ARTIFACTS_READ_MS, openHostArtifactTransfer, readHostArtifactsManifest } from "@edgehero/pi-dispatch/artifacts-channel";
 import { DEFAULT_VALKEY_URL, artifactsDirPath, logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { JOB_IDLE_MINUTES_DEFAULT, JOB_STALL_MINUTES_DEFAULT } from "@edgehero/pi-dispatch/job-limit-rules";
 import { settingsFilePath, readOverlay, readOverlayDocument, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
@@ -5217,6 +5218,12 @@ export function createFleetReader(
     // with a queue that never answers does not wait out the real bounds.
     switchStepTimeoutMs = SWITCH_STEP_TIMEOUT_MS,
     closeTimeoutMs = QUEUE_CLOSE_TIMEOUT_MS,
+    // Issue #942: another host's kept files over its artifacts channel (INT-ARTIFACTS-CHANNEL), and the wait before a
+    // request a busy host refused is made again. Seams, so a test hands answers without a Valkey and waits for none.
+    readHostArtifactsManifestFn = readHostArtifactsManifest,
+    openHostArtifactTransferFn = openHostArtifactTransfer,
+    artifactsWaitFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    artifactsSlotWaitMs = HOST_ARTIFACT_SLOT_WAIT_MS,
   } = {},
 ) {
   const prune = readOnly !== true;
@@ -5394,6 +5401,81 @@ export function createFleetReader(
   };
   // The queues alone, for a caller that reads none of the registry's state after it.
   const fleetQueues = async () => (await fleetRead()).queues;
+
+  // ANOTHER HOST'S KEPT FILES (issue #942, INT-ARTIFACTS-CHANNEL). The files of a forge run stay on the host that ran it
+  // (INT-ARTIFACTS-STORE-CONTRACT); this console asks that host over its artifacts channel on the deployment's own
+  // Valkey, the manifest for the card and a file a chunk at a time for `/api/artifact`. Only a host in the live
+  // registry is asked, so a stopped one costs no wait. How many files this reader is fetching from other hosts now:
+  // one reader serves every request of a console, so this is the console's count (`HOST_ARTIFACT_TRANSFERS_MAX`).
+  // A request past it waits for a transfer to end rather than being refused at once: a run page draws every image it
+  // kept, and a browser asks for them together, more than four at a time (measured: six), so a refusal broke the
+  // thumbnails past the fourth. The wait is bounded (`HOST_ARTIFACT_SLOT_WAIT_MS`), and so is the line
+  // (`HOST_ARTIFACT_SLOT_WAITERS_MAX`); past either the request is refused as before.
+  let hostTransfers = 0;
+  const transferWaiters = [];
+  // Resolves true with a slot taken, or false: the line is full, or no slot came free in time.
+  const takeTransferSlot = () => {
+    if (hostTransfers < HOST_ARTIFACT_TRANSFERS_MAX) {
+      hostTransfers += 1;
+      return Promise.resolve(true);
+    }
+    if (transferWaiters.length >= HOST_ARTIFACT_SLOT_WAITERS_MAX) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const waiter = { resolve: null };
+      const timer = setTimeout(() => {
+        const at = transferWaiters.indexOf(waiter);
+        if (at !== -1) transferWaiters.splice(at, 1);
+        resolve(false);
+      }, artifactsSlotWaitMs);
+      waiter.resolve = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      transferWaiters.push(waiter);
+    });
+  };
+  // A transfer's end hands its slot to the first waiter, so the count only falls when nobody waits.
+  const releaseTransferSlot = () => {
+    const next = transferWaiters.shift();
+    if (next) next.resolve();
+    else hostTransfers -= 1;
+  };
+  // Whether `host` is in the registry's rows, read afresh, within `ms` where a caller has a deadline (the last rows
+  // past it, as `runById` reads them).
+  const hostLive = async (host, ms = null) => {
+    const reading = fleetRead().catch(() => null);
+    const read = ms === null ? await reading : await withTimeout(reading, ms, null);
+    return (read ? read.view.hosts : lastHosts).some((h) => h.name === host);
+  };
+  // One request of the channel, made again after each of `waits` while the host answers that it is busy, and not once
+  // `stopped()` says the caller has gone. A reader that throws, which the channel's never does, is a host that did not
+  // answer.
+  const askHost = async (ask, waits, stopped = () => false) => {
+    const once = async () => { try { return await ask(); } catch { return { error: "host-unavailable" }; } };
+    let got = await once();
+    for (const ms of waits) {
+      if (got?.error !== "host-busy" || stopped()) break;
+      await artifactsWaitFn(ms);
+      if (stopped()) break;
+      got = await once();
+    }
+    return got;
+  };
+  // The card's read of run `jobId`'s manifest from `host`, under the caller's deadline (`within`, as `runById` takes
+  // it): `{ state, counts, host, ... }` in the five states, with `why` for `elsewhere`.
+  const hostArtifacts = async (jobId, counts, host, within) => {
+    const bounded = typeof within === "function";
+    if (!(await hostLive(host, bounded ? within(Infinity) : null))) return { state: "elsewhere", counts, host, why: "not-running" };
+    const ask = () => readHostArtifactsManifestFn({ redis, host, jobId, ...(bounded ? { timeoutMs: within(ARTIFACTS_READ_MS) } : {}) });
+    // One more try where a busy host leaves the page time for it; a file's transfer tries more (`hostArtifactFile`).
+    const got = await askHost(ask, !bounded || within(Infinity) > HOST_ARTIFACT_BUSY_WAITS_MS[0] ? HOST_ARTIFACT_BUSY_WAITS_MS.slice(0, 1) : []);
+    const manifest = got?.manifest;
+    if (manifest && manifest.jobId === jobId && Array.isArray(manifest.files)) return { state: "kept", counts, files: manifest.files, dropped: manifest.dropped, keepUntil: manifest.keepUntil, host };
+    if (got?.missing === true) return { state: "expired", counts, host };
+    if (got?.error === "host-busy") return { state: "elsewhere", counts, host, why: "busy" };
+    if (got?.error === "host-unavailable") return { state: "elsewhere", counts, host, why: "no-answer" };
+    return { state: "unreadable", counts, host };
+  };
 
   // One job by id across the fleet's queues (the first that knows it): the Job, null when no queue holds it, or undefined
   // when that cannot be said. Its `.data` stays with the caller in this file. The queues are the by-id lookup's
@@ -6613,13 +6695,21 @@ export function createFleetReader(
     },
     // A forge job's artifacts for the run page (issue #920, INT-ARTIFACTS-STORE-CONTRACT): null when the record says the run
     // kept and dropped nothing (no panel), else `{ state, counts, ... }`, `state` one of `ARTIFACT_STATES`:
-    //   - `kept`: this host's store holds the run's manifest, `files` and `dropped` from it, `keepUntil` when it goes;
+    //   - `kept`: a store holds the run's manifest, `files` and `dropped` from it, `keepUntil` when it goes;
     //   - `dropped`: the run kept no file and dropped some (`counts` alone says which);
-    //   - `expired`: the record says files were kept here, and the store no longer holds them (the retention sweep);
-    //   - `elsewhere`: another host ran the job and keeps its files; this console reads its own host's store only;
+    //   - `expired`: the record says files were kept, and the store that kept them no longer holds them (its retention);
+    //   - `elsewhere`: another host ran the job and keeps its files, and could not be asked now (`why`, below);
     //   - `unreadable`: a manifest this reader cannot take (or a store it cannot open), never read as "none".
-    // The manifest only, never a file, bounded and opened without following a link. Never throws.
-    artifacts(jobId, record) {
+    // THIS HOST'S STORE FIRST: a manifest on this disk wins whatever the record's host says. Where it holds none and the
+    // record names another host (issue #942), that host is asked over its artifacts channel, and each answer carries
+    // `host`: its manifest is `kept`, "none" is `expired`, one it cannot read is `unreadable`, and `elsewhere` says
+    // `why`: `not-running` (not in the live registry, so not asked and not waited for), `no-answer` (no answer in time,
+    // which an earlier version that has no channel also gives) or `busy` (sending as many files as it takes at once).
+    // `within` is the caller's deadline as a function, as `runById` takes it: the registry's read and the host's are
+    // each bounded by it. `ask: false` (a live tick of an open page) never asks another host: where it would, the answer is
+    // `{ unasked: true }` and the page keeps the card it drew, so an open page costs that host one request, not one every
+    // tick, and a host that does not answer never holds a tick for its wait. The manifest only, never a file. Never throws.
+    async artifacts(jobId, record, { within = null, ask = true } = {}) {
       const counts = recordedArtifacts(record?.artifacts);
       if (counts === null) return null;
       if (counts.kept === 0) return { state: "dropped", counts };
@@ -6633,7 +6723,8 @@ export function createFleetReader(
           text = readBoundedFile(join(paths.artifactsDir, dir, ARTIFACTS_MANIFEST), ARTIFACTS_MANIFEST_MAX_BYTES);
         } catch (error) {
           if (error?.code !== "ENOENT") return { state: "unreadable", counts };
-          return host !== null && host !== self ? { state: "elsewhere", counts, host } : { state: "expired", counts };
+          if (host === null || host === self) return { state: "expired", counts };
+          return ask === false ? { unasked: true } : await hostArtifacts(jobId, counts, host, within);
         }
         const manifest = text === null ? null : artifactsManifestOf(text);
         if (manifest === null || manifest.jobId !== jobId) return { state: "unreadable", counts };
@@ -6669,6 +6760,54 @@ export function createFleetReader(
         if (bytes === null || bytes.length !== entry.size) return { unreadable: true };
         return { bytes, type: entry.type, name: entry.name };
       } catch {
+        return { unreadable: true };
+      }
+    },
+    // One kept file of run `jobId` from `host`'s store (issue #942, INT-ARTIFACTS-CHANNEL), for `/api/artifact` where this
+    // host's own store does not hold it (`artifactFile` first). Before any byte: `{ missing: true }` (the host keeps
+    // nothing for the run, its manifest does not list the name, or `host` is this host, whose store was already read),
+    // `{ unavailable }`, one of `not-running` (not in the live registry: never asked), `no-answer`, `busy` and `full`
+    // (this console was fetching `HOST_ARTIFACT_TRANSFERS_MAX` files from other hosts for all of
+    // `HOST_ARTIFACT_SLOT_WAIT_MS`, or as many requests already waited), or `{ unreadable: true }`.
+    // Else `{ entry, chunk(offset), close() }`. `entry` is `{ name, type, size, sha256 }` from the manifest this reader
+    // asked the host for and the channel validated, looked up by the name, so nothing a chunk's reply says can set a
+    // header. `chunk` asks for the bytes at `offset` over the transfer's one subscription, again after each of
+    // `HOST_ARTIFACT_BUSY_WAITS_MS` while the host is busy, and answers as the channel does; the caller holds each chunk
+    // to `entry`. `close()` ends the subscription and frees the count, and the caller calls it on every path, once.
+    // Never throws.
+    async hostArtifactFile(jobId, name, host) {
+      if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId) || typeof name !== "string" || !ARTIFACT_NAME_RE.test(name) || typeof host !== "string" || !WORKER_NAME_RE.test(host)) return { missing: true };
+      let self;
+      try { self = doctorSelfName(dollarEnvFn() ?? {}); } catch { return { unreadable: true }; }
+      if (host === self) return { missing: true };
+      if (!(await takeTransferSlot())) return { unavailable: "full" };
+      let transfer = null;
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        releaseTransferSlot();
+        try { if (typeof transfer?.close === "function") Promise.resolve(transfer.close()).catch(() => {}); } catch { /* closed either way */ }
+      };
+      try {
+        if (!(await hostLive(host))) { close(); return { unavailable: "not-running" }; }
+        const got = await askHost(() => readHostArtifactsManifestFn({ redis, host, jobId }), HOST_ARTIFACT_BUSY_WAITS_MS);
+        const manifest = got?.manifest;
+        if (!manifest || manifest.jobId !== jobId || !Array.isArray(manifest.files)) {
+          close();
+          if (got?.missing === true) return { missing: true };
+          if (got?.error === "host-busy") return { unavailable: "busy" };
+          if (got?.error === "host-unavailable") return { unavailable: "no-answer" };
+          return { unreadable: true };
+        }
+        const entry = manifest.files.find((f) => f?.name === name);
+        if (!entry) { close(); return { missing: true }; }
+        transfer = await openHostArtifactTransferFn({ redis, host, jobId });
+        if (typeof transfer?.chunk !== "function") { close(); return { unavailable: "no-answer" }; }
+        const chunk = (offset) => askHost(() => transfer.chunk({ name: entry.name, sha256: entry.sha256, offset }), HOST_ARTIFACT_BUSY_WAITS_MS, () => closed);
+        return { entry: { name: entry.name, type: entry.type, size: entry.size, sha256: entry.sha256 }, chunk, close };
+      } catch {
+        close();
         return { unreadable: true };
       }
     },
@@ -7709,6 +7848,18 @@ export const RUN_MIRROR_READ_MS = 2_500;
  * (issue #988) for a caller with a deadline, which hands the host's read this or what it has left.
  */
 export const HOST_HISTORY_READ_MS = 5_000;
+/**
+ * How many files one console fetches from other hosts at once (issue #942, `hostArtifactFile`). Each holds a reply
+ * subscription and a request in flight on the host's channel, which serves a few at once and answers the next busy;
+ * a request past this waits its turn, a bounded time in a bounded line, and is then refused with a sentence.
+ */
+export const HOST_ARTIFACT_TRANSFERS_MAX = 4;
+/** How long a request past `HOST_ARTIFACT_TRANSFERS_MAX` waits for a transfer to end before it is refused (issue #942). */
+export const HOST_ARTIFACT_SLOT_WAIT_MS = 15_000;
+/** How many requests may wait for a transfer at once; the next is refused without waiting (issue #942). */
+export const HOST_ARTIFACT_SLOT_WAITERS_MAX = 32;
+/** The waits before a request a busy host refused is made again (issue #942): a file's every request; the card's once. */
+export const HOST_ARTIFACT_BUSY_WAITS_MS = Object.freeze([100, 200, 400]);
 const RUNS_PAGE_BATCH = 200;
 
 /**

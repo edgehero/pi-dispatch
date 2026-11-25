@@ -251,6 +251,8 @@ test("every Valkey key family is pinned to its source and named in the backup pa
 const NOT_A_KEY = new Map([
 	["history:request:", "a transient pub/sub channel for retained-file reads; never a stored key"],
 	["history:reply:", "a transient pub/sub reply channel; no retained reply or store"],
+	["artifacts:request:", "a transient pub/sub channel for a kept file's manifest and chunks (issue #942); never a stored key"],
+	["artifacts:reply:", "a transient pub/sub reply channel, one chunk per message; no retained reply or store"],
 	["a:", "a field name prefix inside the wait answer hash, not a key"],
 	["model:", "a scoped-limits row's scope prefix (`model:<provider>/<model>`), not a key"],
 	["project:", "a scoped-limits row's scope prefix (`project:<id>`), not a key"],

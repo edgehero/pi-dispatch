@@ -8764,8 +8764,12 @@ free local model, or using a few successful live probes as proof of every routin
   counts only when the text could spell the comment trigger's phrase; the link from `PI_CONSOLE_PUBLIC_URL` alone.
   REJECTED: merging it into the agent's comment (the model's text) or the status comment (numbers and fixed words only),
   and posting per attempt (a retry replaces the files).
-- **Traces to**: `REQ-FORGE-JOB-ARTIFACTS`, `INT-ARTIFACTS-STORE-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
-  `DES-JOB-OUTBOX-CHAINING`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`.
+- **Status** (AMENDED 2026-11-25, #942): the files still stay on the host that kept them, under its retention, and any
+  console of the deployment can now show and serve them by asking that host over its artifacts channel
+  (`INT-ARTIFACTS-CHANNEL`, `DES-OPERATOR-CONSOLE` "another host's artifacts"). The comment's link names the host
+  (`historyHost`), so the run page finds the record on that host after the fleet's run mirror has dropped it.
+- **Traces to**: `REQ-FORGE-JOB-ARTIFACTS`, `INT-ARTIFACTS-STORE-CONTRACT`, `INT-ARTIFACTS-CHANNEL`,
+  `CONST-ISOLATION-CONTAINER-PER-JOB`, `DES-JOB-OUTBOX-CHAINING`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`.
 
 ## DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS
 
@@ -15097,8 +15101,47 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   although it passes viewer routes. An image is drawn at width 240 by attribute, no new class, so the stylesheet is
   unchanged and nothing is pasted. REJECTED: operators only (the evidence is for the reviewer); serving any type inline
   (an SVG or HTML file would run on the console's origin); reading another host's store over the history channel (it is
-  metadata only, at most 256 KiB, and a follow-up issue owns moving files between hosts); auditing each read (a
-  transcript's read is not audited either, and the audit trail is for writes and refusals).
+  metadata only, at most 256 KiB; since #942 another host's files come over a channel of their own, the next entry);
+  auditing each read (a transcript's read is not audited either, and the audit trail is for writes and refusals).
+- **AMENDED 2026-11-25 (#942), another host's artifacts.** One console address now works for a whole fleet: where this
+  host's store holds no manifest for a run whose record names another host, the fleet reader asks that host over its
+  artifacts channel (`INT-ARTIFACTS-CHANNEL`, `readHostArtifactsManifest`, `openHostArtifactTransfer`), and every
+  answer names the host. THIS HOST'S STORE FIRST, unchanged: a manifest on this disk wins whatever the record says, so a
+  store that happens to be shared still serves itself. The card's read (`artifacts`) is async and takes the page's
+  deadline as `runById` does (`within`, awaited in the record's wave under `drawn`): a host not in the live registry is
+  not asked (`elsewhere`, `why: "not-running"`); a host's manifest naming the run is `kept` with `host`, its "none" is
+  `expired` (that host's retention), one it cannot read or another job's is `unreadable`, no answer in time (which an
+  earlier worker with no channel also gives) is `elsewhere` with `why: "no-answer"`, and a busy host, asked once more
+  after 100 ms where the page has time, is `why: "busy"`. `ARTIFACT_STATES` stays the five, and the card says why in
+  plain words and links each file with `&host=`. The route (`/api/artifact`) takes an optional single `host` in the
+  worker-name charset. Order: the agent refusal first (nothing read, nothing asked), then this host's file
+  (`artifactFile`, unchanged), then, only where this host's store does not hold the run or the file and `host` names a
+  live host other than this one, `hostArtifactFile`: the entry (name, type, size, sha256) from the manifest the
+  console asked for and the channel validated, looked up by the request's name, so no chunk's reply sets a header; one
+  transfer; chunk 0, and only then `artifactHeaders` (so `ARTIFACT_CSP` and the inline rule are untouched); each chunk
+  held to its offset and to `min(ARTIFACTS_CHUNK_BYTES, size - offset)` bytes and `last` exactly at the end; a running
+  sha256; every chunk but the last written as it arrives (waiting for `drain`), the last only once the digest and the
+  count are the manifest's, else the connection destroyed. A busy host is asked again after 100, 200 and 400 ms
+  (`HOST_ARTIFACT_BUSY_WAITS_MS`); the browser going away closes the transfer, which asks for nothing more; at most
+  `HOST_ARTIFACT_TRANSFERS_MAX` (4) transfers per console, counted in the fleet reader that serves every request. The
+  next waits for one to end, at most `HOST_ARTIFACT_SLOT_WAIT_MS` (15 s) in a line of at most
+  `HOST_ARTIFACT_SLOT_WAITERS_MAX` (32), a transfer's end handing its place to the first in line, and only then is
+  answered 503: a run page draws every image a run kept and a browser asks for six at once, so refusing the fifth at
+  once broke the thumbnails past the fourth (measured on a run with eight). A live tick of the run page passes
+  `ask: false` to the card's read: this host's store is read as before, another host is never asked, and where only it
+  could answer the read says `unasked` and the tick leaves the card out of its swap (`artifactsKept`, as a host page's
+  live tick leaves its capacity chart), so an open page costs that host one request per draw rather than one every two
+  seconds, and a silent host never holds a tick for its wait. Before the headers each refusal is a fixed sentence naming nothing from the request
+  (`HOST_ARTIFACT_REFUSALS`: 404 for none, 503 for a host not running, silent, busy, full, changed or unreadable). The
+  transfer is closed on every path; nothing is kept on the console's disk; reads stay unaudited. REJECTED: a worker HTTP
+  listener behind the console's sign-in (a listener and a credential on every worker host, which the history channel
+  exists to avoid); a shared `PI_ARTIFACTS_DIR` as the answer (every host's sweep would remove the others' folders by
+  its own retention, and the `.tmp-` and `.reap-` renames race; the local-first read keeps working where one exists);
+  reusing the history channel (its one request at a time per host would let a download starve history browsing, and
+  its replies are metadata); buffering a whole file before the headers (a console would hold every file it serves in
+  memory, and a browser would get no byte until the whole file had come; holding the last chunk back keeps the same
+  guarantee with one chunk held); writing a first chunk that is not the entry's and then destroying (before the headers a 503 says the
+  same with words, and no byte of it reaches the browser).
 - **AMENDED 2026-11-16 (#912), restore the original timeline styling.** `gen_overview.py` owns the enhanced
   timeline's Pulse presentation as well as the fallback's. The library supplies layout and interaction, while the
   console draws solid radius-pill marks, project tags, segmented controls, quiet separators and a bottom ruler.
@@ -20979,6 +21022,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-25 (#942) | **`DES-OPERATOR-CONSOLE` AMENDED**, a dated bullet after #920's: another host's artifacts on any console. The card's read is async under the page's deadline, this host's store first, then the record's host over its artifacts channel (`INT-ARTIFACTS-CHANNEL`) only while it is in the live registry, each answer naming the host and `elsewhere` saying why (`not-running`, `no-answer`, `busy`); `/api/artifact` takes one optional live `host` other than this one, refuses an agent before anything is read or asked, takes the entry from the manifest the console validated, sends the headers after the first chunk, holds each chunk to its offset and length, and writes the last only once the sha256 and the count are the manifest's, else destroys the connection; busy waits of 100, 200 and 400 ms, four transfers per console with the next waiting up to 15 s in a line of 32, a live tick that never asks another host and keeps the drawn card, a fixed sentence for each refusal before the headers. REJECTED: a worker HTTP listener, a shared `PI_ARTIFACTS_DIR` as the answer, reusing the history channel, buffering a whole file, a first chunk written and then destroyed. CORRECTED in #920's bullet: its "a follow-up issue owns moving files between hosts" now points at this channel; the rejection of the history channel stands. **`DES-FORGE-JOB-ARTIFACTS` AMENDED**, a Status bullet: the files stay on their host and any console can show them; the comment's link names the host. **Code evidence**: admin/src/read-model.mjs -> artifacts, hostArtifactFile, HOST_ARTIFACT_TRANSFERS_MAX, HOST_ARTIFACT_SLOT_WAIT_MS, HOST_ARTIFACT_SLOT_WAITERS_MAX, HOST_ARTIFACT_BUSY_WAITS_MS; admin/src/console/artifact-api.mjs -> getArtifact, HOST_ARTIFACT_REFUSALS; admin/src/console/panels/run.mjs -> artifactHref, artifactsBody; admin/src/console/pages.mjs -> artifactsRead, panelFragments; design/tools/gen_runs.py -> the run card's notes. |
 | 2026-11-25 (#998) | **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**: `modelRunRecord` hands a record's `mainCredential` as `{ source }` alone, the variable's name taken out. UNCHANGED, checked: `DES-PER-TRIGGER-SECRET-PROFILE` (which key a job spends is decided as before; the container builder now also says which branch answered), `DES-STORE-VERSION-WHEN-NEEDED` (an additive record key leaves `v` at 1). **Code evidence**: admin/src/read-model.mjs -> modelRunRecord; worker/src/env-allowlist.mjs -> buildContainerEnvAndSource, resolveProviderCredentialAndSource. |
 | 2026-11-25 (#1013) | **`DES-PER-TRIGGER-SECRET-PROFILE` AMENDED**, a dated bullet after #1030's: an answer rule and the `zeroTouch` block take `secrets` and `secretsProfile` of their own, run through the `run.secrets` validators, admitting at load only a name the worker could take as some provider's declared key (`DECLARABLE_PROVIDER_KEYS`, over pi's key table, now one generated data-only leaf in the worker that the console re-exports), with a block value rule at version 12; which of the job's providers a key belongs to judged at pickup by the job builder, which keeps its providers' keys and withholds another provider's (`declared_key_withheld`); a kept key judged by the unchanged exclusive rule, `declaredProviderKey` no longer excluding these jobs; the normalized block keeping both fields only when present; seven rejected alternatives. **`DES-OPERATOR-CONSOLE` AMENDED**, its provider key names paragraph: the generated data-only leaf is the worker's, which the loader reads, and the console re-exports it. UNCHANGED, checked: `DES-PROJECT-SECRET-BUNDLES` (a draft still holds no bundle, a bundle never declares a key), `DES-HOST-OWNED-SUBSCRIPTION-AUTH` (a bound provider is never declared), `DES-STORE-VERSION-WHEN-NEEDED` (the rule; the version itself is `INT-TRIGGERS-FILE-CONTRACT`'s). **Code evidence**: worker/src/triggers.mjs -> validateDeclaredKeys, DECLARABLE_PROVIDER_KEYS, undeclarableReason, TRIGGERS_BLOCK_VALUE_VERSIONS; worker/src/provider-key-names.mjs (generated); .github/scripts/provider-key-names.mjs -> PROVIDER_KEYS_FILE; admin/src/provider-key-names.mjs; worker/src/answerer-runtime.mjs -> declaredKeyFields; worker/src/question-group-runtime.mjs -> makeQuestionGroupRuntime; worker/src/question-groups.mjs -> validateZeroTouchConfig; worker/src/env-allowlist.mjs -> declaredProviderKey; worker/src/start.mjs. |
 | 2026-11-25 (#996) | **`DES-MODEL-FAILOVER` AMENDED**, Random selection: a weighted pool's draw is a weighted shuffle without replacement over the same injected `randomInt`, the first eligible member winning with its weight over the eligible weights, a passed-over candidate's weight leaving the draw and a quota reselection keeping its class's shares, with as many draws as the unweighted shuffle, which a pool without weights keeps draw for draw; weights stay out of the policy digest and the stored choice, with the two rejected alternatives (a digest over them, objects in `candidates`). UNCHANGED, checked: `DES-STORE-VERSION-WHEN-NEEDED` (a value rule per store raises the triggers file to 12 and the job data to 13 only for a pool with weights, as that decision provides). **Code evidence**: worker/src/model-selection.mjs -> weightedModels, shuffledModels, selectRandomModelJob; worker/src/model-selection-state.mjs -> modelSelectionPolicyDigest |

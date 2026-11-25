@@ -7112,10 +7112,15 @@ validator rather than a second copy of it.
 - **Status**: issue #920 (`REQ-FORGE-JOB-ARTIFACTS`, `DES-FORGE-JOB-ARTIFACTS`): part 1 the store, part 2 the console's
   reader (`admin/src/read-model.mjs` `artifacts`, `artifactFile`; every manifest through `artifactsManifestOf` in
   `worker/src/artifacts-record.mjs`), part 3 the worker's comment (`worker/src/artifacts-comment.mjs`, posted from
-  `recordRun` for a final outcome, reading the manifest the same way).
+  `recordRun` for a final outcome, reading the manifest the same way). AMENDED 2026-11-25 (#942): the host's artifacts
+  channel (`INT-ARTIFACTS-CHANNEL`) reads the store the same way for a console on another host, and the comment's link
+  names the host that kept the files as `historyHost`, so the one console address finds the run and its files.
 - **Producer**: the worker (`worker/src/artifacts.mjs`, `collectArtifacts`), once per attempt of a forge job whose
   container exited on its own, reading `<jobDir>/artifacts` (mounted at `/artifacts`, `INT-CONTAINER-JOB-INPUTS`).
-  **Consumer**: the console's run page (part 2), the closing comment (part 3), and the sweep (`makeArtifactsReaper`).
+  **Consumer**: the console's run page (part 2), the closing comment (part 3), the sweep (`makeArtifactsReaper`), and
+  (issue #942) the host's artifacts channel (`serveArtifacts`, `worker/src/artifacts-channel.mjs`), which answers a
+  console on another host with a run's manifest and the bytes of a file it lists, by run id and listed name only,
+  through the same `artifactsManifestOf`, never writing the store.
 - **Location**: `PI_ARTIFACTS_DIR`, default `~/.pi-dispatch/artifacts` (`artifactsDirPath`, `worker/src/config.mjs`),
   0700. One folder per run, named from the record's job id with every character outside `[A-Za-z0-9._-]` made `_`
   (`artifactRunDirOf`; `.` and `..` refused), holding `files/<name>` (0600) and `manifest.json`. Beside them, only
@@ -16119,10 +16124,83 @@ per job id remains the storage rule: overwritten attempts are not recoverable hi
 residual applies if an older file survives on another host after the mirror has expired. `INT-RUN-HISTORY-FILE-CONTRACT`
 and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, write or retention rule moves.
 
+## INT-ARTIFACTS-CHANNEL
+
+- **Status**: NEW 2026-11-25, issue #942 (`REQ-FORGE-JOB-ARTIFACTS`, `DES-FORGE-JOB-ARTIFACTS`): a console reads a run's
+  kept files from the worker host that kept them (`INT-ARTIFACTS-STORE-CONTRACT`), so the one console address the
+  closing comment links works for every host of a fleet. Beside the history channel above, and modelled on it.
+- **Producer**: the worker (`serveArtifacts`, `worker/src/artifacts-channel.mjs`), started by `start.mjs` beside the
+  history service, on the channel of its name (`PI_WORKER_NAME`, else the name the worker gives itself) and reading
+  `PI_ARTIFACTS_DIR`. Boot never waits for it: a subscription that fails or takes over five seconds logs
+  `artifacts_channel_unavailable` with no fields and the worker runs on. Shutdown closes it. **Consumer**: the console
+  (`readHostArtifactsManifest`, `openHostArtifactTransfer`, exported as `@edgehero/pi-dispatch/artifacts-channel`), for
+  the run page's artifacts card and its file route (`admin/src/read-model.mjs`, `admin/src/console/artifact-api.mjs`).
+- **Transport**: pub/sub on the deployment's existing authenticated Valkey connection: no key, nothing retained, no job
+  queued, no listener on the host's network. Requests on `artifacts:request:<host>` (`<host>` in the worker name
+  charset, `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`), replies on `artifacts:reply:<nonce>`.
+- **Requests**, JSON of at most `ARTIFACTS_REQUEST_MAX` (1024) bytes, with exactly these keys:
+  ```
+  { "id": "<32 lowercase hex>", "run": "<job id>", "op": "manifest" }
+  { "id": "<32 lowercase hex>", "run": "<job id>", "op": "chunk", "name": "<name>", "sha256": "<64 lowercase hex>", "offset": <int> }
+  ```
+  `run` matches `^[A-Za-z0-9._:-]{1,200}$` and names a folder by `artifactRunDirOf`; `name` matches `ARTIFACT_NAME_RE`;
+  `offset` is a whole multiple of `ARTIFACTS_CHUNK_BYTES` (192 KiB, 256 KiB once base64) below the file's size, or 0
+  for an empty file. A body over the bound is not parsed, and a body without a valid `id` gets no reply. Any other
+  broken rule (a key more or less, another `op`, a value out of shape, an offset at or past the size) is answered
+  `invalid-request`.
+- **Replies**, JSON on `artifacts:reply:<id>`:
+  - manifest: `{ "manifest": <the manifest as artifactsManifestOf rebuilds it> }`, or `{ "missing": true }` when the run
+    has no folder or no manifest;
+  - chunk: `{ "offset": <the request's>, "data": "<base64>", "last": <bool> }`, holding
+    `min(ARTIFACTS_CHUNK_BYTES, size - offset)` bytes, `last` true exactly when `offset` plus that length is the size;
+    `{ "missing": true }` when the run's manifest does not list the name or the file or `files/` is gone;
+    `{ "changed": true }` when the manifest's `sha256` for the name is not the request's, the file's size is not the
+    manifest's, or the file is no longer a plain file (a link, a folder or a FIFO in its place);
+  - either: `{ "error": "invalid-request" | "artifacts-unreadable" | "host-busy" }`.
+- **How the host reads**: statelessly, the manifest read again for every request and nothing left open between
+  requests. The folder is `artifactRunDirOf(run)` and the file is the manifest's entry of that name: no path is ever
+  taken from a request, and a name the manifest does not list opens nothing under `files/`. The run's folder and its
+  `files/` are `lstat`ed and refused (`artifacts-unreadable`) unless plain folders, a link included. The manifest and
+  the file are opened `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` (a FIFO in a file's place cannot hold the open) and
+  `fstat`ed as plain files. The manifest is read within `ARTIFACTS_MANIFEST_MAX_BYTES`, must rebuild by
+  `artifactsManifestOf` and must name `run` as its `jobId` (two job ids can share a folder), else
+  `artifacts-unreadable`. Up to `ARTIFACTS_HOST_CONCURRENCY` (4) requests are served at once, counted apart from the
+  history channel's one, so a download never starves history browsing; the next is answered `host-busy`.
+- **Readers** never throw and close their own subscription. `readHostArtifactsManifest` waits `ARTIFACTS_READ_MS` (5 s)
+  unless told otherwise. It answers `{ manifest }` only after rebuilding it by `artifactsManifestOf` and finding the
+  `jobId` asked for (else `{ error: "artifacts-unreadable" }`), `{ missing: true }`, a host's error word, or
+  `host-unavailable` for no answer in time or a failed subscription. `openHostArtifactTransfer` holds ONE reply
+  subscription for one file's transfer and sends one request at a time, the next only once the last answered, so
+  Valkey's pub/sub buffer never holds more than one chunk of it. A chunk is taken only when its `offset` is the
+  request's, its `data` is strict base64 (it encodes back to the same string) of at most `ARTIFACTS_CHUNK_BYTES` bytes,
+  and `last` is a boolean. A reply over `ARTIFACTS_REPLY_MAX` (256 KiB plus 1 KiB), for another offset, or in no shape
+  listed here is ignored, and the wait then ends as `host-unavailable`. A request the host would refuse is answered
+  `invalid-request` without being sent. The reader does not know a file's size: its caller holds every chunk's offset
+  and length, and the whole file's size and digest, to the manifest it validated itself.
+- **Never crosses it**: a path, a folder listing, a name the manifest does not list, the run record, or anything but a
+  run's rebuilt manifest and the bytes of a file it lists. No file passes whole: no key holds a byte of one and no
+  message more than one chunk.
+- **Trust**: any client of the deployment's Valkey can ask a host for a kept file and can subscribe to any reply
+  channel, exactly as with the history channel and the transcript streams; the nonce keeps replies apart, it does not
+  keep them secret. A job container holds no Valkey credential: its environment is the closed set
+  `buildContainerEnvAndSource` writes, and `VALKEY_PASSWORD` is refused in `PI_FORWARD_ENV` and in a job's secrets
+  (`WORKER_ONLY_SECRET_VARS`, `RESERVED_ENV_NAMES`).
+- **Mixed versions**: an earlier worker does not subscribe, so a reader's wait ends as `host-unavailable`; an earlier
+  console never asks. Neither side writes a store, a record or a key, so no migration is involved.
+- **Acceptance**: `worker/test/artifacts-channel.test.mjs` (every bound pinned by its number; the round trip on a store
+  the real collector wrote, larger than two chunks and empty; offsets; names; the request's shape; a link at the run's
+  folder, `files/`, the manifest and the file; digest, size and kind drift; another job's manifest; the fifth request;
+  `close`; each rule of both readers; one round trip through a real Valkey under `VALKEY_TEST_URL`),
+  `worker/test/start-wiring.test.mjs` (served from boot under the worker's name from `PI_ARTIFACTS_DIR`, closed by
+  the shutdown), `worker/test/backup-doc.test.mjs` (both prefixes are channels, never keys).
+- **Location**: worker/src/artifacts-channel.mjs -> serveArtifacts, readHostArtifactsManifest,
+  openHostArtifactTransfer, ARTIFACTS_* constants.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-11-25 (#942) | **`INT-ARTIFACTS-CHANNEL` NEW**: a console reads a run's kept files from the worker host that kept them, over pub/sub on the deployment's Valkey: requests on `artifacts:request:<host>` (a manifest by run, or a chunk by run, listed name, digest and offset; at most 1024 bytes, no other key), replies on `artifacts:reply:<nonce>` (the rebuilt manifest, a chunk of at most 192 KiB as base64 with `last`, `missing`, `changed`, or one of `invalid-request`, `artifacts-unreadable` and `host-busy`); the host finds the folder by `artifactRunDirOf` and the file by the manifest's entry, never by a path from a request, refuses a link at the run's folder, `files/`, the manifest or the file, holds the file to the manifest's digest and size, serves four requests at once and keeps nothing open between them; the readers rebuild the manifest and hold it to the job asked for, take a chunk only for their offset in strict base64 within the bound, send one request at a time on one subscription, and end as `host-unavailable` for a host that does not answer, an earlier worker included. **`INT-ARTIFACTS-STORE-CONTRACT` AMENDED**: Status and Consumer name the channel, which reads the store as the console's reader does and never writes it, and the closing comment's link names the host that kept the files as `historyHost`. UNCHANGED, checked: `INT-HISTORY-READ-TRANSPORT` (its channels, bounds and one-request lock stay its own), `INT-CONTAINER-RUNTIME-CONTRACT` (nothing added to a job's environment: a container still holds no Valkey credential), `INT-CONSOLE-AUDIT-LOG` (opening a file from another host writes no audit row, as opening one from this host does not). **Code evidence**: worker/src/artifacts-channel.mjs -> serveArtifacts, readHostArtifactsManifest, openHostArtifactTransfer, ARTIFACTS_REQUEST_PREFIX, ARTIFACTS_REPLY_PREFIX, ARTIFACTS_CHUNK_BYTES, ARTIFACTS_HOST_CONCURRENCY; worker/src/start.mjs -> serveArtifacts, artifacts_channel_unavailable; worker/src/artifacts-comment.mjs -> artifactsLink, artifactsComment |
 | 2026-11-25 (#998) | **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: NEW conditional key `mainCredential`, `{ source, variable? }`, `source` from the closed list `MAIN_CREDENTIAL_SOURCES` (`host-env`, `pi-login`, `subscription`, `run-secret`, `keyless`), `variable` only beside `run-secret` and only a provider key variable's name, never a value; decided by the container builder as it writes the credential and carried by runContainer and the processor to the attempt's record; the last key before `v`; absent before the container, on a container that never started and on older records; `v` stays 1, `RECORD_CORE_FIELDS` does not name it, and `next.maximal` carries it; `/api/run` carries it rebuilt, the variable to an operator alone, and a viewer's copy, an agent's and `dispatch_runs` the source alone. `notionalProviders`' paragraph says it was the last key until this one. **`INT-CONSOLE-STATE-API` AMENDED**, `GET /api/run`: `run.mainCredential`, with `variable` to an operator alone, the one field whose shape differs by role. UNCHANGED, checked: `INT-CONTAINER-RUNTIME-CONTRACT` (no variable and no capability added: the source is the worker's, never the container's), `INT-RUNNER-EXIT-CODE-PROTOCOL`. **Code evidence**: worker/src/env-allowlist.mjs -> resolveProviderCredentialAndSource, buildContainerEnvAndSource; worker/src/run-container.mjs; worker/src/processor.mjs -> withMainCredential, tagMainCredential, ranNoting; worker/src/run-history.mjs -> MAIN_CREDENTIAL_SOURCES, recordedMainCredential, buildRecord; worker/src/canary-runtime.mjs; admin/src/console/run-api.mjs -> safeRunFields, getRun; admin/src/agent-read.mjs -> agentReadProjection; admin/src/read-model.mjs -> modelRunRecord. |
 | 2026-11-25 (#1013) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the answer rules bullet gains optional `secrets` and `secretsProfile`, validated by the `run.secrets` code with every name refused that is not a provider's API-key variable the worker admits (`DECLARABLE_PROVIDER_KEYS`, over pi's generated data-only key table, now the worker's leaf and re-exported by the console) and every message naming the rule and the variable, at triggers file version 12; the version list says 11 (#1008) and 12 (#1013), and CORRECTED: it ended at 10 though `TRIGGERS_FILE_VERSION` was 11; the pre-spend clause gains a dated paragraph: the decision job exception is gone, the job builders hand a draft or grouping job the names its providers read and withhold the rest (`declared_key_withheld`), and `declaredProviderKey` judges those jobs as any other. **`INT-QUESTION-GROUPS` AMENDED**: the `zeroTouch` block's optional `secrets` and `secretsProfile`, carried in the validated copy only when present and covered by its digest, and the grouping job's declared keys of its primary and classifier providers. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, a bullet after #997's: an answer draft's decision model and a grouping job's classifier take `secondaryCredential` the same way, the builder unchanged. UNCHANGED, checked: `INT-RUN-HISTORY-FILE-CONTRACT` (no field or reason token; the record's `secretsProfile` already names a job's profile), the job data version (answer-draft and grouping jobs are built at pickup and unversioned), `INT-CONTAINER-JOB-INPUTS` (`/job/answer-draft.json` and `question-grouping.json` name models, never a credential), `INT-REASON-CATALOG`. **Code evidence**: worker/src/triggers.mjs -> validateDeclaredKeys, DECLARABLE_PROVIDER_KEYS, undeclarableReason, validateSecrets, validateSecretsProfile, TRIGGERS_BLOCK_VALUE_VERSIONS, TRIGGERS_FILE_VERSION; worker/src/provider-key-names.mjs (generated); worker/src/answerer.mjs -> validateAnswerRules; worker/src/question-groups.mjs -> validateZeroTouchConfig; worker/src/answerer-runtime.mjs -> declaredKeyFields; worker/src/question-group-runtime.mjs -> makeQuestionGroupRuntime; worker/src/env-allowlist.mjs -> declaredProviderKey; worker/src/processor.mjs -> roleDeclared; admin/src/zero-touch-actions.mjs -> planZeroTouchName. |
 | 2026-11-25 (#996) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, a dated paragraph after the random pool's: `run.modelSelection` may carry `weights`, an exact candidate to a whole number from 1 to 100 (a candidate not named weighs 1, an empty map refused, every refusal naming a key by its position), near misses beside the pool refused, every reader that rebuilds a pool keeping them (`copyModelSelection`), triggers file version 12 and job data version 13 by value rules with a pool without weights at 6 and 7 as before, weights no part of the selection identity so a weight-only edit refuses no queued job, a weight edit changing a local job's id and a cron template's generation like any pool change, and the console's editor keeping the weights of the candidates that stay with no weight input; the pool sentence no longer lists weights among what is refused. AMENDED, the `version` and `dataVersion` bullet: a key the field table names is refused naming the larger of what the key and its value need, so a weighted pool in a file without a version names 12, not the 6 of `run.modelSelection` alone. And CORRECTED, that bullet: its lists stopped at triggers file 10 and job data 9, and now name 11 (#1008, `run.maxSubscriptionUsd`) and 12 (#996), job data 10 (#932, `duplicateOf` and `windowEndsAt`), 11 (#949, `auxiliaryModels`), 12 (#1008, `maxSubscriptionUsd`) and 13 (#996), and `JOB_DATA_VALUE_VERSIONS` is no longer empty. **`INT-MODEL-SELECTION-STATE` AMENDED**: weights are no part of the policy digest or the state, a weight-only edit refuses no queued run, which draws with the weights it carried at enqueue, and `MODEL_SELECTION_STATE_VERSION` stays 1. UNCHANGED, checked: `INT-RUN-HISTORY-FILE-CONTRACT` (the record's `modelSelection` keeps strategy, candidates and previous only), `INT-HOST-REGISTRY-CONTRACT` (a host's `triggersVersion` and `jobDataVersion`, which the console's gate compares with the new need), `INT-DEFER-REASON-KEY` (`newer-release`, as for every version). **Code evidence**: worker/src/model-ref.mjs -> modelSelectionProblem, copyModelSelection, validateModelRef; worker/src/triggers.mjs -> TRIGGERS_FILE_VERSION, TRIGGER_RUN_VALUE_VERSIONS, RUN_MODEL_NEAR_MISS_TARGETS, parseTriggersDocument; worker/src/job-data-version.mjs -> JOB_DATA_VERSION, JOB_DATA_VALUE_VERSIONS; worker/src/model-selection-state.mjs -> modelSelectionPolicyDigest; admin/src/console/script.mjs -> getsLists, getsBody; admin/src/trigger-environment-plans.mjs -> versionGate |

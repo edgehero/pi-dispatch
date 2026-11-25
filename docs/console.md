@@ -1979,15 +1979,25 @@ policy of its own: a sandboxed page that may run, load and send nothing. Only th
 shown in the browser; every other file is a download. Opening one is not written to the audit log, as reading a
 transcript is not.
 
-The console reads its own host's store only. A run another host kept files for names that host instead.
+**One console for the whole fleet.** The files stay on the host that ran the job, under that host's retention. The
+console reads its own host's store first; for a run another host kept files for, it asks that host over the
+deployment's own Valkey (the artifacts channel, beside the one a run's history is read over), so the link in the
+job's forge comment works whichever host's console it names. The card then names the host the files are on, and each
+file's address carries `&host=<host>`. A file from another host is sent a piece at a time and checked against the
+size and digest in that host's manifest: a file that does not match never arrives whole, and the browser reports a
+failed download. Nothing is copied to the console's disk. A host is asked only while it runs (its row in the fleet's
+registry), and only once it runs a release with the channel. One console fetches at most four files from other hosts
+at once; a further request (a page's fifth picture, say) waits up to 15 seconds for one of them to finish, and is then
+answered with a sentence asking to try again shortly. The card is asked for when the page is drawn, not on each live
+update, so an open page costs the other host one request; reload the page to ask again.
 
 | State | The card says | What to do |
 |---|---|---|
-| `kept` | Each file with its size and kind, what was not kept and why, and when the files go | Open a file, or read the reason a file was not kept and change the setting it names |
+| `kept` | Each file with its size and kind, what was not kept and why, and when the files go; for files another host keeps, which host | Open a file, or read the reason a file was not kept and change the setting it names |
 | `dropped` | This run kept no file, and why each was not kept | Change the job, or the setting a reason names (`PI_ARTIFACTS_MAX_FILES`, `PI_ARTIFACTS_MAX_FILE_MB`, `PI_ARTIFACTS_MAX_RUN_MB`) |
-| `expired` | The files were removed after this host's retention | Nothing to open; raise `PI_ARTIFACTS_RETENTION_DAYS` to keep later runs' files longer |
-| `elsewhere` | Another host keeps the files, and which one | Open the run on that host's console |
-| `unreadable` | The files could not be read here | Check `PI_ARTIFACTS_DIR` on this host and its permissions |
+| `expired` | The files were removed after the retention of the host that kept them (this host's, or the one it names) | Nothing to open; raise `PI_ARTIFACTS_RETENTION_DAYS` on that host to keep later runs' files longer |
+| `elsewhere` | Another host keeps the files and could not be asked now, and why: it is not running; it did not answer in time, or runs an earlier version that cannot send files; or it is busy sending other files | Start that host, or upgrade it, then reload; for a busy or slow host, reload to ask again |
+| `unreadable` | The files could not be read here, or on the host it names | Check `PI_ARTIFACTS_DIR` on that host and its permissions |
 
 A run that kept and dropped nothing has no Artifacts card.
 

@@ -49,8 +49,10 @@ The run page's **Artifacts** card lists what a run kept: each name opens the fil
 name, text opens as text, anything else downloads, and a file that was not kept is one line with its reason. **Viewers
 see the card and can open the files too**, because the evidence is for the person reviewing the pull request; an agent
 token cannot. Each file is served under a policy that lets it run, load and send nothing, and only images and plain text
-are shown in the browser. The console reads its own host's store, so a run another host kept files for names that host.
-See [the console](console.md#a-runs-artifacts).
+are shown in the browser. The console reads its own host's store first; for a run another host kept files for, it asks
+that host over the deployment's Valkey, a piece at a time, and a file is only ever sent whole when its size and digest
+match what the host recorded. When that host is not running, does not answer or is busy, the card names it and says
+which. See [the console](console.md#a-runs-artifacts).
 
 ## On the issue or pull request
 
@@ -62,12 +64,13 @@ pi-dispatch kept 2 files from job `gh-…` for its reviewer:
 - `after.png` (179.9 KB)
 - `e2e-report.txt` (6.1 KB)
 1 file was not kept: it was larger than one file may be (PI_ARTIFACTS_MAX_FILE_MB).
-Open them on the run page: https://console.example.org/run?id=gh-…#p-artifacts
+Open them on the run page: https://console.example.org/run?id=gh-…&historyHost=worker-1#p-artifacts
 ```
 
 The worker writes it, never the agent, from what the store holds. An attempt the queue retries posts nothing; the last
 attempt's comment is the one. The link needs `PI_CONSOLE_PUBLIC_URL`, the console's address as your reviewers reach it;
-without it the comment names the job and says to open it on the console. File names are the only thing in it a job
+without it the comment names the job and says to open it on the console. The link also names the worker that kept the
+files (`historyHost`), so one console address opens the run and its files whichever host ran it. File names are the only thing in it a job
 chose: they are held to the plain characters above and set in backticks, and if the comment could contain the phrase
 that starts a comment trigger, the names are left out and only the counts are said.
 
