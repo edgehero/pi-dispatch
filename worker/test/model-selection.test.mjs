@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { selectRandomModelJob, shuffledModels } from "../src/model-selection.mjs";
+import { Worker } from "node:worker_threads";
+import { selectRandomModelJob, shuffledModels, weightedModels } from "../src/model-selection.mjs";
 import { readModelSelection, modelSelectionKey, armModelSelection, allowModelSelectionQuotaReselection } from "../src/model-selection-state.mjs";
 import { modelCooldownKey } from "../src/model-cooldowns.mjs";
 import { parseScopedLimits, modelDollarRows } from "../src/scoped-limits.mjs";
@@ -29,6 +30,94 @@ test("exhaustive permutations choose each eligible candidate equally, independen
 		assert.deepEqual([...counts.values()], [3, 3, 0]);
 	}
 	assert.throws(() => shuffledModels(pool, () => -1), /invalid random/);
+});
+
+// Issue #996: every answer `randomInt` can give, walked depth first. `run(randomInt)` is one pickup; each complete path of
+// answers is an outcome with its exact probability, the product of 1 / max over its draws, kept as a BigInt fraction so a
+// share is compared exactly, never within a tolerance.
+const gcd = (a, b) => (b === 0n ? a : gcd(b, a % b));
+async function exactShares(run) {
+	const shares = new Map();
+	const draws = new Set();
+	const stack = [[]];
+	while (stack.length > 0) {
+		const prefix = stack.pop();
+		const bounds = [];
+		const result = await run((max) => { bounds.push(max); return bounds.length <= prefix.length ? prefix[bounds.length - 1] : 0; });
+		if (bounds.length > prefix.length) { for (let value = 0; value < bounds[prefix.length]; value++) stack.push([...prefix, value]); continue; }
+		draws.add(bounds.length);
+		const den = bounds.reduce((product, max) => product * BigInt(max), 1n);
+		const [num, was] = shares.get(result) ?? [0n, 1n];
+		const sum = [num * den + was, was * den];
+		const divisor = gcd(sum[0], sum[1]);
+		shares.set(result, [sum[0] / divisor, sum[1] / divisor]);
+	}
+	return { shares: Object.fromEntries([...shares].map(([ref, [num, den]]) => [ref, `${num}/${den}`])), draws: [...draws] };
+}
+
+test("a weighted pool: the first eligible candidate wins with its weight over the eligible weights, exactly, with a draw per position but the last", async () => {
+	const weights = { "openai/a": 3, "anthropic/b": 1, "openai/c": 2 };
+	for (const authored of [pool, [...pool].reverse()]) {
+		const weighted = { strategy: "random", candidates: authored, weights };
+		const pick = (unpriced) => (randomInt) => select(modelSelectionRedis(), { randomInt, checkCandidate: async (candidate) => unpriced.includes(candidate.model) ? "model-unpriced" : null }, { modelSelection: weighted }).then((picked) => picked.ref);
+		assert.deepEqual(await exactShares(pick([])), { shares: { "openai/a": "1/2", "anthropic/b": "1/6", "openai/c": "1/3" }, draws: [2] });
+		// A candidate passed over at pickup takes its weight out of the draw: the others keep their relative shares.
+		assert.deepEqual(await exactShares(pick(["c"])), { shares: { "openai/a": "3/4", "anthropic/b": "1/4" }, draws: [2] });
+		assert.deepEqual(await exactShares(pick(["a"])), { shares: { "anthropic/b": "1/3", "openai/c": "2/3" }, draws: [2] });
+	}
+	// A candidate the weights leave out weighs 1, and the job carries the pool as it was queued, weights and all.
+	const partial = { strategy: "random", candidates: pool, weights: { "openai/c": 2 } };
+	assert.deepEqual((await exactShares((randomInt) => select(modelSelectionRedis(), { randomInt }, { modelSelection: partial }).then((picked) => picked.ref))).shares, { "openai/a": "1/4", "anthropic/b": "1/4", "openai/c": "1/2" });
+	const picked = await select(modelSelectionRedis(), { randomInt: () => 0 }, { modelSelection: partial });
+	assert.deepEqual(picked.job.modelSelection, partial);
+	assert.deepEqual(picked.job.modelSelectionInfo, { strategy: "random", candidates: pool }, "the run record's pool is unchanged");
+	assert.throws(() => weightedModels(partial, () => 4), /invalid random/);
+	assert.throws(() => weightedModels(partial, () => -1), /invalid random/);
+	assert.throws(() => weightedModels(partial, () => 0.5), /invalid random/);
+	assert.deepEqual(weightedModels({ strategy: "random", candidates: ["openai/a"], weights: { "openai/a": 9 } }, () => assert.fail("one candidate needs no draw")), ["openai/a"]);
+});
+
+// A draw outside 0 to the sum less one must end the walk over the spans. Probed in a worker thread first, which a timer can stop:
+// a walk that never ends holds the thread, and in this one no timer would ever fire to say so.
+test("a weighted draw of the whole sum, or any draw outside the spans, rejects promptly as a RangeError and never loops", async () => {
+	const verdict = await new Promise((resolve) => {
+		const probe = new Worker(`
+const { parentPort, workerData } = require("node:worker_threads");
+import(workerData.url).then(({ weightedModels }) => {
+	const pool = { strategy: "random", candidates: ["openai/a", "anthropic/b", "openai/c"], weights: { "openai/a": 3 } };
+	const out = [];
+	for (const answer of [(max) => max, (max) => max + 7, () => Number.MAX_SAFE_INTEGER]) {
+		try { weightedModels(pool, answer); out.push("returned"); } catch (error) { out.push(error?.constructor?.name ?? "thrown"); }
+	}
+	parentPort.postMessage(out.join(","));
+});`, { eval: true, workerData: { url: new URL("../src/model-selection.mjs", import.meta.url).href } });
+		const timer = setTimeout(() => { probe.terminate(); resolve("still drawing after 5 s"); }, 5000);
+		probe.once("message", (message) => { clearTimeout(timer); probe.terminate(); resolve(message); });
+		probe.once("error", (error) => { clearTimeout(timer); resolve(`worker failed: ${error.message}`); });
+	});
+	assert.equal(verdict, "RangeError,RangeError,RangeError");
+	// And through the pickup itself: nothing is committed or leased for a draw that cannot be.
+	const redis = modelSelectionRedis();
+	await assert.rejects(select(redis, { randomInt: (max) => max, acquireEndpoints: async () => assert.fail("no lease") }, { modelSelection: { strategy: "random", candidates: pool, weights: { "openai/a": 3 } } }), RangeError);
+	assert.equal(await readModelSelection(redis, "job"), null);
+});
+
+test("a weighted pool's quota reselection stays in the drawn class with that class's shares, and draws as often as a first draw", async () => {
+	const four = [...mixed, "anthropic/e"];
+	const weights = { "openrouter/x": 5, "anthropic/b": 1, "anthropic/d": 3, "anthropic/e": 1 };
+	const job = mixedJob({ models: four, modelSelection: { strategy: "random", candidates: four, weights } });
+	const policy = async () => ({ ok: true, managed: true, classes: Object.fromEntries(four.map((ref) => [ref, classOf(ref)])), bindings: Object.fromEntries(four.map((ref) => [ref, classOf(ref) === "subscription" ? BINDING : null])) });
+	const reselected = await exactShares(async (randomInt) => {
+		const redis = modelSelectionRedis();
+		// x spans 0 to 4 of the first draw's 10 and b spans 5, so 5 commits b, a subscription choice.
+		const first = await select(redis, { subscriptionPolicyCheck: policy, subscriptionCheck: live(), randomInt: (max) => (max === 10 ? 5 : 0) }, job);
+		assert.equal(first.ref, "anthropic/b");
+		const next = await select(redis, { subscriptionPolicyCheck: policy, subscriptionCheck: live((candidate) => candidate.model === "b"), randomInt }, job);
+		assert.equal(next.job.modelWhy, "random-subscription-limit");
+		return next.ref;
+	});
+	// The API-key candidate's 5 never enters the reselection, nor does the exhausted b's 1: d and e keep their 3 to 1.
+	assert.deepEqual(reselected, { shares: { "anthropic/d": "3/4", "anthropic/e": "1/4" }, draws: [3] });
 });
 
 test("the whole pool is authorized before randomness and no implicit default joins it", async () => {

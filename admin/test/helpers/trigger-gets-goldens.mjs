@@ -160,6 +160,8 @@ const flowStale = () => {
 export const TRIGGER_GETS_DRAW = Object.freeze({
   "trigger-gets-random.operator": () => triggerGetsPage({ entry: { ...GETS_ENTRY, run: { kind: "github", flow: "fix", models: ["anthropic/claude-haiku-4-5", "openai/gpt-5"], modelSelection: { strategy: "random", candidates: ["anthropic/claude-haiku-4-5", "openai/gpt-5"] } } } }),
   "trigger-gets-random.viewer": () => triggerGetsPage({ role: "viewer", entry: { ...GETS_ENTRY, run: { kind: "github", flow: "fix", models: ["anthropic/claude-haiku-4-5", "openai/gpt-5"], modelSelection: { strategy: "random", candidates: ["anthropic/claude-haiku-4-5", "openai/gpt-5"] } } } }),
+  // Issue #996: a weighted pool, which names each candidate's share where an unweighted one says each has an equal chance.
+  "trigger-gets-random-weighted.operator": () => triggerGetsPage({ entry: { ...GETS_ENTRY, run: { kind: "github", flow: "fix", models: ["anthropic/claude-haiku-4-5", "openai/gpt-5"], modelSelection: { strategy: "random", candidates: ["anthropic/claude-haiku-4-5", "openai/gpt-5"], weights: { "anthropic/claude-haiku-4-5": 3 } } } } }),
   "trigger-gets.operator": () => triggerGetsPage(),
   "trigger-gets.viewer": () => triggerGetsPage({ role: "viewer" }),
   "trigger-gets-changed.operator": async () => asChanged(await triggerGetsPage(), GETS_CHANGES),

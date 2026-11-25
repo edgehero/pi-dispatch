@@ -262,6 +262,28 @@ test("absent stays absent: a trigger naming no model or cap enqueues a job with 
 	}
 });
 
+// Issue #996: the receiver copies a random pool whole, so its weights reach the stored job on every route, stamped 13 for a worker that
+// draws with them; a pool without weights keeps its 7 and gains no key.
+test("a random pool's weights reach the job data on every route of every forge, stamped 13, and a pool without them keeps its stamp", async () => {
+	const candidates = ["openai/gpt-5.4", "anthropic/claude-haiku-4-5"];
+	for (const [modelSelection, version] of [[{ strategy: "random", candidates, weights: { "anthropic/claude-haiku-4-5": 4 } }, 13], [{ strategy: "random", candidates }, 7]]) {
+		for (const [forge, entries] of Object.entries(ENTRIES)) {
+			for (const entry of entries) {
+				const raw = { on: entry.on, run: { kind: forge, flow: "work", models: candidates, modelSelection, ...(entry.extra ?? {}) } };
+				const json = JSON.stringify({ version: 12, triggers: [raw] });
+				const cfg = {};
+				assert.deepEqual(reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json }), { ok: true }, `${forge} ${entry.route}`);
+				const r = drive(forge, entry.route, cfg.triggers);
+				assert.equal(r.enqueue, true, `${forge} ${entry.route}: ${r.reason}`);
+				assert.deepEqual(r.job.modelSelection, modelSelection, `${forge} ${entry.route}: the filter's job`);
+				const data = await enqueuedData(forge, r.job);
+				assert.deepEqual(data.modelSelection, modelSelection, `${forge} ${entry.route}: the stored job data`);
+				assert.equal(data.dataVersion, version, `${forge} ${entry.route}`);
+			}
+		}
+	}
+});
+
 test("each field ALONE reaches the job: one folded into a neighbour's conditional spread is dropped only without that neighbour", async () => {
 	// The maximal fixture sets every field at once, so a field spread inside another's conditional (as `run.mcp` could
 	// be, under `excludeTools`) passes it while a trigger naming that field alone loses it. Each field here is the

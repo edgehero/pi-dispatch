@@ -19,6 +19,7 @@ import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME } from "@edgehero/pi-dispatch/mc
 import { EXCLUDABLE_TOOL_NAMES, MCP_EXCLUDABLE_TOOL_NAMES, mcpServerToolPattern, triggersFileVersionProblem, validateExcludeExtensionTools } from "@edgehero/pi-dispatch/triggers";
 import { flowBasisOf, hostsAgree } from "@edgehero/pi-dispatch/host-loads";
 import { overlayEntryNamed } from "@edgehero/pi-dispatch/loaded-record";
+import { modelSelectionProblem, modelSelectionShares, modelShareText } from "@edgehero/pi-dispatch/model-ref";
 import { optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { hostLoadsRow, hostPiFor, sandboxFreshLine, triggerLastRun } from "./loaded-words.mjs";
 import { loaderTriggers, normalizeTriggerForDisplay } from "./read-model.mjs";
@@ -333,9 +334,16 @@ function modelRow({ trigger, defaults, modelChoices }) {
   const refs = catalog.filter((ref) => inUse.includes(ref.split("/")[0])).slice(0, MODEL_CHOICES_MAX);
   const cap = trigger.maxCostUsd ?? null;
   const deploymentCap = deploymentCapOf(defaults?.maxCostUsd);
+  // Issue #996: a weighted pool's shares of the whole pool, in whole percent, the doctor's rule; null for a pool without weights,
+  // which reads as it always did.
+  const shares = trigger.modelSelection?.weights !== undefined && modelSelectionProblem(trigger.modelSelection) === null ? modelSelectionShares(trigger.modelSelection) : null;
+  const sharesText = shares === null ? null : shares.map(({ ref, share }) => `${ref} ${modelShareText(share)}`).join(", ");
   return {
     mode: trigger.modelSelection?.strategy === "random" ? "random" : trigger.fallbackModels?.length ? "fallback" : "fixed",
     candidates: trigger.modelSelection?.candidates ?? [],
+    // Only for a weighted pool, so an unweighted one's row keeps its keys: each candidate's weight, which the form keeps on a save
+    // for the candidates that stay, and the shares in words for the hint.
+    ...(shares === null ? {} : { weights: { ...trigger.modelSelection.weights }, sharesText }),
     provider: trigger.provider ?? "",
     model: trigger.model ?? "",
     cap: cap ?? "",
@@ -350,7 +358,7 @@ function modelRow({ trigger, defaults, modelChoices }) {
     models: unique(refs.map((ref) => ref.slice(ref.indexOf("/") + 1))),
     refs,
     read: [
-      trigger.modelSelection?.strategy === "random" ? `random choice from: ${trigger.modelSelection.candidates.join(", ")}` : trigger.model ? `${trigger.provider ? `${trigger.provider} / ` : ""}${trigger.model}` : `the deployment’s model${defaults?.model ? `, ${defaults.provider ? `${defaults.provider} / ` : ""}${defaults.model}` : ""}`,
+      trigger.modelSelection?.strategy === "random" ? `random choice from: ${sharesText ?? trigger.modelSelection.candidates.join(", ")}` : trigger.model ? `${trigger.provider ? `${trigger.provider} / ` : ""}${trigger.model}` : `the deployment’s model${defaults?.model ? `, ${defaults.provider ? `${defaults.provider} / ` : ""}${defaults.model}` : ""}`,
       trigger.models ? `allowed: ${trigger.models.join(", ")}` : Array.isArray(allowed) ? "the deployment’s allowed list" : "any model allowed",
       trigger.fallbackModels ? `fallbacks: ${trigger.fallbackModels.join(", ")}` : "no fallback",
       cap !== null ? `$${cap} cap` : deploymentCap !== null ? `the deployment’s $${deploymentCap} cap` : "no cap of its own",

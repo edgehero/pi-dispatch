@@ -107,15 +107,20 @@ const jobDataFields = () => {
 };
 
 test("the job data tables hold the rule", () => {
-	assert.equal(JOB_DATA_VERSION, 12, "a subscription allowance at 12");
+	assert.equal(JOB_DATA_VERSION, 13, "a random pool's weights at 13");
 	assert.equal(JOB_DATA_VERSION_FIELD, "dataVersion");
 	const known = jobDataFields();
 	assert.ok(known.includes("waitFor") && known.includes("models"), "the job data fields were found");
-	assert.deepEqual(versionTableProblems(JOB_DATA_FIELD_VERSIONS, { known, version: JOB_DATA_VERSION }), []);
+	// A value rule can raise the version with no field-table row, which neither check can see, so each rule's answer for
+	// the value that needs it joins the field table here, and the largest of them all must be the version.
+	const weightedPool = JOB_DATA_VALUE_VERSIONS.modelSelection({ strategy: "random", candidates: ["openai/a", "openai/b"], weights: { "openai/a": 3 } });
+	assert.deepEqual(versionTableProblems(Object.freeze({ ...JOB_DATA_FIELD_VERSIONS, modelSelection: Math.max(JOB_DATA_FIELD_VERSIONS.modelSelection, weightedPool) }), { known, version: JOB_DATA_VERSION }), []);
 	assert.deepEqual(valueTableProblems(JOB_DATA_VALUE_VERSIONS, { known, version: JOB_DATA_VERSION }), []);
-	// A value rule can raise the version with no field-table row, which neither check can see. While there is none, the
-	// version is the field table's; the first value rule must extend this assertion with the versions it answers.
-	assert.deepEqual(Object.keys(JOB_DATA_VALUE_VERSIONS), []);
+	// Every value rule, named and probed (issue #996: a weighted pool at 13, one without weights at the field table's 7).
+	assert.deepEqual(Object.keys(JOB_DATA_VALUE_VERSIONS), ["modelSelection"]);
+	assert.equal(weightedPool, 13);
+	assert.equal(JOB_DATA_VALUE_VERSIONS.modelSelection({ strategy: "random", candidates: ["openai/a", "openai/b"] }), 1);
+	assert.equal(jobDataVersionFor({ modelSelection: { strategy: "random", candidates: ["openai/a", "openai/b"] } }), 7, "a pool without weights keeps its stamp");
 });
 
 test("jobDataNewer: no field or a readable integer passes; above the build, or anything that is not an integer, cannot be read", () => {

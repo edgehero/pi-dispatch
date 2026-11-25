@@ -85,7 +85,7 @@ const datalist = (id, options) => html`<datalist id="${id}">${options.map((optio
 
 /** A chip of a list key. `inverse`: on means NOT in the file's list, as `run.excludeTools` is a list of what is removed. */
 function chip(key, entry, { inverse = false } = {}) {
-  return html`<label class="te-chip"><input type="checkbox"${entry.on ? html` checked` : null} data-gets-list="${key}" data-gets-value="${entry.name ?? entry.value}"${inverse ? html` data-gets-inverse` : null} data-gets-on="${entry.onWord}" data-gets-off="${entry.offWord}"><span>${entry.label ?? entry.name ?? entry.value}</span></label>`;
+  return html`<label class="te-chip"><input type="checkbox"${entry.on ? html` checked` : null} data-gets-list="${key}" data-gets-value="${entry.name ?? entry.value}"${inverse ? html` data-gets-inverse` : null}${entry.weight === undefined ? null : html` data-gets-weight="${entry.weight}"`} data-gets-on="${entry.onWord}" data-gets-off="${entry.offWord}"><span>${entry.label ?? entry.name ?? entry.value}</span></label>`;
 }
 const roChip = (label, on = true) => html`<span class="${on ? "te-chip te-chip--ro" : "te-chip te-chip--ro te-chip--off"}">${label}</span>`;
 const chips = (body) => html`<div class="te-chips">${body}</div>`;
@@ -101,7 +101,12 @@ function modelBody(gets, form) {
   if (!form) return readLine(m.read);
   const deployed = (word, value) => (value ? `Blank uses the deployment’s, ${value}.` : `Blank uses the deployment’s ${word}.`);
   const add = (key, id, label, word) => html`<div class="field"><label for="${id}">${label}</label><input id="${id}" class="input" list="te-model-refs" maxlength="${key === "randomCandidates" ? 8192 : 512}" autocomplete="off" spellcheck="false" placeholder="provider/model, separated by spaces" data-gets-add="${key}" data-gets-word="${word}"></div>`;
-  const listed = (key, entries, what) => entries.map((ref) => chip(key, { value: ref, on: true, onWord: `${ref} back on ${what}`, offWord: `${ref} off ${what}` }));
+  // A weighted pool's candidate carries its weight (issue #996), so a save keeps the weights of the candidates that stay.
+  const listed = (key, entries, what, weights = null) => entries.map((ref) => chip(key, { value: ref, on: true, onWord: `${ref} back on ${what}`, offWord: `${ref} off ${what}`, ...(weights !== null && Object.hasOwn(weights, ref) ? { weight: weights[ref] } : {}) }));
+  // "Equal chance" only for a pool without weights; a weighted one names each candidate's share. No weight is typed here.
+  const poolHint = m.sharesText === undefined
+    ? "Each eligible model has an equal chance."
+    : `Each eligible model's chance follows the weights set in the triggers file, as a share of the whole pool: ${m.sharesText}. A model that cannot run at pickup leaves that draw, and the others keep their relative shares. A candidate taken off here loses its weight, and one added here weighs 1.`;
   return html`<div class="field"><label for="te-selection">Model selection</label><select id="te-selection" class="input" data-gets-mode data-gets-was="${m.mode}"><option value="fixed"${m.mode === "fixed" ? html` selected` : null}>Fixed model</option><option value="fallback"${m.mode === "fallback" ? html` selected` : null}>Ordered fallbacks</option><option value="random"${m.mode === "random" ? html` selected` : null}>Random model pool</option></select><p class="field__hint">A new run chooses once. Retries keep that model unless an evidenced subscription limit permits another choice.</p></div>
 <div class="te-grid" data-gets-fixed${m.mode === "random" ? html` hidden` : null}>
 ${textField({ id: "te-provider", name: "provider", label: "Provider", value: m.provider, hint: deployed("provider", m.deployment.provider), list: "te-providers", word: "provider changed" })}
@@ -110,7 +115,7 @@ ${textField({ id: "te-model", name: "model", label: "Model", value: m.model, hin
 ${textField({ id: "te-cap", name: "maxCostUsd", label: "Job cap, in dollars", value: m.cap, hint: m.capHint, word: "job cap changed", amount: true })}
 ${textField({ id: "te-allowance", name: "maxSubscriptionUsd", label: "Subscription allowance, in dollars", value: m.allowance, hint: "The list price its subscription calls may use, checked between calls. Blank means no allowance.", word: "subscription allowance changed", amount: true })}
 ${datalist("te-providers", m.providers)}${datalist("te-models", m.models)}${datalist("te-model-refs", m.refs)}
-<div data-gets-random${m.mode !== "random" ? html` hidden` : null}>${sub("Random candidate pool")}${m.candidates.length ? chips(listed("randomCandidates", m.candidates, "candidate")) : html`<p class="te-read">Add 1 to 16 exact provider/model references.</p>`}${add("randomCandidates", "te-random-add", "Add candidates", "random pool changed")}<p class="field__hint">Each eligible model has an equal chance. The allowed-model list still applies; the deployment's default is not an extra candidate. No model is chosen by this preview.</p></div>
+<div data-gets-random${m.mode !== "random" ? html` hidden` : null}>${sub("Random candidate pool")}${m.candidates.length ? chips(listed("randomCandidates", m.candidates, "candidate", m.weights ?? null)) : html`<p class="te-read">Add 1 to 16 exact provider/model references.</p>`}${add("randomCandidates", "te-random-add", "Add candidates", "random pool changed")}<p class="field__hint">${poolHint} The allowed-model list still applies; the deployment's default is not an extra candidate. No model is chosen by this preview.</p></div>
 <div>${sub("Allowed models")}${m.allowed.length ? chips(listed("models", m.allowed, "the allowed list")) : html`<p class="te-read">${m.allowedNone}</p>`}${add("models", "te-models-add", m.allowed.length > 0 ? "Add a model" : "Limit to a list", "allowed models changed")}</div>
 <div data-gets-fallback${m.mode !== "fallback" ? html` hidden` : null}>${sub("If it is rate limited")}${m.fallbacks.length ? chips(listed("fallbackModels", m.fallbacks, "the fallbacks")) : html`<p class="te-read">No fallback.</p>`}${add("fallbackModels", "te-fallbacks-add", "Add a fallback", "fallbacks changed")}</div>`;
 }

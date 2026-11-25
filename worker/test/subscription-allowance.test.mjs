@@ -78,7 +78,7 @@ test("the field needs triggers file version 11: an older loader would drop it, s
 
 test("job data: the allowance rides every builder as written, stamps version 12, and a job without it keeps its bytes", async () => {
 	assert.equal(JOB_DATA_FIELD_VERSIONS.maxSubscriptionUsd, 12);
-	assert.equal(JOB_DATA_VERSION, 12);
+	assert.ok(JOB_DATA_VERSION >= 12, "this build reads what it stamps (issue #996 raised it to 13)");
 	const q = fakeQueue();
 	await enqueueForgeJob(q, "github", FORGE);
 	await enqueueForgeJob(q, "github", { ...FORGE, trigger: { ...FORGE.trigger, deliveryId: "d-1008-b" }, maxSubscriptionUsd: "12.50" });

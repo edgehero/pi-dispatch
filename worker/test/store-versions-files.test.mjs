@@ -190,7 +190,7 @@ const triggersPathWith = (doc) => {
 };
 
 test("triggers: the shipped tables hold the rule, against the run keys and blocks the loader reads", () => {
-	assert.equal(TRIGGERS_FILE_VERSION, 11, "a subscription allowance at 11");
+	assert.equal(TRIGGERS_FILE_VERSION, 12, "a random pool's weights at 12");
 	// Every `run.<key>` any worker module reads: a lenient superset (comments add names), which is enough to refuse a
 	// table row naming a key nothing reads.
 	const runKeys = new Set();
@@ -200,10 +200,12 @@ test("triggers: the shipped tables hold the rule, against the run keys and block
 	}
 	// An on value can need a newer reader than any run field. Include its close grant's evaluated
 	// requirement when checking the largest version, without inventing a run field for that policy.
+	// A weighted random pool (issue #996) is a run value rule's answer, so its evaluated requirement joins the same way.
 	assert.ok(Object.isFrozen(TRIGGER_RUN_FIELD_VERSIONS) && Object.isFrozen(TRIGGERS_BLOCK_VERSIONS));
 	const blocks = [...new Set([...bodyOf(src("triggers.mjs"), "parseTriggersDocument").matchAll(/\bparsed\??\.(\w+)/g)].map((m) => m[1]))].filter((key) => key !== "version");
 	assert.ok(blocks.includes("secretBundles") && blocks.includes("triggers"), blocks.join(","));
-	assert.deepEqual(versionTableProblems(Object.freeze({ ...TRIGGER_RUN_FIELD_VERSIONS, ...TRIGGERS_BLOCK_VERSIONS, on: TRIGGER_VALUE_VERSIONS.on({ closeActors: ["closer-app[bot]"] }) }), { known: [...runKeys, ...blocks, "on"], version: TRIGGERS_FILE_VERSION }), []);
+	const weightedPool = TRIGGER_RUN_VALUE_VERSIONS.modelSelection({ strategy: "random", candidates: ["openai/a", "openai/b"], weights: { "openai/a": 3 } });
+	assert.deepEqual(versionTableProblems(Object.freeze({ ...TRIGGER_RUN_FIELD_VERSIONS, ...TRIGGERS_BLOCK_VERSIONS, on: TRIGGER_VALUE_VERSIONS.on({ closeActors: ["closer-app[bot]"] }), modelSelection: Math.max(TRIGGER_RUN_FIELD_VERSIONS.modelSelection, weightedPool) }), { known: [...runKeys, ...blocks, "on"], version: TRIGGERS_FILE_VERSION }), []);
 	assert.deepEqual(valueTableProblems(TRIGGERS_BLOCK_VALUE_VERSIONS, { known: blocks, version: TRIGGERS_FILE_VERSION }), []);
 	// The value tables: an entry's own fields (every `entry.<key>` the loader reads), and the same `run` keys as above.
 	const entryKeys = [...new Set([...src("triggers.mjs").matchAll(/\bentry\??\.(\w+)/g)].map((m) => m[1]))];
@@ -211,7 +213,9 @@ test("triggers: the shipped tables hold the rule, against the run keys and block
 	assert.deepEqual(valueTableProblems(TRIGGER_VALUE_VERSIONS, { known: entryKeys, version: TRIGGERS_FILE_VERSION }), []);
 	assert.deepEqual(valueTableProblems(TRIGGER_RUN_VALUE_VERSIONS, { known: [...runKeys], version: TRIGGERS_FILE_VERSION }), []);
 	// Every value rule is named and probed; the close-actor probe above also participates in the maximum.
-	assert.deepEqual([...Object.keys(TRIGGER_VALUE_VERSIONS), ...Object.keys(TRIGGER_RUN_VALUE_VERSIONS), ...Object.keys(TRIGGERS_BLOCK_VALUE_VERSIONS)], ["on", "secretBundles"]);
+	assert.deepEqual([...Object.keys(TRIGGER_VALUE_VERSIONS), ...Object.keys(TRIGGER_RUN_VALUE_VERSIONS), ...Object.keys(TRIGGERS_BLOCK_VALUE_VERSIONS)], ["on", "modelSelection", "secretBundles"]);
+	assert.equal(weightedPool, 12);
+	assert.equal(TRIGGER_RUN_VALUE_VERSIONS.modelSelection({ strategy: "random", candidates: ["openai/a", "openai/b"] }), 1, "a pool without weights moves no file");
 	assert.equal(TRIGGERS_BLOCK_VALUE_VERSIONS.secretBundles({ lab: { files: ["DEVICE_KEY"] } }), 8);
 	assert.equal(TRIGGERS_BLOCK_VALUE_VERSIONS.secretBundles({ lab: { profile: "lab" } }), 1);
 	assert.equal(TRIGGER_VALUE_VERSIONS.on({ type: "pull_request", forge: "github" }), 5);
