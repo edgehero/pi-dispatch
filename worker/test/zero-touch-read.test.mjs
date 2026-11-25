@@ -123,3 +123,18 @@ test("the run index cap reaches the run records read: a large index of a raised 
 	const whole = await readZeroTouch({ redis, logsDir: localRecord(), now: () => NOW, retentionDays: 90, indexMax: 10_000 });
 	assert.equal(whole.coverage.fromMs, NOW - 10 * DAY, "the deployment's cap: nothing was cut");
 });
+
+test("a window that collapsed on unresolved actions alone, with the runs read, is marked so; any other loss beside it is not (#1076)", async () => {
+	const read = async (answer, logsDir = localRecord(), fs = undefined) => readZeroTouch({ redis: { async eval(script) { if (script !== TOUCH_SCRIPTS.READ) return [0]; return answer(); } }, logsDir, now: () => NOW, retentionDays: 90, ...(fs ? { fs } : {}) });
+	// Started, with one action whose outcome is unresolved: unavailable, and the console may say a settle would record it.
+	const unresolved = await read(() => [["since", String(NOW - 10 * DAY)], [], 1, 0]);
+	assert.deepEqual([unresolved.state, unresolved.unresolvedOnly], ["unavailable", true]);
+	// Not started beside it, an index lost beside it, or no run read at all: unavailable as before, and not marked.
+	assert.equal((await read(() => [[], [], 1, 0])).unresolvedOnly, undefined);
+	assert.equal((await read(() => [["since", String(NOW - 10 * DAY), "indexed", "1"], [], 1, 0])).unresolvedOnly, undefined);
+	const denied = { readdirSync() { throw Object.assign(new Error("denied"), { code: "EACCES" }); }, statSync() { throw new Error("unused"); }, readFileSync() { throw new Error("unused"); } };
+	assert.equal((await read(() => [["since", String(NOW - 10 * DAY)], [], 1, 0], "/nonexistent/zero-touch-read", denied)).unresolvedOnly, undefined);
+	// The control: nothing unresolved is ready and unmarked.
+	const ready = await read(() => [["since", String(NOW - 10 * DAY)], [], 0, 0]);
+	assert.deepEqual([ready.state, ready.unresolvedOnly], ["ready", undefined]);
+});

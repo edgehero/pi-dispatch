@@ -55,8 +55,15 @@ export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 3
 			const fix = await this.read(id); if (!fix || fix.state !== "pending") return false;
 			await command("set", `${prefix}meta:${id}`, JSON.stringify({ ...fix, state: "refused" }), "PX", ttl); return true;
 		},
-		async repair({ readTrigger, readFile } = {}) {
-			if (typeof readTrigger !== "function" && typeof readFile !== "function") return;
+		/**
+		 * The pending fixes whose change provably landed: the file the change wrote still has the digest it wrote, or the
+		 * trigger the instruction changed still hashes as it did. Reads only (issue #1076): the Zero touch page says what a
+		 * settle would commit, and `repair` commits exactly these. `{ ready }` holds their ids. A row whose proof cannot be
+		 * read stays out, never replayed; a store that does not answer throws.
+		 */
+		async settleable({ readTrigger, readFile } = {}) {
+			const ready = [];
+			if (typeof readTrigger !== "function" && typeof readFile !== "function") return { ready };
 			const ids = await command("zrevrangebyscore", `${prefix}index`, "+inf", 0, "LIMIT", 0, 5000);
 			for (const id of ids) {
 				const fix = await this.read(id, { includeUndo: true });
@@ -65,13 +72,25 @@ export function makeZeroTouchFixStore({ redis, now = Date.now, retentionDays = 3
 					if (fix.undo.file && typeof readFile === "function") {
 						// The caller owns the configuration path allowlist. A peer-written path cannot choose a read here.
 						const bytes = await readFile(fix.undo.file);
-						if ((typeof bytes === "string" || Buffer.isBuffer(bytes)) && createHash("sha256").update(bytes).digest("hex") === fix.undo.afterDigest) await this.commit(id);
+						if ((typeof bytes === "string" || Buffer.isBuffer(bytes)) && createHash("sha256").update(bytes).digest("hex") === fix.undo.afterDigest) ready.push(id);
 					} else if (typeof readTrigger === "function") {
 						const current = await readTrigger(fix.undo.index);
-						if (current && createHash("sha256").update(JSON.stringify(current)).digest("hex") === fix.undo.triggerDigest) await this.commit(id);
+						if (current && createHash("sha256").update(JSON.stringify(current)).digest("hex") === fix.undo.triggerDigest) ready.push(id);
 					}
 				} catch { /* An unprovable outcome remains pending, never replayed. */ }
 			}
+			return { ready };
+		},
+		/**
+		 * Commits what `settleable` proves, one row at a time. A commit the store does not answer throws, after the rows
+		 * before it were committed, so a caller can say the settle may have landed in part; settling again is safe, since a
+		 * committed row is no longer pending.
+		 */
+		async repair(readers = {}) {
+			const { ready } = await this.settleable(readers);
+			let settled = 0;
+			for (const id of ready) if (await this.commit(id)) settled++;
+			return { settled };
 		},
 		async markUndone(id, at = now()) {
 			const fix = await this.read(id); if (!fix || fix.undoneAt) return false;

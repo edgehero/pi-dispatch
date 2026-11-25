@@ -236,6 +236,12 @@ export async function readZeroTouch({ redis = null, logsDir, retentionDays = 30,
 	const collapsed = report.coverage.partial && report.coverage.fromMs >= nowMs;
 	const notStarted = collapsed && reasons.includes(TOUCH_NOT_STARTED) && !reasons.some((r) => TOUCH_UNREAD_REASONS.includes(r));
 	report.state = unavailable || reasons.includes("touch-index-unavailable") ? "unavailable" : notStarted ? "not-started" : collapsed ? "unavailable" : "ready";
+	// Issue #1076: a window that collapsed on one thing alone, actions whose outcome is still unresolved: the touch store
+	// gave that reason and no other, and every run source read covers time before now. The console then says what a
+	// settle would record, rather than "could not be read": the read worked. A note on the runs' coverage (no mirror, a
+	// skipped file) does not collapse a window and does not stop it; any other touch reason, or runs not read, does.
+	const runsFrom = [local?.fromMs, runs.coverage.mirror?.fromMs].filter((v) => Number.isFinite(v));
+	if (report.state === "unavailable" && !unavailable && touches.coverage.reasons.length === 1 && touches.coverage.reasons[0] === "touch-actions-unresolved" && runsFrom.length > 0 && runsFrom.every((v) => v < nowMs)) report.unresolvedOnly = true;
 	if (includeRecords) Object.defineProperties(report, { records: { value: runs.records }, recordMirror: { value: runs.mirrorState } });
 	return report;
 }
