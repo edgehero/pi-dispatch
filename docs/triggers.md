@@ -487,7 +487,8 @@ as broken). `run.excludeExtensions` or `run.excludeExtensionTools` needs version
 `stallTimeoutMinutes` or `maxMinutes` needs version 3; `mayMerge` needs version 4; local event commands and
 `run.worker` need version 5; `modelSelection` needs version 6; `privateEndpoints` needs version 7;
 `secretFiles` and file bundles need version 8; `auxiliaryModels` needs version 9; local `on.closeActors`
-needs version 10. A file without a field or value
+needs version 10; `maxSubscriptionUsd` needs version 11; `weights` in a `modelSelection` pool need version 12.
+A file without a field or value
 needing a newer version still needs only version 1. A
 file that uses such a field or value with a lower `version`, or with none, is refused like any malformed file.
 
@@ -1004,9 +1005,9 @@ A person can choose **Random model pool** on a trigger's **What its jobs get** c
 "models": ["anthropic/claude-haiku-4-5", "openai/gpt-5.5"]
 ```
 
-Remove `provider`, `model` and `fallbackModels` when using the pool. Use 1–16 unique exact catalog references. The pool chooses; `models` authorizes. If `models` is absent the deployment's finite allowed-model ceiling must supply it. A pool without either ceiling refuses, and the deployment's default model is never an extra candidate. Role names, weights, command jobs and package canaries are not accepted. No model-callable tool can write this policy.
+Remove `provider`, `model` and `fallbackModels` when using the pool. Use 1 to 16 unique exact catalog references. The pool chooses; `models` authorizes. If `models` is absent the deployment's finite allowed-model ceiling must supply it. A pool without either ceiling refuses, and the deployment's default model is never an extra candidate. Role names, command jobs and package canaries are not accepted. No model-callable tool can write this policy.
 
-A fresh run draws uniformly among candidates that pass the current free gates. Its in-process children use that selected model too. A queued outbox child is a new run and draws from the inherited reviewed pool. Retry retains the choice; fresh Re-run draws again. The Models page shows the configured pool and observed blockers without guessing what will be selected. Run history shows the actual model, **Chosen at random**, or **Changed after subscription limit**, with the previous model when it changed.
+A fresh run draws among the candidates that pass the current free gates, each with an equal chance, or by the pool's [weights](#weighting-the-pool). Its in-process children use that selected model too. A queued outbox child is a new run and draws from the inherited reviewed pool. Retry retains the choice; fresh Re-run draws again. The Models page shows the configured pool and observed blockers without guessing what will be selected. Run history shows the actual model, **Chosen at random**, or **Changed after subscription limit**, with the previous model when it changed.
 
 An exhausted subscription excludes all candidates sharing that account/application allowance. If every candidate is temporarily blocked, the job waits without starting a container. A displayed recheck time is not a promise that the provider has reset the allowance; an unknown reset stays unknown. One model name never creates another account allowance. A pool never switches accounts or enables paid extra usage on its own.
 
@@ -1019,6 +1020,40 @@ An API-key draw takes its key from the worker's environment or from the trigger'
 A replacement is allowed only when authoritative exhaustion is found before execution, or on an already-authorized retry after a signed failure proves that no tool started and replay is safe, and the host successfully records the exhausted allowance. A generic 429, authentication trouble, a crash or uncertain/tool execution keeps the choice. Already-spent usage remains charged. Recovery, parked answers and approval continuations keep their original exact model; missing or changed saved-session binding refuses safely.
 
 Upgrade every worker, receiver and console before enabling this field: trigger files require version 6 and queued jobs version 7. See [the upgrade guide](upgrading.md) and [backup state](backup.md).
+
+### Weighting the pool
+
+To give some candidates more of the draws than others, add `weights` inside `modelSelection`, by hand in the file:
+
+```json
+"modelSelection": {
+  "strategy": "random",
+  "candidates": ["anthropic/claude-haiku-4-5", "openai/gpt-5.5"],
+  "weights": { "anthropic/claude-haiku-4-5": 3 }
+}
+```
+
+Each key is one of `candidates`, spelled exactly the same, and each weight a whole number from 1 to 100. A candidate
+`weights` does not name weighs 1, so here the Haiku model gets 75% of the draws and the GPT one 25%. Leave `weights` out for
+equal shares: an empty `weights` is refused, as is a key that names no candidate (or differs from one only in case),
+a weight outside 1 to 100, and `weights` written beside the pool rather than inside it. A candidate's share is its
+weight over the sum of the pool's weights. A candidate that cannot run at pickup (blocked, cooling down, refused by
+its check) leaves that draw, and the others keep their relative shares: with the GPT model cooling down, the Haiku
+model gets the draw. A replacement after a subscription limit chooses among the other subscription candidates by
+their weights. `pi-dispatch doctor` names each candidate's share on one line per weighted pool, by billing class when
+the pool mixes them on that host; the trigger's page and **Models** show the shares too.
+
+The trigger's page has no weight input. A pool edited there keeps the weight of each candidate that stays, drops the
+weight of one taken off, and adds a candidate with none, so it weighs 1. Changing only the weights refuses no queued
+job: a job draws with the weights it carried when it was queued, and its stored choice and run record do not hold
+them. Like any change to the pool, a weight edit gives a cron trigger's scheduler a new template with a new
+selection generation, and gives a local job a new id, so one queued with other weights in the same minute is not taken
+as a duplicate of one queued before.
+
+A pool with `weights` needs triggers file version 12, and its jobs are queued at job data version 13; a pool without
+them needs 6 and 7 as before. Upgrade every worker, receiver and console host first: an older receiver or worker
+refuses to load such a file, and an older worker holds such a job (`newer-release`) without spending. The trigger's
+page refuses the edit while a live host reads less. See [mixed versions](upgrading.md#mixed-versions-what-is-safe).
 
 ## Limiting which models a job may call
 

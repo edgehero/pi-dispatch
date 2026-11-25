@@ -1,4 +1,4 @@
-import { modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
+import { copyModelSelection, modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
 /**
  * Read-only Triggers list facts. Calendar projection uses BullMQ's pinned parser in a VERIFIED owning-host zone;
  * quiet bands use the worker's actual wall-clock predicate. Neither a projected tick nor an elapsed tick proves a run.
@@ -43,7 +43,7 @@ function ruleOf(t) {
   out.instructions = t.instructions === true;
   out.secrets = Number.isSafeInteger(t.secrets) && t.secrets >= 0 ? t.secrets : 0;
   for (const key of ["any", "all", "none", "action", "reviewState", "reviewAuthors", "closeActors", "models", "fallbackModels", "auxiliaryModels", "mcp", "privateEndpoints", "excludeTools", "excludeExtensions", "excludeExtensionTools", "gates"]) if (Array.isArray(t[key])) out[key] = copyStrings(t[key]);
-  if (t.modelSelection !== undefined && modelSelectionProblem(t.modelSelection) === null) out.modelSelection = { strategy: "random", candidates: [...t.modelSelection.candidates] };
+  if (t.modelSelection !== undefined && modelSelectionProblem(t.modelSelection) === null) out.modelSelection = copyModelSelection(t.modelSelection);
   if (t.disarmed && typeof t.disarmed === "object") out.disarmed = Object.fromEntries(["at", "jobId"].filter((k) => typeof t.disarmed[k] === "string").map((k) => [k, t.disarmed[k]]));
   if (Array.isArray(t.waitFor)) out.waitFor = t.waitFor.slice(0, 64).flatMap((w) => typeof w?.profile === "string" ? [{ profile: w.profile }] : typeof w?.after === "string" ? [{ after: w.after }] : []);
   return out;

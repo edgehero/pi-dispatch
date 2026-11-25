@@ -70,7 +70,7 @@ import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectOf, pr
 import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs";
 import { FIRST_CALL_MIN_CONTEXT_BYTES, FIRST_CALL_OVERHEAD_TOKENS, boundModelOf, firstCallFloorMicros, isTransientOverlayRead, overlayProviderProblem, serviceTierMultiplier } from "./model-catalog.mjs";
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
-import { failoverListUsable, providerIdProblem, splitModelEntry } from "./model-ref.mjs";
+import { failoverListUsable, modelSelectionShares, modelSelectionWeight, modelShareText, providerIdProblem, splitModelEntry } from "./model-ref.mjs";
 import { notionalConnection } from "./reserve-estimate.mjs";
 import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
 import { resolveConfiguredModelRuns as resolveDoctorModelRuns, cooldownModelRefs, RADIUS_COST_CAP_LABEL, RADIUS_COST_CAP_FIX } from "./model-observation.mjs";
@@ -4308,6 +4308,7 @@ export async function collectChecks(shellVars, seams) {
 			if (subjectProvider !== provider && result.managed) checks.push(subscriptionCredentialCheck(subjectProvider, result));
 		}
 		checks.push(...mixedBillingPoolChecks(subjects, { verdictOf: (subjectProvider) => subscriptionChecks.get(subjectProvider) }));
+		checks.push(...weightedPoolChecks(subjects, { verdictOf: (subjectProvider) => subscriptionChecks.get(subjectProvider) }));
 		checks.push(...notionalCapChecks(subjects, { verdictOf: (subjectProvider) => subscriptionChecks.get(subjectProvider) }));
 		const catalog = await (seams.modelCatalog ?? defaultModelCatalog)();
 		if (catalog) {
@@ -6863,7 +6864,9 @@ export function modelSubjects({ runs = [], deployment, envList = null, modelRole
 		if (run.modelSelection) {
 			// Authorization was checked separately by resolveDoctorModelRuns. Each possible execution is a
 			// singleton: unrelated allowed providers need no forwarded credential and cannot widen its cost bound.
-			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], auxiliaryModels: run.auxiliaryModels ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, named: true, random: true, trigger: run.label, triggerCap: triggerCapOf(run.maxCostUsd), allowance: allowanceOf(run.maxSubscriptionUsd) });
+			// Issue #996: a weighted pool's candidate carries its `weight`, for the shares line (`weightedPoolChecks`).
+			const weighted = run.modelSelection.weights !== undefined;
+			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], auxiliaryModels: run.auxiliaryModels ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, named: true, random: true, trigger: run.label, triggerCap: triggerCapOf(run.maxCostUsd), allowance: allowanceOf(run.maxSubscriptionUsd), ...(weighted ? { weight: modelSelectionWeight(run.modelSelection, `${ref.provider}/${ref.id}`) } : {}) });
 			continue;
 		}
 		const main = { provider: run.provider ?? deployment.provider, id: run.model ?? deployment.model };
@@ -7402,6 +7405,38 @@ export function mixedBillingPoolChecks(subjects, { verdictOf = () => undefined }
 				fix: `lower the trigger's run.maxCostUsd to at most ${formatMicros(credit)}, or raise the connection's extraUsageCreditMicros in the auth connections file`,
 			});
 		}
+	}
+	return checks;
+}
+
+/**
+ * Issue #996: one fact line per WEIGHTED random pool, naming each candidate's share of the whole pool in whole percent
+ * (`modelSelectionShares`, the console's rule too). For a pool that mixes billing classes on this host (the verdicts
+ * `mixedBillingPoolChecks` reads), the candidates are grouped by class, each class with its own total: a draw bills
+ * its candidate's class, and a quota reselection stays in the class it drew, among that class's weights. An unweighted
+ * pool says nothing new. Every line says once that a candidate that cannot run at pickup leaves that draw and the
+ * others keep their relative shares, since the shares are of the whole pool and a pickup draws among the ones that can
+ * run. `subjects` are `modelSubjects'` (a weighted pool's candidate carries `weight`).
+ */
+export function weightedPoolChecks(subjects, { verdictOf = () => undefined } = {}) {
+	const pools = new Map();
+	for (const subject of subjects) {
+		if (subject.random !== true || typeof subject.trigger !== "string" || !Number.isSafeInteger(subject.weight)) continue;
+		const pool = pools.get(subject.trigger) ?? [];
+		pool.push({ ref: `${subject.main.provider}/${subject.main.id}`, weight: subject.weight, subscription: verdictOf(subject.main.provider)?.managed === true });
+		pools.set(subject.trigger, pool);
+	}
+	const checks = [];
+	for (const [trigger, pool] of pools) {
+		const selection = { candidates: pool.map((row) => row.ref), weights: Object.fromEntries(pool.map((row) => [row.ref, row.weight])) };
+		const shares = new Map(modelSelectionShares(selection).map((row) => [row.ref, row.share]));
+		const named = (rows) => rows.map((row) => `${row.ref} ${modelShareText(shares.get(row.ref))}`).join(", ");
+		const subscription = pool.filter((row) => row.subscription);
+		const api = pool.filter((row) => !row.subscription);
+		const total = pool.reduce((sum, row) => sum + row.weight, 0);
+		const classShare = (rows) => modelShareText(Math.round((100 * rows.reduce((sum, row) => sum + row.weight, 0)) / total));
+		const listed = subscription.length > 0 && api.length > 0 ? `, by billing class on this host: subscription ${classShare(subscription)} (${named(subscription)}); API key ${classShare(api)} (${named(api)})` : `: ${named(pool)}`;
+		checks.push({ ok: true, label: `${trigger}: its random pool is weighted; each candidate's share of the pool${listed}. A candidate that cannot run at pickup leaves that draw, and the others keep their relative shares` });
 	}
 	return checks;
 }

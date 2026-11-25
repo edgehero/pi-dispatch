@@ -2059,14 +2059,18 @@ ${FIT_JS}
   // that held a value is null, which deletes the key: the planner refuses a blank rather than read it as not sent.
   function getsLists(form) {
     var lists = Object.create(null);
-    function listOf(key) { return lists[key] || (lists[key] = { was: [], now: [] }); }
+    function listOf(key) { return lists[key] || (lists[key] = { was: [], now: [], weights: {} }); }
     var chips = form.querySelectorAll("[data-gets-list]");
     for (var i = 0; i < chips.length; i++) {
       var inverse = chips[i].hasAttribute("data-gets-inverse");
       var row = listOf(chips[i].getAttribute("data-gets-list"));
       var value = chips[i].getAttribute("data-gets-value");
       if (chips[i].defaultChecked !== inverse) row.was.push(value);
-      if (chips[i].checked !== inverse) row.now.push(value);
+      if (chips[i].checked !== inverse) {
+        row.now.push(value);
+        // Issue #996: a weighted pool's candidate that stays keeps its weight; one taken off takes its weight with it.
+        if (chips[i].hasAttribute("data-gets-weight")) row.weights[value] = Number(chips[i].getAttribute("data-gets-weight"));
+      }
     }
     var adds = form.querySelectorAll("[data-gets-add]");
     for (var j = 0; j < adds.length; j++) {
@@ -2105,12 +2109,17 @@ ${FIT_JS}
     var mode = form.querySelector("[data-gets-mode]");
     if (mode) {
       var wasMode = mode.getAttribute("data-gets-was");
-      var pool = lists.randomCandidates || { was: [], now: [] };
+      var pool = lists.randomCandidates || { was: [], now: [], weights: {} };
       delete out.randomCandidates;
       if (mode.value === "random") {
         delete out.provider; delete out.model; delete out.fallbackModels;
         if (wasMode !== "random" || JSON.stringify(pool.was) !== JSON.stringify(pool.now)) {
           out.modelSelection = { strategy: "random", candidates: pool.now };
+          // The weights of the candidates that stay, in the pool's order (issue #996). None left is no key at all, since the file refuses an empty map.
+          var kept = {};
+          var weighted = false;
+          for (var p = 0; p < pool.now.length; p++) if (Object.prototype.hasOwnProperty.call(pool.weights, pool.now[p])) { kept[pool.now[p]] = pool.weights[pool.now[p]]; weighted = true; }
+          if (weighted) out.modelSelection.weights = kept;
           out.provider = null; out.model = null; out.fallbackModels = null;
         }
       } else {

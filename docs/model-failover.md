@@ -52,7 +52,7 @@ answered it; the six-hour model timeout alone does not clear it. While it lasts,
 is blocked, not only the one that was refused, because the limit belongs to the account. A fallback on another
 subscription runs the retry; a fallback billed by an API key behind a subscription primary is skipped
 (`auth-mixed-billing`), so such a trigger waits for the limit instead. A random pool draws again among its
-other candidates. The reviewed fallback order still applies, and each
+other candidates, by their weights where the pool sets them. The reviewed fallback order still applies, and each
 candidate must have authorized authentication and pass all ordinary admission gates. Candidate checks do not
 consume a trial or rotate accounts. Nothing switches credentials inside a running attempt.
 

@@ -354,7 +354,7 @@ function isNonEmptyString(value) {
  * `version`, absent meaning 1, which `writeTriggers` owns and writes only when the content needs more than 1, so every
  * file of today's fields stays byte-identical.
  */
-export const TRIGGERS_FILE_VERSION = 11;
+export const TRIGGERS_FILE_VERSION = 12;
 
 /**
  * Each `run` key whose ABSENCE an older build would misread, with the version that introduced it. The raw `run` keys
@@ -391,8 +391,13 @@ export const TRIGGER_VALUE_VERSIONS = Object.freeze({
 /**
  * Each EXISTING `run` key whose range a later release widens (a new `run.waitFor` condition kind, or a new `run.kind`,
  * say), as above.
+ *
+ * `modelSelection` (issue #996), at 12 when it holds `weights`: an older loader refuses the unknown field, so the whole
+ * file, as broken. Stamped, it defers instead. A pool without weights needs nothing new, so no existing file moves.
  */
-export const TRIGGER_RUN_VALUE_VERSIONS = Object.freeze({});
+export const TRIGGER_RUN_VALUE_VERSIONS = Object.freeze({
+	modelSelection: (selection) => selection !== null && typeof selection === "object" && Object.hasOwn(selection, "weights") ? 12 : 1,
+});
 
 /**
  * Each EXISTING top-level block whose range a later release widens, keyed by the block's name (`secretBundles`,
@@ -548,16 +553,19 @@ export function parseTriggersDocument(text, path, { supported = TRIGGERS_FILE_VE
 	// Issue #761: a block, a `run` key or a value that needs a higher version than the file declares, after every other
 	// check so a broken file names its first broken entry as it always did. Such a file was hand-edited or written by a
 	// writer that dropped the stamp, and an older loader would read it without the key, or refuse the value as broken
-	// rather than newer: refused like any malformed entry.
+	// rather than newer: refused like any malformed entry. A key the field table names is refused first, and its sentence
+	// names the larger of what the key and its value need (issue #996): naming the key's alone sent a person who wrote that
+	// version straight to a second refusal, for the value.
 	const { version: _version, ...blocks } = parsed;
+	const needOf = (short, record, valueTable) => Math.max(short.needs, valueNeededVersion({ [short.field]: record[short.field] }, valueTable));
 	const shortBlock = underDeclared(Object.keys(blocks), blockTable, parsed.version);
-	if (shortBlock) throw configError(`triggers file: top-level ${JSON.stringify(shortBlock.field)} needs triggers file version ${shortBlock.needs}, and the file declares ${parsed.version ?? 1}: ${path}`);
+	if (shortBlock) throw configError(`triggers file: top-level ${JSON.stringify(shortBlock.field)} needs triggers file version ${needOf(shortBlock, blocks, blockValueTable)}, and the file declares ${parsed.version ?? 1}: ${path}`);
 	const shortBlockValue = valueUnderDeclared(blocks, blockValueTable, parsed.version);
 	if (shortBlockValue) throw configError(`triggers file: top-level ${JSON.stringify(shortBlockValue.field)} holds a value that needs triggers file version ${shortBlockValue.needs}, and the file declares ${parsed.version ?? 1}: ${path}`);
 	entries.forEach((entry, index) => {
 		const declared = parsed.version ?? 1;
 		const short = underDeclared(Object.keys(entry.run), runTable, parsed.version);
-		if (short) throw configError(`trigger at index ${index}: run.${short.field} needs triggers file version ${short.needs}, and the file declares ${declared}: ${path}`);
+		if (short) throw configError(`trigger at index ${index}: run.${short.field} needs triggers file version ${needOf(short, entry.run, runValueTable)}, and the file declares ${declared}: ${path}`);
 		const shortEntry = valueUnderDeclared(entry, entryValueTable, parsed.version);
 		if (shortEntry) throw configError(`trigger at index ${index}: ${shortEntry.field} holds a value that needs triggers file version ${shortEntry.needs}, and the file declares ${declared}: ${path}`);
 		const shortRun = valueUnderDeclared(entry.run, runValueTable, parsed.version);
@@ -2115,6 +2123,9 @@ const RUN_MODEL_NEAR_MISS_TARGETS = Object.freeze({
 	fallbackmodels: "run.fallbackModels", fallbackmodel: "run.fallbackModels", fallbackmodelid: "run.fallbackModels", fallbackmodelids: "run.fallbackModels", fallbackmodelname: "run.fallbackModels", fallbackmodelnames: "run.fallbackModels",
 	auxiliarymodels: "run.auxiliaryModels", auxiliarymodel: "run.auxiliaryModels", auxiliarymodelid: "run.auxiliaryModels", auxiliarymodelids: "run.auxiliaryModels",
 	modelselection: "run.modelSelection", modelselections: "run.modelSelection", modelselectiongeneration: "run.modelSelection",
+	// Issue #996: a pool's weights belong inside `run.modelSelection`. Written beside it they would be dropped, and the pool
+	// would draw at equal shares while the file reads as weighted.
+	weights: "run.modelSelection.weights", weight: "run.modelSelection.weights", modelweights: "run.modelSelection.weights", modelweight: "run.modelSelection.weights", candidateweights: "run.modelSelection.weights", candidateweight: "run.modelSelection.weights", modelselectionweights: "run.modelSelection.weights", modelselectionweight: "run.modelSelection.weights", poolweights: "run.modelSelection.weights", poolweight: "run.modelSelection.weights",
 	maxturns: "run.maxTurns", maxturn: "run.maxTurns",
 	maxcostusd: "run.maxCostUsd", maxcost: "run.maxCostUsd",
 	// Issue #1008: the list-price allowance for subscription calls. Its own name, the dollar-less and plural steps, and the
@@ -2155,6 +2166,7 @@ function validateRunModel(on, run, at, path) {
 			if (exactIsLegal && exact.has(key)) continue;
 			const meant = runModelFieldNearMiss(key);
 			if (meant === null) continue;
+			if (meant === "run.modelSelection.weights") throw configError(`${at}: ${label}.${key} is not a field -- did you mean ${meant}? Weights the loader drops leave every candidate an equal share while the file reads as weighted, so a near miss is refused rather than dropped: ${path}`);
 			throw configError(`${at}: ${label}.${key} is not a field -- did you mean ${meant}? A model choice the loader drops runs the job on the deployment default while the file reads as though it chose, so a near miss is refused rather than dropped: ${path}`);
 		}
 	}

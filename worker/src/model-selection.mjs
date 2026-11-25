@@ -1,5 +1,5 @@
 import { randomInt as cryptoRandomInt } from "node:crypto";
-import { modelSelectionProblem, modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
+import { modelSelectionProblem, modelSelectionWeight, modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
 import { modelWindowHasRoom } from "./model-failover.mjs";
 import { modelDollarRows } from "./scoped-limits.mjs";
 import { MODEL_RECHECK_MS, readModelCooldown } from "./model-cooldowns.mjs";
@@ -16,6 +16,34 @@ export function shuffledModels(candidates, randomInt = cryptoRandomInt) {
 		[order[i], order[j]] = [order[j], order[i]];
 	}
 	return order;
+}
+
+/**
+ * Issue #996: a weighted pool's order, a weighted shuffle without replacement over the same `randomInt`. Each step draws
+ * `randomInt(the remaining weights' sum)`, takes the candidate whose cumulative weight span holds the draw, and removes
+ * it, so the first eligible candidate of the order is each eligible candidate with its weight over the eligible weights:
+ * one passed over at pickup leaves the draw, and the others keep their relative shares. The same holds within a billing
+ * class when a quota reselection passes over the other class (issue #968). It draws once per position but the last, as
+ * the unweighted shuffle does, so a pool makes as many random draws weighted or not. A draw outside 0 to the sum less
+ * one throws a RangeError, and the walk over the spans is bounded by the candidates left, so no draw can keep it going.
+ */
+export function weightedModels(selection, randomInt = cryptoRandomInt) {
+	const left = [...selection.candidates];
+	const order = [];
+	while (left.length > 1) {
+		const total = left.reduce((sum, ref) => sum + modelSelectionWeight(selection, ref), 0);
+		let draw = randomInt(total);
+		if (!Number.isSafeInteger(draw) || draw < 0 || draw >= total) throw new RangeError("invalid random model draw");
+		let i = 0;
+		for (; i < left.length; i++) {
+			const weight = modelSelectionWeight(selection, left[i]);
+			if (draw < weight) break;
+			draw -= weight;
+		}
+		if (i === left.length) throw new RangeError("invalid random model draw");
+		order.push(...left.splice(i, 1));
+	}
+	return [...order, ...left];
 }
 
 const managed = (result) => result?.rootManaged ?? (result?.managed === true || Array.isArray(result?.managed) && result.managed.length > 0);
@@ -110,13 +138,15 @@ export async function selectRandomModelJob(job, { redis, id, retry = false, retr
 			// resets only its own exact token at the failure boundary (markModelSelectionNeverStarted).
 		}
 		const reselect = state?.phase === "quota-reselectable" && !locked;
-		const order = locked ? [locked] : state && !reselect ? [state.ref] : shuffledModels(candidates, randomInt);
+		// A pool without weights keeps the unweighted shuffle, draw for draw (issue #996).
+		const order = locked ? [locked] : state && !reselect ? [state.ref] : job.modelSelection.weights === undefined ? shuffledModels(candidates, randomInt) : weightedModels(job.modelSelection, randomInt);
 		const blockers = [];
 		let conflicted = false;
 		for (const ref of order) {
 			// Issue #968: a quota reselection stays in the class the first draw billed. A candidate of the other class is
 			// passed over before any auth read of it, keeping the permutation (and so the number of random draws) as it
-			// was; when every same-class candidate is blocked the job waits, and never crosses to the other class.
+			// was, and in a weighted pool the class's own weights decide among its candidates (issue #996); when every
+			// same-class candidate is blocked the job waits, and never crosses to the other class.
 			if (reselect && state.billing !== null && classes[ref] !== state.billing) { log("model_candidate_skipped", { model: ref, reason: "auth-mixed-billing" }); continue; }
 			// The class this attempt is pinned to: a continuation's, the committed choice's, or (a first draw or a
 			// reselection) the candidate's own. `pinned` falls back to the candidate's class only for a choice an unwired

@@ -292,6 +292,12 @@ test("the trigger list retains a validated random pool as a policy without inven
   assert.deepEqual(view.rows[0].trigger.modelSelection, modelSelection);
   assert.equal(view.rows[0].trigger.provider, undefined);
   assert.equal(view.rows[0].trigger.model, undefined);
+  // Issue #996: a weighted pool keeps its weights, a fresh copy, and one without them gains no key.
+  const weighted = { ...modelSelection, weights: { "openai/gpt-5": 4 } };
+  const kept = build({ snapshot: snapshot([rule({ modelSelection: weighted })]) }).rows[0].trigger.modelSelection;
+  assert.deepEqual(kept, weighted);
+  assert.notEqual(kept.weights, weighted.weights);
+  assert.equal(Object.hasOwn(view.rows[0].trigger.modelSelection, "weights"), false);
 });
 
 test("list facts keep auxiliary grants distinct from the allowed ceiling and copy their array", () => {

@@ -7,7 +7,7 @@ import { DEFAULT_MODEL, DEFAULT_PROVIDER, allowedModelsFrom } from "@edgehero/pi
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
 import { parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
-import { splitModelEntry, modelIdProblem, providerIdProblem, modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
+import { splitModelEntry, modelIdProblem, providerIdProblem, modelSelectionProblem, modelSelectionShares } from "@edgehero/pi-dispatch/model-ref";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { MODEL_ROLE_RE } from "@edgehero/pi-dispatch/model-roles";
 import { failoverModelStatus } from "@edgehero/pi-dispatch/model-status";
@@ -179,9 +179,15 @@ export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], dep
     return { ref, provider: parsed.provider, model: parsed.model, known: price.known, priced: price.priced, reason: price.reason,
       windows: modelWindowsRows, state: configUnknown || overlayUnknown || cooldowns === null || modelWindowsRows.some(window => window.unavailable) ? "unknown" : refusedRefs.has(ref) && !resolvedRefs.has(ref) ? "policy-refused" : observedCooldowns.some(row => row.ref === ref) ? "cooling-down" : price.priced === null ? "unknown" : !price.known ? "unknown-model" : !price.priced ? "unpriced" : modelWindowsRows.some(window => window.spentMicros >= window.capMicros) ? "window-full" : "available" };
   });
-  const randomPools = entries.flatMap((entry, index) => entry?.run?.modelSelection != null && modelSelectionProblem(entry.run.modelSelection) === null ? [{ index, number: index + 1,
-    candidates: entry.run.modelSelection.candidates.filter(ref => splitModelEntry(ref)).slice(0, 16).map(ref => ({ ref, state: models.find(model => model.ref === ref)?.state ?? "unknown" })),
-  }] : []);
+  // Issue #996: a weighted pool says so, and each of its candidates carries its share of the whole pool in whole percent (the doctor's
+  // rule); a pool without weights keeps exactly its keys.
+  const randomPools = entries.flatMap((entry, index) => {
+    if (entry?.run?.modelSelection == null || modelSelectionProblem(entry.run.modelSelection) !== null) return [];
+    const shares = entry.run.modelSelection.weights === undefined ? null : new Map(modelSelectionShares(entry.run.modelSelection).map(row => [row.ref, row.share]));
+    return [{ index, number: index + 1, ...(shares ? { weighted: true } : {}),
+      candidates: entry.run.modelSelection.candidates.filter(ref => splitModelEntry(ref)).slice(0, 16).map(ref => ({ ref, state: models.find(model => model.ref === ref)?.state ?? "unknown", ...(shares ? { share: shares.get(ref) } : {}) })),
+    }];
+  });
   const hostRows = (snapshot?.doctor?.hosts ?? []).slice(0, MODELS_LIMITS.hosts);
   const proposals = hostRows.flatMap(host => (host.checks ?? []).flatMap(check => {
     const proposal = modelProposalOf(check.proposal);
@@ -372,7 +378,8 @@ export function modelsForAgent(view) {
   const bannerReasons = { "role-conflict": ["model-role-unknown", "model-role-provider-conflict", "model-roles-invalid"], "radius-cost-cap": ["cost-cap"], "configuration-unavailable": ["model-roles-invalid"], "catalog-unavailable": ["model-unknown"], "cooldowns-unavailable": ["model-cooldown"] };
 
   return { subscriptionAuth: subscriptionAuthForAgent(view?.subscriptionAuth), scopes: (view?.scopes ?? []).filter(scope => safeId(scope)), state: view?.state === "ready" ? "ready" : "unreadable", partial: view?.partial !== false, now: integer(view?.now),
-    randomPools: (view?.randomPools ?? []).slice(0, MODELS_LIMITS.waits).map(pool => ({ index: integer(pool.index), candidates: (pool.candidates ?? []).slice(0, 16).map(candidate => ({ ref: model(candidate.ref), state: ["cooling-down", "window-full", "unknown", "unknown-model", "unpriced", "policy-refused", "available"].includes(candidate.state) ? candidate.state : "unknown" })) })),
+    // `share` (issue #996): a weighted pool's candidate's share of the whole pool in whole percent, null in a pool without weights.
+    randomPools: (view?.randomPools ?? []).slice(0, MODELS_LIMITS.waits).map(pool => ({ index: integer(pool.index), weighted: pool.weighted === true, candidates: (pool.candidates ?? []).slice(0, 16).map(candidate => ({ ref: model(candidate.ref), state: ["cooling-down", "window-full", "unknown", "unknown-model", "unpriced", "policy-refused", "available"].includes(candidate.state) ? candidate.state : "unknown", share: pool.weighted === true && Number.isSafeInteger(candidate.share) && candidate.share >= 0 && candidate.share <= 100 ? candidate.share : null })) })),
     recentRandom: (view?.recentRandom ?? []).slice(0, 20).map(row => ({ jobId: runId(row.jobId), provider: providerIdProblem(row.provider) === null ? row.provider : null, model: modelIdProblem(row.model) === null ? row.model : null, modelWhy: ["random", "random-subscription-limit"].includes(row.modelWhy) ? row.modelWhy : null })),
     roles: (view?.roles ?? []).map(row => ({ scope: safeId(row.scope), role: roleValid(row.role) ? row.role : null, model: model(row.model),
       fallbackModels: (row.fallbackModels ?? []).map(item => ({ ref: model(item.ref), priced: typeof item.priced === "boolean" ? item.priced : null, skipped: item.skipped === true })),

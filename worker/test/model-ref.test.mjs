@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { getAllBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { readFileSync } from "node:fs";
 import { configError } from "../src/config.mjs";
-import { MAX_ALLOWED_MODELS, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN, auxiliaryModelsProblem, modelIdProblem, modelListProblem, modelSelectionProblem, modelOnList, providerIdProblem, splitModelEntry, validateModelRef } from "../src/model-ref.mjs";
+import { MAX_ALLOWED_MODELS, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN, auxiliaryModelsProblem, copyModelSelection, modelIdProblem, modelListProblem, modelSelectionProblem, modelSelectionShares, modelShareText, modelOnList, providerIdProblem, splitModelEntry, validateModelRef } from "../src/model-ref.mjs";
 import { parseExitUsage } from "../src/run-history.mjs";
-import { parseTriggers, validateModelRef as reexported } from "../src/triggers.mjs";
+import { parseTriggers, parseTriggersDocument, triggersFileVersionFor, validateModelRef as reexported } from "../src/triggers.mjs";
+import { jobDataVersionFor } from "../src/job-data-version.mjs";
 
 const isRecordableModelId = (id) => typeof id === "string" && MODEL_REF_PATTERN.test(id);
 
@@ -48,6 +49,8 @@ test("still refused: path shapes at character one, a doubled prefix, foreign cha
 const PATH = "/triggers.json";
 const parse = (triggers) => parseTriggers(JSON.stringify({ triggers }), PATH);
 const isConfigError = (e) => e.piDispatchConfig === true;
+/** What `fn` throws, so a test can read its fields. */
+const capture = (fn) => { try { fn(); } catch (error) { return error; } assert.fail("it threw nothing"); };
 
 // One entry per normalizer, and the three non-github forges for the kinds they have. Every one loads clean
 // as written, so a refusal below is the field under test and nothing else.
@@ -397,11 +400,86 @@ test("random policy preserves exact physical references on every AI trigger and 
 	assert.equal(modelSelectionProblem({ strategy: "random", candidates: Array.from({ length: 16 }, (_, i) => `openai/model-${i}`) }), null);
 });
 
-test("random policy rejects malformed shapes, weighted lists, case duplicates and roles", () => {
+test("random policy rejects malformed shapes, a weights list, case duplicates and roles", () => {
 	for (const value of [null, false, [], {}, { strategy: "ordered", candidates: RANDOM.candidates }, { ...RANDOM, weights: [1, 2] }, { ...RANDOM, candidates: [] }, { ...RANDOM, candidates: Array.from({ length: 17 }, (_, i) => `openai/m${i}`) }, { ...RANDOM, candidates: ["openai/X", "openai/x"] }, { ...RANDOM, candidates: ["openai/role:reviewer"] }, { ...RANDOM, candidates: ["role:reviewer"] }, { ...RANDOM, candidates: ["openai/x", { pool: "nested" }] }]) {
 		assert.notEqual(modelSelectionProblem(value), null, JSON.stringify(value));
 		assert.throws(() => validateModelRef({ modelSelection: value }, "test", PATH), /run.modelSelection/);
 	}
+});
+
+// Issue #996: the accept/refuse table of `run.modelSelection.weights`, a map from an exact candidate to a whole number from 1 to 100.
+test("random weights: an exact candidate to a whole number from 1 to 100 loads and is kept; every other shape is refused by its own sentence, never echoing a key", () => {
+	const [a, b] = RANDOM.candidates;
+	const sixteen = Array.from({ length: 16 }, (_, i) => `openai/model-${i}`);
+	for (const value of [{ ...RANDOM, weights: { [a]: 3 } }, { ...RANDOM, weights: { [b]: 100, [a]: 1 } }, { strategy: "random", candidates: sixteen, weights: Object.fromEntries(sixteen.map((ref) => [ref, 100])) }]) {
+		assert.equal(modelSelectionProblem(value), null, JSON.stringify(value));
+		const kept = validateModelRef({ modelSelection: value }, "test", PATH).modelSelection;
+		assert.deepEqual(kept, value, "the loader keeps the weights as written");
+		assert.notEqual(kept.weights, value.weights, "a fresh copy");
+		assert.deepEqual(copyModelSelection(value), value);
+	}
+	const table = [
+		[[1, 2], /^weights must be an object from a candidate to a whole number from 1 to 100 \(leave it out for equal shares\)$/],
+		[null, /^weights must be an object/],
+		["openai/gpt-5.4", /^weights must be an object/],
+		[3, /^weights must be an object/],
+		[{}, /^weights must not be empty \(leave it out for equal shares\)$/],
+		[{ "openai/other": 2 }, /^weights entry 1 names no candidate: each key must be one of candidates, spelled exactly the same$/],
+		[{ [a]: 2, "OpenAI/GPT-5.4": 2 }, /^weights entry 2 differs from a candidate only in case: each key must be one of candidates, spelled exactly the same$/],
+		[{ [a]: 2, "openai/gpt-5.4 ": 2 }, /^weights entry 2 names no candidate/],
+	];
+	for (const bad of [0, 101, 1.5, "2", -1, null, true, [2], { n: 2 }]) table.push([{ [b]: 1, [a]: bad }, /^weights entry 2 must be a whole number from 1 to 100$/]);
+	for (const [weights, sentence] of table) {
+		const problem = modelSelectionProblem({ ...RANDOM, weights });
+		assert.match(problem ?? "", sentence, JSON.stringify(weights));
+		assert.ok(!problem.includes("other") && !problem.includes("OpenAI"), "a key is named by its position, never echoed");
+		assert.throws(() => validateModelRef({ modelSelection: { ...RANDOM, weights } }, "test", PATH), (e) => e.message === `test: run.modelSelection ${problem}: ${PATH}`);
+	}
+	// A misspelled field inside the pool is an unknown one, and the sentence names all three it may hold.
+	assert.equal(modelSelectionProblem({ ...RANDOM, weight: { [a]: 2 } }), "has an unknown field (only strategy, candidates and weights are supported)");
+});
+
+test("random weights need triggers file 12 and job data 13; a pool without them keeps both stamps, and the shares are of the whole pool", () => {
+	const weighted = { ...RANDOM, weights: { [RANDOM.candidates[0]]: 3 } };
+	const run = { ...KINDS.label.run, modelSelection: weighted, models: RANDOM.candidates };
+	const text = (version, modelSelection = weighted) => JSON.stringify({ version, triggers: [{ ...KINDS.label, run: { ...run, modelSelection } }] });
+	assert.throws(() => parseTriggers(text(11), PATH), (e) => e.newer === undefined && e.message === `trigger at index 0: run.modelSelection holds a value that needs triggers file version 12, and the file declares 11: ${PATH}`);
+	const [loaded] = parseTriggers(text(12), PATH);
+	assert.deepEqual(loaded.run.modelSelection, weighted);
+	assert.equal(triggersFileVersionFor(JSON.parse(text(12))), 12);
+	assert.equal(jobDataVersionFor(loaded.run), 13, "the job a weighted trigger queues needs a worker that draws with the weights");
+	// No version, or the pool's own field version, is refused naming the 12 the weights need, never the 6 the key alone
+	// needs: a person who wrote what the sentence named would otherwise meet a second refusal.
+	for (const version of [undefined, 1, 6]) {
+		const doc = JSON.parse(text(version ?? 12));
+		if (version === undefined) delete doc.version;
+		else doc.version = version;
+		const says = version === 6 ? "holds a value that needs" : "needs";
+		assert.throws(() => parseTriggers(JSON.stringify(doc), PATH), (e) => e.message === `trigger at index 0: run.modelSelection ${says} triggers file version 12, and the file declares ${version ?? 1}: ${PATH}`, String(version));
+	}
+	// The rule is the field check's own, for a top-level block too: a field need of 3 under a value that needs 8 names 8.
+	const bundled = JSON.stringify({ secretBundles: { lab: { profile: "devices", ref: "lab", project: "lab", files: ["DEVICE_KEY"] } }, triggers: [] });
+	assert.throws(() => parseTriggersDocument(bundled, PATH, { blockTable: { secretBundles: 3 } }), (e) => e.message === `triggers file: top-level "secretBundles" needs triggers file version 8, and the file declares 1: ${PATH}`);
+	assert.throws(() => parseTriggers(JSON.stringify({ version: 1, triggers: [{ ...KINDS.label, run: { ...KINDS.label.run, models: RANDOM.candidates, modelSelection: RANDOM } }] }), PATH), (e) => e.message.includes("run.modelSelection needs triggers file version 6, and the file declares 1"), "a pool without weights still names its own 6");
+	// A build that reads 11 defers the file as newer, never refuses it as broken.
+	assert.equal(capture(() => parseTriggersDocument(text(12), PATH, { supported: 11 })).newer, true);
+	const [plain] = parseTriggers(text(6, RANDOM), PATH);
+	assert.equal(triggersFileVersionFor(JSON.parse(text(6, RANDOM))), 6);
+	assert.equal(jobDataVersionFor(plain.run), 7);
+	assert.equal(Object.hasOwn(plain.run.modelSelection, "weights"), false);
+	assert.deepEqual(modelSelectionShares(weighted), [{ ref: RANDOM.candidates[0], share: 75 }, { ref: RANDOM.candidates[1], share: 25 }]);
+	assert.deepEqual(modelSelectionShares(RANDOM).map((row) => row.share), [50, 50]);
+	assert.deepEqual(modelSelectionShares({ strategy: "random", candidates: ["a/x", "a/y", "a/z"], weights: { "a/x": 100, "a/y": 100 } }).map((row) => modelShareText(row.share)), ["50%", "50%", "under 1%"]);
+});
+
+test("random weights written beside the pool are refused as a near miss, under run in any spelling and under on", () => {
+	const weights = { [RANDOM.candidates[0]]: 3 };
+	// Every spelling the sweep holds, each of its own (so a target taken out of the table is noticed), with separators and case.
+	const spellings = ["weights", "weight", "modelWeights", "modelWeight", "candidateWeights", "candidateWeight", "modelSelectionWeights", "modelSelectionWeight", "poolWeights", "poolWeight"];
+	for (const key of [...spellings, "Weights", "model_weights", "pool-weight", "w\u0435ights"]) {
+		refused(withRun(KINDS.label, { modelSelection: RANDOM, models: RANDOM.candidates, [key]: weights }), new RegExp(`run\\.${key.replace(/[-\\]/g, "\\$&")} is not a field -- did you mean run\\.modelSelection\\.weights\\? Weights the loader drops leave every candidate an equal share while the file reads as weighted`));
+	}
+	for (const key of spellings) refused({ ...KINDS.label, on: { ...KINDS.label.on, [key]: weights } }, new RegExp(`on\\.${key} is not a field -- did you mean run\\.modelSelection\\.weights`));
 });
 
 test("random conflicts include explicit null fixed/fallback fields and command-only jobs", () => {

@@ -1,6 +1,6 @@
 import { readConsumerStatus } from "@edgehero/pi-dispatch/consumer-status";
 import { consumerHealthOf } from "@edgehero/pi-dispatch/consumer-health";
-import { modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
+import { copyModelSelection, modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
 import { makeHistoryReader, readHostHistory, historyRow } from "@edgehero/pi-dispatch/history-reader";
 import { readSubscriptionStatus } from "@edgehero/pi-dispatch/subscription-status";
 import { readSandboxInventories } from "@edgehero/pi-dispatch/sandbox-inventory";
@@ -4065,7 +4065,8 @@ export function normalizeTriggerForDisplay(entry) {
     // a dollar amount, the operator's own words, never a value a job chose. Spread only when present, so a trigger
     // that sets neither keeps exactly its keys.
     ...(Array.isArray(run.models) && run.models.length > 0 && run.models.every((m) => typeof m === "string") && { models: [...run.models] }),
-    ...(run.modelSelection != null && modelSelectionProblem(run.modelSelection) === null && { modelSelection: { strategy: "random", candidates: [...run.modelSelection.candidates] } }),
+    // A pool's weights (issue #996) ride with it, `copyModelSelection`'s rule: the page shows each candidate's share.
+    ...(run.modelSelection != null && modelSelectionProblem(run.modelSelection) === null && { modelSelection: copyModelSelection(run.modelSelection) }),
     ...(Array.isArray(run.fallbackModels) && run.fallbackModels.length > 0 && run.fallbackModels.every((m) => typeof m === "string") && { fallbackModels: [...run.fallbackModels] }),
     ...(Array.isArray(run.auxiliaryModels) && run.auxiliaryModels.length > 0 && run.auxiliaryModels.every((m) => typeof m === "string") && { auxiliaryModels: [...run.auxiliaryModels] }),
     ...((typeof run.maxCostUsd === "string" || typeof run.maxCostUsd === "number") && { maxCostUsd: String(run.maxCostUsd) }),
