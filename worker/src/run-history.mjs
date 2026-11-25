@@ -311,8 +311,11 @@ export const COST_CAP_WHYS = Object.freeze(["unboundable", "external", "over-cap
  * only beside a `cost-cap` reason, where it becomes the record's `why`: the worst a forged line can do is name the
  * wrong rule.
  */
-/** Bounded refusal diagnostics: hashes and closed reasons only, never agent-authored names. */
-export const MODEL_ROLE_REFUSAL_REASONS = Object.freeze(["unknown-role", "model-not-allowed", "unknown-agent", "invalid-arguments", "aborted"]);
+/**
+ * Bounded refusal diagnostics: hashes and closed reasons only, never agent-authored names. `subscription-child-unsupported`
+ * (issue #946): a child on a subscription the runner could not run inside itself, refused before it started.
+ */
+export const MODEL_ROLE_REFUSAL_REASONS = Object.freeze(["unknown-role", "model-not-allowed", "unknown-agent", "invalid-arguments", "aborted", "subscription-child-unsupported"]);
 export function modelRolesTelemetryOf(value) {
 	if (value === null || typeof value !== "object" || Array.isArray(value) || !Array.isArray(value.refusals) || value.refusals.length > 8) return null;
 	const refusals = [];

@@ -471,10 +471,15 @@ routing. See [Spend accounting](costs.md) and [model failover](model-failover.md
 
 Subscription jobs require a finite reviewed `models` list. Community Claude requires its verified staged
 package to remain enabled. Compaction and child sessions sharing the admitted root runtime retain its
-provider/model/account policy. Separate pi CLI or Node child processes refuse subscription dispatch in this
-initial release; they do not inherit attested subscription admission. A fresh runtime without the admitted
-adapter also refuses. Unsupported endpoint/API combinations, OpenAI classifier roles, OpenShell
-venues and subscription canaries refuse before spending. A resurrected sandbox remains credential-free.
+provider/model/account policy. The job's `subagent` tool ([model roles](model-roles.md#on-a-subscription)) is such a
+child: on a subscription, a role child whose model is on the subscription runs inside the runner, on the admitted
+runtime, with pi's built-in tools and the job's skills but no extension tools, and its calls are checked and counted
+as the job's own. A separate pi CLI or Node child process, a staged package's own child among them, still refuses
+subscription dispatch and stops the job; it does not inherit attested subscription admission. A fresh runtime without
+the admitted adapter also refuses. An image from before this release starts every role child as a separate process,
+so a subscription job with a role map is refused on it before it spends (`job-image-subscription-roles-unsupported`).
+Unsupported endpoint/API combinations, OpenAI classifier roles, OpenShell venues and subscription canaries refuse
+before spending. A resurrected sandbox remains credential-free.
 Recovery retains its checkpoint's physical model and rechecks current authentication and policy.
 
 Connections shows the configured owner, selected profile, compatibility, credential state and expiry.

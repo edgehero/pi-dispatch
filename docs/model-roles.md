@@ -124,6 +124,34 @@ The complete JSON-encoded agent snapshot is bounded at 16 MiB before reserves, i
 
 Project scope keys use the same lowercase, 1 to 32 character letter/digit/dash identifiers as projects.json. Scope lookup uses own keys, so a project named `constructor` remains an ordinary project identifier.
 
+## On a subscription
+
+On a [subscription connection](subscription-auth.md), a role child whose model is on the subscription runs inside the
+runner, in the same process as the job's own agent and on the subscription the runner admitted. A separate pi process
+cannot use the subscription: it holds the access token but not the runner's admission, so before this its first call
+stopped the whole job as `model-not-allowed`. Inside the runner the child's calls pass the same checks as the job's own,
+the model list, the cost cap and the subscription allowance among them, and they count in the job's tokens and cost.
+
+Such a child has pi's built-in tools (by default `read`, `bash`, `edit` and `write`), only those the agent's `tools`
+name when it names any, and never one the trigger's `run.excludeTools` or `run.excludeExtensionTools` remove, as any role
+child. It is told the job's guardrails and instructions and the agent's prompt, and it can use the job's skills from the
+repository, the trigger and the operator's overlay. A role child of an API-key job, a pi process, is told the agent's
+prompt but not the job's guardrails or the operator's overlay instructions, and it reads what pi itself finds. It has no extension tools: no staged package, overlay extension,
+repository extension or MCP server is loaded for it, and it has no `subagent` tool of its own. A role child of an
+API-key job is a pi process and loads the extensions it finds; this one loads none, because loading the job's extensions
+again would register the subscription's provider a second time, which the runner refuses for the whole job. A child
+whose last answer ended in an error, or that was stopped, returns a failed result, and a chain stops there; one whose
+provider failed says only that it failed.
+
+A role child on an API-key provider is a pi process as before. A subscription child the runner cannot run inside itself
+(the subscription was not admitted, or the runtime has no such model) returns a named tool error before it starts,
+`subscription-child-unsupported`, and the parent can continue. A separate pi process that a staged package's own tool
+starts still cannot use the subscription and still stops the job.
+
+An image from before this release starts every role child as a pi process, so a newer worker refuses a subscription job
+with a role map on it before it spends (`job-image-subscription-roles-unsupported`). See
+[upgrading](upgrading.md#mixed-versions-what-is-safe).
+
 ## Editing in the console
 
 Open **More → Models** to inspect the role map by default and project scope. The page links each consuming

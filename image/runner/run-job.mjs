@@ -37,7 +37,7 @@ import {
 	readPrompt,
 } from "./src/config.mjs";
 import { promptAdditionsOf } from "./src/prompt-additions.mjs";
-import { buildLoadedResourceLoader, GLOBAL_PI_DIR, JOB_PI_DIR, TRIGGER_SKILLS_DIR, WORKSPACE } from "./src/loader.mjs";
+import { buildLoadedResourceLoader, buildRoleChildResourceLoader, GLOBAL_PI_DIR, JOB_PI_DIR, TRIGGER_SKILLS_DIR, WORKSPACE } from "./src/loader.mjs";
 import { readMergePolicy } from "./src/merge-policy.mjs";
 import {
 	capExitMessage,
@@ -70,6 +70,7 @@ import { createJobMcp, mcpExcludableNames, mcpShadow, readJobMcp } from "./src/m
 import { applyApprovalDecision, approvalDecisionFromEvent, approvalShadow, approvalTerminal, createRequestApproval } from "./src/request-approval.mjs";
 import { awaitInputShadow, createAwaitInput, parkedTerminal } from "./src/await-input.mjs";
 import { createRoleSubagents, readRoleInputs, roleSubagentShadow } from "./src/model-roles.mjs";
+import { createRoleChildSessions } from "./src/role-child-session.mjs";
 import { createReportProgress, reportProgressShadow } from "./src/report-progress.mjs";
 import { assertSteerReady, createInbox } from "./src/inbox.mjs";
 import { createCostWarnings, readTimeLimit, steersQueued, TIME_LIMIT, TURN_LIMIT } from "./src/cost-warning.mjs";
@@ -515,7 +516,12 @@ async function main() {
 	// What the session and each role child leave out: pi's own and the servers' (`run.excludeTools`) and an extension's. One list, since pi
 	// reads one, and the second half is not held to pi's names: an unmatched name widens nothing, and which matched is asked below.
 	const sessionExclusions = [...cfg.excludeTools, ...cfg.excludeExtensionTools];
-	const roleSubagents = roleInputs ? createRoleSubagents(roleInputs, { excludeTools: sessionExclusions }) : null;
+	// Issue #946: on a subscription, a role child whose model is on a subscription provider runs inside this runner, on this
+	// runtime, built when the tool is called (after the seal below) and admitted only while the registration guard admits
+	// that provider (src/role-child-session.mjs says why a separate pi process cannot). Every other child, and every child
+	// of a job with no subscription, is a pi process as before.
+	const roleChildren = roleInputs && subscriptionRegistration ? { subscriptions: subscriptionEntries.map((row) => row.provider), admitted: (provider) => subscriptionRegistration.admitted(provider), inProcess: createRoleChildSessions({ modelRuntime, settingsManager, agentDir, loader: ({ agentPrompt, settingsManager: settings }) => buildRoleChildResourceLoader({ mayMerge, settingsManager: settings, agentPrompt }) }) } : {};
+	const roleSubagents = roleInputs ? createRoleSubagents(roleInputs, { excludeTools: sessionExclusions, ...roleChildren }) : null;
 	if (roleSubagents) roleExitFields = () => ({ modelRoles: roleSubagents.snapshot() });
 	// The run's inbox (issue #646, src/inbox.mjs), on the same terms. The acks are signed with the exit key and name the
 	// run by PI_JOB_ID, the exact string the worker verifies them against (its container name for this job: the worker's

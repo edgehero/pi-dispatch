@@ -1639,6 +1639,16 @@ Refused: the job image does not declare modelRoles support. Rebuild it before ru
 
 What to do: Rebuild the job image from a release that declares the feature, or set the trigger's `run.image` to one that does.
 
+### job-image-subscription-roles-unsupported
+
+Refused: the job image does not declare subscription role children, so its runner would start this job's subagent as a separate pi process, which the subscription refuses, and the job would stop at the first child call. Rebuild the image from a version that has this feature. Not run.
+
+The job runs on a subscription and its scope has a role map. An image from this release runs such a job's role child
+inside the runner, on the subscription it admitted; an older one starts it as a separate pi process, which cannot use
+the subscription. No container started and nothing was spent. See [model roles](model-roles.md#on-a-subscription).
+
+What to do: Rebuild the job image from a release that declares the feature, or set the trigger's `run.image` to one that does.
+
 ## Watch findings and investigations
 
 ### watch-cooldown

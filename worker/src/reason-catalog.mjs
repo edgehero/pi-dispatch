@@ -121,6 +121,7 @@ const ROWS = [
 	["model-roles-invalid", TERMINAL_COMMENTS["model-roles-invalid"], "Check the reviewed role map, its effective 16-model ceiling, and the job image inputs."],
 	["model-roles-shadowed", TERMINAL_COMMENTS["model-roles-shadowed"], "Remove the conflicting subagent extension or staged package and run again."],
 	["job-image-model-roles-unsupported", "Refused: the job image does not declare modelRoles support. Rebuild it before running role-mapped jobs. Not run.", REBUILD],
+	["job-image-subscription-roles-unsupported", imageRefusal("subscription role children", "its runner would start this job's subagent as a separate pi process, which the subscription refuses, and the job would stop at the first child call"), REBUILD],
 	...Object.entries(APPROVAL_COMMENTS).map(([token, sentence]) => [token, sentence, "Check the current approval, its saved session, and the trigger declaration; reload before replying again."]),
 	// ── Stopped while running ───────────────────────────────────────────────────────────────────────────────────────
 	["worker-abort", TERMINAL_COMMENTS["worker-abort"], "Check the worker log for the shutdown, then run the job again if its work is still wanted."],

@@ -5,7 +5,7 @@ import { makeImagePreflight } from "../src/image-preflight.mjs";
 import { makeProcessor } from "../src/index.mjs";
 
 const NOW = Date.parse("2026-10-29T12:00:00Z");
-function fixture({ roles = { default: { editor: "openai/first", explorer: "openai/small" } }, data = {}, capabilities = ["exitAuth", "modelPolicy", "modelRoles"], stage = async () => {}, imagePreflight = async () => ({ ok: true, capabilities }), result = { code: 0, aborted: false }, readRoles = null, canaryBusy = undefined } = {}) {
+function fixture({ roles = { default: { editor: "openai/first", explorer: "openai/small" } }, data = {}, capabilities = ["exitAuth", "modelPolicy", "modelRoles"], stage = async () => {}, imagePreflight = async () => ({ ok: true, capabilities }), result = { code: 0, aborted: false }, readRoles = null, canaryBusy = undefined, subscription = false } = {}) {
 	const events = [];
 	const records = [];
 	const store = new Map();
@@ -20,7 +20,7 @@ function fixture({ roles = { default: { editor: "openai/first", explorer: "opena
 	const processor = makeProcessor({ redis, cancelJob: () => {}, stopContainer: () => {}, now: () => NOW,
 		getSettings: () => ({ provider: "openai", model: "default", maxTurns: 5, dailyCap: 10, concurrency: 3, softHoldPct: null }),
 		readModelRoles: readRoles ?? (() => map), recordRun: (row) => records.push(row),
-		deps: { canaryBusy, now: new Date(NOW), imagePreflight, mintToken: async () => { events.push("mint"); return "token"; }, isDefaultBranchProtected: async () => true,
+		deps: { canaryBusy, now: new Date(NOW), imagePreflight, subscriptionAuthRequired: async () => subscription, mintToken: async () => { events.push("mint"); return "token"; }, isDefaultBranchProtected: async () => true,
 			prepareWorkspace: async () => { events.push("clone"); return { workspace: "/w", jobDir: "/j" }; }, stageModelRoleInputs: async (job, prepared) => { events.push({ stage: job }); return stage(job, prepared); },
 			cleanup: async () => {}, comment: async () => {}, log: () => {}, runContainer: async ({ job }) => { events.push({ run: job }); return result; } },
 	});
@@ -81,6 +81,20 @@ test("a tool exclusion on an image whose role child would keep the tool refuses 
 	assert.equal((await noMachinery.run()).reason, "job-image-model-roles-unsupported", "an image with no role machinery is refused for that, in its own words");
 	const fresh = fixture({ ...removes, imagePreflight: image(`${older},loadExclusions`) });
 	assert.equal((await fresh.run()).outcome, "completed");
+});
+
+test("a subscription job with a role map on an image that would start its child as a separate pi process refuses free, through the real pickup (#946)", async () => {
+	const image = (capabilities) => makeImagePreflight({ image: "pi-job:test", spawnFn: () => {
+		const child = new EventEmitter(); child.stdout = new EventEmitter();
+		queueMicrotask(() => { child.stdout.emit("data", `sha256:abc|1.6.0|github|${capabilities}`); child.emit("close", 0); });
+		return child;
+	} });
+	const older = "exitAuth,modelPolicy,modelRoles,subscriptionAuth";
+	const refused = fixture({ subscription: true, imagePreflight: image(older) });
+	assert.equal((await refused.run()).reason, "job-image-subscription-roles-unsupported");
+	assert.deepEqual(refused.events, [], "before the mint, the clone, the snapshot and the reservation");
+	const apiKey = fixture({ imagePreflight: image(older) });
+	assert.equal((await apiKey.run()).outcome, "completed", "an API-key job's role child is a pi process on every image");
 });
 
 test("invalid base agent snapshot refuses before the count reservation and container", async () => {

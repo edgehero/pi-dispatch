@@ -149,7 +149,7 @@ test("subscriptionAllowance: any job carrying an allowance, 0 included, needs it
 	assert.equal(row.reason, "job-image-subscription-allowance-unsupported");
 	assert.equal(row.event, "refused_image_subscription_allowance_unsupported");
 	assert.match(row.comment("img", "is absent"), /run\.maxSubscriptionUsd and run this job's subscription calls with no dollar limit at all/);
-	assert.equal(CAPABILITY_GATES.at(-1), row, "last, so a job lacking an older feature is refused for that one as before");
+	assert.deepEqual(CAPABILITY_GATES.slice(CAPABILITY_GATES.indexOf(row) + 1).map((gate) => gate.token), ["subscriptionRoles"], "after every older row, so a job lacking an older feature is refused for that one as before; only issue #946's row is newer");
 });
 
 test("subscription-allowance is a runner policy stop: exit 2 read back, a terminal comment, a catalog row, and the image refusal's row", () => {
