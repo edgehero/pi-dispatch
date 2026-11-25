@@ -19,7 +19,7 @@ const url = process.env.VALKEY_TEST_URL;
 if (!url && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS === "1") throw new Error("question-group-pipeline.integration requires VALKEY_TEST_URL");
 const skip = url ? false : "needs VALKEY_TEST_URL";
 const CLOCK = Date.UTC(2026, 9, 30, 12);
-const MODEL = { provider: "openrouter", id: "typesafe/jev-1.13", type: "classifier", api: "openrouter-classifier", contextWindow: 4096, cost: { input: 1, output: 0 } };
+const MODEL = { provider: "openrouter", id: "typesafe/jev-1.13", type: "classifier", api: "typesafe-system-one", contextWindow: 4096, cost: { input: 1, output: 0 } };
 const PRIVATE = "PRIVATE question and exemplar text must stay out of references and metadata";
 
 /** Prefix every ledger key, including Lua KEYS, so this file can run beside every other real-queue test. */

@@ -63,7 +63,7 @@ import { MAX_SLOTS, loadModelEndpoints, modelEndpointsPath, readOverlayModels } 
 import { sweepSecretFiles } from "./secret-files.mjs";
 import { grantsDirOf, runWithInput, sweepGrants } from "./endpoint-grants.mjs";
 import { endpointsOverlap, loadPrivateEndpoints, privateEndpointsPath, privateFolderInsideJobPathSentence, privateFoldersInsideJobPaths } from "./private-endpoints.mjs";
-import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
+import { builtinClassifier, builtinModel, checkModelsKnown } from "./model-catalog.mjs";
 import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
 import { liveHostNamesOf, makeHostRegistry, readLiveHosts } from "./host-registry.mjs";
@@ -2322,7 +2322,8 @@ export async function startWorker(
 			const entry = models?.providers?.[provider];
 			const custom = entry?.models?.find((model) => model.id === id);
 			if (custom) return custom;
-			const base = builtinModel(provider, id);
+			// The classifier of that id, not whichever model the catalog lists first under it (builtinClassifier).
+			const base = builtinClassifier(provider, id);
 			const override = entry?.modelOverrides?.[id];
 			return base ? { ...base, ...override, cost: { ...base.cost, ...override?.cost } } : null;
 		},

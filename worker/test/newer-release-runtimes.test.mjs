@@ -101,7 +101,7 @@ function grouping({ settings, triggers = { triggers: [], zeroTouch: ZERO_TOUCH }
 		setStatus: async (runId, status) => statuses.push([runId, status]),
 		assign: async () => ({ status: "assigned" }),
 	};
-	const runtime = makeQuestionGroupRuntime({ store, triggersPath: f.triggersPath, getSettings: f.getSettings, resolveClassifier: () => ({ type: "classifier", contextWindow: 4096, cost: { input: 0, output: 0 } }) });
+	const runtime = makeQuestionGroupRuntime({ store, triggersPath: f.triggersPath, getSettings: f.getSettings, resolveClassifier: () => ({ type: "classifier", api: "typesafe-system-one", contextWindow: 4096, cost: { input: 0, output: 0 } }) });
 	let headRead = false;
 	const getSettings = () => {
 		const read = f.getSettings();

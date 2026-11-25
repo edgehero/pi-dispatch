@@ -79,7 +79,7 @@ const ROWS = [
 	["watch-cap", "The source, rule or active-fingerprint cap refused the finding before paid work.", "Inspect the source and caps before changing the reviewed limits."],
 	["watch-unmatched", "The finding matched no reviewed watch rule. No investigation started.", "Check the source and structured match fields."],
 	["watch-ignored", "The reviewed decision selected ignore. Only the decision was charged.", "Inspect its probabilities and thresholds if the outcome was unexpected."],
-	["decide-refused", "The decision model or its bounded price was refused.", "Use a known input-only priced decision model and a sufficient reviewed cap."],
+	["decide-refused", "The decision model or its bounded price was refused.", "Use a known input-only priced decision model (not a Radius one) and a sufficient reviewed cap."],
 	["question-group-unavailable", "Question grouping is not configured on this worker.", "Check the Zero touch grouping status and reviewed configuration before trying again."],
 	["question-group-config-changed", "The reviewed question grouping settings changed.", "Check the Zero touch grouping status and reviewed configuration before trying again."],
 	["question-group-source-expired", "The private source for this question expired.", "Check the Zero touch grouping status and reviewed configuration before trying again."],

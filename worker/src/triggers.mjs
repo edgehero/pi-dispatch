@@ -55,7 +55,8 @@ import { apiKeyVariable, needsHostAuthentication, nonApiKeyKind } from "./provid
 import { PROVIDER_KEY_NAMES } from "./provider-key-names.mjs";
 import { normalizeWatchSources, normalizeWatchRule, watchDurationMs } from "./watch-contract.mjs";
 import { validateWatchDecision } from "./watch-decision.mjs";
-import { builtinModel } from "./model-catalog.mjs";
+import { builtinClassifier } from "./model-catalog.mjs";
+import { runnerPricesApi } from "./model-status.mjs";
 import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES, isPrivateEndpointEnvName } from "./reserved-env.mjs";
 import { neededVersion, underDeclared, valueNeededVersion, valueUnderDeclared, versionProblem } from "./store-version.mjs";
 // The wait grammar's two shared halves (issue #230). `afterInstantMs` is imported rather than restated so
@@ -768,8 +769,10 @@ function normalizeWatchDecisionConfig(value, issue) {
 	parseUsdMicros(value.maxCostUsd);
 	if (value.shadow !== undefined && typeof value.shadow !== "boolean") throw configError("watch: decide.shadow must be boolean");
 	const { shadow = true, ...policy } = value;
-	const checked = validateWatchDecision({ ...policy, maxCostUsd: String(policy.maxCostUsd) }, { resolveModel: ref => { const i = ref.indexOf("/"); return builtinModel(ref.slice(0, i), ref.slice(i + 1)); } });
-	if (!checked.ok) throw configError("watch: decide-refused; require a known input-only classifier and bounded questions");
+	// A classifier on an api the runner's bound does not price would be refused inside its container under the decision's
+	// cap, after a container started: refused here instead (runnerPricesApi).
+	const checked = validateWatchDecision({ ...policy, maxCostUsd: String(policy.maxCostUsd) }, { resolveModel: ref => { const i = ref.indexOf("/"); const model = builtinClassifier(ref.slice(0, i), ref.slice(i + 1)); return model && runnerPricesApi(model.api) ? model : null; } });
+	if (!checked.ok) throw configError("watch: decide-refused; require a known input-only classifier whose api the cost bound prices, and bounded questions");
 	return { ...checked.config, shadow };
 }
 

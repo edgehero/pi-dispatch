@@ -66,6 +66,18 @@ export function builtinModel(provider, id) {
 }
 
 /**
+ * The builtin catalog's CLASSIFIER `provider`/`id`, or null. Not `builtinModel`: an id can name a chat model and a
+ * decision model of one provider (`openai/gpt-6-luna` is both since pi 1.1.0), and `builtinModel` answers whichever the
+ * catalog lists first, the chat one there, so a decision model looked up by it was refused as "not a classifier". The
+ * runner looks a decision model up by its type (`getModelsOfType("classifier", provider)`), and this answers the same.
+ */
+export function builtinClassifier(provider, id) {
+	if (typeof provider !== "string" || typeof id !== "string") return null;
+	if (!getBuiltinProviders().includes(provider)) return null;
+	return getAllBuiltinModels(provider).find((m) => m?.type === "classifier" && m.id === id) ?? null;
+}
+
+/**
  * The builtin catalog's CHAT models of `provider` (the ones pi applies an overlay's provider `compat` and `modelOverrides`
  * to), or [] for a provider the catalog does not know (issue #571: doctor's no-usage check reads their api, compat and
  * cost). Copies of the list, never the catalog's own array.

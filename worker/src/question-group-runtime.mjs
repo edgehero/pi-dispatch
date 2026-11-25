@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { parseTriggersDocument } from "./triggers.mjs";
 import { questionDigest, QUESTION_RUN_RE, QUESTION_GROUP_LIMITS } from "./question-groups.mjs";
 import { declaredKeyFields } from "./answerer-runtime.mjs";
+import { runnerPricesApi } from "./model-status.mjs";
 
 export const QUESTION_GROUP_REASONS = Object.freeze(["question-group-unavailable", "question-group-config-changed", "question-group-source-expired", "question-group-source-unavailable", "question-group-source-oversize", "question-group-candidates-expired", "question-group-limit", "question-group-stale", "question-group-refused", "question-group-unanswered", "question-group-output-invalid"]);
 const policy = (reason) => ({ outcome: "policy", reason, budgetReserved: false });
@@ -42,7 +43,9 @@ export function makeQuestionGroupRuntime({ store, triggersPath, getSettings = ()
 			try { selected = await resolveClassifier(classifier); } catch { return { result: policy("question-group-refused") }; }
 			// The full reviewed context window is a conservative input-only price ceiling, not a guessed tokenizer.
 			// The runner still checks the exact call at its dispatch boundary before it can reach the provider.
-			if (!selected || selected.type !== "classifier" || !Number.isFinite(selected.cost?.input) || selected.cost.input < 0 || selected.cost.output !== 0 || !Number.isSafeInteger(selected.contextWindow) || selected.contextWindow <= 0) return { result: policy("question-group-refused") };
+			// An api the runner's bound does not price (pi 1.6.1's pi-decision, an overlay's custom one) is refused here, before
+			// any reservation, rather than inside a container under the cap (runnerPricesApi).
+			if (!selected || selected.type !== "classifier" || !runnerPricesApi(selected.api) || !Number.isFinite(selected.cost?.input) || selected.cost.input < 0 || selected.cost.output !== 0 || !Number.isSafeInteger(selected.contextWindow) || selected.contextWindow <= 0) return { result: policy("question-group-refused") };
 			const boundMicros = Math.ceil(selected.contextWindow * selected.cost.input);
 			if (!Number.isSafeInteger(boundMicros) || boundMicros > Math.round(Number(current.maxCostUsd) * 1000000)) return { result: policy("question-group-refused") };
 			const grouping = { ...ref };
