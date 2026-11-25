@@ -1611,9 +1611,10 @@ test("declaredProviderKey: the provider's own API-key variable in run.secrets, a
 	assert.equal(declaredProviderKey(job({ secretFiles: { OPENROUTER_API_KEY: "ref" } })), null, "a file secret of the same name keeps it reserved");
 	assert.equal(declaredProviderKey(job({ secrets: undefined, secretFiles: { OPENROUTER_API_KEY: "ref" } })), null, "a file alone is a path, never the key");
 	assert.equal(declaredProviderKey(job({}), { forwardEnv: ["OPENROUTER_API_KEY"] }), null, "a PI_FORWARD_ENV name is the operator's host value");
-	for (const field of ["answerDraft", "questionGrouping"]) assert.equal(declaredProviderKey(job({ [field]: { runId: "r" } })), null, `a ${field} job keeps the host's credential`);
 	// Issue #997: a watch job carries its rule's run.secrets like any trigger's job, so it declares a key the same way.
 	assert.equal(declaredProviderKey(job({ watch: { findingId: "f" } })), "OPENROUTER_API_KEY");
+	// Issue #1013: and an answer draft and a question grouping carry their answer rule's or the zeroTouch block's secrets.
+	for (const field of ["answerDraft", "questionGrouping"]) assert.equal(declaredProviderKey(job({ [field]: { runId: "r" } })), "OPENROUTER_API_KEY", field);
 	assert.equal(declaredProviderKey(job({ provider: "github-copilot", secrets: { COPILOT_GITHUB_TOKEN: "ref" } })), null, "a provider that needs host authentication is never declared");
 	assert.equal(declaredProviderKey(job({ provider: "local-ollama", secrets: { OPENROUTER_API_KEY: "ref" } })), null, "a provider pi reads no key variable for has none to declare");
 	assert.equal(declaredProviderKey(job({ secrets: Object.create({ OPENROUTER_API_KEY: "inherited" }) })), null, "own keys only");
@@ -1658,11 +1659,11 @@ test("reservedAuxiliaryNames: an auxiliary model's provider is judged by the mai
 	assert.deepEqual(reservedAuxiliaryNames(panel()).sort(), ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"]);
 	assert.deepEqual(reservedAuxiliaryNames({ provider: "anthropic", auxiliaryModels: ["openrouter/x"], secrets: { OPENROUTER_API_KEY: "ref" } }), []);
 	assert.deepEqual(reservedAuxiliaryNames({ provider: "openrouter", secrets: {} }), [], "no auxiliary models, nothing");
-	// Where the main rule admits no key, the API-key variable stays reserved too: a file secret, a PI_FORWARD_ENV name,
-	// a decision job.
+	// Where the main rule admits no key, the API-key variable stays reserved too: a file secret, a PI_FORWARD_ENV name.
 	assert.ok(reservedAuxiliaryNames(panel({ secrets: {}, secretFiles: { ANTHROPIC_API_KEY: "ref" } })).includes("ANTHROPIC_API_KEY"));
 	assert.ok(reservedAuxiliaryNames(panel(), { forwardEnv: ["ANTHROPIC_API_KEY"] }).includes("ANTHROPIC_API_KEY"));
-	assert.ok(reservedAuxiliaryNames(panel({ answerDraft: { runId: "r" } })).includes("ANTHROPIC_API_KEY"));
+	// Issue #1013: a decision job is judged as any job, so it no longer keeps the admitted key reserved.
+	assert.deepEqual(reservedAuxiliaryNames(panel({ answerDraft: { runId: "r" } })).sort(), ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"]);
 	// A provider that needs host authentication keeps every variable reserved, bound or not, as a job on it does.
 	assert.ok(HOST_AUTH_PROVIDERS.some((provider) => providerKeyCandidates(provider).length > 0), "the loop below judges a variable");
 	for (const provider of HOST_AUTH_PROVIDERS) {
@@ -1727,6 +1728,33 @@ test("issue #997: a declared role credential is the classifier's only credential
 	// On the main provider the classifier shares the declared main key, which the classifier's reservation lets through.
 	const shared = buildContainerEnv({ ...options, secondaryProvider: "openrouter", secondaryCredential: null, mainCredential: "OPENROUTER_API_KEY", secrets: { OPENROUTER_API_KEY: "sk-or-shared" } });
 	assert.equal(shared.OPENROUTER_API_KEY, "sk-or-shared");
+});
+
+// --- issue #1013: an answer draft's and a grouping job's models take the keys their rule or the zeroTouch block declares ---
+
+test("issue #1013: an answer draft's and a grouping job's declared keys win for the main and the role model, the host's key never reaches the container, and an empty value refuses", { skip }, () => {
+	const { declaredProviderKey } = mod;
+	const hostEnv = { OPENAI_API_KEY: "host-openai", ANTHROPIC_API_KEY: "host-anthropic", ANTHROPIC_AUTH_TOKEN: "host-bearer", ANTHROPIC_OAUTH_TOKEN: "host-oauth" };
+	const kinds = {
+		answerDraft: { kind: "github", provider: "openai", model: "gpt-5-mini", answerDraft: { runId: "r", ruleId: "help" }, answerDecisionModel: { provider: "anthropic", id: "claude-haiku-4-5" } },
+		questionGrouping: { kind: "local", provider: "openai", model: "gpt-5-mini", questionGrouping: { runId: "r" }, questionGroupModel: { provider: "anthropic", id: "claude-haiku-4-5" } },
+	};
+	for (const [field, base] of Object.entries(kinds)) {
+		const job = { ...base, secrets: { OPENAI_API_KEY: "op://ci/openai", ANTHROPIC_API_KEY: "op://ci/anthropic" } };
+		const role = base.answerDecisionModel ?? base.questionGroupModel;
+		// The processor's own two verdicts: the main job, and the role model's provider asked as the job on it.
+		const mainCredential = declaredProviderKey(job);
+		const secondaryCredential = declaredProviderKey({ ...job, provider: role.provider, model: role.id });
+		assert.deepEqual([mainCredential, secondaryCredential], ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"], field);
+		const build = (secrets) => buildContainerEnv({ provider: job.provider, secondaryProvider: role.provider, model: job.model, maxTurns: 1, jobId: `${field}-1`, forgeKind: job.kind === "github" ? "github" : "local", githubToken: job.kind === "github" ? "tok" : undefined, hostEnv, authFromPi: true, readFile: () => assert.fail("auth.json must not be read for a declared credential"), secrets, mainCredential, secondaryCredential });
+		const env = build({ OPENAI_API_KEY: "sk-declared-openai-private", ANTHROPIC_API_KEY: "sk-ant-api03-declared-private" });
+		assert.equal(env.OPENAI_API_KEY, "sk-declared-openai-private", field);
+		assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-api03-declared-private", field);
+		assert.equal(Object.values(env).some((value) => String(value).startsWith("host-")), false, `${field}: no host credential reaches the container`);
+		for (const secrets of [{ OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "sk-ant-api03-declared-private" }, { OPENAI_API_KEY: "sk-declared-openai-private", ANTHROPIC_API_KEY: "" }]) {
+			assert.throws(() => build(secrets), (error) => error.piDispatchConfig === true && /has no value, and the host's credential does not stand in for it/.test(error.message) && !error.message.includes("private"), field);
+		}
+	}
 });
 
 // --- issue #1002: a random pool's draw holds no other candidate's API key from the run secrets ---

@@ -126,7 +126,7 @@ test("a slot names the triggers that bring their own key, by name and variable, 
     // A missing slot is exactly where a host-only reading misled: "Not set" while two triggers spend their own key.
     const google = line("google");
     assert.equal(google.getAttribute("data-provider-declared"), "spent");
-    assert.equal(text(google), "cron nightly, trigger 5 bind GEMINI_API_KEY in run.secrets, so every call their jobs make to this provider spends that key, not this host's credential.");
+    assert.equal(text(google), "cron nightly and trigger 5 bind GEMINI_API_KEY in run.secrets, so every call their jobs make to this provider spends that key, not this host's credential.");
     assert.deepEqual(google.querySelectorAll("a").map(a => a.getAttribute("href")), ["/config/trigger?index=1", "/config/trigger?index=4"]);
     assert.equal(google.querySelector("a .pk-key").textContent, "nightly", "a long cron id wraps as the slot's key does");
     // This host's PI_FORWARD_ENV names the variable: this host refuses, and the line does not say the key is spent.
@@ -162,7 +162,7 @@ test("issue #1029: a trigger that reaches a slot only through its decide or auxi
   ] };
   const doc = draw({ data: { setup: null, connections: { providerKeys: value } } });
   const text = provider => doc.querySelector(`[data-provider="${provider}"] [data-provider-declared]`).textContent.replace(/\s+/g, " ");
-  assert.equal(text("google"), "trigger 2 (for its decide model), cron nightly, trigger 4 (for its auxiliary model), trigger 5 bind GEMINI_API_KEY in run.secrets, so every call their jobs make to this provider spends that key, not this host's credential.");
+  assert.equal(text("google"), "trigger 2 (for its decide model), cron nightly, trigger 4 (for its auxiliary model) and trigger 5 bind GEMINI_API_KEY in run.secrets, so every call their jobs make to this provider spends that key, not this host's credential.");
   assert.equal(text("openai"), "trigger 1 (for its auxiliary model) binds OPENAI_API_KEY in run.secrets, but this host's PI_FORWARD_ENV names it too, so it refuses its jobs before they spend.");
   assert.equal(text("cloudflare-ai-gateway"), "trigger 7 (for its decide model) binds CLOUDFLARE_API_KEY in run.secrets, so every call its jobs make to this provider spends that key, not this host's credential, unless this host's PI_FORWARD_ENV names it.");
   // The qualifier sits outside the link, which still opens the trigger.
@@ -176,4 +176,22 @@ test("issue #1029: a trigger that reaches a slot only through its decide or auxi
 test("provider-key layout is the exact CSS built into the reference card", () => {
   const generator = readFileSync(new URL("../../design/tools/provider_keys.py", import.meta.url), "utf8");
   assert.equal(PROVIDER_KEYS_CSS, generator.match(/PROVIDER_KEYS_CSS = """([\s\S]*?)"""/)[1]);
+});
+
+test("issue #1013: an answer rule and the zeroTouch block that declare a slot's variable are named after its triggers, in every form of the line", () => {
+  const value = { ...inventory(), declaredKeys: [
+    { key: "GEMINI_API_KEY", triggers: [], more: 0, forwarded: false, holders: [{ rule: "help" }, { zeroTouch: true, via: "grouping" }] },
+    { key: "OPENAI_API_KEY", triggers: [{ index: 0, cron: null }], more: 0, forwarded: true, holders: [{ rule: "help", via: "decision" }] },
+    { key: "CLOUDFLARE_API_KEY", triggers: [], more: 0, forwarded: null, holders: [{ zeroTouch: true }] },
+  ] };
+  const doc = draw({ data: { setup: null, connections: { providerKeys: value } } });
+  const text = provider => doc.querySelector(`[data-provider="${provider}"] [data-provider-declared]`).textContent.replace(/\s+/g, " ");
+  assert.equal(text("google"), "answer rule help and the zeroTouch block (for its grouping model) declare GEMINI_API_KEY in their secrets, so every call their jobs make to this provider spends that key, not this host's credential.");
+  assert.equal(text("openai"), "trigger 1 binds OPENAI_API_KEY in run.secrets, and answer rule help (for its decision model) declares it in its secrets, but this host's PI_FORWARD_ENV names it too, so it refuses their jobs before they spend.");
+  assert.equal(text("cloudflare-ai-gateway"), "the zeroTouch block declares CLOUDFLARE_API_KEY in its secrets, so every call its jobs make to this provider spends that key, not this host's credential, unless this host's PI_FORWARD_ENV names it.");
+  assert.equal(doc.querySelector('[data-provider="google"] [data-provider-declared] .pk-key').textContent, "help", "a rule id wraps as the slot's key does");
+  const managed = inventory();
+  Object.assign(managed.rows[2], { source: "managed", status: "managed", mode: null });
+  const bound = draw({ data: { setup: null, connections: { providerKeys: { ...managed, declaredKeys: [{ key: "GEMINI_API_KEY", triggers: [], forwarded: false, holders: [{ rule: "help" }] }] } } } });
+  assert.equal(bound.querySelector("[data-provider-declared]").textContent.replace(/\s+/g, " "), "answer rule help declares GEMINI_API_KEY in its secrets, but this host binds the provider to a subscription, so it refuses its jobs before they spend.");
 });

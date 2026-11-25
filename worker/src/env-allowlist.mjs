@@ -214,12 +214,13 @@ export function resolveProviderCredential({ provider, hostEnv, authFromPi = fals
  *     the API key and sends them as other credentials, so a trigger binding one is still the issue #309 hazard;
  *   - it is an own key of `run.secrets` and NOT a key of `run.secretFiles` (a file is a path, never the key itself);
  *   - it is not in PI_FORWARD_ENV, where the operator's own host value claims the same name;
- *   - the job is not an answer draft or a question grouping, internal decision jobs whose reviewed fixed routes take
- *     their credentials from the host alone (neither carries `run.secrets`: answer rules and the `zeroTouch` settings
- *     have none, and admitting one would be a new field of the triggers file). A watch job counts since issue #997: it
- *     carries its rule's `run.secrets` like any trigger's job, so its main model may declare a key, and its `decide`
- *     model's provider is judged by this same function, asked as `{ ...job, provider }`;
  *   - the provider is not one that needs host authentication (`HOST_AUTH_PROVIDERS`).
+ * Every job kind counts. A watch job since issue #997: it carries its rule's `run.secrets` like any trigger's job, so its
+ * main model may declare a key, and its `decide` model's provider is judged by this same function, asked as
+ * `{ ...job, provider }`. An answer draft and a question grouping since issue #1013: each carries the `secrets` (and
+ * `secretsProfile`) its answer rule or the `zeroTouch` block declares, as `job.secrets`, kept by the job builder to the
+ * names a provider of that job reads, so the main model and the answer decision or grouping model are judged the same
+ * way. Before it they took their credentials from the host alone, since neither block had such a field.
  * The last condition, that the provider is not bound to a subscription on this host, is the CALLER's: every caller
  * asks the subscription service first and never reaches this for a managed provider, and the processor asks again
  * after the resolver. A project secret bundle never counts (secret-bundles.mjs keeps every provider variable
@@ -228,7 +229,6 @@ export function resolveProviderCredential({ provider, hostEnv, authFromPi = fals
  * Pure, and the names come from pi through `providerKeyCandidates`, so no table of providers is kept here.
  */
 export function declaredProviderKey(job, { forwardEnv = [] } = {}) {
-	if (job?.answerDraft || job?.questionGrouping) return null;
 	const provider = job?.provider;
 	if (typeof provider !== "string" || provider === "" || needsHostAuthentication(provider)) return null;
 	const name = apiKeyVariable(providerKeyCandidates(provider));
@@ -252,8 +252,7 @@ function auxiliaryProvidersOf(job) {
  * The variables of a job's auxiliary providers that its run secrets may not name (issue #999): each auxiliary model's
  * provider judged by the main provider's own rule. Every variable pi reads for it is reserved except the one
  * `declaredProviderKey` admits for a job on that provider: its API-key variable, bound in `run.secrets` and not in
- * `run.secretFiles`, not on PI_FORWARD_ENV, on no answer draft or question grouping, and on a provider that needs no
- * host authentication. So at the pin an `anthropic` auxiliary model keeps ANTHROPIC_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN reserved, and a
+ * `run.secretFiles`, not on PI_FORWARD_ENV, and on a provider that needs no host authentication. So at the pin an `anthropic` auxiliary model keeps ANTHROPIC_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN reserved, and a
  * `github-copilot` or `google-vertex` one its only variable, as a job on that provider would.
  *
  * An auxiliary provider takes its credential from the worker's environment with the run secrets laid over it
@@ -508,8 +507,9 @@ function layoutEnv(layout) {
  * `mainCredential` (issue #967) is the variable name of the run secret the processor admitted as this job's main
  * credential (`declaredProviderKey`), handed down by run-container as an argument of its own and never read off the job,
  * so nothing queued can set it. Null keeps the host's credential, as before. `secondaryCredential` (issue #997) is the
- * same for the role model's provider (`secondaryProvider`, a watch rule's `decide` model): the run secret the processor
- * admitted as that model's credential, on the same terms and by the same route.
+ * same for the role model's provider (`secondaryProvider`, a watch rule's `decide` model and, since issue #1013, an answer
+ * draft's decision model or a grouping job's classifier): the run secret the processor admitted as that model's
+ * credential, on the same terms and by the same route.
  */
 export function buildContainerEnv({ mainCredential = null, secondaryCredential = null, size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, subscriptionAllowanceMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, secretFilePaths = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, auxiliaryModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, privateEndpoints = [], exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, timeLimitMs = null, timeLeftMs = null, credentialRefresh = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when

@@ -712,7 +712,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// `user`/`home` are the job-user gate's answer (issue #341), null for the image's own USER.
 		// `mainCredential` (issue #967) is the name of the run secret admitted as the main provider's credential, passed only
 		// when there is one: an argument of its own, never a job field, so queue data cannot choose it. `secondaryCredential`
-		// (issue #997) is the same for the role model's provider, a watch rule's `decide` model on another provider.
+		// (issue #997) is the same for the role model's provider, a watch rule's `decide` model on another provider, or (issue
+		// #1013) an answer draft's decision model or a grouping job's classifier there.
 		// `secrets` is the resolved map from the gate above: values, already fetched, host-side. It MUST honour
 		// `signal`: stop the container on abort, and reject/exit promptly if `signal.aborted` is already
 		// true at entry (the timeout can fire during a slow prepare). The wiring injects name + signal, and
@@ -1429,8 +1430,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// Issue #967: the run secret the MAIN job's verdict declares as its credential (`declaredProviderKey`), or null. Handed
 		// to the resolver, re-checked against the resolved values, and passed to the container as an argument of its own,
 		// never as a job field. Issue #997: the role model's verdict the same way (`roleDeclared`, with the job the gate was
-		// asked as), on the same rule. Only a watch job can have one: an answer draft and a question grouping carry no
-		// `run.secrets`, so their role provider keeps the host's credential and its variables stay reserved
+		// asked as), on the same rule: a watch rule's `decide` model and, since issue #1013, an answer draft's decision model
+		// and a grouping job's classifier, whose jobs carry the `secrets` their answer rule or the zeroTouch block declares.
+		// A role provider with no declared key keeps the host's credential and its variables stay reserved
 		// (`secondaryCredentialNames` below).
 		let mainDeclared = null;
 		let roleDeclared = null;
@@ -1965,7 +1967,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// The same set the loader uses, imported, so the two cannot drift, and checked before the resolver so
 		// no wiring of it can skip the check.
 		// Issue #997: but for a declared key the gate admitted above, the role model's own or, when the role model shares the
-		// main provider, the main one, which the resolver then judges with the rest of the main provider's names.
+		// main provider, the main one, which the resolver then judges with the rest of the main provider's names. The same
+		// for an answer draft's decision model and a grouping job's classifier since issue #1013.
 		const secondaryCredentialNames = new Set((job.answerDraft && job.answerDecisionModel ? providerKeyCandidates(job.answerDecisionModel.provider) : job.questionGrouping && job.questionGroupModel ? providerKeyCandidates(job.questionGroupModel.provider) : job.watch && job.watchDecisionModel ? providerKeyCandidates(job.watchDecisionModel.provider) : []).filter((name) => name !== mainDeclared && name !== roleDeclared));
 		const loadReserved = secretsArmed(job) ? [...Object.keys(job.secrets ?? {}), ...Object.keys(job.secretFiles ?? {})].find((name) => isReservedEnvName(name) || secondaryCredentialNames.has(name)) : undefined;
 		// Issue #967: the declared main credential is the one name the resolver lifts out of its reserved set, and only when

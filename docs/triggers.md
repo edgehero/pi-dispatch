@@ -487,8 +487,8 @@ as broken). `run.excludeExtensions` or `run.excludeExtensionTools` needs version
 `stallTimeoutMinutes` or `maxMinutes` needs version 3; `mayMerge` needs version 4; local event commands and
 `run.worker` need version 5; `modelSelection` needs version 6; `privateEndpoints` needs version 7;
 `secretFiles` and file bundles need version 8; `auxiliaryModels` needs version 9; local `on.closeActors`
-needs version 10; `maxSubscriptionUsd` needs version 11; `weights` in a `modelSelection` pool need version 12.
-A file without a field or value
+needs version 10; `maxSubscriptionUsd` needs version 11; `weights` in a `modelSelection` pool, and `secrets`
+or `secretsProfile` on an answer rule or on the `zeroTouch` section, need version 12. A file without a field or value
 needing a newer version still needs only version 1. A
 file that uses such a field or value with a lower `version`, or with none, is refused like any malformed file.
 
@@ -1467,4 +1467,6 @@ Use `run.model: "role:editor"` with an operator-reviewed `modelRoles` block to m
 The optional top-level `zeroTouch` section enables bounded private question capture and declares the classifier,
 cap, confidence threshold and human-written group names. It never sends an answer. Grouping is an operator-confirmed
 job through every normal budget/model/credential gate. See [Zero touch](zero-touch.md#group-repeated-questions) for
-the schema, limits and privacy boundaries. It is separate from answer rules (#772).
+the schema, limits and privacy boundaries. It is separate from answer rules (#772). Like an answer rule
+([a key of the rule's own](answer-rules.md#a-key-of-the-rules-own)), it may name its models' provider keys in
+`secrets` and `secretsProfile`, which need file version 12.

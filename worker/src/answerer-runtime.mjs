@@ -8,6 +8,18 @@ import { SKILL_NAME_RE } from "./flow-gate.mjs";
 const policy = reason => ({ outcome: "policy", reason, budgetReserved: false });
 const modelRef = text => { const i = text.indexOf("/"); return { provider: text.slice(0, i), id: text.slice(i + 1) }; };
 const object = v => v !== null && typeof v === "object" && !Array.isArray(v);
+/** Issue #1013: a rule's or the zeroTouch block's declared provider keys a job on `providers` receives, as job fields
+ * (`secrets`, and `secretsProfile` beside them), and the names it does not: each name some provider of the job reads
+ * (`keyNames`, pi's list through `providerKeyCandidates`) is kept for the worker's credential gate to judge, every other
+ * one is withheld, since the block may name a provider this job does not run on. Shared by the grouping job's builder. */
+export function declaredKeyFields(holder, providers, keyNames) {
+	const secrets = holder?.secrets;
+	if (!object(secrets)) return { fields: {}, withheld: [] };
+	const read = new Set(providers.flatMap(provider => keyNames(provider) ?? []));
+	const kept = Object.keys(secrets).filter(name => read.has(name));
+	const fields = kept.length > 0 ? { secrets: Object.fromEntries(kept.map(name => [name, secrets[name]])), ...(typeof holder.secretsProfile === "string" ? { secretsProfile: holder.secretsProfile } : {}) } : {};
+	return { fields, withheld: Object.keys(secrets).filter(name => !read.has(name)) };
+}
 const fileJson = (path, max, fs) => {
 	let fd;
 	try {
@@ -49,7 +61,9 @@ export async function readAnswerPending({ queues, source, runId, budget = 500, t
 }
 
 /** A durable intent is written before enqueue. The drainer retries publication, never the parent's paid work. */
-export function makeAnswerDraftRuntime({ store, triggersPath, enqueue, identity = async () => null, readParkedInfo = () => null, readPendingAnswer = async () => ({ unknown: true }), readApproval = async () => ({ error: "unavailable" }), now = Date.now, readFile = nodeFs.readFileSync, fs = nodeFs, log = () => {} } = {}) {
+/** `providerKeyNames` (issue #1013) is pi's variable list for a provider (`providerKeyCandidates`), which this module does
+ * not import: it decides which of a rule's declared keys the draft job receives (`declaredKeyFields`). Unwired, none. */
+export function makeAnswerDraftRuntime({ store, triggersPath, enqueue, identity = async () => null, readParkedInfo = () => null, readPendingAnswer = async () => ({ unknown: true }), readApproval = async () => ({ error: "unavailable" }), providerKeyNames = () => [], now = Date.now, readFile = nodeFs.readFileSync, fs = nodeFs, log = () => {} } = {}) {
 	const document = () => parseTriggersDocument(readFile(triggersPath, "utf8"), triggersPath);
 	async function publish(meta) {
 		if (meta.status !== "pending") return false;
@@ -117,12 +131,16 @@ export function makeAnswerDraftRuntime({ store, triggersPath, enqueue, identity 
 				return { result: policy("answer-draft-unavailable") };
 			}
 			const model = modelRef(rule.model), classifier = modelRef(rule.decisionModel);
+			// Issue #1013: the rule's declared provider keys, for the draft's main model and its decision model only. Names only
+			// in the log line, never a reference.
+			const declared = declaredKeyFields(rule, [model.provider, classifier.provider], providerKeyNames);
+			if (declared.withheld.length > 0) log("declared_key_withheld", { rule: rule.id, names: declared.withheld });
 			const answerDraft = { ...ref };
 			Object.defineProperty(answerDraft, "input", { value: { version: 1, rule: { id: rule.id, categories: rule.categories, confidence: rule.confidence, mode: rule.mode, decisionModel: classifier }, source: input.source, standing: (doc.standingAnswers ?? []).filter(a => a.projects.includes(input.project) && a.repo.toLowerCase() === `${input.source.kind}:${input.source.repo}`.toLowerCase()).map(a => ({ id: a.id, title: a.title, text: a.text, revision: answerConfigDigest(a) })) } });
 			Object.defineProperty(answerDraft, "configDigest", { value: input.configDigest });
 			Object.defineProperty(answerDraft, "project", { value: input.project });
 			await store.update(ref.runId, { status: "running" });
-			return { data: { kind: input.source.kind, purpose: "answer-draft", repo: input.source.repo, target: { ...input.source.target, title: "", body: "" }, ...(input.source.projectId !== undefined ? { projectId: input.source.projectId } : {}), ...(input.source.azure ? { azure: input.source.azure } : {}), flow: rule.flow, provider: model.provider, model: model.id, models: [...new Set([rule.model, rule.decisionModel])], maxCostUsd: rule.maxCostUsd, maxTurns: 8, packages: false, secretBundle: false, resume: false, awaitInput: false, steer: false, progress: false, statusComment: false, recover: false, answerDecisionModel: classifier, answerDraft } };
+			return { data: { kind: input.source.kind, purpose: "answer-draft", repo: input.source.repo, target: { ...input.source.target, title: "", body: "" }, ...(input.source.projectId !== undefined ? { projectId: input.source.projectId } : {}), ...(input.source.azure ? { azure: input.source.azure } : {}), flow: rule.flow, provider: model.provider, model: model.id, models: [...new Set([rule.model, rule.decisionModel])], maxCostUsd: rule.maxCostUsd, maxTurns: 8, packages: false, secretBundle: false, ...declared.fields, resume: false, awaitInput: false, steer: false, progress: false, statusComment: false, recover: false, answerDecisionModel: classifier, answerDraft } };
 		},
 		async collect({ job, prepared, completed, result }) {
 			if (!job?.answerDraft) return null;
