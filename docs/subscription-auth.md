@@ -89,9 +89,12 @@ Run management commands in a terminal on the owning host, with the same deployme
 ```sh
 pi-dispatch auth status
 pi-dispatch auth login chatgpt-main
-pi-dispatch auth usage chatgpt-main
 pi-dispatch auth logout chatgpt-main
+pi-dispatch auth usage claude-main
 ```
+
+`auth usage` reads usage only through an adapter that has a usage read, which today means the Claude adapters. On a
+ChatGPT connection it answers `auth-usage-unsupported`, so the console does not offer it there.
 
 Login follows the selected adapter's browser authorization. The browser console does not receive credentials
 or perform renewal. Logout disconnects future snapshots and prints `logout.remoteRevocationConfirmed` separately. A false value means remote revocation is unconfirmed, including when an adapter was removed or changed.

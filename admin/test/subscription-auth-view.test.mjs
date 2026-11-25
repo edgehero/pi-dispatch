@@ -66,7 +66,7 @@ test("invalid date, percentage, identifiers and provider text cannot become safe
 });
 
 test("display adapter pins and quota bounds are bolted to the authoritative worker contracts", () => {
-  assert.deepEqual(SUBSCRIPTION_ADAPTERS, Object.fromEntries(Object.entries(COMMUNITY_AUTH_ADAPTERS).map(([id, row]) => [id, { provider: row.provider, package: row.package ?? null, version: row.version ?? null, community: row.community }])));
+  assert.deepEqual(SUBSCRIPTION_ADAPTERS, Object.fromEntries(Object.entries(COMMUNITY_AUTH_ADAPTERS).map(([id, row]) => [id, { provider: row.provider, package: row.package ?? null, version: row.version ?? null, community: row.community, usage: row.usage }])));
   assert.equal(SUBSCRIPTION_VIEW_LIMITS.freshMs, SUBSCRIPTION_QUOTA_LIMITS.freshMs);
   assert.equal(SUBSCRIPTION_VIEW_LIMITS.windows, SUBSCRIPTION_QUOTA_LIMITS.windows);
 });
