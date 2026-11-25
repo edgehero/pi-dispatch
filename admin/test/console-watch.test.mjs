@@ -217,6 +217,17 @@ test("trace shows a chosen action beside status, reviewed model, actual cost, ti
   assert.ok(operator.includes("usage") && operator.includes("0.001"));
 });
 
+test("a decision the provider billed says so to every role, and only the operator sees the provider's id (pi 1.6.1)", () => {
+  const data = { board, trace: [{ kind: "decide", status: "answered", action: "ignore", model: "openrouter/typesafe/jev-1.13", modelReviewed: true, costUsd: 0.000004, billed: true, responseId: "gen-1764081234-AbCdEf", at: 1000 }] };
+  const viewer = String(watchBoardPanel(view(data)));
+  assert.ok(viewer.includes("cost $0.000004; billed by the provider"), viewer);
+  assert.ok(!viewer.includes("gen-1764081234-AbCdEf"));
+  const operator = String(watchBoardPanel(view(data, "operator")));
+  assert.ok(operator.includes("gen-1764081234-AbCdEf"), "the private entry names it");
+  const unbilled = String(watchBoardPanel(view({ board, trace: [{ ...data.trace[0], billed: "yes" }] })));
+  assert.ok(!unbilled.includes("billed by the provider"));
+});
+
 test("public trace rendering rejects malformed scalar metadata even from a private-loaded entry", () => {
   const data = { board, trace: [{ kind: "decide", status: PRIVATE, action: PRIVATE, model: "PRIVATE-MODEL", modelReviewed: false, costUsd: PRIVATE, rows: PRIVATE, at: PRIVATE, confidence: PRIVATE, probabilities: { secret: PRIVATE } }] };
   for (const role of ["viewer", "operator"]) {

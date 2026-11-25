@@ -39,6 +39,15 @@ test("decide calls only the reviewed runtime classifier and records both stages"
 	const failed = fixture({ runtime: { getModelsOfType: () => [{ id: config.decisionModel.id, cost: { input: 1, output: 0 } }], classify() { throw new Error("private"); } } });
 	assert.equal((await failed.tool("decide").execute("d", { state: {}, questions: {} })).isError, true); assert.equal(failed.lines.at(-1).status, "failed");
 });
+test("decide traces the provider's response id for the operator and does not hand it to the model (pi 1.6.1)", async () => {
+	const model = { provider: "openrouter", id: "typesafe/jev-1.13", cost: { input: 1, output: 0 } };
+	for (const [responseId, kept] of [["gen-1764081234-AbCdEf", true], ["gen 1764081234", false], [undefined, false]]) {
+		const f = fixture({ runtime: { getModelsOfType: () => [model], classify: async () => ({ stopReason: "stop", answers: { act: { choice: "ignore" } }, ...(responseId !== undefined && { responseId }) }) } });
+		const response = await f.tool("decide").execute("d", { state: { count: 4 }, questions: { act: { type: "choice", criteria: { ignore: "noise" } } } });
+		assert.equal(f.lines.at(-1).responseId, kept ? responseId : undefined, String(responseId));
+		assert.equal("responseId" in JSON.parse(response.content[0].text), false, "the model's reply is unchanged");
+	}
+});
 test("board proposals use only the fixed outbox path; oversize is refused before write", async () => {
 	const f = fixture();
 	assert.equal((await f.tool("board_write").execute("b", { board: { version: 1, blocks: [] } })).isError, undefined);

@@ -4,6 +4,12 @@ import { configError } from "./outcome.mjs";
 import { LAYOUT } from "./layout.mjs";
 const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const fail = () => configError("invalid deterministic watch decision", "watch-config-invalid");
+/**
+ * The provider's own id for a classify answer (pi 1.6.1: `ClassifierResult.responseId`, such as OpenRouter's generation
+ * id), kept when it is a plain token and left out otherwise. It names a paid call in the provider's own records, so an
+ * operator can find it there; the worker checks the shape again and keeps it in the operator's trace alone.
+ */
+export const responseIdOf = (result) => typeof result?.responseId === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(result.responseId) ? result.responseId : null;
 export function readWatchDecision({ path = `${LAYOUT.job}/watch-decision.json`, fs = { lstatSync, readFileSync } } = {}) {
 	let stat;
 	try { stat = fs.lstatSync(path); } catch (error) { if (error?.code === "ENOENT") return null; throw fail(); }
@@ -32,7 +38,8 @@ export async function executeWatchDecision({ input, runtime, outbox = LAYOUT.out
 	const questions = Object.fromEntries(Object.entries(input.questions).map(([key, question]) => [key, { ...question, type: question.type === "noul" ? "bool" : question.type }]));
 	let result;
 	try { result = await runtime.classify(model, { state: input.state, questions }, { signal: AbortSignal.timeout(10000) }); } catch { result = { stopReason: "error", answers: {} }; }
-	const output = { version: 1, stopReason: result.stopReason, answers: result.answers ?? {}, ...(result.usage && { usage: result.usage }) };
+	const responseId = responseIdOf(result);
+	const output = { version: 1, stopReason: result.stopReason, answers: result.answers ?? {}, ...(result.usage && { usage: result.usage }), ...(responseId && { responseId }) };
 	let raw;
 	try { raw = JSON.stringify(output); } catch { return { ok: false, reason: "decide-unanswered" }; }
 	if (Buffer.byteLength(raw) > 16384) return { ok: false, reason: "decide-unanswered" };
