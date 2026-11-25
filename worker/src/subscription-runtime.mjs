@@ -267,6 +267,35 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		}
 		return settled;
 	}
+	/**
+	 * Issue #1046: gives back a trial this attempt claimed when the attempt provably never reached the provider, because
+	 * its container never started (index.mjs calls this on the runtime's `container-never-started` verdict, the one the
+	 * dollar and slot refunds trust) or because it was refused after admission and before any container was asked for.
+	 * Without it the claim stood, so the attempt's retry was deferred and every other job on the connection refused until
+	 * six hours after the claim: one infrastructure failure at retest time made a six-hour block twelve.
+	 *
+	 * The rows come from `auth.check`, never from `check(job)`: a preview refuses while the trial is held, so it would name
+	 * no connection to release. `releaseTrial` is guarded by the holder (subscription-quota.mjs `heldTrialRefusal`), so a
+	 * trial another attempt holds, or none, is a refused no-op and calling this twice is harmless. No binding is compared
+	 * as `settleTrial` does: that one records what a run said about the limit, under the account that ran it, while this
+	 * only undoes the attempt's own claim, which names its connection's current identity. Each connection apart; a refused
+	 * release is no error.
+	 */
+	async function releaseUnstartedTrial(job, { attemptId } = {}) {
+		if (typeof attemptId !== "string") return [];
+		const released = [];
+		const seen = new Set();
+		for (const ref of subscriptionRoutes(job)) {
+			if (seen.has(ref.provider)) continue;
+			seen.add(ref.provider);
+			const model = lookup(ref.provider, ref.id);
+			const row = await auth.check(ref.provider, { model: ref.id, api: model?.api, baseUrl: model?.baseUrl });
+			if (!row?.ok || !row.managed) continue;
+			const written = await quota.releaseTrial(subscriptionIdentity(row), { attemptId });
+			if (written.ok) released.push({ provider: row.provider, trial: "released" });
+		}
+		return released;
+	}
 	function sameBinding(row, snapshot) {
 		return (row.connectionId ?? row.id) === snapshot.connectionId && row.provider === snapshot.provider && row.ownerHost === snapshot.ownerHost && row.accountGroup === snapshot.accountGroup && row.generation === snapshot.generation && row.adapter === snapshot.adapter && (row.bindingSignature === undefined || row.bindingSignature === snapshot.bindingSignature);
 	}
@@ -312,5 +341,5 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		if (next.provider !== snapshot.provider || next.connectionId !== snapshot.connectionId || next.bindingSignature !== snapshot.bindingSignature || next.adapter !== snapshot.adapter || next.accountGroup !== snapshot.accountGroup) return null;
 		return { ...snapshot, ...next };
 	}
-	return { check, inspectPolicy, prepare, validate, observe, settleTrial, usage, status, extend, current, watch: (snapshot, changed) => auth.watch?.(snapshot.connectionId, changed) };
+	return { check, inspectPolicy, prepare, validate, observe, settleTrial, releaseUnstartedTrial, usage, status, extend, current, watch: (snapshot, changed) => auth.watch?.(snapshot.connectionId, changed) };
 }

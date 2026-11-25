@@ -20166,12 +20166,21 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
   refusal row (exhaustion would vanish with no evidence, the rule this key was built on); clearing on any successful
   job (a job that never called that provider proves nothing); refusing to clear on exit 1 (output tokens from that
   provider prove the window answered, whatever ended the run after: an overload later in the run is no quota
-  evidence); a retest per host (two hosts would each spend one). Residual: a trial whose container never started
-  (refused or failed after admission, before the container) is not given back, since the never-started paths are many
-  and none passes through one seam that knows the trial; its next retest comes six hours after its claim. **Code
-  evidence**: worker/src/subscription-quota.mjs -> SUBSCRIPTION_RETEST_MS, retestAtOf, heldTrialRefusal, admit,
-  clearTrialEvidence, releaseTrial; worker/src/subscription-runtime.mjs -> settleTrial; worker/src/index.mjs ->
-  subscriptionAttemptId; worker/test/subscription-retest.test.mjs.
+  evidence); a retest per host (two hosts would each spend one). An attempt that never reached the provider gives its
+  trial back too (issue #1046): the pickup releases it on the runtime's `container-never-started` verdict (an exit of
+  125 to 127, a spawn fault, a pre-start gate after the prepare), the verdict the dollar and slot refunds already trust,
+  and on a refusal returned after the prepare before any container was asked for. Without it one infrastructure failure
+  at retest time held the connection six hours past the claim, twelve in all. The release names the connection from
+  `auth.check` (a preview refuses while the trial is held, so it would name none) and is guarded by the holder, so a
+  trial another attempt holds is untouched and a second release is a no-op; no binding is compared, since it records
+  nothing about the limit and only undoes the attempt's own claim. A wait (quota, owner, reserve) keeps the attempt
+  and its claim, which the store re-admits. Rejected: a release at each never-started site (there are dozens, and
+  the processor holds no subscription deps beyond the prepare and the validation); a release on every deferral (a
+  wait's attempt comes back under the same id). Residual: a non-retryable throw before the container keeps the trial
+  to its next retest. **Code evidence**: worker/src/subscription-quota.mjs -> SUBSCRIPTION_RETEST_MS, retestAtOf,
+  heldTrialRefusal, admit, clearTrialEvidence, releaseTrial; worker/src/subscription-runtime.mjs -> settleTrial,
+  releaseUnstartedTrial; worker/src/index.mjs -> subscriptionAttemptId, releaseUnstartedTrial;
+  worker/test/subscription-retest.test.mjs; worker/test/model-failover.test.mjs.
 
 - **Concurrent bearer replacement (2026-11-20)**: job A can rotate a shared connection while job B is
   still far from its own renewal window. Waiting for B's lease timer leaves its old bearer revoked.
@@ -21396,3 +21405,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-24 (#969) | **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: the refusal net. Each attempt counts its comments, and a forge refusal before spend that posted none gets the reason catalog's sentence once from the pickup; five reasons stay silent by decision (named on one line a test reads); the knob, per-site comments, a dedup store and label removal are rejected. OQ-023's prepare-policy silence is ended, its every-delivery hazard bounded as every spend refusal's is. UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, the post-spend terminals, the failure hook and its paging, and `INT-FORGE-TERMINAL-RECEIPT`. |
 | 2026-11-24 (#971) | **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: ended label-job receipts. The two listeners that post the completion receipt post `INT-FORGE-ENDED-RECEIPT` for a returned refusal or stop and for a final failure, after the comment that says why, with the same binding. The rejection of receipts for failed jobs is reversed for this separate receipt, with supersession by the newest receipt per job id; a marker inside the human comments, a v1 field and a retry hint are rejected. UNCHANGED, checked: the completion receipt, the human comments' bytes, the refusal net, the failure hook and its paging. |
 | 2026-11-24 (#950) | **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**: one row, `provider-stop-refusal`, the runner's exit-2 stop of a run whose provider ended the reply with an explicit refusal. A fixed sentence that never carries the provider's explanation, a reason catalog row whose sentence is that comment, and a page through the hook's spread of `RUNNER_POLICY_REASONS`. Rejected: putting the explanation in the comment, since it is the provider's prose about what the job was asked. UNCHANGED, checked: `DES-MODEL-FAILOVER` (the stop is an exit 2: its model attempt keeps only the marker written before the container started, it writes no cooldown, and it is never retried, so it never fails over), the refusal net and the ended receipt's binding. |
+| 2026-11-25 (#1046) | **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` AMENDED**: the retest residual is closed. An attempt that claimed a trial and never reached the provider gives it back, on the runtime's `container-never-started` verdict and on a refusal returned after the prepare before any container was asked for, through one release in the pickup that names the connection from `auth.check` and is guarded by the holder. A wait keeps its claim; a non-retryable throw before the container is the residual. `CONST-RETRY-INFRA-ONLY` UNCHANGED, checked: the release never throws and never changes the result. `INT-SUBSCRIPTION-QUOTA-KEY` AMENDED (its settled-trial bullet): the store's release and its guards are as they were, with a second caller. |

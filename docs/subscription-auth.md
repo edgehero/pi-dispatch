@@ -340,9 +340,9 @@ stop, which settle nothing. If the provider answered it (a verified exit 0, 1 or
 provider returned output, and no quota or rate-limit failure ended it, so an overload or a policy stop later in the
 run still counts), the refusal is cleared and every job may use the connection again. If the run provably never
 called that provider (a policy stop before its first call, say, and an exit line whose usage rules the provider
-out), the retest is given back and the next pickup tries again at once. Otherwise (calls that returned nothing, a
-usage record that cannot rule the provider out) the next retest is six hours after it started, and so is it for a
-retest whose container never started. Exhaustion read from a usage window (Claude's) and exhaustion with a known
+out), the retest is given back and the next pickup tries again at once, and so it is for a retest whose container
+never started or that was refused before its container. Otherwise (calls that returned nothing, a usage record that
+cannot rule the provider out) the next retest is six hours after it started. Exhaustion read from a usage window (Claude's) and exhaustion with a known
 reset are never retested. Refresh observations on the owner:
 
 ```sh
@@ -356,8 +356,8 @@ pi-dispatch auth trial claude-main
 ```
 
 The command starts no job and does not clear exhaustion; the job that claims the trial clears a provider's
-refusal the same way a retest does, once the provider answered it, and a job that never called the provider leaves
-the trial for the next pickup. Candidate inspection consumes nothing. Only selected
+refusal the same way a retest does, once the provider answered it, and a job that never called the provider (its
+container never started, say) leaves the trial for the next pickup. Candidate inspection consumes nothing. Only selected
 admission claims the trial atomically for one durable attempt; another attempt cannot use it while that one holds it,
 and gets it only when that attempt gave it back unasked. A known reset,
 newer evidence or stale state prevents the corresponding stale trial grant. The trial bypasses no model,

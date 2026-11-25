@@ -312,6 +312,33 @@ test("a retest that never asked the provider gives the trial back, so the retest
 	}
 });
 
+test("issue #1046: an attempt whose container never started gives its trial back, so the retest is due again at once, not six hours on", async () => {
+	const world = await retesting();
+	assert.equal((await world.runtime.prepare(JOB, { attemptId: "b:0:0" })).wait, "subscription-quota", "the claim holds while the attempt runs");
+	assert.deepEqual(await world.runtime.releaseUnstartedTrial(JOB, { attemptId: "b:0:0" }), [], "another attempt's claim is never given back");
+	assert.equal((await world.status()).trialClaimedAt, NOW + 6 * HOUR);
+	assert.deepEqual(await world.runtime.releaseUnstartedTrial(JOB, { attemptId: "a:1:0" }), [{ provider: "openai", trial: "released" }]);
+	const status = await world.status();
+	assert.deepEqual([status.state, status.trialClaimedAt, status.retestAt <= world.now()], ["exhausted", null, true], "still exhausted, the retest due");
+	assert.deepEqual(await world.runtime.releaseUnstartedTrial(JOB, { attemptId: "a:1:0" }), [], "a second release is a refused no-op");
+	assert.equal((await world.runtime.prepare(JOB, { attemptId: "a:2:0" })).ok, true, "the retry retests at once");
+	// No attempt id, or a job with no subscription route, gives nothing back and asks nothing.
+	assert.deepEqual(await world.runtime.releaseUnstartedTrial(JOB, {}), []);
+	assert.deepEqual(await world.runtime.releaseUnstartedTrial({ ...JOB, provider: "anthropic", model: "x", models: ["anthropic/x"] }, { attemptId: "a:2:0" }), []);
+	assert.equal((await world.status()).trialClaimedAt, NOW + 6 * HOUR + 60_000, "the retry's own claim stands");
+});
+
+test("issue #1046: a person's trial an unstarted attempt claimed is unused again, for the next pickup", async () => {
+	const world = runtimeWorld();
+	await world.runtime.observe(JOB, REFUSED, [world.row]);
+	assert.equal((await world.quota.grantOneTrial(subscriptionIdentity(world.row), { expectedVersion: 1, actorKind: "person" })).ok, true);
+	world.at(NOW + 1000);
+	assert.equal((await world.runtime.prepare(JOB, { attemptId: "a:0:0" })).ok, true);
+	assert.equal((await world.runtime.prepare(JOB, { attemptId: "b:0:0" })).wait, "subscription-quota");
+	assert.deepEqual(await world.runtime.releaseUnstartedTrial(JOB, { attemptId: "a:0:0" }), [{ provider: "openai", trial: "released" }]);
+	assert.equal((await world.runtime.prepare(JOB, { attemptId: "b:0:0" })).ok, true, "the grant goes to the next pickup");
+});
+
 test("a person's trial whose run may have called the provider through other/other is never handed to a second attempt", async () => {
 	const world = runtimeWorld();
 	await world.runtime.observe(JOB, REFUSED, [world.row]);
