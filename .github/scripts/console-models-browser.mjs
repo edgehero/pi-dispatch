@@ -257,9 +257,16 @@ export async function checkModelsBrowser({ chrome, shots = null, sandbox = proce
     fixture.state.subscriptionAuth = { state: "ready", partial: false, connections: [] };
     await navigate("/config/connections");
     assert.ok(await evaluate("document.querySelector('#p-subscription-auth').textContent.includes('No subscription connection is configured')"));
+    // Issue #1073: null is a status nobody read (the reader returns it when the registry is unreachable or the read
+    // throws), so the card says it is not known. Hosts that published nothing are a status that was read and holds no
+    // connection, which keeps "not published".
     fixture.state.subscriptionAuth = null;
     await navigate("/config/connections");
-    assert.ok(await evaluate("document.querySelector('#p-subscription-auth').textContent.includes('Subscription status not published')&&!document.querySelector('#p-subscription-auth').textContent.includes('No subscription connection is configured')"));
+    assert.ok(await evaluate("(()=>{const t=document.querySelector('#p-subscription-auth').textContent;return t.includes('Subscription status not known')&&!t.includes('Subscription status not published')&&!t.includes('No subscription connection is configured')})()"));
+    await capture("subscription-connections-unread");
+    fixture.state.subscriptionAuth = { state: "partial", partial: true, connections: [] };
+    await navigate("/config/connections");
+    assert.ok(await evaluate("(()=>{const t=document.querySelector('#p-subscription-auth').textContent;return t.includes('Subscription status not published')&&!t.includes('Subscription status not known')&&!t.includes('No subscription connection is configured')})()"));
     await capture("subscription-connections-unpublished");
     fixture.state.subscriptionAuth = consoleSubscriptionFixture(subscriptionClock);
     stage = "subscription no-JavaScript facts and terminal instructions";
