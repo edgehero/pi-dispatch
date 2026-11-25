@@ -182,9 +182,10 @@ test("the chain verifies after a mix of panel rows and CLI rows appended to one 
   cli.append({ actor: { name: "alice", role: "operator", session: "abc" }, action: "login", outcome: "ok" });
   panelWrite(logsDir, { kind: "setting-set", target: "/d/s.json" }, () => ({ invalid: "no" }));
   const rows = rowsOf(logsDir);
-  assert.deepEqual(rows.map((r) => r.actor.role), ["shell", "panel", "operator", "panel", "panel"]);
-  assert.deepEqual(rows.map((r) => r.seq), [1, 2, 3, 4, 5], "one chain, no seq written twice");
-  assert.deepEqual(verifyConsoleAudit({ logsDir }), { ok: true, rows: 5, startsAt: null });
+  // The panel's write that landed has its receipt after its intent (issue #1072); the refused one its failed row.
+  assert.deepEqual(rows.map((r) => [r.actor.role, r.action]), [["shell", "token-added"], ["panel", "write"], ["panel", "write-applied"], ["operator", "login"], ["panel", "write"], ["panel", "write"]]);
+  assert.deepEqual(rows.map((r) => r.seq), [1, 2, 3, 4, 5, 6], "one chain, no seq written twice");
+  assert.deepEqual(verifyConsoleAudit({ logsDir }), { ok: true, rows: 6, startsAt: null });
 });
 
 test("panelActor: the login name in a plain charset, role panel, no session; unknown when there is none", () => {
@@ -265,7 +266,7 @@ test("the dialog writes and /dispatch secrets are audited too", async () => {
   await withDeployment(logsDir, async ({ triggersPath }) => {
     const ui = { select: async () => "label", input: (() => { const a = ["github", "bug", "fix"]; return async () => a.shift(); })(), confirm: async () => true, notify() {} };
     await indexMod.handleDashboardAction({ action: "addTrigger" }, { triggersPath }, { ui });
-    assert.deepEqual(rowsOf(logsDir).map((r) => [r.kind, r.outcome]), [["trigger-add", "ok"]]);
+    assert.deepEqual(rowsOf(logsDir).map((r) => [r.kind, r.action, r.outcome]), [["trigger-add", "write", "ok"], ["trigger-add", "write-applied", "ok"]]);
   });
   const { runSecretsCommand } = await jiti.import("../src/secrets-command.ts");
   const files = {};
@@ -279,7 +280,8 @@ test("the dialog writes and /dispatch secrets are audited too", async () => {
   const audit = { append: (row) => { seen.push({ ...row, wroteYet: "/s/settings.json" in files }); return row; } };
   const ctx = { ui: { input: async (t) => (/profile name/.test(t) ? "prod" : "/opt/pi/resolve.sh"), confirm: async () => true, notify() {} } };
   await runSecretsCommand({ settingsFile: "/s/settings.json" }, ctx, () => {}, ["add"], { fs, audit });
-  assert.deepEqual(seen.map((r) => [r.kind, r.outcome, r.target, r.wroteYet]), [["secret-profile-add", "ok", "/s/settings.json", false]]);
+  // The intent before the write, the receipt after it (issue #1072).
+  assert.deepEqual(seen.map((r) => [r.kind, r.action, r.outcome, r.target, r.wroteYet]), [["secret-profile-add", "write", "ok", "/s/settings.json", false], ["secret-profile-add", "write-applied", "ok", "/s/settings.json", true]]);
   // An audit that cannot append refuses the declaration with nothing written.
   const notes = [];
   const fs2 = { ...fs, writeFileSync: () => assert.fail("must not write"), renameSync: () => assert.fail("must not write") };
@@ -327,15 +329,17 @@ test("auditedWrite's note: a second ok row with the reason on the same ticket, o
   const note = (r) => (r?.short ? "the list may be short" : null);
   const said = (list) => list.map((r) => [r.action, r.outcome, r.reason ?? null]);
   assert.deepEqual(auditedWrite({ audit, actor: ACTOR, kind: "fleet-pause", target: "fleet", note }, () => ({ ok: true, short: true })), { ok: true, short: true });
-  assert.deepEqual(said(rows), [["write", "ok", null], ["write", "ok", "the list may be short"]]);
+  // A person's write that landed has its receipt after the note, as an agent's has (issue #1072).
+  assert.deepEqual(said(rows), [["write", "ok", null], ["write", "ok", "the list may be short"], ["write-applied", "ok", null]]);
   assert.equal(rows[0].ticket, rows[1].ticket);
+  assert.equal(rows[0].ticket, rows[2].ticket);
   rows.length = 0;
   await auditedWrite({ audit, actor: { ...ACTOR, role: "agent" }, kind: "fleet-pause", target: "fleet", note }, async () => ({ ok: true, short: true }));
   assert.deepEqual(said(rows), [["write", "ok", null], ["write", "ok", "the list may be short"], ["write-applied", "ok", null]]);
   rows.length = 0;
   auditedWrite({ audit, actor: ACTOR, kind: "fleet-pause", target: "fleet", note }, () => ({ ok: true }));
   auditedWrite({ audit, actor: ACTOR, kind: "fleet-pause", target: "fleet", note }, () => ({ invalid: "refused", short: true }));
-  assert.deepEqual(said(rows), [["write", "ok", null], ["write", "ok", null], ["write", "failed", "refused"]]);
+  assert.deepEqual(said(rows), [["write", "ok", null], ["write-applied", "ok", null], ["write", "ok", null], ["write", "failed", "refused"]]);
   // The note's row fails: logged, and the write's own answer is what the caller sees.
   const logs = [];
   let n = 0;
@@ -376,7 +380,7 @@ test("the TUI's p and r over a list that is short because Valkey answered a read
       const resumeNote = note.replace("Pause the fleet again", "Resume the fleet again").replace("pause the fleet again", "resume the fleet again").replace("then pause again", "then resume again").replace("were not paused", "were not resumed");
       assert.ok((await said("p")).includes(`paused the fleet, but ${note}`), `${what}: ${await said("")}`);
       assert.ok((await said("r")).includes(`resumed the fleet, but ${resumeNote}`), what);
-      assert.deepEqual(rowsOf(logsDir).map((r) => [r.kind, r.outcome, r.reason ?? null]), [["fleet-pause", "ok", null], ["fleet-pause", "ok", kept(note)], ["fleet-resume", "ok", null], ["fleet-resume", "ok", kept(resumeNote)]], what);
+      assert.deepEqual(rowsOf(logsDir).map((r) => [r.kind, r.action, r.outcome, r.reason ?? null]), [["fleet-pause", "write", "ok", null], ["fleet-pause", "write", "ok", kept(note)], ["fleet-pause", "write-applied", "ok", null], ["fleet-resume", "write", "ok", null], ["fleet-resume", "write", "ok", kept(resumeNote)], ["fleet-resume", "write-applied", "ok", null]], what);
       // Part-way: the shared queue's pause is sent and never answered, so the note leads with the short list and why.
       flip = (name) => (name === "pi-jobs" ? new Promise(() => {}) : Promise.resolve());
       const lost = await said("p", 400);
@@ -429,7 +433,7 @@ test("the TUI's p and r over a real fleet reader whose registry does not answer:
     };
     assert.ok((await said("p")).includes(`paused the fleet, but ${switchShortNote(true)}`));
     assert.ok((await said("r")).includes(`resumed the fleet, but ${switchShortNote(false)}`));
-    assert.deepEqual(rowsOf(logsDir).map((r) => [r.kind, r.outcome, r.reason ?? null]), [["fleet-pause", "ok", null], ["fleet-pause", "ok", switchShortNote(true)], ["fleet-resume", "ok", null], ["fleet-resume", "ok", switchShortNote(false)]]);
+    assert.deepEqual(rowsOf(logsDir).map((r) => [r.kind, r.action, r.outcome, r.reason ?? null]), [["fleet-pause", "write", "ok", null], ["fleet-pause", "write", "ok", switchShortNote(true)], ["fleet-pause", "write-applied", "ok", null], ["fleet-resume", "write", "ok", null], ["fleet-resume", "write", "ok", switchShortNote(false)], ["fleet-resume", "write-applied", "ok", null]]);
   } finally {
     await comp.dispose();
   }
@@ -640,4 +644,26 @@ test("a lost agent receipt reports successful action with incomplete accounting,
   assert.equal(calls, 1);
   assert.equal(rows.length, 2);
   assert.doesNotMatch(logs.join(""), /private failure/);
+});
+
+// Issue #1072: a receipt for every write that landed, whoever made it. A person's and the panel's lost receipt is said
+// in the log and changes nothing of the answer: their write landed, and the audit page then reads its outcome as unknown.
+test("a write that landed gets its receipt for a person and the panel too, and a lost one is logged without changing the answer (#1072)", async () => {
+  for (const role of ["operator", "panel"]) {
+    const rows = [];
+    const opts = { audit: { append: (row) => rows.push(row) }, actor: { name: "ops", role, session: null }, kind: "setting-set", target: "/d/s.json", ticket: "abcdef123456" };
+    assert.deepEqual(await auditedWrite(opts, async () => ({ ok: true })), { ok: true }, role);
+    assert.deepEqual(rows.map((r) => [r.action, r.outcome, r.ticket, r.kind, r.target]), [["write", "ok", opts.ticket, "setting-set", "/d/s.json"], ["write-applied", "ok", opts.ticket, "setting-set", "/d/s.json"]], role);
+    // A refused write has its failed row and no receipt.
+    rows.length = 0;
+    assert.deepEqual(await auditedWrite(opts, async () => ({ invalid: "stale" })), { invalid: "stale" });
+    assert.deepEqual(rows.map((r) => [r.action, r.outcome]), [["write", "ok"], ["write", "failed"]], role);
+    // A lost receipt: logged by its code, the answer as the write gave it, no warning, nothing retried.
+    let calls = 0;
+    const logs = [];
+    const lost = { ...opts, audit: { append(row) { if (row.action === "write-applied") throw Object.assign(new Error("private failure"), { code: "ENOSPC" }); return row; } }, log: (line) => logs.push(line) };
+    assert.deepEqual(await auditedWrite(lost, async () => { calls += 1; return { ok: true }; }), { ok: true }, role);
+    assert.equal(calls, 1);
+    assert.deepEqual(logs, ["panel: audit append failed (ENOSPC) for the receipt of a setting-set write that landed; the log reads ticket abcdef123456 as an outcome unknown"]);
+  }
 });

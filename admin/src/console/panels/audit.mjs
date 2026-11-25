@@ -74,8 +74,9 @@ function rowId(entry, pos, state, used) {
  * is looked up only when the console writes it: a word this console does not know (issue #761) that happens to name a
  * state ("damaged") must not wear that state's badge, so it takes the attention badge with the word as written.
  */
-function outcomeCell(entry, state) {
-  const key = state === "ok" ? (CONSOLE_AUDIT_OUTCOMES.includes(entry.outcome) ? entry.outcome : null) : state;
+function outcomeCell(entry, state, outcome = null) {
+  // Issue #1072: a verified intent nothing settles wears the unknown outcome's badge (`audit-view.mjs` header).
+  const key = state === "ok" ? (outcome === "unknown" ? "unknown" : CONSOLE_AUDIT_OUTCOMES.includes(entry.outcome) ? entry.outcome : null) : state;
   const w = typeof key === "string" && Object.hasOwn(AUDIT_OUTCOME_WORDS, key) ? AUDIT_OUTCOME_WORDS[key] : { status: "attention", icon: null, word: String(entry.outcome ?? "unknown") };
   return ui.badge(w.status, w.word, { icon: w.icon });
 }
@@ -157,8 +158,13 @@ function countText(kind, n, alone) {
   return `count ${n}`;
 }
 
+/**
+ * The note under the reason of a write intent whose outcome is unknown (issue #1072): nothing follows it on its ticket.
+ */
+export const AUDIT_OUTCOME_UNKNOWN_TEXT = "No outcome follows this write on its ticket: whatever made it stopped before it said, so the change may or may not have been made. Look at what it changes.";
+
 /** One table row of the log (`kit.tbl`'s `{ cells, mark, id }`). */
-function rowOf({ entry, pos, state }, chain, used) {
+function rowOf({ entry, pos, state, outcome = null }, chain, used) {
   const id = rowId(entry, pos, state, used);
   if (!isAuditRow(entry)) {
     const file = typeof entry?.file === "string" ? entry.file : "an audit file";
@@ -183,7 +189,7 @@ function rowOf({ entry, pos, state }, chain, used) {
   // aside).
   const count = Number.isSafeInteger(entry.count) ? (said === "" ? countText(entry.kind, entry.count, true) : ` (${countText(entry.kind, entry.count, false)})`) : "";
   // The faint dash stands for a cell with nothing in it: a row whose state note fills the cell has no dash before it.
-  const note = stateNote(entry, state, chain);
+  const note = outcome === "unknown" && state === "ok" ? html`<span class="reason">${AUDIT_OUTCOME_UNKNOWN_TEXT}</span>` : stateNote(entry, state, chain);
   const unknownNote = unknownWordsNote(entry, state);
   const reasonText = said === "" && count === "" ? (note === null && unknownNote === null ? none : null) : html`${said}${count}`;
   const reason = state === "damaged"
@@ -192,7 +198,7 @@ function rowOf({ entry, pos, state }, chain, used) {
   return {
     id,
     mark: state === "damaged" ? "failed" : null,
-    cells: [html`<b>${entry.seq}</b>`, { when: true, html: html`<span class="au-at">${timeHtml(msOf(entry.at))}</span>` }, who, action, { wide: true, html: target }, outcomeCell(entry, state), reasonCell(reason)],
+    cells: [html`<b>${entry.seq}</b>`, { when: true, html: html`<span class="au-at">${timeHtml(msOf(entry.at))}</span>` }, who, action, { wide: true, html: target }, outcomeCell(entry, state, outcome), reasonCell(reason)],
   };
 }
 

@@ -49,6 +49,15 @@
  *
  * NEVER AN ECHO. A query parameter is checked against a closed list or a charset before anything reads it, and a
  * refusal names the parameter, never the value (`pages.mjs`'s rule).
+ *
+ * A WRITE WHOSE OUTCOME WAS NEVER WRITTEN SAYS SO (issue #1072). A write's `ok` row is its intent, appended before the
+ * write; one that landed appends a receipt on the same ticket, and one that did not a row that is not `ok`. An intent
+ * nothing follows is a write whose writer stopped during it (a crash, a kill, a stop past its deadline), and it read as
+ * a write that landed. Which intents nothing follows is the verifier's to say (`withOutcomes`: its walk reads every row
+ * in order, so a page judges none by the rows it happened to read, and a row reads the same on every page that shows
+ * it), from each role's first receipt on, since before #1072 only an agent's write had one. Such a row on an intact
+ * chain shows "outcome unknown" with a note. The rows this view read are asked too: a receipt appended since the check
+ * (it is cached) clears its intent at once, where the check would say so only at its next run.
  */
 import { CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_CURSOR_RE, CONSOLE_AUDIT_OUTCOMES, CONSOLE_AUDIT_READ_MAX, consoleAuditDriver } from "@edgehero/pi-dispatch/console-audit";
 
@@ -97,6 +106,8 @@ export const AUDIT_OUTCOME_WORDS = Object.freeze({
   unverified: Object.freeze({ status: "idle", icon: "hourglass", word: "not verified" }),
   suspect: Object.freeze({ status: "idle", icon: "hourglass", word: "not verified" }),
   unchecked: Object.freeze({ status: "idle", icon: null, word: "unchecked" }),
+  // Issue #1072: a verified intent the verifier found nothing after (see the header).
+  unknown: Object.freeze({ status: "attention", icon: null, word: "outcome unknown" }),
 });
 
 /** The row states a view hands the screen. */
@@ -246,9 +257,14 @@ function indexOf(files) {
   return Object.freeze(out);
 }
 
-/** The chain as the screen reads it, from a `verifyConsoleAudit({ withLast: true })` result or anything else. */
+/** The verifier's `unsettled`, its row numbers alone, frozen (issue #1072); [] for anything that is not that list. */
+function unsettledOf(value) {
+  return Object.freeze(Array.isArray(value) ? value.filter((seq) => Number.isSafeInteger(seq) && seq >= 1) : []);
+}
+
+/** The chain as the screen reads it, from a `verifyConsoleAudit({ withLast: true, withOutcomes: true })` result or anything else. */
 function chainOf(v) {
-  const unread = (why) => ({ state: "unreadable", why, from: null, through: null, startsAt: null, broken: null, last: null, suspect: null, index: Object.freeze([]), checkedAt: null, unknown: 0 });
+  const unread = (why) => ({ state: "unreadable", why, from: null, through: null, startsAt: null, broken: null, last: null, suspect: null, index: Object.freeze([]), checkedAt: null, unknown: 0, unsettled: unsettledOf(null) });
   if (v === null || typeof v !== "object" || typeof v.ok !== "boolean") return unread("error");
   const checkedAt = Number.isFinite(v.checkedAt) ? v.checkedAt : null;
   const last = v.last ? rowPlace(v.last) : null;
@@ -261,7 +277,8 @@ function chainOf(v) {
   // The rows an intact chain holds with an action or outcome this console does not know (issue #761; the verifier says
   // so only on an intact chain and only when there are some), for About.
   const unknown = Number.isSafeInteger(v.unknown) && v.unknown > 0 ? v.unknown : 0;
-  const base = { from, through: last?.seq ?? null, last, suspect, index: indexOf(v.files), checkedAt, unknown };
+  // The intents the walk found nothing after (issue #1072): on an intact chain only, as the verifier gives them.
+  const base = { from, through: last?.seq ?? null, last, suspect, index: indexOf(v.files), checkedAt, unknown, unsettled: unsettledOf(v.ok ? v.unsettled : null) };
   if (v.ok) return { state: "ok", why: null, ...base, startsAt: Number.isSafeInteger(v.startsAt?.seq) ? v.startsAt.seq : null, broken: null };
   const b = v.broken ?? {};
   const pos = placeText(b.file, b.line);
@@ -308,6 +325,24 @@ function indexEnd(chain) {
   return last ? last.seq + last.rows - 1 : null;
 }
 
+/** What a write's rows share (the verifier's key): its ticket, kind and target. */
+const writeKey = (row) => `${row.ticket}\u0000${row.kind ?? ""}\u0000${row.target ?? ""}`;
+
+/** Whether a row says what became of its write (see the header and the verifier's `withOutcomes`). */
+function settles(row) {
+  if (!isAuditRow(row) || typeof row.ticket !== "string" || row.ticket === "") return false;
+  return row.action === "write-applied" || (row.action === "write" && (row.outcome !== "ok" || (typeof row.reason === "string" && row.reason !== "")));
+}
+
+/**
+ * Whether a shown row's outcome is unknown (issue #1072, see the header): a verified write intent the chain check found
+ * nothing after, that no row this view read settles either.
+ */
+export function auditOutcomeUnknown(entry, state, chain, settled = new Set()) {
+  if (state !== "ok" || !isAuditRow(entry) || entry.action !== "write" || entry.outcome !== "ok") return false;
+  return Array.isArray(chain?.unsettled) && chain.unsettled.includes(entry.seq) && !settled.has(writeKey(entry));
+}
+
 /** Whether a row matches the filters (a damaged entry is shown whatever they say, by the caller; see the header). */
 function matches(entry, q) {
   if (!isAuditRow(entry)) return false;
@@ -331,7 +366,8 @@ function matches(entry, q) {
  *     check ran; the console caches it), or throws, or is not given: the chain is then `unreadable`;
  *   - `query` is `parseAuditQuery`'s; `perPage` the rows a page shows.
  *
- * `rows` are `{ entry, pos, state }`, newest first, at most `perPage` (under a filter, the damaged entries the search
+ * `rows` are `{ entry, pos, state }`, with `outcome: "unknown"` on a write intent nothing settles (`auditOutcomeUnknown`,
+ * issue #1072), newest first, at most `perPage` (under a filter, the damaged entries the search
  * met are among them whatever the filters say; see the header), and none on a `seq` page whose row was not found: what
  * its walk kept is whatever it met of the row's chunk before it stopped (one row above a row moved out of its place,
  * say), which, above a foot saying the row was not found, read as that row's page. `next` is the place the next page
@@ -345,8 +381,9 @@ function matches(entry, q) {
  * `newest` is the newest row's seq when the view read from the top (else null), `first` the log's first row's seq by
  * the index (else null). `who` is the sorted token names the examined rows name, for the filter's list (the chosen one
  * included). `chain` is `{ state: "ok"|"broken"|"unreadable", why, from, through, startsAt, broken, last, suspect, index,
- * checkedAt, unknown }` (`unknown`: the rows an intact chain holds whose action or outcome this console does not know,
- * issue #761, else 0). `unreadable` is the reader's sentence when it could not read (no rows then).
+ * checkedAt, unknown, unsettled }` (`unknown`: the rows an intact chain holds whose action or outcome this console does
+ * not know, issue #761, else 0; `unsettled`: the seqs of the write intents the check found nothing after, issue #1072).
+ * `unreadable` is the reader's sentence when it could not read (no rows then).
  *
  * `seq` opens the `perPage`-row chunk that holds that row: rows numbered from `(k - 1) * perPage + 1` to `k * perPage`
  * for the `k` that holds it, with the damaged lines among them, so a link to "row 41" lands on one page however many
@@ -368,6 +405,8 @@ export async function readAuditView({ read, verify = null, query = {}, perPage =
   const top = seq === null ? null : Math.ceil(seq / size) * size;
   const bottom = top === null ? null : top - size + 1;
   const names = new Set();
+  // The writes a row this view read settles (issue #1072): one landed since the cached check is not called unknown.
+  const settled = new Set();
 
   /**
    * Read the log from below `from` (null: the newest row) down, `limit` entries a call and never past
@@ -414,6 +453,7 @@ export async function readAuditView({ read, verify = null, query = {}, perPage =
         const pos = page.positions[i];
         s.examined += 1;
         s.lastPos = pos;
+        if (settles(entry)) settled.add(writeKey(entry));
         if (isAuditRow(entry)) {
           if (from === null && s.newest === null) s.newest = entry.seq;
           if (typeof entry.actor?.name === "string" && AUDIT_WHO_RE.test(entry.actor.name)) names.add(entry.actor.name);
@@ -487,7 +527,10 @@ export async function readAuditView({ read, verify = null, query = {}, perPage =
   // Not found: no rows (see above), and Older still goes on from where the walk got to.
   const drawn = seq !== null && s.found !== true ? [] : shown;
   return {
-    rows: drawn.map(({ entry, pos }) => ({ entry, pos, state: auditRowState(entry, pos, chain) })),
+    rows: drawn.map(({ entry, pos }) => {
+      const state = auditRowState(entry, pos, chain);
+      return { entry, pos, state, ...(auditOutcomeUnknown(entry, state, chain, settled) ? { outcome: "unknown" } : {}) };
+    }),
     next,
     examined: s.examined,
     stopped: s.stopped,

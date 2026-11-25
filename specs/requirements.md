@@ -1422,7 +1422,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   Tool audit actors are `agent` with a server-derived login even when a person confirms. Commands and panel
   keys remain `panel`. Every mutation requires its intent row first, a failure compensates that ticket, and
   an agent success appends a correlated `write-applied` receipt. Receipt failure reports incomplete tracking
-  and never repeats a completed action. Bulk writes record each job separately and report partial outcomes.
+  and never repeats a completed action. AMENDED 2026-11-25 (#1072): every write that lands appends that receipt,
+  a command's and a panel key's too; a lost one is said in the panel's log and reports incomplete tracking for an
+  agent alone, and the console's audit page reads an intent of a role with neither a receipt nor a failed row after
+  it, from that role's first receipt on, as "outcome unknown". Bulk writes record each job separately and report partial outcomes.
   Trusted interaction origin is separate from actor role: confirmed UI work is human intervention; unattended
   work is agent intervention and never increments a human-touch counter. The setup wizard remains unaudited.
   Model write errors carry fixed public refusals unless the producing path proves its text comes only from
@@ -3728,6 +3731,17 @@ writes retain their existing interactive confirmation. This adds no unattended p
     is not vouched for ..."), `admin/test/console-kit.test.mjs` (a
     table row's id), `admin/test/console-stylesheet.test.mjs` ("the audit log: the side card beside the log from 1600
     px and under it below ...").
+    **AMENDED 2026-11-25 (#1072): an outcome that was never written says so.** Given a write of any role that landed,
+    when its rows are appended, then a `write-applied` receipt follows its intent on the same ticket (an agent's alone
+    had one). Given a verified intent of a role whose first receipt the chain check walked before it, with no receipt,
+    no `write` row that is not `ok` and no #964 note after it on its ticket (its writer stopped during the write),
+    then its outcome badge reads "outcome unknown" and a note under its reason says "No outcome follows this
+    write on its ticket: whatever made it stopped before it said, so the change may or may not have been made. Look at
+    what it changes."; given such an intent written before its role's first receipt, then it reads as before; given a
+    failed write, then it reads failed as before. The outcome filter's list stays the outcomes rows hold. Tests:
+    `admin/test/console-panels.test.mjs` (the two tests named #1072, one a write whose process is SIGKILLed during it),
+    `worker/test/console-audit.test.mjs` (the two tests named #1072), `admin/test/audited-write.test.mjs` ("a write
+    that landed gets its receipt for a person and the panel too, ...").
   - (i) **Byte-pinned pages.** Given the fixture deployment (`launch/fixture-deployment.mjs`) seeded into Valkey, every
     page renders byte-identical to its fixture in `admin/test/fixtures/console/`, twice in a row; no page holds an ESC
     byte, a host path or an email address; a hostile-value variant renders escaped. Test:
@@ -10489,3 +10503,4 @@ instead of drifting.
 | 2026-11-24 (#950) | **`REQ-JOB-STATUS-COMMENTS` AMENDED**: the worker's terminal comments gain `provider-stop-refusal`, the exit-2 stop of a run whose provider ended the reply with an explicit refusal of the request, which until now was an infrastructure exit the queue retried until its attempts ran out. Its fixed sentence says the model refused, that the same request is likely to be refused again and that partial work may exist; it never carries the provider's explanation, which the runner keeps off the exit line. A polled label job's ended receipt then reads `end=stopped reason=provider-stop-refusal`. UNCHANGED, checked: `REQ-OPERATOR-FAILURE-NOTIFICATION` (the hook already pages every member of `RUNNER_POLICY_REASONS`), `REQ-MODEL-POLICY`'s failover (an exit 2 is never retried, so it never fails over), and the refusal net's rules (it acts only on `budgetReserved: false`, and this stop reserved its budget). |
 | 2026-11-25 (#1076) | **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: a page view writes nothing, with one named exception left, signing in. The zero touch page's repair of a pending accounting entry and of a pending fix, on every view by anyone who opened the page (and on `/runs?touched=1`, which reads the same report), was the second, and is gone; the wire test now seeds one of each pending. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, one dated bullet: `zero-touch-settle`, an operator's confirmed action, records what the page once repaired, and the page says how many wait and who can settle them. **`REQ-ZERO-TOUCH-RATE` UNCHANGED, checked**: "an applied action whose telemetry cannot finish is repaired without repeating the action; until repaired its coverage is incomplete" holds as written, since it never said where the repair runs, and now the worker's daily sweep or a settle runs it. |
 | 2026-11-25 (#1055) | **`REQ-RUNNER-TURN-BUDGET` AMENDED**: NEW **The warning before it**: the root session is told once, at the end of the turn this budget's own count reaches 70% of the maximum, to report and push, by the cost cap warning's hook; `tokens.turnsWarned` says whether it was queued; when the budget aborts UNCHANGED, checked. **`REQ-JOB-ACTIVITY-LIMITS` AMENDED**: NEW **The warning before the ceiling**: a job with a wall-clock ceiling is told once at a turn's end past 70% of it, counted from the pickup, the worker handing the ceiling and what was left as two durations; the timer alone stops the job, and the idle and stall limits and the 30-minute fallback have no warning; the limits, their defaults and the backstop UNCHANGED, checked. `REQ-TOKEN-ACCOUNTING-AND-CAPS` UNCHANGED, checked: the cost cap's warning is as issue #985 left it. |
+| 2026-11-25 (#1072, receipts) | **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: every write that lands appends its receipt, a command's and a panel key's too; incomplete tracking is reported for an agent alone. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (h) Audit, by a dated passage: a write's receipt for every role, and a verified intent with no outcome row after it reads "outcome unknown" from its role's first receipt on, as before it, and failed as failed. UNCHANGED, checked: `REQ-OPERATOR-CONSOLE-ACTIONS` (the actions and their answers). |

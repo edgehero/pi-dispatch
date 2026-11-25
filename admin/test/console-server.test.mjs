@@ -946,13 +946,15 @@ test("pause windows: preview then confirm writes exactly the previewed file, aud
   // The preview's digest IS the digest of what the real writer put on disk.
   assert.equal(sha256(written), p.afterDigest);
   assert.deepEqual(JSON.parse(written).windows, WINDOWS);
-  const row = c.audit.rows.at(-1);
+  // The intent, then the receipt of the write that landed, on one ticket (issue #1072).
+  const [row, receipt] = c.audit.rows.slice(-2);
   assert.equal(row.action, "write");
   assert.equal(row.outcome, "ok");
   assert.equal(row.target, c.config.pauseWindowsPath);
   assert.equal(row.beforeDigest, p.beforeDigest);
   assert.equal(row.afterDigest, p.afterDigest);
   assert.equal(row.ticket, sha256(p.ticket).slice(0, 12));
+  assert.deepEqual([receipt.action, receipt.outcome, receipt.ticket, receipt.target], ["write-applied", "ok", row.ticket, row.target]);
   // the writer got the preview's snapshot as `expect`
   assert.deepEqual(c.writes.at(-1).expect, [{ path: c.config.pauseWindowsPath, text: beforeText }]);
   const reuse = await c.post("/api/pause-windows/confirm", { ticket: p.ticket }, { cookie });

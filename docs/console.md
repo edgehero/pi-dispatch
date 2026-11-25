@@ -671,6 +671,19 @@ change, and if it cannot be written (a full disk, a logs folder you cannot write
 sentence saying so. Fix the folder and try again. The one exception is `/dispatch setup`, which builds the deployment
 before there is a log to write to.
 
+**Every write has its outcome on its ticket (2026-11-25, #1072).** The `ok` line a write starts with is written
+before the change, so it says the change was asked for. A change that was refused or failed is followed by a `failed`
+line on the same ticket, and since this release a change that landed is followed by a `write-applied` line, whoever
+made it (only an agent's had one before). A write with neither line after it is one whose console, panel or tool
+stopped during it, from a crash, a kill or a stop past its deadline: the audit page shows its outcome as **outcome
+unknown**, with "No outcome follows this write on its ticket: whatever made it stopped before it said, so the change
+may or may not have been made. Look at what it changes." It judges a write that way only on a chain it verified, and
+only from the first `write-applied` line of the write's own role on: rows written before this release had none for a
+person or the panel, so they read as they did. A pi session that still runs an older release writes the panel's lines
+without one, so reload pi after upgrading. The check that finds such writes is the chain check the page already runs
+and keeps for 30 seconds, so a write that landed in the last 30 seconds can read **outcome unknown** on a page that
+does not show its `write-applied` line, until the next check.
+
 Each line carries the sha256 of the line before it, so an edit shows:
 
 ```bash

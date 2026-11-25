@@ -3386,11 +3386,17 @@ async function confirmBulk(ctx, action, entry, { actor, tag, actx, flight = { ab
   }
   const results = Array.isArray(result.results) ? result.results : [];
   for (const r of results) if (!r.ok) compensate(r.jobId ?? "-", r.reason ?? "refused", r.partial === true);
+  // A receipt for each job that landed, whoever confirmed it (issue #1072, `auditedWrite`'s fifth step): an agent's since
+  // #766, a person's since #1072, so the audit page can tell a job whose outcome was never written from one that landed.
   let trackingIncomplete = false;
-  if (actor.role === "agent") for (const r of results) if (r.ok) {
+  for (const r of results) if (r.ok) {
     try {
       audit.append({ ...rowOf(r.jobId), action: "write-applied", outcome: "ok" });
-    } catch {
+    } catch (e) {
+      if (actor.role !== "agent") {
+        deps.log(`console: audit append failed (${codeOf(e)}) for the receipt of a ${action.kind} job that landed; the log reads it as an outcome unknown`);
+        continue;
+      }
       trackingIncomplete = true;
       deps.log("console: agent bulk write succeeded but an audit receipt could not be written; accounting is incomplete, do not repeat the action");
     }

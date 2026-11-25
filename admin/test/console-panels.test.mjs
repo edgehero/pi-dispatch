@@ -8,8 +8,8 @@ import { BEAT_FRESH_MS, COUNT_WINDOWS_UTC_TEXT, NO_WORKER_TEXT, STALE_BEATS_TEXT
 import { SHELL_PANEL_IDS } from "../src/console/shell.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_OUTCOMES, CONSOLE_AUDIT_READ_MAX, makeConsoleAudit, readConsoleAudit, verifyConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
-import { AUDIT_EXAMINE_MAX, AUDIT_OUTCOME_WORDS, AUDIT_PARAMS, AUDIT_Q_MAX, AUDIT_ROW_STATES, AUDIT_SEEK_BY, AUDIT_WHO_RE, auditQueryString, auditRowState, parseAuditQuery, readAuditView } from "../src/console/audit-view.mjs";
-import { AUDIT_BULK_KINDS, AUDIT_OPERATORS_ONLY, AUDIT_WAITING_KINDS, auditAbout, auditChain, auditFilter, auditLog } from "../src/console/panels/audit.mjs";
+import { AUDIT_EXAMINE_MAX, AUDIT_OUTCOME_WORDS, AUDIT_PARAMS, AUDIT_Q_MAX, AUDIT_ROW_STATES, AUDIT_SEEK_BY, AUDIT_WHO_RE, auditOutcomeUnknown, auditQueryString, auditRowState, parseAuditQuery, readAuditView } from "../src/console/audit-view.mjs";
+import { AUDIT_BULK_KINDS, AUDIT_OPERATORS_ONLY, AUDIT_OUTCOME_UNKNOWN_TEXT, AUDIT_WAITING_KINDS, auditAbout, auditChain, auditFilter, auditLog } from "../src/console/panels/audit.mjs";
 import { ACTIONS } from "../src/console/actions.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { secretsView } from "../src/secrets-view.mjs";
@@ -306,7 +306,10 @@ test("auditQueryString writes a query back in one order, which parseAuditQuery t
 
 test("the outcome words: every outcome the worker writes, and a state for every row the chain cannot vouch for", () => {
   for (const o of CONSOLE_AUDIT_OUTCOMES) assert.equal(AUDIT_OUTCOME_WORDS[o].word, o, o);
-  assert.deepEqual(Object.keys(AUDIT_OUTCOME_WORDS), [...CONSOLE_AUDIT_OUTCOMES, "damaged", "unverified", "suspect", "unchecked"]);
+  // Issue #1072: "unknown" is a verified write intent the chain check found nothing after, never an outcome a row holds.
+  assert.deepEqual(Object.keys(AUDIT_OUTCOME_WORDS), [...CONSOLE_AUDIT_OUTCOMES, "damaged", "unverified", "suspect", "unchecked", "unknown"]);
+  assert.ok(!CONSOLE_AUDIT_OUTCOMES.includes("unknown"), "the worker's closed outcomes are unchanged");
+  assert.deepEqual(AUDIT_OUTCOME_WORDS.unknown, { status: "attention", icon: null, word: "outcome unknown" });
   assert.deepEqual({ damaged: AUDIT_OUTCOME_WORDS.damaged.status, unverified: [AUDIT_OUTCOME_WORDS.unverified.status, AUDIT_OUTCOME_WORDS.unverified.icon, AUDIT_OUTCOME_WORDS.unverified.word], unchecked: AUDIT_OUTCOME_WORDS.unchecked.status }, { damaged: "failed", unverified: ["idle", "hourglass", "not verified"], unchecked: "idle" });
   // The row before a broken prev is not verified either, under the card's same word (its sentence says why).
   assert.deepEqual(AUDIT_OUTCOME_WORDS.suspect, AUDIT_OUTCOME_WORDS.unverified);
@@ -2036,6 +2039,65 @@ function appendLinked(log, rows) {
   log.write(lines);
   return log;
 }
+
+// Issue #1072: a write intent nothing follows on its ticket reads "outcome unknown", from its role's own first receipt on.
+test("the audit panels: a write whose outcome was never written reads outcome unknown after its role's first receipt, and as it did before it; failed stays failed (#1072)", async () => {
+  const w = (role, ticket, extra = {}) => ({ actor: { ...OPS, role }, action: "write", kind: "setting-set", target: "/d/s.json", outcome: "ok", ticket, ...extra });
+  const log = appendLinked(auditLogDir(1), [
+    w("operator", "a00000000001"), // 2: a person's intent before any person receipt (an older console): as before
+    w("operator", "a00000000002"), // 3: the first person write of this release
+    { ...w("operator", "a00000000002"), action: "write-applied" }, // 4: its receipt, the cutover
+    w("operator", "a00000000003"), // 5: lost (a crash during it)
+    w("operator", "a00000000004"), // 6: refused
+    w("operator", "a00000000004", { outcome: "failed", reason: "no" }), // 7
+    w("operator", "a00000000005"), // 8: landed later, after the check
+  ]);
+  const checked = { ...log.verify(), ...verifyConsoleAudit({ logsDir: log.logsDir, withOutcomes: true }) };
+  assert.deepEqual(checked.unsettled, [5, 8]);
+  const view = await readAuditView({ read: log.read, verify: async () => checked, query: parseAuditQuery("").query });
+  const outcomeOf = (seq) => view.rows.find((r) => r.entry.seq === seq)?.outcome ?? null;
+  assert.deepEqual([2, 3, 5, 6, 7, 8].map(outcomeOf), [null, null, "unknown", null, null, "unknown"]);
+  const p = auditPanels(view);
+  const row = (seq) => new RegExp(`<tr id="seq-${seq}">.*?</tr>`).exec(p.log)?.[0] ?? "";
+  assert.ok(row(5).includes(">outcome unknown</span>") && row(5).includes(AUDIT_OUTCOME_UNKNOWN_TEXT), row(5));
+  assert.ok(row(2).includes(">ok</span>") && !row(2).includes("outcome unknown"), "before the cutover, as before");
+  assert.ok(row(7).includes(">failed</span>"), row(7));
+  // A receipt appended since the cached check clears its intent on the page that read it.
+  appendLinked(log, [{ ...w("operator", "a00000000005"), action: "write-applied" }]);
+  const later = await readAuditView({ read: log.read, verify: async () => checked, query: parseAuditQuery("").query });
+  assert.deepEqual([5, 8].map((seq) => later.rows.find((r) => r.entry.seq === seq)?.outcome ?? null), ["unknown", null]);
+  // Only a verified row is judged: past the check's last row the state decides, and a broken chain judges none.
+  const stale = await readAuditView({ read: log.read, verify: async () => ({ ...checked, last: { ...checked.last, seq: 4, line: 4 } }), query: parseAuditQuery("").query });
+  assert.equal(stale.rows.find((r) => r.entry.seq === 5).outcome, undefined);
+  assert.deepEqual(auditOutcomeUnknown({ seq: 5, action: "write", outcome: "ok", ticket: "a00000000003" }, "ok", { unsettled: [] }), false);
+});
+
+// Issue #1072, a real kill: a panel write whose process is killed during it leaves its intent alone, and the page says
+// its outcome is unknown, where it read as a write that landed.
+test("the audit panels: a write whose process is SIGKILLed during it reads outcome unknown (#1072)", async () => {
+  const { spawn } = await import("node:child_process");
+  const logsDir = tempDir("console-audit-kill-");
+  const src = new URL("../src/audited-write.mjs", import.meta.url).href;
+  // A first write that lands (the panel's cutover), then one that never returns, as a process killed during it.
+  const script = `import { panelWrite } from ${JSON.stringify(src)};
+panelWrite(process.argv[1], { kind: "setting-set", target: "/d/s.json" }, () => ({ ok: true }));
+panelWrite(process.argv[1], { kind: "setting-set", target: "/d/s.json" }, () => { process.stdout.write("writing\\n"); setInterval(() => {}, 1000); return new Promise(() => {}); });`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script, logsDir], { stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    await new Promise((resolve, reject) => {
+      child.stdout.on("data", (c) => (String(c).includes("writing") ? resolve() : null));
+      child.on("exit", (code) => reject(new Error(`the writer exited ${code} before its write`)));
+    });
+  } finally {
+    child.kill("SIGKILL");
+  }
+  await new Promise((resolve) => (child.exitCode !== null || child.signalCode !== null ? resolve() : child.once("exit", resolve)));
+  const read = (a) => readConsoleAudit({ logsDir, ...a, positions: true });
+  const verify = async () => ({ ...verifyConsoleAudit({ logsDir, withLast: true, withOutcomes: true }), checkedAt: NOW });
+  const view = await readAuditView({ read, verify, query: parseAuditQuery("").query });
+  assert.deepEqual(view.rows.map((r) => [r.entry.seq, r.entry.action, r.state, r.outcome ?? null]), [[3, "write", "ok", "unknown"], [2, "write-applied", "ok", null], [1, "write", "ok", null]]);
+  assert.ok(auditPanels(view).log.includes(AUDIT_OUTCOME_UNKNOWN_TEXT));
+});
 
 /** The note a verified row with a word this console does not know carries, for `words`. */
 const unknownNote = (words) => `<span class="reason">Not known to this console: ${words} (a newer release writes such rows).</span>`;

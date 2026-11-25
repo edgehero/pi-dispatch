@@ -231,8 +231,8 @@ test("Resolver preview JSON/HTML/diff/Undo keep basenames, but confirm writes ex
   const written = await f.call("secret-profile-add", { ticket: preview.data.ticket }, true);
   assert.equal(written.status, 200, JSON.stringify(written));
   assert.equal(JSON.parse(fs.readFileSync(f.paths.settingsFile)).secretProfiles.prod, raw);
-  assert.equal(f.audits.length, 1);
-  assert.equal(f.audits[0].kind, "secret-profile-add");
+  // The intent, then the receipt of a write that landed (issue #1072).
+  assert.deepEqual(f.audits.map((row) => [row.kind, row.action]), [["secret-profile-add", "write"], ["secret-profile-add", "write-applied"]]);
   assert.ok(!JSON.stringify(written.data).includes(PRIVATE));
   assert.equal((await f.call("secret-profile-add", { ticket: preview.data.ticket }, true)).status, 409);
 });

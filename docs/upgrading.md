@@ -550,6 +550,21 @@ exited 1 and the queue ran the whole paid job again. The worker gives the stop i
 
 See [reasons.md](reasons.md#provider-stop-refusal).
 
+### Unreleased: a receipt for every write in the audit log (#1072)
+
+Every write that lands now appends a `write-applied` row to the console audit log after its `ok` row, on the same
+ticket, for a person and the `/dispatch` panel as for an agent, whose writes had one already. The audit page reads a
+write that has neither that receipt nor a `failed` row after it as **outcome unknown**: whatever made it stopped during
+the write. It judges a write that way only from the first receipt of its own role on, so the rows written before this
+release read as they did.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| `PI_LOGS_DIR/console-audit/` | One more row for each write a person or the panel makes: an existing action, `write-applied`, with no new field or outcome. The chain and its verification are unchanged; nothing moves, and no older-state detector applies. |
+| Mixed versions | An older console's audit page shows a person's receipt as one more `ok` row, and its Agent writes today still counts agents' receipts alone. A pi session that still runs an older admin extension writes the panel's writes without a receipt: once a panel receipt has been written, its writes read **outcome unknown** on the audit page. Reload pi on every host that shares the logs folder after upgrading. |
+
+See [the audit log](console.md#the-audit-log).
+
 ### 5.4.2
 
 #### Completed label-job receipts (#920)

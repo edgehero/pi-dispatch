@@ -147,7 +147,7 @@ test("SIGTERM during a bulk retry on a Valkey that answers: the program exits 0 
     assert.ok(end.at - at < 8000, `${end.at - at} ms`);
     assert.deepEqual(await queue.getJobCounts("failed", "waiting"), { failed: 0, waiting: 100, paused: 0 }, "the stop cut none of the confirm in flight");
     const rows = auditRows(dep).filter((r) => r.kind === "failed-retry-all");
-    assert.deepEqual([rows.length, rows.filter((r) => r.outcome !== "ok").length], [100, 0], "an ok row per job, and no row saying one was cut");
+    assert.deepEqual([rows.filter((r) => r.action === "write").length, rows.filter((r) => r.action === "write-applied").length, rows.filter((r) => r.outcome !== "ok").length], [100, 100, 0], "an ok row and a receipt per job, and no row saying one was cut");
     assert.equal((await confirm).json?.done, 100, "and the confirm was answered before the listener closed");
     assert.equal(existsSync(dep.lock), false, "the lock is gone");
   } finally {

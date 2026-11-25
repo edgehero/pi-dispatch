@@ -526,7 +526,8 @@ const CASES = [
 
 for (const c of CASES) {
   const isTool = c.name.startsWith("dispatch_");
-  const expected = c.outcomes.flatMap((outcome) => isTool && outcome === "ok" && c.outcomes.length === 1 ? [[c.kind, outcome, "write", "agent", null], [c.kind, outcome, "write-applied", "agent", null]] : [[c.kind, outcome, "write", isTool ? "agent" : "panel", null]]);
+  // A write that landed has its receipt after its intent, the panel's as an agent's (issue #1072; an agent's alone before).
+  const expected = c.outcomes.flatMap((outcome) => outcome === "ok" && c.outcomes.length === 1 ? [[c.kind, outcome, "write", isTool ? "agent" : "panel", null], [c.kind, outcome, "write-applied", isTool ? "agent" : "panel", null]] : [[c.kind, outcome, "write", isTool ? "agent" : "panel", null]]);
   const opts = { timeout: 30_000, ...(c.live && !LIVE ? { skip: "needs VALKEY_TEST_URL" } : {}) };
   test(`${c.name}: appends ${c.kind} (${c.outcomes.join(" then ")}) as the panel${c.state ? ", and writes nothing when the row cannot be appended" : ""}`, opts, async () => {
     const fx = deployment({ alloc: c.alloc, valkey: c.live ? LIVE : NO_VALKEY });
@@ -625,8 +626,8 @@ test("/dispatch pause and resume over a registry key that holds a string switch 
     assert.equal(await r.hget("bull:pi-jobs@mini1:meta", "paused"), "1", "this host's own queue (the .env's PI_WORKER_NAME, mini1) was paused");
     const resumed = await command("resume");
     assert.ok(resumed.includes(`resumed (2 queues), but ${resumedNote}`), JSON.stringify(resumed));
-    const rows = rowsOf(fx.files.logs).filter((row) => row.kind?.startsWith("fleet-")).map((row) => [row.kind, row.outcome, row.reason ?? null]);
-    assert.deepEqual(rows, [["fleet-pause", "ok", null], ["fleet-pause", "ok", pausedNote], ["fleet-resume", "ok", null], ["fleet-resume", "ok", resumedNote]]);
+    const rows = rowsOf(fx.files.logs).filter((row) => row.kind?.startsWith("fleet-")).map((row) => [row.kind, row.action, row.outcome, row.reason ?? null]);
+    assert.deepEqual(rows, [["fleet-pause", "write", "ok", null], ["fleet-pause", "write", "ok", pausedNote], ["fleet-pause", "write-applied", "ok", null], ["fleet-resume", "write", "ok", null], ["fleet-resume", "write", "ok", resumedNote], ["fleet-resume", "write-applied", "ok", null]]);
     assert.ok([...resumedNote].length <= CONSOLE_AUDIT_FIELD_MAX, "the row holds the whole sentence");
     assert.equal(pausedNote, switchShortNote(true, switchShortCause({ blind: "x", shortCause: { waits: false, errors: [{ key: HOST_SET, code: "WRONGTYPE" }] } })));
     for (const said of [...paused, ...resumed]) assert.doesNotMatch(said, /once Valkey answers|refus/i);
@@ -652,9 +653,9 @@ test("/dispatch pause over one host row that holds a string names that row's key
     await r.set(hostKey(host), "not a hash");
     const paused = await command("pause");
     assert.ok(paused.some((line) => line.endsWith(`, but ${note}`)), JSON.stringify(paused));
-    const rows = rowsOf(fx.files.logs).filter((row) => row.kind === "fleet-pause").map((row) => [row.outcome, row.reason ?? null]);
-    assert.deepEqual(rows, [["ok", null], ["ok", [...note].slice(0, CONSOLE_AUDIT_FIELD_MAX).join("")]]);
-    assert.ok(rows[1][1].includes("Waiting does not change that: remove or repair that key"), "what to put right is in what the row keeps");
+    const rows = rowsOf(fx.files.logs).filter((row) => row.kind === "fleet-pause").map((row) => [row.action, row.outcome, row.reason ?? null]);
+    assert.deepEqual(rows, [["write", "ok", null], ["write", "ok", [...note].slice(0, CONSOLE_AUDIT_FIELD_MAX).join("")], ["write-applied", "ok", null]]);
+    assert.ok(rows[1][2].includes("Waiting does not change that: remove or repair that key"), "what to put right is in what the row keeps");
     // Repaired: the same command reads the registry whole and says nothing of a short list.
     await r.del(hostKey(host));
     await r.srem(HOST_SET, host);
