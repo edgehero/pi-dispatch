@@ -1109,7 +1109,15 @@ A change that timed out before it left the console is not made when Valkey retur
 stopped answering may or may not have been made, and the confirm and its audit row say so. Adopting or undoing a package and
 ending a sandbox shell say it too, and an End request that may still stand is taken back. With Valkey unreachable, Adopt and
 Undo say that, not that someone changed the package. On a Valkey that stopped answering, the kill switch answers within about 6 seconds for a pause and 12 for a
-resume (9 measured), and its preview waits at most 2 seconds for the fleet's counts before a pause and 10 before a resume, so a pause is previewed and answered in about 8 seconds (7 to 8 measured; 11 to 12 while the preview waited 6), and the `dispatch_pause` tool, which previews once, in about 8 as well (16 while it previewed twice). It names the
+resume (9 measured). Its preview does not wait on a Valkey the console already knows is silent (2026-11-25, #1072): when
+the console's last read of the fleet got no answer, the preview reads nothing and says "Valkey did not answer the last read
+of the fleet, so this preview did not wait for another", so a pause pressed on a page that could not read the fleet takes
+only the confirm's time (5 seconds measured, 7 before), and a resume's preview there answers at once (9 seconds before). The first press after Valkey
+stopped waits about 2 seconds for the preview's own read of the host registry, and says the same. On a Valkey that
+answers, the preview waits up to 5 seconds for a pause's counts and 10 for a resume's, so one that answers each reply 100
+to 200 ms late still lists every queue (it gave the list up at 2 seconds before). The `dispatch_pause` tool reads with a
+reader of its own on each call, so it never knows beforehand: about 8 seconds on a stopped Valkey (16 while it previewed
+twice). It names the
 queues it knows are paused (or resumed), those not confirmed, whose pause or resume was sent and may or may not have been made, and those it
 did not try, since a resume stops at the first queue that does not answer. It stops at no other: a resume goes on past a queue Valkey
 refused or answered with an error, so one queue whose key holds the wrong type of value leaves no other queue paused. A queue whose pause or resume Valkey answered with an
@@ -1156,7 +1164,9 @@ another took its place, since the preview; "the durable approval request could n
 be read; and what the queue refused about the job when it could not be built. Every paid start (these, a re-run of any
 kind, a started run, Fire now, a canary and a grouping job) says nothing was queued when its connection was closed
 before it was ready: that Valkey could not be reached, or, where a start of the hour was already counted, that the
-start was used. Each could say there that a run may have been queued. A re-run that lands on the queue of the host
+start was used. Each could say there that a run may have been queued. The same holds for a connection that closed right
+after it was ready, before the job was sent (2026-11-25, #1072): its client refuses the job before anything leaves, so
+the start says nothing was queued, and Fire now adds that the start was used and that this minute's fire is taken. A re-run that lands on the queue of the host
 that owns an approval names that queue, so its Undo cancels the job where it is. No page lists
 every waiting job: Runs lists a run only once it has ended, the overview names the first few waiting jobs of each reason
 and Fleet counts them. So the next preview looks for a run like it and says when one is already queued or running, with

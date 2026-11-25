@@ -12,7 +12,7 @@ import { makeTouchOutbox } from "@edgehero/pi-dispatch/touch-outbox";
 import { readZeroTouch, ZERO_TOUCH_NO_PROJECT, zeroTouchProjectMatches } from "@edgehero/pi-dispatch/zero-touch";
 import { runMirrorMaxRunsOf } from "@edgehero/pi-dispatch/retention";
 import { QUEUE_CLOSE_TIMEOUT_MS, readRunById, RUN_MIRROR_UNREAD } from "./read-model.mjs";
-import { boundedClient, checkTriggerFixSource, connectedQueue, CONFIRM_READ_TIMEOUT_MS, refusedByValkey, STORE_TIMEOUTS, TRIGGER_FIX_UNCHECKED, unconfirmedWrite, valkeyRead, within } from "./job-actions.mjs";
+import { addNeverLeft, boundedClient, dropDeadQueue, checkTriggerFixSource, connectedQueue, CONFIRM_READ_TIMEOUT_MS, refusedByValkey, STORE_TIMEOUTS, TRIGGER_FIX_UNCHECKED, unconfirmedWrite, valkeyRead, within } from "./job-actions.mjs";
 import { runMatches } from "./run-filter.mjs";
 import { planZeroTouchGroup, planZeroTouchName, planZeroTouchInstruction, planZeroTouchInstructionUndo, applyZeroTouchFilePlan } from "./zero-touch-actions.mjs";
 import { fileCaseOfError } from "./file-case.mjs";
@@ -367,7 +367,10 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
           try {
             jobId = await enqueueQuestionGroupJob(queue, p, /^[a-f0-9]{64}$/.test(entry.ticketDigest ?? "") ? { nonce: () => entry.ticketDigest } : {});
           } catch (err) {
-            if (refusedByValkey(err) || err?.message === "invalid question grouping reference") {
+            // Issue #1072: an add its client refused before it left (a connection that died after the connect) queued
+            // nothing, as one Valkey refused did not.
+            if (refusedByValkey(err) || err?.message === "invalid question grouping reference" || addNeverLeft(err)) {
+              if (addNeverLeft(err)) dropDeadQueue(queue);
               await putBack();
               return { unreachable: true };
             }

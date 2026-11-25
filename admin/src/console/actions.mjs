@@ -97,6 +97,7 @@ import { MODEL_ROLE_EDIT_FIELDS } from "../model-role-plans.mjs";
 // The names only. `trigger-environment-plans.mjs` must stay out of this module's imports, which every tool reaches: the planner
 // arrives through `ctx.a`, which a tool's context does not carry (`trigger-environment-boundary.test.mjs`).
 import { TRIGGER_ENVIRONMENT_EDIT_FIELDS } from "../trigger-edit-core.mjs";
+import { PAGE_DEADLINE_MS, PAGE_VIEW_GRACE_MS } from "./page-deadline.mjs";
 
 /** The diff moved to the confirm view with the rest of the bar's markup (issue #737); re-exported where it always was. */
 import { CONSOLE_STOPPING, STOPPED_UNCONFIRMED } from "./writes-in-flight.mjs";
@@ -511,13 +512,18 @@ export const SNAPSHOT_TIMEOUT_MS = 10_000;
  * kill switch must not wait the full ten seconds for numbers before it can be confirmed. A resume keeps the ten: its
  * Undo and its count of what starts spending are read from the snapshot.
  *
- * Two seconds since issue #1035 (six before). The six were waited in full on exactly the Valkey a kill switch is for,
- * one that takes the connection and answers nothing, and then the confirm's own switch waits for its queues: twelve
- * seconds on the console and, through the tool, which previewed twice, sixteen before anything was paused. What the
- * shorter bound costs is the preview's counts on a deployment whose first snapshot takes longer than two seconds, and
- * never the pause: the preview then says the counts could not be read and the switch still reaches every queue.
+ * Six seconds at first, waited in full on exactly the Valkey a kill switch is for, one that takes the connection and
+ * answers nothing; two since issue #1035, which cost the counts on a Valkey that answers and is slow (a reply 100 to
+ * 200 ms late: the queue list was given up at 2.0 s on a console that had not read the fleet yet, and through the
+ * tool, whose reader is new on every call). Since issue #1072 the bound is not what ends the wait on a silent Valkey:
+ * a reader that already knows it is silent (`knownSilent`) is not asked at all, and the snapshot stops at its own
+ * registry read when that gets no answer (`stopUnanswered`, the read's own two seconds). So the bound only decides for
+ * a Valkey whose registry read answered, and it is the page's deadline less its grace: a preview answers within the
+ * time a page load has. REJECTED: one deadline shared by the preview and the confirm, since they are two requests with
+ * a person between them; and a bound that rises with the last snapshot's measured time, which still paid the full
+ * bound on a Valkey that stopped between two reads, where its own registry read now says so in two seconds.
  */
-export const PAUSE_SNAPSHOT_TIMEOUT_MS = 2_000;
+export const PAUSE_SNAPSHOT_TIMEOUT_MS = PAGE_DEADLINE_MS - PAGE_VIEW_GRACE_MS;
 
 /** The refusal when the snapshot did not answer within `SNAPSHOT_TIMEOUT_MS`: what happened, nothing more. */
 export const SNAPSHOT_TIMEOUT_SENTENCE = "the fleet did not answer within 10 seconds, so this could not be previewed; nothing was changed";
@@ -531,8 +537,28 @@ export const SNAPSHOT_TIMEOUT_SENTENCE = "the fleet did not answer within 10 sec
  */
 const SWITCH_READ = Object.freeze({ switchQueues: true });
 
+/**
+ * The same read for a fleet switch's preview (issue #1072): one that stops at its own registry read when that read got
+ * no answer (`stopUnanswered`), so a Valkey that stopped since the last read costs that read's bound, not the preview's.
+ * A one-queue switch keeps `SWITCH_READ`: its preview refuses without its queue's state, which a later read may give.
+ */
+const FLEET_SWITCH_READ = Object.freeze({ switchQueues: true, stopUnanswered: true });
+
+/**
+ * The line a fleet switch preview adds when it read nothing because Valkey did not answer (issue #1072): the reader
+ * already knew (`knownSilent`), or this preview's own registry read got no answer. Before the counts' line, which says
+ * what the switch still does.
+ */
+export const SWITCH_SILENT_LINE = "Valkey did not answer the last read of the fleet, so this preview did not wait for another";
+
 /** The refusal when the snapshot failed, or answered nothing: the read failed, which the timeout's words do not say. */
 export const SNAPSHOT_UNREAD_SENTENCE = "the fleet could not be read (is Valkey reachable?); nothing was changed";
+
+/**
+ * What a fleet switch's snapshot answers when Valkey did not answer (issue #1072): the reader already knew, or the
+ * snapshot's own registry read got no answer. The unread refusal, marked, so the preview says why it has no counts.
+ */
+const SNAPSHOT_SILENT = Object.freeze({ refusal: SNAPSHOT_UNREAD_SENTENCE, status: 503, silent: true });
 
 /** The bound's own answer in `snapshotOf`'s race, told apart from a snapshot that answers null. */
 const SNAPSHOT_LATE = Symbol("snapshot-late");
@@ -557,12 +583,23 @@ async function snapshotOf(ctx, opts = {}, timeoutMs = SNAPSHOT_TIMEOUT_MS) {
     const s = await Promise.race([Promise.resolve().then(() => ctx.a.fleet.snapshot(opts)), late]);
     if (s === SNAPSHOT_LATE) return { refusal: SNAPSHOT_TIMEOUT_SENTENCE, status: 503, state: "timeout", timedOut: true };
     if (s) return { snapshot: s };
-  } catch {
-    // answered below
+  } catch (err) {
+    // Issue #1072: a snapshot asked to stop on silence (`FLEET_SWITCH_READ`) whose registry read got no answer.
+    if (err?.registryUnanswered === true) return SNAPSHOT_SILENT;
   } finally {
     clearTimeout(timer);
   }
   return { refusal: SNAPSHOT_UNREAD_SENTENCE, status: 503 };
+}
+
+/**
+ * A fleet switch's snapshot (issue #1072): none at all where the reader already knows Valkey is silent (`knownSilent`,
+ * the page the switch was pressed on could not read the fleet), else `FLEET_SWITCH_READ` under `timeoutMs`. A fleet
+ * without `knownSilent` (a test's) is read as before.
+ */
+function switchSnapshotOf(ctx, timeoutMs = SNAPSHOT_TIMEOUT_MS) {
+  if (typeof ctx.a.fleet?.knownSilent === "function" && ctx.a.fleet.knownSilent() === true) return SNAPSHOT_SILENT;
+  return snapshotOf(ctx, FLEET_SWITCH_READ, timeoutMs);
 }
 
 /**
@@ -1883,7 +1920,7 @@ function fleetSwitch({ name, kind, paused }) {
       let shortLines = [];
       let switchLines = [];
       if (paused) {
-        const s = await snapshotOf(ctx, SWITCH_READ, ctx.a.pauseSnapshotTimeoutMs ?? PAUSE_SNAPSHOT_TIMEOUT_MS);
+        const s = await switchSnapshotOf(ctx, ctx.a.pauseSnapshotTimeoutMs ?? PAUSE_SNAPSHOT_TIMEOUT_MS);
         if (s.snapshot) {
           const all = Array.isArray(s.snapshot.queueCounts) ? s.snapshot.queueCounts : [];
           short = switchShortOf(s.snapshot);
@@ -1899,10 +1936,10 @@ function fleetSwitch({ name, kind, paused }) {
           switchLines = [...Array.from({ length: Math.ceil(listed.length / 20) }, (_, i) => `Queues: ${listed.slice(i * 20, (i + 1) * 20).join(", ")}`), ...(unread.length > 0 ? [SWITCH_OWN_UNREAD(unread)] : []), ...(errored.length > 0 ? [SWITCH_ERRORED_LINE(errored)] : []), `${plural(sum("active"), "running job")} ${sum("active") === 1 ? "keeps" : "keep"} running`, `${plural(sum("delayed"), "delayed job")} and ${s.snapshot.held?.unreachable || !Array.isArray(s.snapshot.held?.rows) ? "an unknown number of" : `${s.snapshot.held.truncated ? "at least " : ""}${s.snapshot.held.rows.length + (Number.isSafeInteger(s.snapshot.held.more) ? s.snapshot.held.more : 0)}`} held ${s.snapshot.held?.rows?.length === 1 && !s.snapshot.held?.truncated && !s.snapshot.held?.more ? "job waits" : "jobs wait"} until a resume`, "Audited as fleet-pause"];
         // No "Undo" line here (issue #1035): the confirm view and the tool's dialog add the action's own, and with this
         // one a preview without a snapshot said "Undo: Resume the fleet" twice.
-        } else switchLines = [SWITCH_UNREAD_LINES.pause, "Audited as fleet-pause"];
+        } else switchLines = [...(s.silent ? [SWITCH_SILENT_LINE] : []), SWITCH_UNREAD_LINES.pause, "Audited as fleet-pause"];
       }
       if (!paused) {
-        const s = await snapshotOf(ctx, SWITCH_READ);
+        const s = await switchSnapshotOf(ctx);
         if (s.snapshot) {
           const all = Array.isArray(s.snapshot.queueCounts) ? s.snapshot.queueCounts : [];
           const rows = all.filter((q) => q?.paused);
@@ -1916,7 +1953,7 @@ function fleetSwitch({ name, kind, paused }) {
           pausedBefore = Array.isArray(s.snapshot.queueCounts) ? { queues: all.length, paused: rows.map((q) => String(q?.queue ?? "-")), ...(short.length > 0 || errored.length > 0 ? { short: true } : {}) } : null;
         } else {
           waiting = { count: null, line: s.timedOut === true ? RESUME_WAITING_UNKNOWN.timeout : RESUME_WAITING_UNKNOWN.unread };
-          switchLines = [SWITCH_UNREAD_LINES.resume];
+          switchLines = [...(s.silent ? [SWITCH_SILENT_LINE] : []), SWITCH_UNREAD_LINES.resume];
         }
       }
       return {

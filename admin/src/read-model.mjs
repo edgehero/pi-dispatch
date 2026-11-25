@@ -1178,6 +1178,11 @@ export async function enqueueDispatchRun({
     return { ok: true, jobId };
   } catch (err) {
     if (!sent || refusedByValkey(err)) return unqueued(boundedText(err?.message ?? String(err)));
+    // Issue #1072: the add was refused by its client before it left, on a connection that died after the connect.
+    if (addNeverLeft(err)) {
+      dropDeadQueue(queue);
+      return unqueued(ADD_NOT_SENT_WHY);
+    }
     // The start was counted before this add when the hour's allowance applies (`aiInvoked`), and the count is never
     // given back: the sentence says so (issue #987), as Fire now's does.
     return enqueueUnconfirmed("the run", { counted: aiInvoked === true });
@@ -1367,7 +1372,7 @@ export { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
  * size alone and are re-exported here, so every caller still reaches the queue through this one funnel. And the
  * worker's reserve rule, for the reserve a paid action shows before confirm.
  */
-import { boundedClient, boundedText, connectedQueue, CONFIRM_READ_TIMEOUT_MS, enqueueUnconfirmed, enqueueUnread, heldClearedAnswer, heldRefused, heldRemovalUnanswered, parkedAnswerRefusalOf, refusedByValkey, rerunRefusalOf, RERUN_BAD_ID, within } from "./job-actions.mjs";
+import { ADD_NOT_SENT_WHY, addNeverLeft, dropDeadQueue, boundedClient, boundedText, connectedQueue, CONFIRM_READ_TIMEOUT_MS, enqueueUnconfirmed, enqueueUnread, heldClearedAnswer, heldRefused, heldRemovalUnanswered, parkedAnswerRefusalOf, refusedByValkey, rerunRefusalOf, RERUN_BAD_ID, within } from "./job-actions.mjs";
 import { fileCaseOfError } from "./file-case.mjs";
 import { mirrorUnread } from "./mirror-words.mjs";
 export { planTriggerFire, enqueueTriggerFire } from "./trigger-fire.mjs";
@@ -5097,6 +5102,27 @@ export const SWITCH_PREVIEW_QUEUES_MAX = 200;
 export const SWITCH_SCAN_INCOMPLETE = "the scan for the deployment's queues did not finish";
 
 /**
+ * How long a registry read that got no answer counts as what the reader KNOWS of its Valkey (issue #1072,
+ * `knownSilent`): a kill switch's preview does not wait on a Valkey the page it was pressed on could not read. A page
+ * that is open reads the registry on every tick of its stream, and one that was just opened read it on its load, so
+ * the verdict a press meets is seconds old. Past this it is no longer known, and the preview reads again, which on a
+ * Valkey that is still silent ends at that read's own bound (`registryUnanswered`).
+ */
+export const SILENCE_KNOWN_MS = 30_000;
+
+/**
+ * Whether a registry read's view (`fleetView`) got no answer at all (issue #1072): not read, not in part, and no code
+ * Valkey answered with. One rule for the keyspace scan's `failed` and for what a kill switch's preview knows.
+ */
+const registryUnanswered = (view) => view.degraded !== null && !view.partial && view.error === null;
+
+/**
+ * What a switch snapshot asked to stop on silence (`snapshot({ switchQueues: true, stopUnanswered: true })`) rejects
+ * with when its own registry read got no answer (issue #1072): marked, so its caller says why it has no counts.
+ */
+export const registryUnansweredError = () => Object.assign(new Error("Valkey did not answer the read of the host registry"), { code: "REGISTRY_UNANSWERED", registryUnanswered: true });
+
+/**
  * The wide window the fleet reader folds `parked` and `failures24h` from (issue #641): the newest runs of the local
  * index and the mirror, merged, at most this many. Wider than the TUI's 50 because a parked run waits for a person and
  * may be days old; bounded because it is read on the tick (at most once per `DOLLAR_RECORDS_TTL_MS`).
@@ -5296,6 +5322,9 @@ export function createFleetReader(
   // The snapshot's `hostsReadAt`, so a surface drawing the rows of a registry it could not read this tick says how old
   // they are.
   let lastHostsAt = null;
+  // When the last registry read ended (issue #1072), answered or not, on the reader's clock; null before the first.
+  // `knownSilent` asks it, so a verdict the reader holds goes stale rather than standing for ever.
+  let fleetReadAt = null;
 
   // THE REGISTRY AS ONE READ SAW IT (issue #1036): what `fleetRead` hands its caller beside the queues, frozen, the
   // eight values above as that read left them. A snapshot is assembled over many awaits, and until this it read the
@@ -5361,6 +5390,7 @@ export function createFleetReader(
       lastHosts = fresh;
       lastHostsAt = nowFn();
     }
+    fleetReadAt = nowFn();
     // A host that left keeps its queue open until dispose. Closing it here would race a pause already in flight
     // against it, and an idle BullMQ Queue costs one connection -- cheaper than that race.
     return { queues: lastNames.map(queueNamed), view: fleetView() };
@@ -5444,8 +5474,12 @@ export function createFleetReader(
   // queues the write reaches: a stopped host's queue the registry no longer names included.
   // `view` is that registry read's (`fleetRead`), handed on so a preview's snapshot and a switch's outcome say what
   // THIS read saw of the registry, whatever another call reads meanwhile.
-  const switchQueueNames = async () => {
+  // `stopUnanswered` (issue #1072): a registry read that got no answer ends the look there, rejecting with
+  // `registryUnansweredError`, for a preview that has no use for a keyspace scan and per-queue reads of a Valkey that
+  // just did not answer, each of which would wait out a bound of its own. The switch never asks it: it fails open.
+  const switchQueueNames = async ({ stopUnanswered = false } = {}) => {
     const { view } = await fleetRead();
+    if (stopUnanswered && registryUnanswered(view)) throw registryUnansweredError();
     return { ...(await killSwitchNames(view.names)), view };
   };
   const switchQueues = async () => queuesNamed((await switchQueueNames()).names);
@@ -5466,8 +5500,8 @@ export function createFleetReader(
   // read-only (the panel's) would write that queue's meta key by building it, which every later scan lists as a queue,
   // while a preview writes nothing. A read-only reader's queue no longer writes by being built (issue #1036), so for
   // the console and the agent's failed read this is the first reason alone.
-  const switchPreviewQueues = async (queue, { lookupBound = false } = {}) => {
-    const { names, incomplete, found, view } = await switchQueueNames();
+  const switchPreviewQueues = async (queue, { lookupBound = false, stopUnanswered = false } = {}) => {
+    const { names, incomplete, found, view } = await switchQueueNames({ stopUnanswered });
     const readable = names.filter((n) => found.has(n));
     const unread = names.filter((n) => !found.has(n));
     const flipped = new Set(readable);
@@ -5658,7 +5692,7 @@ export function createFleetReader(
     const seq = scans;
     const previous = discovered?.names ?? [];
     // Read when the scan settles, after the registry read of the same snapshot (see `failed` above).
-    const unanswered = () => fleetDegraded !== null && !fleetPartial && fleetError === null;
+    const unanswered = () => registryUnanswered(fleetView());
     const settled = Promise.resolve()
       .then(() => discoverHostQueuesFn(redis, { timeoutMs: FLEET_READ_TIMEOUT_MS }))
       .then((got) => {
@@ -5841,6 +5875,9 @@ export function createFleetReader(
     // switch flips; `switchTruncated`, true when `queueCounts` holds fewer; `switchIncomplete`, `SWITCH_SCAN_INCOMPLETE`
     // when the keyspace scan behind the set did not finish, else null. `switchLookupBound` (issue #963): true reads at most
     // the by-id lookup's set of them instead (`switchPreviewQueues`' `lookupBound`), for a caller that previews no switch.
+    // `stopUnanswered` (issue #1072), with `switchQueues`: a registry read of this snapshot's own that got no answer
+    // ends it there, rejecting with `registryUnansweredError` (`registryUnanswered: true`), where it went on to the scan
+    // and every queue's reads, each waiting out its bound on the Valkey that just did not answer.
     // The waiting jobs and nothing else (issue #800), for a preview that names the ones a change would refuse. `snapshot` reads every
     // queue's counts, the run history and the schedulers besides, and a timeout around it stops the wait for them and not the reads,
     // so each preview of a slow Valkey left one running. This shares the snapshot's window and its one read (`waitingOf`), and a read
@@ -5867,7 +5904,7 @@ export function createFleetReader(
       // Started BEFORE the queue discovery is waited for (issue #961), and awaited after it: on a Valkey that stopped
       // answering each waits out a bound of its own, and one after the other a kill switch preview paid for both.
       const mergedRead = mergedRunsOn(redis, { logsDir: paths.logsDir, limit: RUNS_ON_DASHBOARD, prune }).catch(() => ({ runs: [], hosts: [], mirror: "off" }));
-      const preview = opts?.switchQueues === true ? await switchPreviewQueues(opts?.queue, { lookupBound: opts?.switchLookupBound === true }) : null;
+      const preview = opts?.switchQueues === true ? await switchPreviewQueues(opts?.queue, { lookupBound: opts?.switchLookupBound === true, stopUnanswered: opts?.stopUnanswered === true }) : null;
       // The registry as THIS snapshot's own read saw it (`fleetRead`'s view, issue #1036), beside the queues that read
       // named. Every mark below that speaks of the registry is this value's, never the reader's variables, which
       // another call may write while this one waits on its queues.
@@ -6645,6 +6682,17 @@ export function createFleetReader(
       // Resume spans the same set, and it is the direction that strands a deployment: a queue paused while its host
       // was live, then resumed while that host is down, stays paused with nothing naming it.
       return killSwitch(false);
+    },
+    /**
+     * Whether this reader already KNOWS its Valkey is silent (issue #1072): its last registry read got no answer (not
+     * read in part, no code Valkey answered with) and ended within `SILENCE_KNOWN_MS` on its clock. A kill switch's
+     * preview then reads nothing: the page it was pressed on could not read the fleet, and a preview that waited for
+     * its counts made the pause the sum of two bounds. A clock that went back is no proof the verdict is fresh.
+     */
+    knownSilent() {
+      if (fleetReadAt === null || !registryUnanswered(fleetView())) return false;
+      const age = nowFn() - fleetReadAt;
+      return age >= 0 && age < SILENCE_KNOWN_MS;
     },
     /**
      * Pause or resume ONE fleet queue (issue #642), the console's per-queue control, on this reader's Valkey and

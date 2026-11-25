@@ -1877,3 +1877,34 @@ test("a preview's read is marked as Valkey out of reach only for what is known t
   t.mock.timers.tick(2000);
   assert.deepEqual([(await fix).error?.message, (await fix).error?.valkeyNotSent], ["fix-store-timeout", true]);
 });
+
+// Issue #1072: a paid enqueue says nothing was queued of an add its client refused with `STREAM_NOT_WRITABLE`, which
+// is only true while ioredis raises those words for a command it never wrote. Read here from the installed copy, which
+// the lockfile pins: a bump that moves the refusal after the write, or raises the words anywhere else, fails this
+// before a confirm can say nothing was queued of an add that left.
+test("ioredis refuses with STREAM_NOT_WRITABLE only a command it did not write, at the pinned version (#1072)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { createRequire } = await import("node:module");
+  const { STREAM_NOT_WRITABLE } = await import("../src/job-actions.mjs");
+  const require = createRequire(import.meta.url);
+  const pkg = require.resolve("ioredis/package.json");
+  assert.equal(JSON.parse(readFileSync(pkg, "utf8")).version, "5.11.1", "re-read built/Redis.js's sendCommand at the new version before moving this pin");
+  const source = readFileSync(new URL("built/Redis.js", `file://${pkg}`), "utf8");
+  const quoted = `"${STREAM_NOT_WRITABLE}"`;
+  assert.equal(source.split(quoted).length - 1, 1, "raised in one place");
+  const start = source.indexOf("    sendCommand(command, stream) {");
+  const end = source.indexOf("\n    }\n", start);
+  assert.ok(start > 0 && end > start, "sendCommand is where it was");
+  const body = source.slice(start, end);
+  // The branch for a stream that cannot be written: refused, and returned, before the branch that writes.
+  const refusal = body.search(/if \(!writable\) \{\s+if \(!this\.options\.enableOfflineQueue\) \{\s+command\.reject\(new Error\("Stream isn't writeable and enableOfflineQueue options is false"\)\);\s+return command\.promise;\s+\}/);
+  assert.ok(refusal > 0, "the refusal returns at once inside the not-writable branch");
+  const firstWrite = body.search(/\.write\(command\.toWritable/);
+  assert.ok(firstWrite > refusal, "every write comes after it, in the branch for a stream that can be written");
+  assert.equal((body.slice(0, refusal).match(/\.write\(/g) ?? []).length, 0, "nothing is written before it");
+  // And nowhere else in the client's own files.
+  const { readdirSync } = await import("node:fs");
+  const built = new URL("built/", `file://${pkg}`);
+  const elsewhere = readdirSync(built, { recursive: true }).filter((f) => f.endsWith(".js") && f !== "Redis.js" && !f.startsWith("cluster")).filter((f) => readFileSync(new URL(f, built), "utf8").includes(quoted));
+  assert.deepEqual(elsewhere, []);
+});

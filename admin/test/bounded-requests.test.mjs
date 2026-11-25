@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { DISPATCH_RUN_ALLOWANCE_LOST, QUEUE_CLOSE_TIMEOUT_MS, applyPriorities, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planEnvelopeWrite, planParkedAnswer, planRerun, readAllocations, readEnvelope, revertAllocation, writeEnvelope, writeTracking } from "../src/read-model.mjs";
-import { ALREADY_CUT, ALREADY_MATCH, ALREADY_PER_STATE, ALREADY_UNCHECKED, APPROVAL_NOT_PENDING, APPROVAL_UNREAD, CONNECT_ENDED, LOOK_FIRST, CONFIRM_READ_TIMEOUT_MS, PAID_PLAN_TIMEOUT_MS, alreadyQueuedLine, connectedQueue, dispatchRunAlready, enqueueUnconfirmed, enqueueUnread, queuedAlready } from "../src/job-actions.mjs";
+import { ADD_NOT_SENT, ADD_NOT_SENT_WHY, STREAM_NOT_WRITABLE, ALREADY_CUT, ALREADY_MATCH, ALREADY_PER_STATE, ALREADY_UNCHECKED, APPROVAL_NOT_PENDING, APPROVAL_UNREAD, CONNECT_ENDED, LOOK_FIRST, CONFIRM_READ_TIMEOUT_MS, PAID_PLAN_TIMEOUT_MS, alreadyQueuedLine, connectedQueue, dispatchRunAlready, enqueueUnconfirmed, enqueueUnread, queuedAlready } from "../src/job-actions.mjs";
 import { approvalTargetKey } from "@edgehero/pi-dispatch/approval-state";
 import { ALLOC_EXPECTED_KEY, ALLOC_LOCK_KEY, ALLOC_LOG_KEY, ALLOC_PLAN_KEY, CAS_SCRIPT, SEED_SCRIPT, STATE_CHANGE_OUTCOMES, makeAllocationState } from "@edgehero/pi-dispatch/allocation";
 import { envelopeDigest, parseEnvelope } from "@edgehero/pi-dispatch/envelope";
@@ -165,6 +165,51 @@ for (const [name, , , enqueue] of ENQUEUES) {
     assert.equal(dropped.calls.add, 1);
   });
 }
+
+// Issue #1072: an add on a connection that died in the moment after its connect is refused by its client before it
+// leaves, in words ioredis raises for no command it wrote (`STREAM_NOT_WRITABLE`, held to the installed copy in
+// `job-actions.test.mjs`). It said may or may not; nothing was sent, so it says nothing was queued.
+for (const [name, what, , enqueue] of ENQUEUES) {
+  test(`${name} whose first add its client refused before it left says nothing was queued, and the same words on an add the client marked as written say may or may not (#1072)`, async () => {
+    const unsent = () => new Error(STREAM_NOT_WRITABLE);
+    const q = fakeQueue({ client: Promise.resolve({ status: "ready" }), add: () => Promise.reject(unsent()) });
+    assert.deepEqual(await enqueue(q.seams), { unreachable: ADD_NOT_SENT });
+    assert.equal(ADD_NOT_SENT, "the queue's connection closed after it was ready and before the add was sent; nothing was queued");
+    assert.equal(q.calls.add, 1);
+    assert.equal(q.calls.disconnect, 1, "the dead queue is dropped beside its close: its close's QUIT is refused as its add was, and it would reconnect for nobody");
+    const written = fakeQueue({ client: Promise.resolve({ status: "ready" }), add: () => Promise.reject(Object.assign(unsent(), { valkeyMayStillRun: true })) });
+    assert.deepEqual(await enqueue(written.seams), enqueueUnconfirmed(what), "the bounded client's mark of a written command decides");
+    assert.equal(written.calls.disconnect, 0);
+    // "Connection is closed." stays may or may not: ioredis rejects written commands with those words too.
+    const closed = fakeQueue({ client: Promise.resolve({ status: "ready" }), add: () => Promise.reject(new Error("Connection is closed.")) });
+    assert.deepEqual(await enqueue(closed.seams), enqueueUnconfirmed(what));
+  });
+}
+
+test("a forge enqueue whose later add, after the semantic repair asked for it, is refused before it left still says may or may not: the repair ran between the adds (#1072)", async () => {
+  let adds = 0;
+  // The first add is answered as the window's duplicate (another id); its owner reads as replaced, so the helper adds
+  // again, and that second add is refused by its client.
+  const q = fakeQueue({ client: Promise.resolve({ status: "ready", eval: async () => ["changed", null, null] }), add: () => ((adds += 1), adds === 1 ? Promise.resolve({ id: "gh-someone-else" }) : Promise.reject(new Error(STREAM_NOT_WRITABLE))) });
+  assert.deepEqual(await enqueueParkedAnswer(PARKED_PLAN, { url: "redis://x", ...q.seams, connectTimeoutMs: BOUND }), enqueueUnconfirmed("the answer to gh-parked"));
+  assert.equal(adds, 2);
+});
+
+test("Fire now whose add its client refused before it left says nothing was queued, with the start it used and the minute it took (#1072)", async () => {
+  const dir = tempDir("pd-1072-fire-");
+  const folder = join(dir, "repo");
+  mkdirSync(folder);
+  const triggersPath = join(dir, "triggers.json");
+  writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "daily", pattern: "0 6 * * *" }, run: { kind: "local", folder, flow: "fix", task: "t" } }] }));
+  const at = () => Date.UTC(2026, 0, 2, 12, 0, 10);
+  const queue = { getJobScheduler: async () => ({ key: "daily" }), getJobs: async () => [], close: async () => {}, disconnect() {}, add: () => Promise.reject(new Error(STREAM_NOT_WRITABLE)), getJob: async () => null };
+  const options = { index: 0, triggersPath, url: "redis://x", env: {}, grantsEnv: {}, now: at, queueFn: () => queue, parseConnectionFn: () => ({}), admissionFn: async () => ({}), redisFn: () => ({ set: async () => "OK", disconnect() {} }) };
+  const { plan } = await planTriggerFire(options);
+  const res = await enqueueTriggerFire(plan, options);
+  assert.deepEqual(res, { invalid: "Nothing was queued and one start of this hour was used: the queue's connection closed after it was ready and before the add was sent, and this minute's Fire now is taken. Try again next minute.", partial: true });
+  assert.ok(res.invalid.length <= CONSOLE_AUDIT_FIELD_MAX, "an audit row keeps the whole sentence");
+  assert.ok(res.invalid.includes(ADD_NOT_SENT_WHY));
+});
 
 /** The durable approval a parked run waits on, as the approval store keeps it, and the answer the console planned for it. */
 const APPROVAL = { version: 1, requestId: "a".repeat(64), runId: "gh-parked", kind: "github", repo: "o/r", target: { type: "issue", number: 7 }, action: "deploy:staging", toolCallId: "call-1", configDigest: "digest", sessionKey: "session-key", host: "host-1", createdAt: 123456, state: "pending" };

@@ -26,7 +26,8 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { DISPATCH_RUN_COUNT_SCRIPT, QUEUE_CLOSE_TIMEOUT_MS, applyPriorities, cancelHeldJob, cancelQueuedJob, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planCancelQueued, planEnvelopeWrite, planParkedAnswer, planRerun, readAllocations, readEnvelope, revertAllocation, writeEnvelope } from "../src/read-model.mjs";
 import { makeAllocationState } from "@edgehero/pi-dispatch/allocation";
 import { historyBehind } from "../src/render.mjs";
-import { APPROVAL_NOT_PENDING, CONNECT_ENDED, dispatchRunAlready, enqueueUnconfirmed } from "../src/job-actions.mjs";
+import { ADD_NOT_SENT, APPROVAL_NOT_PENDING, CONNECT_ENDED, dispatchRunAlready, enqueueUnconfirmed } from "../src/job-actions.mjs";
+import { recordingProxy } from "./helpers/recording-proxy.mjs";
 import { enqueueTriggerFire, FIRE_UNCONFIRMED, planTriggerFire } from "../src/trigger-fire.mjs";
 import { readUpdates } from "../src/updates-view.mjs";
 import { GROUP_STATUS_UNANSWERED, GROUP_UNCONFIRMED, makeZeroTouchService } from "../src/zero-touch-data.mjs";
@@ -154,6 +155,41 @@ for (const enqueue of ENQUEUES) {
       proxy.thaw();
       await sleep(1500);
       assert.equal(await s.jobs(), 0, "nothing was sent, and nothing is sent when the connection comes up");
+    } finally {
+      proxy.close();
+      await s.done();
+    }
+  });
+}
+
+// Issue #1072: a connection that dies in the moment after the connect found it ready. The add then meets a stream its
+// client cannot write, and the client refuses it before it leaves (`STREAM_NOT_WRITABLE`): the real BullMQ and ioredis,
+// with the socket destroyed as the connect phase hands the client over, and a proxy that records what reached the wire.
+for (const enqueue of ENQUEUES) {
+  test(`${enqueue.name} whose queue's connection dies right after its connect says nothing was queued, and no add reached the wire (#1072)`, live, async () => {
+    const s = await scene("t1072");
+    const proxy = await recordingProxy(s.url);
+    const dropped = [];
+    const queueFn = (conn, opts) => {
+      const q = makeQueue(conn, opts);
+      return new Proxy(q, {
+        get(target, name) {
+          if (name === "client") return target.client.then((client) => (client.stream?.destroy(), dropped.push(client.status), client));
+          const value = Reflect.get(target, name);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    };
+    try {
+      const got = await clocked(enqueue.run(s, proxy.url, { queueFn, makeQueueFn: queueFn }));
+      assert.deepEqual(got.res, { unreachable: ADD_NOT_SENT }, JSON.stringify(got.res?.thrown?.message ?? got.res));
+      assert.ok(dropped.length > 0 && dropped[0] === "ready", `the connect found it ready: ${JSON.stringify(dropped)}`);
+      assert.ok(got.ms < 1500, `${got.ms} ms`);
+      const sent = proxy.commands.filter((c) => c.name === "EVAL" || c.name === "EVALSHA");
+      assert.deepEqual(sent.filter((c) => /Adds a (?:\w+ )?job/i.test(c.script ?? "")), [], "no add reached Valkey");
+      // Long enough for the dropped queue's client to reconnect and be closed, so nothing of it outlives the proxy.
+      await sleep(1_000);
+      assert.equal(await s.jobs(), 0);
     } finally {
       proxy.close();
       await s.done();
