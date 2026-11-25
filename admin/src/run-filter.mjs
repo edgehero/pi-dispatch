@@ -56,6 +56,21 @@ const localEventFilter = (value) => {
   return prefix === "event" && extra === undefined && localEventFilterValue({ forge, id }) === value;
 };
 const TRIGGER_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+/**
+ * A forge trigger by its row AND its identity (issue #1073): `<row>:<forge>:<on.type>`, the three things a forge run's
+ * record holds of the trigger that queued it (`triggerIndex`, `kind`, `triggerType`) and the rule `/triggers` and a
+ * trigger's page count its runs by (`trigger-match.mjs`). A row number alone matched every run of whatever trigger held
+ * that row, and rows are renumbered when one is added or deleted before them; it is still taken, from a link written
+ * before this, and the runs page says what it matches.
+ */
+const TRIGGER_IDENTITY_RE = /^(\d{1,4}):([a-z]{1,16}):([a-z_]{1,32})$/;
+/** A `<row>:<forge>:<type>` value as `{ index, kind, type }`, or null for any other value. */
+export function triggerIdentityOf(value) {
+  const m = typeof value === "string" ? TRIGGER_IDENTITY_RE.exec(value) : null;
+  return m && FORGE_KINDS.includes(m[2]) ? { index: Number(m[1]), kind: m[2], type: m[3] } : null;
+}
+/** Whether a `trigger` value names a row alone (a link written before issue #1073), which matches by row only. */
+export const triggerRowOnly = (value) => typeof value === "string" && TRIGGER_INDEX_RE.test(value);
 
 /**
  * A run record's `model`: the bare host-effective model id (no provider prefix), as the runs filter and `/api/run`
@@ -81,7 +96,7 @@ const RULES = Object.freeze({
   repo: { ok: (v) => v.length <= 200 && /^[A-Za-z0-9._/-](?:[A-Za-z0-9._/ -]*[A-Za-z0-9._/-])?$/.test(v), says: "a repository path of letters, digits, '.', '_', '-', '/' and inner spaces, at most 200 characters" },
   kind: { ok: (v) => RUN_KINDS.includes(v), says: `one of ${RUN_KINDS.join(", ")}` },
   flow: { ok: (v) => SKILL_NAME_RE.test(v), says: "a flow name (lowercase letters, digits, '_' and '-', at most 64 characters)" },
-  trigger: { ok: (v) => TRIGGER_INDEX_RE.test(v) || TRIGGER_ID_RE.test(v) || localEventFilter(v), says: "an event:forge:id reference, a trigger's index or a scheduler id (letters, digits, '.', '_', '-', at most 128 characters)" },
+  trigger: { ok: (v) => TRIGGER_INDEX_RE.test(v) || triggerIdentityOf(v) !== null || TRIGGER_ID_RE.test(v) || localEventFilter(v), says: "an event:forge:id reference, a trigger's index with its forge and type (index:forge:type), a trigger's index or a scheduler id (letters, digits, '.', '_', '-', at most 128 characters)" },
   project: { ok: (v) => PROJECT_ID_RE.test(v), says: "a project id (lowercase letters, digits and '-', at most 32 characters)" },
   host: { ok: (v) => WORKER_NAME_RE.test(v), says: "a worker name (letters, digits, '.', '_', '-', at most 64 characters)" },
   // A venue name (issue #712), by the shape a host row carries one (HOST_VENUE_NAME_RE), not this build's table: a
@@ -163,6 +178,19 @@ export function triggerValueOf(record) {
 }
 
 /**
+ * The `trigger` value a runs list offers for `record` (issue #1073): a forge run's row with its identity
+ * (`<row>:<forge>:<type>`) where the record holds all three, else `triggerValueOf`'s. Not `triggerValueOf` itself, which
+ * the trigger page's queued list compares with a row number alone.
+ */
+export function triggerFilterValueOf(record) {
+  if (record?.kind !== "local" && Number.isSafeInteger(record?.triggerIndex) && record.triggerIndex >= 0 && record.triggerIndex <= 9999 && typeof record.triggerType === "string") {
+    const value = `${record.triggerIndex}:${record.kind}:${record.triggerType}`;
+    if (triggerIdentityOf(value) !== null) return value;
+  }
+  return triggerValueOf(record);
+}
+
+/**
  * Whether `record` passes `filter` (a `parseRunFilter` result's `filter`): every set field must hold. A null or empty
  * filter passes everything. A record field that is absent never matches a set filter field, with one exception:
  * `backend`, where a record with no venue is a `local` run from before venues were recorded (UNATTRIBUTED_BACKEND), so
@@ -176,8 +204,12 @@ export function runMatches(record, filter) {
   if (f.kind !== undefined && record.kind !== f.kind) return false;
   if (f.flow !== undefined && record.flow !== f.flow) return false;
   if (f.trigger !== undefined) {
+    // By the row and the trigger's identity, the three facts a forge run holds of it (issue #1073); by the row alone
+    // only for a link that names nothing more, which the page says.
+    const identity = triggerIdentityOf(f.trigger);
+    const byIdentity = identity !== null && record.triggerIndex === identity.index && record.kind === identity.kind && record.triggerType === identity.type;
     const byIndex = TRIGGER_INDEX_RE.test(f.trigger) && record.triggerIndex === Number(f.trigger);
-    if (!byIndex && schedulerIdOf(record.jobId) !== f.trigger && !(record.kind === "local" && localEventFilterValue(record.localEvent) === f.trigger)) return false;
+    if (!byIdentity && !byIndex && schedulerIdOf(record.jobId) !== f.trigger && !(record.kind === "local" && localEventFilterValue(record.localEvent) === f.trigger)) return false;
   }
   if (f.project !== undefined && record.project !== f.project) return false;
   if (f.host !== undefined && record.host !== f.host) return false;

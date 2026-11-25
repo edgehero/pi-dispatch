@@ -167,7 +167,7 @@ test("the words of a failed read and the sentences that are never the pill's are
   // on the second, would let a page say a read failed under a Live pill with every other test green: so each is held
   // by its exact text, and a change to either is a change to this test, which a person reads.
   assert.deepEqual(UNREAD_WORDS.map((phrase) => phrase.source), ["could not be read", "could not read\\b", "cannot be read", "\\bnot read\\b", "\\bunreadable\\b", "read in part", "did not answer", "\\bincomplete\\b",
-    "\\bNot every [\\w' ]{1,40}? could be (?:read|found)\\b", "\\bNot read\\b", "\\bnot asked\\b"]);
+    "\\bNot every [\\w' ]{1,40}? could be (?:read|found)\\b", "\\bNot read\\b", "\\bnot asked\\b", "answered this page's read with\\b", "failed while it read\\b"]);
   assert.deepEqual(NOT_THE_PILLS.map(([sentence]) => sentence.source), [
     "The host's capacity history could not be read\\.",
     "logs dir unreadable \\([A-Z_-]+\\)",

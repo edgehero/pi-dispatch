@@ -843,7 +843,7 @@ async function together(reads) {
  *     drawn for a Valkey that did not answer: `asked` throws into the read's own catch, and `askedOr` answers what a
  *     read with no catch answers when it could not read. A cut read is never worded as a fault of this console.
  *
- * A load the deadline cut says so (`data.deadlineSpent`), and `data.snapshotFailure` is "late" where the snapshot is
+ * A load the deadline cut says so (`data.deadlineSpent`), and `data.snapshotFailure` is `{ kind: "late" }` where the snapshot is
  * what it cut. A Valkey that is slow and still answers inside the deadline is cut nowhere. Not timed: what reads
  * files alone (the audit log, the secrets view, the editor's hints) and synchronous work, the Insights pages' folds
  * over the run records among it. The Insights assembly's Valkey reads are under the deadline since issue #1073: they
@@ -898,6 +898,21 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     const got = await deadline.settle(read, passed, { grace: true });
     if (shortened && deadline.spent()) cut();
     return got;
+  };
+  // Why the snapshot read failed (issue #1073): `snapshotFailureOf`'s mark, kept on the data, and a fault of the
+  // console's own code logged by its error's name and where it was thrown, never its message.
+  const snapshotFailed = (err) => {
+    const failure = snapshotFailureOf(err);
+    if (failure === null) return;
+    data.snapshotFailure = failure;
+    if (failure.kind === "fault") {
+      const line = `console: the ${name} page's read of the deployment failed in the console (${faultWhere(err)})`;
+      // Once a minute for one line: an open page reloads every two seconds, and a fault fails each of them alike.
+      if (Number.isFinite(FAULTS_LOGGED.get(line)) && now - FAULTS_LOGGED.get(line) < FAULT_LOG_EVERY_MS && now >= FAULTS_LOGGED.get(line)) return;
+      FAULTS_LOGGED.set(line, now);
+      if (FAULTS_LOGGED.size > 64) FAULTS_LOGGED.delete(FAULTS_LOGGED.keys().next().value);
+      try { deps.log?.(line); } catch { /* a log that cannot be written fails no page */ }
+    }
   };
   // The run history under the deadline: this host's files and the fleet's mirror, the mirror within the bound the
   // reader is handed, so past the deadline the reader still answers, with this host's part and the mirror not reached.
@@ -1043,8 +1058,8 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
         data.readFailed = true;
         // Issue #988: the read did not fail, the page's deadline cut it (or had passed before it could be made); or
         // Valkey answered it, with an error. Either way a page's sentence must not say Valkey could not be read.
-        if (err instanceof PageDeadlinePassed) data.snapshotFailure = "late";
-        else if (repliedWithError(err)) data.snapshotFailure = "error";
+        // Issue #1073: with the reply's code, and a fault of the console's own code said as one, in its log too.
+        snapshotFailed(err);
         // Issue #844: what the deployment's files hold needs no Valkey, so a page still draws it rather than an empty
         // list. Absent where the reader has none or it throws: a panel then says the fact could not be read.
         try { if (typeof deps.fleet?.fileViews === "function") data.files = deps.fleet.fileViews() ?? null; } catch { data.files = null; }
@@ -1335,7 +1350,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   };
   const refusedSnapshotRead = async () => {
     if (name === "run" && data.run?.record && refusedBeforeStart(data.run.record)) {
-      try { data.snapshot = await asked(() => deps.fleet.snapshot()); } catch (err) { data.snapshot = null; if (err instanceof PageDeadlinePassed) data.snapshotFailure = "late"; else if (repliedWithError(err)) data.snapshotFailure = "error"; }
+      try { data.snapshot = await asked(() => deps.fleet.snapshot()); } catch (err) { data.snapshot = null; snapshotFailed(err); }
     }
   };
   const refusedWindowRead = async () => {
@@ -1563,6 +1578,41 @@ function oneReading(fs, path) {
  * did not answer, and not a deadline.
  */
 const repliedWithError = (err) => err?.name === "ReplyError" || /^(?:WRONGTYPE|ERR|NOAUTH|NOPERM|LOADING|MISCONF|READONLY|BUSY|OOM)\b/.test(String(err?.message ?? ""));
+
+/**
+ * The engine's own errors: what a fault in the console's code throws (a property of null, a call of what is not a
+ * function), and no client of Valkey throws for a Valkey that did not answer or answered with an error.
+ */
+const CONSOLE_FAULTS = new Set(["TypeError", "ReferenceError", "RangeError", "SyntaxError", "EvalError", "URIError"]);
+/** When each fault's log line was last written (the load's clock), so one fault is logged once a minute, not per load. */
+const FAULTS_LOGGED = new Map();
+const FAULT_LOG_EVERY_MS = 60_000;
+
+/**
+ * Why a snapshot read failed, as a page's data keeps it (issue #1073): `{ kind: "late" }` for a read the page's
+ * deadline cut, `{ kind: "error", code }` for a reply Valkey answered with an error (its code, the reply's first word,
+ * null where it has none), `{ kind: "fault" }` for an engine error of the console's own code, or null for every other
+ * failure: a Valkey that did not answer, which a page says when no mark is set. It was "late" and "error" alone, so a
+ * console fault was said as a Valkey that could not be read, and an error named no code.
+ */
+export function snapshotFailureOf(err) {
+  if (err instanceof PageDeadlinePassed) return { kind: "late" };
+  if (repliedWithError(err)) return { kind: "error", code: /^([A-Z][A-Z0-9_]{0,31})(?=\s|$)/.exec(String(err?.message ?? ""))?.[1] ?? null };
+  if (CONSOLE_FAULTS.has(err?.name) || CONSOLE_FAULTS.has(err?.constructor?.name)) return { kind: "fault" };
+  return null;
+}
+
+/**
+ * A fault's name and where it was thrown, for the console's log: the error's class and its first stack frame cut to
+ * the function and the file's last part ("TypeError at readHosts (read-model.mjs:812)"). Never the message, which can
+ * hold a value read from a file or a key.
+ */
+function faultWhere(err) {
+  const name = CONSOLE_FAULTS.has(err?.name) ? err.name : "Error";
+  const frame = String(err?.stack ?? "").split("\n").find((line) => /^\s+at /.test(line)) ?? "";
+  const m = /^\s+at (?:(?:async )?([\w$.<>[\] ]{1,80}) \()?(?:file:\/\/)?[^()]*?([\w.-]{1,80}):(\d{1,7}):\d{1,7}\)?$/.exec(frame);
+  return m ? `${name} at ${m[1] ? `${m[1].trim()} (${m[2]}:${m[3]})` : `${m[2]}:${m[3]}`}` : name;
+}
 
 function runPlacesOf(data) {
   const run = data?.readFailed === true && !data?.run?.record ? { unreadable: RUN_RECORD_UNREAD } : data?.run;

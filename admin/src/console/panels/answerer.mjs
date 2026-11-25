@@ -2,8 +2,7 @@
 import { ANSWER_CLASSIFICATIONS } from "@edgehero/pi-dispatch/answerer";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
-import { ageText, canAct, changesOffered, noChangeText, RUN_ID_RE } from "./common.mjs";
-import { OVERVIEW_UNREAD_TEXT } from "./overview.mjs";
+import { ageText, canAct, changesOffered, noChangeText, RUN_ID_RE, snapshotMissingText } from "./common.mjs";
 import { listed } from "../../words.mjs";
 
 export const ANSWERER_PASS_WORDS = Object.freeze({
@@ -101,7 +100,7 @@ export function answererParked(view, { manualAnswer = () => null } = {}) {
   if (!state || !(state.rules?.length || state.rows?.length || state.state !== "ok")) return null;
   const operator = view.role === "operator";
   const s = view.data?.snapshot ?? null;
-  const parkedUnread = s === null ? OVERVIEW_UNREAD_TEXT : typeof s.parkedUnreachable === "string" && s.parkedUnreachable !== "" ? `The parked runs could not be read (${s.parkedUnreachable}); this is not an empty inbox.` : null;
+  const parkedUnread = s === null ? snapshotMissingText(view) : typeof s.parkedUnreachable === "string" && s.parkedUnreachable !== "" ? `The parked runs could not be read (${s.parkedUnreachable}); this is not an empty inbox.` : null;
   const known = resultsRead(state);
   const parked = parkedUnread === null && Array.isArray(s.parked) ? s.parked : [];
   const rows = new Map((state.rows ?? []).map(row => [row.runId, row]));

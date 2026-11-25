@@ -439,6 +439,18 @@ export function triggerKinds(v) {
         </p>`}`,
   );
 }
+/**
+ * How many jobs in line this trigger's change would refuse (issue #1073). Over a queue check that was incomplete and saw
+ * none, the count is not known, where it said "At least 0 jobs"; a count agrees with its noun; and why the check was
+ * incomplete is said once, under "Jobs in line now", where it was said there and again here.
+ */
+export const SKEW_UNKNOWN_TEXT = "Whether a job in line would be refused now is not known: the queue check was incomplete.";
+function skewText(d) {
+  const n = d.skewed?.length ?? 0;
+  const jobs = `${n} ${n === 1 ? "job" : "jobs"} in view would be refused now.`;
+  if (d.skewIncomplete !== true) return jobs;
+  return n === 0 ? SKEW_UNKNOWN_TEXT : `At least ${jobs} The queue check was incomplete.`;
+}
 export function triggerChange(v) {
   const t = trigger(v);
   return card(
@@ -455,7 +467,7 @@ export function triggerChange(v) {
         ${t?.runKind === "local" ? "Current and pending generation state is shown in Runs it started." : !t || detail(v).skewed == null
           ? (detail(v).skewReason ??
             "Jobs that would be refused cannot be checked here.")
-          : `${detail(v).skewIncomplete ? "At least " : ""}${detail(v).skewed?.length ?? 0} jobs in view would be refused now.${detail(v).skewIncomplete ? ` The queue check was incomplete.${queuedFloorText(v, { queuedIncomplete: true })}` : ""}`}
+          : skewText(detail(v))}
       </p>
       <p>${othersUnread(v) ? TRIGGER_GETS_WORDS.othersUnread : fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? fileRefused(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? (t ? "This console loads the triggers file." : null)}</p>
       ${(detail(v).skewed ?? []).map(job => html`<p>${runLink(job.jobId)}: ${job.field ?? job.conditions ?? "trigger changed"}</p>`)}

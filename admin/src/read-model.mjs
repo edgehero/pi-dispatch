@@ -116,7 +116,7 @@ import { PACKAGES_SUBDIR, STAGE_MANIFEST, readStageManifest, readStagedSkills } 
 import { selectEntries, keepOnlyDeclaredSkills } from "@edgehero/pi-dispatch/materialize";
 import { FORGES, RUN_KINDS, isForgeKind, semanticItemOfId } from "@edgehero/pi-dispatch/forges";
 import { hasControls, scrubControls } from "./panel.mjs";
-import { RUN_MODEL_RE, RUN_PROVIDER_RE, parseRunFilter, runMatches, runVenueOf, triggerValueOf } from "./run-filter.mjs";
+import { RUN_MODEL_RE, RUN_PROVIDER_RE, parseRunFilter, runMatches, runVenueOf, triggerFilterValueOf, triggerValueOf } from "./run-filter.mjs";
 import { recordMatchesTrigger } from "./trigger-match.mjs";
 // The two pure text scanners live in graph-model.mjs (the pure side of the graph feature); this module
 // supplies them bytes, never the other way around -- the dependency points read-model -> graph-model.
@@ -7177,18 +7177,22 @@ const outcomeCounts = () => Object.fromEntries([...OUTCOME_KEYS, "other"].map((k
 /** Code-unit order, so two reads of one window list the same values in the same order whatever the host's locale. */
 const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
-/** A trigger's values in reading order: the triggers-file positions by number ("row 2" before "row 10"), then the scheduler ids. */
+/**
+ * A trigger's values in reading order: the triggers-file positions by number ("row 2" before "row 10"), a position with
+ * its identity (`<row>:<forge>:<type>`, issue #1073) by its number too, then the scheduler ids.
+ */
 function byTriggerValue(a, b) {
-  const an = /^\d+$/.test(a);
-  const bn = /^\d+$/.test(b);
-  if (an && bn) return Number(a) - Number(b);
-  return an ? -1 : bn ? 1 : byText(a, b);
+  const rowOf = (v) => /^(\d+)(?::|$)/.exec(v)?.[1];
+  const an = rowOf(a);
+  const bn = rowOf(b);
+  if (an !== undefined && bn !== undefined) return Number(an) - Number(bn) || byText(a, b);
+  return an !== undefined ? -1 : bn !== undefined ? 1 : byText(a, b);
 }
 
 /** A record's value of a listed field, as the runs filter matches it (`runMatches`), or null. */
 function windowValueOf(field, r) {
   if (field === "backend") return runVenueOf(r);
-  if (field === "trigger") return triggerValueOf(r);
+  if (field === "trigger") return triggerFilterValueOf(r);
   if (field === "reason") return recordReason(r);
   const v = r?.[field];
   return typeof v === "string" && v !== "" ? v : null;

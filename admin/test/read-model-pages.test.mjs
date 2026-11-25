@@ -2028,7 +2028,7 @@ test("without a snapshot Fleet and the overview's Hosts card offer Pause and Res
   for (const snapshot of [null, undefined]) {
     const bar = String(fleetBar(panelView(snapshot)));
     const hosts = String(overviewHosts(panelView(snapshot)));
-    assert.ok(bar.includes("<p>The deployment's Valkey could not be read. The next refresh tries again.</p>"), bar);
+    assert.ok(bar.includes("<p>The deployment&#39;s Valkey could not be read. The next refresh tries again.</p>"), bar);
     assert.ok(hosts.includes("<h2>Hosts</h2>") && hosts.includes(KILL_SWITCH_UNREAD_TEXT), hosts);
     for (const out of [bar, hosts]) {
       assert.deepEqual(switchForms(out), ["fleet-pause", "fleet-resume"], out);

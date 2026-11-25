@@ -119,7 +119,10 @@ export const UNREAD_WORDS = [/could not be read/, /could not read\b/, /cannot be
   // The words of the other marks of a snapshot that answered (issues #1037, #1064, #986): a list read short of every
   // queue ("Not every queue could be found", "Not every queue's schedules could be read"), a queue Valkey answered
   // with an error ("Not read, so not in these counts"), and a host's own queue that no read asked.
-  /\bNot every [\w' ]{1,40}? could be (?:read|found)\b/, /\bNot read\b/, /\bnot asked\b/];
+  /\bNot every [\w' ]{1,40}? could be (?:read|found)\b/, /\bNot read\b/, /\bnot asked\b/,
+  // The page's own read by its cause (issue #1073): a reply Valkey answered with an error, by its code, and a fault of
+  // the console's own code, where every cause was said "could not be read".
+  /answered this page's read with\b/, /failed while it read\b/];
 /**
  * What a page can say in those words that is not a read the console makes for the page, or not one its stream makes
  * again: never the pill's, each with why. `console-pill.test.mjs` holds the list's length and each sentence, so it
@@ -153,7 +156,7 @@ export const unreadWordsIn = (words) => { const left = NOT_THE_PILLS.reduce((res
  * never the pill's (`NOT_THE_PILLS`): a host's page always says its capacity history is read once, which is no word
  * of what a read that failed left out, and it stood in for one on every host's page.
  */
-export const saysWhatIsMissing = (words) => { const left = NOT_THE_PILLS.reduce((rest, [sentence]) => rest.replace(sentence, " "), words); return /could not be read|was read in part|not read this time|could not be counted|cannot be told|not known|could be found|may be missing|more may be registered|Not read, so not in|(?:was|were) not asked/.test(left); };
+export const saysWhatIsMissing = (words) => { const left = NOT_THE_PILLS.reduce((rest, [sentence]) => rest.replace(sentence, " "), words); return /could not be read|was read in part|not read this time|could not be counted|cannot be told|not known|could be found|may be missing|more may be registered|Not read, so not in|(?:was|were) not asked|answered this page's read with|failed while it read/.test(left); };
 /** Whether a page the server drew carries the pill's mark; null where it draws no pill (a page that is not live). */
 export const pillOf = (page) => {
   const tag = /<span id="live-status"[^>]*>/.exec(page);

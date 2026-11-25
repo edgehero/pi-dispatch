@@ -2638,7 +2638,7 @@ test("a switch read that Valkey answered with an error for one queue names it: t
     assert.equal(own.status, 400, own.text);
     assert.equal(own.json().error, queueErroredRefusal("pi-jobs@hostb", "WRONGTYPE"));
   }
-  assert.equal(queueErroredRefusal("pi-jobs@hostb", "WRONGTYPE"), "pi-jobs@hostb could not be read: Valkey answered its read with an error (WRONGTYPE), so whether it is paused is not known here; nothing was changed");
+  assert.equal(queueErroredRefusal("pi-jobs@hostb", "WRONGTYPE"), "pi-jobs@hostb could not be read: Valkey answers bull:pi-jobs@hostb:meta with WRONGTYPE, so whether it is paused is not known here. Remove or repair that key first; nothing was changed");
   // Another queue's preview goes on, and its switch is made.
   const other = await c.both("queue-pause", { queue: "pi-jobs" });
   assert.equal(other.confirm.status, 200, other.confirm.text);
@@ -2756,11 +2756,11 @@ test("a queue whose paused flag was read and whose counts alone Valkey answers w
     // where it was not.
     const c = await start({ paths, a: { fleet: { snapshot: (opts) => reader.snapshot(opts), pauseQueue: async () => ({ ok: true }) }, killSwitchPlanFn: () => ({ urls: ["redis://h/0"], disagreement: null }) } });
     const counts = await c.act("queue-resume", { queue: "pi-jobs@hostb" });
-    assert.deepEqual([counts.status, counts.json().error], [400, "the counts of pi-jobs@hostb could not be read: Valkey answered that read with an error (ERR). It is paused, and what the switch would change there is not known here; nothing was changed"]);
+    assert.deepEqual([counts.status, counts.json().error], [400, "the counts of pi-jobs@hostb could not be read: Valkey answers the read of its counts with ERR. It is paused, and what the switch would change there is not known here; nothing was changed"]);
     const running = await c.act("queue-pause", { queue: "pi-jobs@hostd" });
-    assert.equal(running.json().error, "the counts of pi-jobs@hostd could not be read: Valkey answered that read with an error (WRONGTYPE). It is running, and what the switch would change there is not known here; nothing was changed");
+    assert.equal(running.json().error, "the counts of pi-jobs@hostd could not be read: Valkey answers the read of its counts with WRONGTYPE. It is running, and what the switch would change there is not known here. Waiting does not change that; nothing was changed");
     const flag = await c.act("queue-resume", { queue: "pi-jobs@hostc" });
-    assert.equal(flag.json().error, "pi-jobs@hostc could not be read: Valkey answered its read with an error (WRONGTYPE), so whether it is paused is not known here; nothing was changed");
+    assert.equal(flag.json().error, "pi-jobs@hostc could not be read: Valkey answers bull:pi-jobs@hostc:meta with WRONGTYPE, so whether it is paused is not known here. Remove or repair that key first; nothing was changed");
   } finally {
     await reader.dispose();
   }

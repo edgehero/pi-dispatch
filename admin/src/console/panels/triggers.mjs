@@ -8,13 +8,13 @@ import {
   CHECK_PR_ACTIONS,
   CHECK_LIMITS,
 } from "../../trigger-check.mjs";
-import { SCHEDULES_PART_TEXT, TRIGGER_LIST_KINDS } from "../../trigger-list.mjs";
+import { SCHEDULERS_UNREAD_NO_RULES_TEXT, SCHEDULERS_UNREAD_TEXT, SCHEDULES_PART_TEXT, TRIGGER_LIST_KINDS } from "../../trigger-list.mjs";
 import { triggerWhoMayFire } from "../../trigger-policy.mjs";
 import { fmtCost } from "../../panel.mjs";
 import { outcomeWord, recordReason, reasonWords } from "../../words.mjs";
 import { html as escapedHtml } from "../html.mjs";
 import * as ui from "../kit.mjs";
-import { timeHtml, ageText, plural, shownPath, runLink } from "./common.mjs";
+import { timeHtml, ageText, plural, shownPath, runLink, unreadAfter, unreadCauseOf, unreadLead, unreadText } from "./common.mjs";
 const html = (strings, ...values) =>
   escapedHtml(
     strings.map((s) => s.replace(/[ \t]*\n[ \t]*/g, "\n")),
@@ -133,13 +133,24 @@ export function triggersCount(v) {
       ${(m?.problems ?? []).map(
         (p) =>
           html`<p class="tr-problem">
-            ${ui.icon("attention", { size: "sm" })}${p}
+            ${ui.icon("attention", { size: "sm" })}${problemWords(v, p)}
           </p>`,
       )}`,
   );
 }
 /** Under a next fire drawn from a schedule list read in part (issue #986): an earlier one may be on a queue nobody read. */
 const SCHEDULES_NEXT_PART_TEXT = "Not every queue's schedules could be read, so an earlier fire may be registered.";
+/**
+ * A problem of the list in the words of the snapshot's cause (issue #1073): the schedules' sentence, which the list's
+ * builder words for a Valkey that did not answer, said for the cause the page met. Every other problem as it is.
+ */
+function problemWords(v, p) {
+  const known = { [SCHEDULERS_UNREAD_TEXT]: " The rules shown are the triggers file's.", [SCHEDULERS_UNREAD_NO_RULES_TEXT]: "" };
+  const cause = unreadCauseOf(v.data);
+  if (!Object.hasOwn(known, p) || cause.kind === "silent") return p;
+  const after = unreadAfter(cause);
+  return `${unreadLead(cause)}: next fires, owning hosts and stall counts are not known.${after ? ` ${after}` : ""}${known[p]}`;
+}
 export function triggersNext(v) {
   const m = modelOf(v),
     n = m?.next;
@@ -154,9 +165,7 @@ export function triggersNext(v) {
       : m?.schedulesReadInPart
         ? html`<p class="tr-empty">Not known. ${SCHEDULES_PART_TEXT}</p>`
       : m?.schedulersUnread
-        ? html`<p class="tr-empty">
-            Not known: Valkey could not be read, so no next fire can be shown.
-          </p>`
+        ? html`<p class="tr-empty">${unreadText(v, { prefix: "Not known: ", then: "so no next fire can be shown" })}</p>`
         : html`<p class="tr-empty">
           No next fire is published. Check the schedule's owning worker and its
           doctor result.
@@ -333,7 +342,7 @@ function ruleRow(v, r) {
           </p>`}${next
         ? html`<p class="tr-next">
               ${next.unread
-                ? "Next fire and stall count not known: Valkey could not be read."
+                ? unreadText(v, { prefix: "Next fire and stall count not known: " })
                 : next.part
                 ? html`Next fire not known: not every queue's schedules could be read · stalls ${next.stalls ?? "unknown"} of ${next.stallLimit}`
                 : html`Next: ${next.at === null ? "unknown" : timeHtml(next.at)} ·
