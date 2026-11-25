@@ -129,11 +129,15 @@ test("assembleBudgetView asks for the job-slot counters, the scoped rows' and th
   const sent = [];
   const never = () => new Promise(() => {});
   const redisFn = () => ({ on() {}, disconnect() {}, get: (key) => (sent.push(["get", key]), never()), mget: (...keys) => (sent.push(["mget", ...keys]), never()) });
+  // The readers' bounds are unref'd timers (a CLI is never held open by one), and this fake holds no socket as a real
+  // client does: with nothing else in the event loop, Node 22 ends the file with this test's promise pending. A timer of
+  // the test's own holds the loop until the bounds have fired.
+  const alive = setInterval(() => {}, 1_000);
   const started = performance.now();
   const assembling = assembleBudgetView(paths, { redisFn, env: { PI_DAILY_COST_USD: "10", PI_MAX_COST_USD: "1" }, nowMs: NOW, timeoutMs: 40 });
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual([sent.filter(([cmd]) => cmd === "get").length >= 5, sent.filter(([cmd]) => cmd === "mget").length], [true, 1], "the four counters, a scoped row's and the dollar windows' MGET, before any bound fired");
-  const got = await assembling;
+  const got = await assembling.finally(() => clearInterval(alive));
   assert.ok(performance.now() - started < 3 * 40 + 500, "one bound, not three in turn");
   assert.deepEqual([Boolean(got.unreachable), got.scopedUnreachable, got.dollars.countersUnreachable], [true, "timed out reaching the queue", "timed out reaching the queue"], "each says it was not read");
 });
