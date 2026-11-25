@@ -3102,10 +3102,28 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	assert.equal(constructions[0].intervalMs, 24 * 3600000, "24h by default, in ms");
 	// The allocation audit files (issue #504 part B) second: boot reaps them right after the logs, and a tick re-runs that
 	// same closure in the same place.
-	// Issue #645: the host-lost sweep on every host, last; the checkpoint store's retention only where there is a store.
-	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "touch_outbox", "sandbox", "artifacts", "session", "recovery_host_lost"], "boot's own order (issue #920: the artifacts store beside the sandbox store)");
+	// Issue #645: the host-lost sweep on every host; the checkpoint store's retention only where there is a store.
+	// Issue #1075: the held index's sweep after it, on the timer alone (boot runs no such pass).
+	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "touch_outbox", "sandbox", "artifacts", "session", "recovery_host_lost", "held_index"], "boot's own order (issue #920: the artifacts store beside the sandbox store), then the held index");
 	assert.equal(captured.extraClosers.length, 9 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the sandbox follow-ups + the sweep + the doctor runs (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
+});
+
+test("the held index's reaper sweeps through the worker's own client and says what it did in counts alone (issue #1075)", { skip }, async () => {
+	let handed;
+	const out = await runStart({ makeRetentionSweep: (args) => ((handed = args), { start() {}, sweepOnce: async () => {}, close: async () => {} }) });
+	// The harness has closed the boot's client by now, so its two commands are this test's: nothing reaches the shared
+	// test Valkey's index, where other files plant stale members and count them.
+	const sent = [];
+	Object.assign(out.captured.redis, {
+		sscan: async (...args) => (sent.push(["sscan", ...args]), ["0", ["gone-1", "live-1"]]),
+		eval: async (_script, numKeys, ...args) => (sent.push(["eval", numKeys, ...args]), 1),
+	});
+	const from = out.logsNow().length;
+	await handed.reapers.find((r) => r.name === "held_index").reap({ stopped: () => false });
+	assert.deepEqual(sent, [["sscan", "wait:held", "0", "COUNT", 64], ["eval", 3, "wait:held", "wait:job:gone-1", "wait:job:live-1", "gone-1", "live-1"]]);
+	const lines = out.logsNow().slice(from).filter((l) => l.event === "held_index_swept");
+	assert.deepEqual(lines.map(({ event, host, time, ...fields }) => fields), [{ looked: 2, removed: 1, more: false }], "counts only: no member, no target");
 });
 
 // ── issue #978: the boot sweep in bounded passes ────────────────────────────────────────────────────
@@ -3390,9 +3408,11 @@ test("the sweep re-runs the SAME closures boot already built, so one config read
 	assert.equal(logReaperCalls[0].logsDir, "/x/logs");
 	assert.equal(logReaperCalls[0].retentionDays, 9);
 
-	// Driving the handed reapers must reach those same closures, which is what "no drift" means.
+	// Driving the handed reapers must reach those same closures, which is what "no drift" means. The held index's reaper
+	// (issue #1075) asks the boot's Valkey client, which the harness has closed by now: its rejection is what the
+	// retention sweep logs as `held_index_reaper_skipped`, and it constructs nothing either.
 	const before = logReaperCalls.length + sandboxReaperCalls.length;
-	for (const r of handed.reapers) await r.reap();
+	for (const r of handed.reapers) await Promise.resolve(r.reap()).catch((error) => assert.equal(r.name, "held_index", `${r.name} threw: ${error?.message}`));
 	assert.equal(logReaperCalls.length + sandboxReaperCalls.length, before, "a sweep constructs nothing");
 });
 

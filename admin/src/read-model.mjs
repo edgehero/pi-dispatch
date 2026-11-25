@@ -69,7 +69,7 @@ import { removeHeldJob, requestCancel, withdrawCancel } from "@edgehero/pi-dispa
 import { makeRunBudgetLedger } from "@edgehero/pi-dispatch/run-budget-ledger";
 import { RECOVERY_CAP, recoveryJobId, runIdOf } from "@edgehero/pi-dispatch/recovery-queue";
 import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES, isOpen as steerIsOpen, listInboxPublic } from "@edgehero/pi-dispatch/steer-inbox";
-import { HELD_SET, jobKey, WAIT_ANSWER_PREFIX, WAIT_ANSWERS, WAIT_PROFILE_FIELD_RE } from "@edgehero/pi-dispatch/wait-state";
+import { HELD_SET, jobKey, pruneHeld, WAIT_ANSWER_PREFIX, WAIT_ANSWERS, WAIT_PROFILE_FIELD_RE } from "@edgehero/pi-dispatch/wait-state";
 // Why a waiting job waits (issue #737): the worker's closed vocabulary and the rules each field of its record is held to,
 // from the leaf the worker writes with, so the reader and the writer cannot drift on the key, a field or a bucket.
 import { DEFER_BUCKETS, DEFER_FIELDS, DEFER_HOST_RE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, WAITING_DUE_GRACE_MS, deferKey, parseDefer, recordMatchesDue } from "@edgehero/pi-dispatch/defer-reasons";
@@ -347,9 +347,9 @@ function parseNonNegInt(raw, fallback) {
  * `readOnly` (issue #1036, default false) makes it write NOTHING: its queues are built without BullMQ's meta write
  * (`makeQueue`'s `metaWrite: false`) and its registry read prunes no stale member. For `dispatch_status`, which is
  * described to a model as read-only. `/dispatch status` and the setup wizard's probe are a person's and keep the
- * default: they prune as they read. Who else does depends on the index, and for one of them nobody else does
- * (`INT-HOST-REGISTRY-CONTRACT`, "WHO PRUNES": a `host:live` member, the worker and the receiver at times, the CLI and
- * doctor; a `wait:held` member, no service at all), so no read may depend on a prune.
+ * default: they prune as they read. Who else does depends on the index (`INT-HOST-REGISTRY-CONTRACT`, "WHO PRUNES": a
+ * `host:live` member, the worker and the receiver at times, the CLI and doctor; a `wait:held` member, the worker's
+ * retention sweep alone, on its timer, since issue #1075, and nobody else before it), so no read may depend on a prune.
  */
 export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500, readOnly = false } = {}) {
   let queue;
@@ -2743,7 +2743,9 @@ const HELD_HYDRATE_MAX = 200;
  * 2,000 stale members beside 4 real holds answered no hold at all, on every read. The walk now goes on past a stale
  * member, a page at a time, until it holds `HELD_HYDRATE_MAX` real holds, has looked at every member, or has looked at
  * this many. Past this bound the read says it is not whole (`truncated`), which then means: members remain that
- * nobody looked at, so a hold may be missing from the list.
+ * nobody looked at, so a hold may be missing from the list. Since issue #1075 the worker's retention sweep prunes the
+ * index too (`sweepHeld`, every PI_SWEEP_INTERVAL_HOURS), and the walk stays: a read must still not depend on a prune
+ * (the sweep can be off, and a crowd can grow between two passes).
  */
 export const HELD_LOOK_MAX = 2_000;
 
@@ -2937,9 +2939,10 @@ export function resolveWorkerCount({ hosts, workerCount }) {
  *
  * `prune` (issue #1036, default true): a member with no hash is stale and is removed in passing, which is what keeps an
  * index a set cannot expire from only growing. False skips it the same and writes nothing, for `dispatch_waits`, which
- * is described to a model as read-only; `/dispatch status` keeps the default and prunes. No service prunes this
- * index, so a read must not depend on one: either way the walk goes on past a stale member, to `HELD_LOOK_MAX`
- * members looked at (`walkHeldIndex`), and the real holds are listed whatever stale members sit before them.
+ * is described to a model as read-only; `/dispatch status` keeps the default and prunes. The worker's retention
+ * sweep prunes it too since issue #1075, on its timer alone, so a read must still not depend on a prune: either way
+ * the walk goes on past a stale member, to `HELD_LOOK_MAX` members looked at (`walkHeldIndex`), and the real holds
+ * are listed whatever stale members sit before them.
  */
 export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient, timeoutMs = 2500, now = () => Date.now(), prune = true } = {}) {
   let redis;
@@ -2956,9 +2959,11 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
             const h = await redis.hgetall(jobKey(jobId));
             // A member with no hash is STALE: the hash expired or the hold was released without the index
             // being updated. The reader prunes it, which is what makes an index safe here at all -- a set
-            // cannot expire its own members, so the alternative is a set that only grows.
+            // cannot expire its own members, so the alternative is a set that only grows. Through the worker's
+            // one prune script (issue #1075), which looks at the hash again in the step that removes: a separate
+            // SREM removed a member whose hold was written between this HGETALL and it.
             if (!h || !h.since) {
-              if (prune) await redis.srem(HELD_SET, jobId).catch(() => {});
+              if (prune) await pruneHeld(redis, [jobId]).catch(() => {});
               return null;
             }
             const since = Number(h.since);
@@ -4974,10 +4979,11 @@ async function heldJobs(redis, { prune = true } = {}) {
       try {
         const h = await redis.hgetall(`wait:job:${jobId}`);
         if (!h || !h.since) {
-          // Stale index member: prune as we go, which is what makes an index safe when a SET cannot expire. Not on a
-          // read-only reader (the console's): the row is skipped the same and left for the panel or `/dispatch status`,
-          // the only two that prune this index.
-          if (prune) await redis.srem("wait:held", jobId).catch(() => {});
+          // Stale index member: prune as we go, which is what makes an index safe when a SET cannot expire, through the
+          // worker's one prune script (`readHeldJobs` says why not a bare SREM). Not on a read-only reader (the
+          // console's): the row is skipped the same and left for the panel, `/dispatch status` and the worker's
+          // retention sweep (issue #1075).
+          if (prune) await pruneHeld(redis, [jobId]).catch(() => {});
           return null;
         }
         const since = Number(h.since);

@@ -1186,7 +1186,8 @@ test("the one-shot readers write nothing when asked to: no meta write, no pruned
     const schedulers = await readSchedulers({ url, makeQueueFn: queues(handed), parseConnectionFn: () => ({}), redisFn: () => redis, now: () => AT, ...flag });
     assert.deepEqual([Array.isArray(schedulers), handed[0], handed[1], redis.wrote], [true, opts, { ...opts, name: "pi-jobs@hosta" }, pruned], `readSchedulers, readOnly ${readOnly}`);
   }
-  for (const [prune, wrote] of [[false, []], [true, ["srem wait:held stale-held"]], [undefined, ["srem wait:held stale-held"]]]) {
+  // The held index is pruned through the worker's script since issue #1075, which removes by the same rule in one step.
+  for (const [prune, wrote] of [[false, []], [true, ["eval wait:held"]], [undefined, ["eval wait:held"]]]) {
     const redis = client();
     const held = await readHeldJobs({ url, redisFn: () => redis, ...(prune === undefined ? {} : { prune }) });
     assert.deepEqual([held.rows, redis.wrote], [[], wrote], `readHeldJobs, prune ${prune}`);
