@@ -125,8 +125,20 @@ export function piProviders() {
  * `modelEndpoints` is the pickup's snapshot `{ endpoints, models }` (never a read of its own), so the free gate and
  * the container env decide on the same declaration. A builtin provider whose baseUrl an operator pointed at a local
  * server is NOT keyless (a named residual): pi knows it, so it still needs its key.
+ *
+ * The answer is `resolveProviderCredentialAndSource`'s `env`, so every caller here gets the map it always did.
  */
-export function resolveProviderCredential({ provider, hostEnv, authFromPi = false, agentDir, readFile = readFileSync, forwardEnv = [], modelEndpoints = null }) {
+export function resolveProviderCredential(args) {
+	return resolveProviderCredentialAndSource(args).env;
+}
+
+/**
+ * `resolveProviderCredential` with the branch that answered (issue #998): `{ env, source }`, `source` the closed word
+ * the run record names (`MAIN_CREDENTIAL_SOURCES`, run-history.mjs): `host-env` for the worker's own environment, a
+ * host-authenticated provider's variables included, `pi-login` for the host's pi `auth.json`, and `keyless` for a
+ * declared keyless endpoint. One implementation, so the word cannot name a branch the map did not come from.
+ */
+export function resolveProviderCredentialAndSource({ provider, hostEnv, authFromPi = false, agentDir, readFile = readFileSync, forwardEnv = [], modelEndpoints = null }) {
 	// The NAMES come from pi, the VALUES from `hostEnv`, and this asks each question of the thing that can
 	// answer it (issue #311). It used to be one `providerKeyVars(provider, hostEnv)` call, which conflates
 	// them: that is `findEnvKeys`, whose presence test falls back to the REAL `process.env` for any name the
@@ -154,7 +166,7 @@ export function resolveProviderCredential({ provider, hostEnv, authFromPi = fals
 		const ids = keylessEndpointsFor(provider, modelEndpoints);
 		// The one variable this branch writes, fixed and non-secret. It is the credential's slot in the closed map,
 		// so buildContainerEnv carries it exactly when this gate passes keyless, and on no other job.
-		if (ids !== null) return { [KEYLESS_ENV_NAME]: KEYLESS_VALUE };
+		if (ids !== null) return { env: { [KEYLESS_ENV_NAME]: KEYLESS_VALUE }, source: "keyless" };
 		// The overlay could not be read at this pickup for a TRANSIENT reason (index.mjs, `modelsUnreadable`): the provider
 		// may well be keyless, so this is no verdict at all. UNTAGGED and marked transient, never `piDispatchConfig`: a
 		// config refusal is permanent, refunded and commented publicly, and the same job may pass on the next attempt. The
@@ -190,11 +202,11 @@ export function resolveProviderCredential({ provider, hostEnv, authFromPi = fals
 	// What is NEVER done is WRITING an auth.json key under either token name: that choice is
 	// `apiKeyVariable`'s, below.
 	if (held.length > 0) {
-		return Object.fromEntries(held);
+		return { env: Object.fromEntries(held), source: "host-env" };
 	}
 	if (authFromPi) {
 		const { name, value } = credentialFromPiAuth(provider, agentDir ?? defaultAgentDir(hostEnv), readFile, { hostEnv, forwardEnv });
-		return { [name]: value };
+		return { env: { [name]: value }, source: "pi-login" };
 	}
 	throw configError(`provider ${provider} has no configured credential in the worker environment. Set its key there, or, ${KEYLESS_HOW}.`);
 }
@@ -510,8 +522,22 @@ function layoutEnv(layout) {
  * same for the role model's provider (`secondaryProvider`, a watch rule's `decide` model and, since issue #1013, an answer
  * draft's decision model or a grouping job's classifier): the run secret the processor admitted as that model's
  * credential, on the same terms and by the same route.
+ *
+ * The answer is `buildContainerEnvAndSource`'s `env`, so every caller here gets the map it always did.
  */
-export function buildContainerEnv({ mainCredential = null, secondaryCredential = null, size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, subscriptionAllowanceMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, secretFilePaths = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, auxiliaryModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, privateEndpoints = [], exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, timeLimitMs = null, timeLeftMs = null, credentialRefresh = false }) {
+export function buildContainerEnv(args) {
+	return buildContainerEnvAndSource(args).env;
+}
+
+/**
+ * `buildContainerEnv` with where the main model's credential came from (issue #998): `{ env, mainCredentialSource }`,
+ * `{ source, variable? }` with `source` one of the record's closed words (`MAIN_CREDENTIAL_SOURCES`, run-history.mjs):
+ * `run-secret` with the declared variable's NAME (`mainCredential`, never its value), `subscription` for the provider's
+ * access snapshot, or the resolver's branch (`host-env`, `pi-login`, `keyless`). Decided where the credential is
+ * written, so the word is what reached this container and no gate's guess. run-container hands it to the processor,
+ * which puts it on the run record.
+ */
+export function buildContainerEnvAndSource({ mainCredential = null, secondaryCredential = null, size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, subscriptionAllowanceMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, secretFilePaths = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, auxiliaryModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, privateEndpoints = [], exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, timeLimitMs = null, timeLeftMs = null, credentialRefresh = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -532,7 +558,10 @@ export function buildContainerEnv({ mainCredential = null, secondaryCredential =
 		if (isOAuthTokenValue(forProvider, value)) throw configError(`buildContainerEnv: the declared run secret ${name} holds a subscription token, not an API key`);
 		return { [name]: value };
 	};
-	const credEnv = mainCredential !== null ? declaredCredential(provider, mainCredential, selectedAuth) : selectedAuth ? selectedAuth.env : resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints });
+	const resolved = mainCredential === null && !selectedAuth ? resolveProviderCredentialAndSource({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints }) : null;
+	const credEnv = mainCredential !== null ? declaredCredential(provider, mainCredential, selectedAuth) : selectedAuth ? selectedAuth.env : resolved.env;
+	// Issue #998: where that credential came from, for the run record, by the branch that just answered.
+	const mainCredentialSource = mainCredential !== null ? { source: "run-secret", variable: mainCredential } : selectedAuth ? { source: "subscription" } : { source: resolved.source };
 	// A reviewed watch classifier may use another provider. Resolve only that provider, never a blanket key copy.
 	// Issue #997: or take the run secret the processor admitted as its credential, exclusively, as the main one above. A
 	// role model on the main provider shares the main credential, so a declared role key there is refused rather than
@@ -937,5 +966,5 @@ export function buildContainerEnv({ mainCredential = null, secondaryCredential =
 	// job's. PI_FORWARD_ENV and run.secrets both refuse it upstream; this is the line that holds if either is bypassed.
 	for (const name of RECEIVER_ONLY_VARS) delete env[name];
 
-	return env;
+	return { env, mainCredentialSource };
 }

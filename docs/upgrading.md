@@ -452,6 +452,14 @@ Release numbers come from the git tags.
 
 See [weighting the pool](triggers.md#weighting-the-pool).
 
+### Unreleased: which key a run spent (#998)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Run record `mainCredential` | New, additive: where the run's main model got its credential, `{ source, variable? }` (`host-env`, `pi-login`, `subscription`, `run-secret` with the declared variable's name, or `keyless`; never a value), a conditional key before `v`. `v` stays 1 and an older record without it shows no Credential row. An older console leaves it off its run page and `/api/run`, but its `dispatch_runs` passes the field to an agent whole, the declared variable's name included (a name, never a value), until the console is upgraded with the worker. No migration or older-state detector is needed. |
+
+See [which key a run spent](console.md#which-key-a-run-spent).
+
 ### Unreleased: declared keys for the answer and grouping models (#1013)
 
 | Stored state | What changes and how to move it |

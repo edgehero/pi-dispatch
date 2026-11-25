@@ -13,7 +13,7 @@ import { computeZeroTouch } from "../src/zero-touch.mjs";
 import { configError } from "../src/config.mjs";
 import { makeGitHubHost } from "../src/github-host.mjs";
 import { REFUSAL_COMMENTS } from "../src/comment-tables.mjs";
-import { buildContainerEnv, declaredProviderKey } from "../src/env-allowlist.mjs";
+import { buildContainerEnv, buildContainerEnvAndSource, declaredProviderKey } from "../src/env-allowlist.mjs";
 
 // The job-count ledger list the processor takes (issue #499 part B), from a `budgetCapsFor`-shaped object.
 const asLedgers = (c) => (c ? [{ scope: c.scope, keyPrefix: scopeKeyPrefix(c.scope), caps: c.caps, reason: "scope-cap" }] : []);
@@ -3429,6 +3429,55 @@ test("issue #1013: an answer draft's declared keys pass the real gate as its mai
 		assert.ok(!refused.calls.some((call) => call.startsWith("mint:") || call === "prepare" || call === "run-container"), reason);
 		assert.deepEqual(refused.posted, []);
 	}
+});
+
+// --- Issue #998: the run record says where the main model's credential came from ---
+
+/** A runContainer that builds its env as run-container does, through the real builder, and answers with its source. */
+const containerBuiltOn = (hostEnv, extra = {}) => async (ctx) => {
+	const { mainCredentialSource } = buildContainerEnvAndSource({ provider: ctx.job.provider, model: ctx.job.model, maxTurns: ctx.job.maxTurns, jobId: "attempt", githubToken: ctx.token ?? undefined, forgeKind: ctx.job.kind, hostEnv, secrets: ctx.secrets, mainCredential: ctx.mainCredential ?? null, subscriptionAuth: ctx.subscriptionAuth ?? [], ...extra });
+	return { code: 0, aborted: false, mainCredentialSource };
+};
+const recordOfRun = (job, result) => buildRecord({ job: { id: "gh-1", data: job }, result: result instanceof Error ? undefined : result, error: result instanceof Error ? result : undefined, startedAt: "2026-07-16T10:00:00.000Z", endedAt: "2026-07-16T10:01:00.000Z" });
+
+test("issue #998: each credential source the container builder answers reaches the run record, a declared key by its name and never its value", async () => {
+	const run = async (job, over) => {
+		const { deps: d, calls } = deps(over);
+		const result = await runJob(job, d);
+		return { result, record: recordOfRun(job, result), calls };
+	};
+	const host = await run(ghJob, { runContainer: containerBuiltOn({ ANTHROPIC_API_KEY: "sk-host-private" }) });
+	assert.deepEqual(host.record.mainCredential, { source: "host-env" });
+	const login = await run(ghJob, { runContainer: containerBuiltOn({ HOME: "/root" }, { authFromPi: true, agentDir: "/home/u/.pi/agent", readFile: () => JSON.stringify({ anthropic: { type: "api_key", key: "sk-from-pi-private" } }) }) });
+	assert.deepEqual(login.record.mainCredential, { source: "pi-login" });
+	const keyless = await run({ ...ghJob, provider: "local-ollama", model: "qwen2.5:0.5b" }, { runContainer: containerBuiltOn({ HOME: "/root" }, { modelEndpoints: { endpoints: [{ id: "mac-ollama", host: "host.docker.internal", port: 11434, slots: 1, keyless: true }], models: { providers: { "local-ollama": { api: "openai-completions", baseUrl: "http://host.docker.internal:11434/v1", apiKey: "$PI_DISPATCH_KEYLESS", models: [{ id: "qwen2.5:0.5b" }] } } } } }) });
+	assert.deepEqual(keyless.record.mainCredential, { source: "keyless" });
+	// A key the trigger declares, through the real gate's rule: its variable's name, never the value.
+	const declaredJob = { ...ghJob, provider: "openrouter", model: "deepseek/deepseek-chat", secrets: { OPENROUTER_API_KEY: "op://ci/or" } };
+	const declared = await run(declaredJob, { checkProviderCredential: (job, { secrets = null } = {}) => (declaredProviderKey(job) === null ? { ok: true } : { ok: true, declared: declaredProviderKey(job) }), resolveSecrets: async () => ({ ok: true, secrets: { OPENROUTER_API_KEY: "sk-or-declared-private" } }), runContainer: containerBuiltOn({ PATH: "/usr/bin" }) });
+	assert.deepEqual(declared.record.mainCredential, { source: "run-secret", variable: "OPENROUTER_API_KEY" });
+	// A subscription connection's access snapshot for the job's provider.
+	const subscribed = await run(ghJob, { prepareSubscriptionAuth: async () => ({ ok: true, snapshots: [{ provider: "anthropic", env: { ANTHROPIC_OAUTH_TOKEN: "subscription-private" } }] }), validateSubscriptionAuth: async () => true, runContainer: containerBuiltOn({ ANTHROPIC_API_KEY: "sk-host-private" }) });
+	assert.deepEqual(subscribed.record.mainCredential, { source: "subscription" });
+	for (const { result, record } of [host, login, keyless, declared, subscribed]) {
+		assert.equal(result.outcome, "completed", JSON.stringify(result));
+		assert.equal(JSON.stringify(record).includes("private"), false, "never a value");
+	}
+});
+
+test("issue #998: a refusal before the container records no credential source, and each attempt, a failover attempt's included, records its own", async () => {
+	// Refused over budget after the clone and before the container: no source, though the run was about to start.
+	const refused = await runJob(ghJob, deps({ redis: fakeRedis(10), runContainer: containerBuiltOn({ ANTHROPIC_API_KEY: "sk-host" }) }).deps);
+	assert.equal(refused.reason, "over-budget");
+	assert.equal("mainCredential" in recordOfRun(ghJob, refused), false);
+	// An attempt whose container failed after it ran (a copying venue's collect throwing) keeps its own source on the throw,
+	// and the next attempt, the failover onto another provider with a declared key, records its own, not the first's.
+	const first = await runJob(ghJob, deps({ runContainer: async (ctx) => { const { mainCredentialSource } = await containerBuiltOn({ ANTHROPIC_API_KEY: "sk-host" })(ctx); throw Object.assign(new InfraRetry("output collection failed", { reason: "container-infra-exit" }), { mainCredentialSource }); } }).deps).catch((error) => error);
+	assert.ok(first instanceof Error, String(first));
+	assert.deepEqual(recordOfRun(ghJob, first).mainCredential, { source: "host-env" });
+	const failover = { ...ghJob, provider: "openrouter", model: "deepseek/deepseek-chat", secrets: { OPENROUTER_API_KEY: "op://ci/or" } };
+	const second = await runJob(failover, deps({ checkProviderCredential: (job) => (declaredProviderKey(job) === null ? { ok: true } : { ok: true, declared: declaredProviderKey(job) }), resolveSecrets: async () => ({ ok: true, secrets: { OPENROUTER_API_KEY: "sk-or-declared" } }), runContainer: containerBuiltOn({ ANTHROPIC_API_KEY: "sk-host" }) }).deps);
+	assert.deepEqual(recordOfRun(failover, second).mainCredential, { source: "run-secret", variable: "OPENROUTER_API_KEY" });
 });
 
 // --- Issue #1002: a random pool's run secret that is another candidate's API key stays out of this draw ---

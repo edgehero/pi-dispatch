@@ -651,7 +651,9 @@ In detail:
   grouping job's alike, and `pi-dispatch doctor` prints a line naming each trigger whose key replaces this host's
   credential, for which of those models, and where: on every job of the trigger, on a random candidate's draws, or on a
   fallback's failover attempts. It names an answer rule's and the `zeroTouch` block's declared keys in lines of their
-  own.
+  own. Afterwards, the run's record says which key its main model spent (`mainCredential`): `run-secret` with the
+  declared variable's name, or `host-env`, `pi-login`, `subscription` or `keyless`, never a value. The run page shows it
+  as the Model usage card's Credential row ([which key a run spent](console.md#which-key-a-run-spent)).
   The console's Provider API keys card (Connections) names the same triggers under the provider's slot, watch rules
   included, resolving model roles as doctor does (a watch rule takes none, as in the worker), adds "(for its decide
   model)" or "(for its auxiliary model)" to a trigger whose own jobs run on another provider, and says where this host

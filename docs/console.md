@@ -1949,6 +1949,19 @@ run page is a live page: its panels and transcript share one connection and one 
 
 The `/dispatch` panel's running rows show the same, with the phase name clipped.
 
+### Which key a run spent
+
+A run's **Model usage** card has a **Credential** row: where its main model got its key. "the trigger's declared key
+OPENAI_API_KEY" is a key the trigger named in `run.secrets` (an answer draft says "the answer rule's", a question grouping
+"the zeroTouch block's"), "the host's key" a key in the worker's environment, "the host's pi login" a key from pi's
+`auth.json` on the host, "a subscription connection" a connection's access, and "no key (keyless)" a keyless endpoint
+([secrets](secrets.md#the-provider-key-as-a-run-secret)). It names the variable and never its value. The row is on an
+operator's run page; a viewer's run page draws no Model usage card, as it draws no Cost or Secrets panel. `/api/run`
+carries it as `mainCredential`: to an operator with the variable's name, to a viewer and an agent token as the word alone,
+since neither is shown a secret's name; `dispatch_runs` gives the word alone. A run refused before its container
+started, one whose container never started (the runtime's never-started exit, with nothing spent), and one an earlier
+release recorded, show no row.
+
 ### A run's artifacts
 
 A forge job may leave files in `/artifacts` (a screenshot of what it ran, a test report, a log), and the worker keeps

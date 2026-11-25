@@ -260,6 +260,22 @@ async function runConsole(fleet, { env = ENV } = {}) {
 
 const TOP_KEYS = ["activeJobId", "forgeLink", "mode", "newerRunOnTarget", "pendingRunOnTarget", "progress", "run", "says", "state", "steer", "transcript", "version"];
 
+test("issue #998: /api/run names a declared key's variable to an operator alone; a viewer and an agent read the source word", async () => {
+  const r = record("gh-credential", { mainCredential: { source: "run-secret", variable: "OPENAI_API_KEY" } });
+  const c = await runConsole(fakeFleet({ records: { [r.jobId]: r } }));
+  const seen = async (cookie) => {
+    const res = await c.get(`/api/run?id=${r.jobId}`, cookie);
+    assert.equal(res.status, 200, res.text);
+    return res.json().run.mainCredential;
+  };
+  assert.deepEqual(await seen(c.op), { source: "run-secret", variable: "OPENAI_API_KEY" });
+  assert.deepEqual(await seen(c.viewer), { source: "run-secret" });
+  assert.deepEqual(await seen(c.agent), { source: "run-secret" });
+  // A source with no name reads the same for every role.
+  r.mainCredential = { source: "pi-login" };
+  for (const cookie of [c.op, c.viewer, c.agent]) assert.deepEqual(await seen(cookie), { source: "pi-login" });
+});
+
 test("/api/run gives agents only closed reasons and safe numeric transcript/progress metadata", async () => {
   const r = record("gh-agent-private", { reason: "private_decision", note: CANARY });
   const fleet = fakeFleet({ records: { [r.jobId]: r } });
@@ -974,4 +990,16 @@ test("watch kind is reporting-only and needs its bounded watch target", () => {
     assert.equal(bad.kind, null, target);
     assert.equal(bad.target, null, target);
   }
+});
+
+test("issue #998: /api/run carries where the main credential came from, rebuilt by the worker's rule, and an agent's copy keeps the word alone", () => {
+  const declared = record("gh-1", { mainCredential: { source: "run-secret", variable: "OPENAI_API_KEY", value: "sk-private" } });
+  assert.deepEqual(safeRunOf("gh-1", declared).mainCredential, { source: "run-secret", variable: "OPENAI_API_KEY" });
+  assert.deepEqual(safeRunOf("gh-1", record("gh-1", { mainCredential: { source: "subscription" } })).mainCredential, { source: "subscription" });
+  for (const mainCredential of [undefined, { source: "vault" }, "host-env"]) assert.equal(Object.hasOwn(safeRunOf("gh-1", record("gh-1", { mainCredential })), "mainCredential"), false, JSON.stringify(mainCredential));
+  // The model-facing projection of the same answer: the word, never which variable.
+  assert.deepEqual(agentReadProjection({ run: safeRunOf("gh-1", declared) }).run.mainCredential, { source: "run-secret" });
+  assert.equal(JSON.stringify(agentReadProjection(safeRunOf("gh-1", declared))).includes("OPENAI_API_KEY"), false);
+  // Raw records an agent's state document carries (its runs page) are rebuilt by the same closed list, not by shape alone.
+  assert.deepEqual(agentReadProjection({ runs: [{ jobId: "gh-1", mainCredential: { source: "run-secret", variable: "OPENAI_API_KEY" } }, { jobId: "gh-2", mainCredential: { source: "made-up" } }] }).runs, [{ jobId: "gh-1", mainCredential: { source: "run-secret" } }, { jobId: "gh-2" }]);
 });

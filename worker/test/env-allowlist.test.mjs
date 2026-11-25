@@ -1814,3 +1814,32 @@ test("issue #1055: the time limit and what is left of it ride as two whole milli
 	}
 	for (const name of ["PI_JOB_MAX_MS", "PI_JOB_LEFT_MS"]) assert.ok(CONTAINER_ENV_NAMES.has(name), `${name} is reserved, so run.secrets and PI_FORWARD_ENV cannot set it`);
 });
+
+// ── Issue #998: where the main model's credential came from, for the run record ───────────────────────────────────
+
+test("issue #998: each credential branch says which it was, from the resolver to the container builder, in the record's closed words, and never with a value", { skip }, async () => {
+	const { MAIN_CREDENTIAL_SOURCES } = await import("../src/run-history.mjs");
+	const sourced = (args) => mod.resolveProviderCredentialAndSource(args);
+	// The resolver's three branches, each with the same map its callers already get.
+	const host = { ...authBase, hostEnv: { HOME: "/root", ANTHROPIC_API_KEY: "sk-host" }, authFromPi: true, readFile: () => assert.fail("auth.json is not read while the host holds a key") };
+	assert.deepEqual(sourced(host), { env: { ANTHROPIC_API_KEY: "sk-host" }, source: "host-env" });
+	const login = { ...authBase, hostEnv: { HOME: "/root" }, authFromPi: true, readFile: authReader({ anthropic: { type: "api_key", key: "sk-from-pi" } }) };
+	assert.deepEqual(sourced(login), { env: { ANTHROPIC_API_KEY: "sk-from-pi" }, source: "pi-login" });
+	const keyless = { ...klBase, modelEndpoints: klSnapshot() };
+	assert.deepEqual(sourced(keyless), { env: { PI_DISPATCH_KEYLESS: "keyless" }, source: "keyless" });
+	for (const args of [host, login, keyless]) assert.deepEqual(mod.resolveProviderCredential(args), sourced(args).env, "every other caller gets the map it always did");
+	// The container builder: those three, a declared run secret with its variable's name, and a subscription snapshot.
+	const built = (args) => mod.buildContainerEnvAndSource(args);
+	assert.deepEqual(built(host).mainCredentialSource, { source: "host-env" });
+	assert.deepEqual(built(login).mainCredentialSource, { source: "pi-login" });
+	assert.deepEqual(built(keyless).mainCredentialSource, { source: "keyless" });
+	const declared = built({ ...host, mainCredential: "ANTHROPIC_API_KEY", secrets: { ANTHROPIC_API_KEY: "sk-ant-api03-declared-private" } });
+	assert.deepEqual(declared.mainCredentialSource, { source: "run-secret", variable: "ANTHROPIC_API_KEY" });
+	assert.equal(declared.env.ANTHROPIC_API_KEY, "sk-ant-api03-declared-private");
+	const subscribed = built({ ...host, subscriptionAuth: [{ provider: "anthropic", env: { ANTHROPIC_OAUTH_TOKEN: "subscription-private" } }] });
+	assert.deepEqual(subscribed.mainCredentialSource, { source: "subscription" });
+	for (const args of [host, login, keyless]) assert.deepEqual(buildContainerEnv(args), built(args).env, "buildContainerEnv's callers get the env it always built");
+	const words = [host, login, keyless].map((args) => built(args).mainCredentialSource.source).concat([declared, subscribed].map((b) => b.mainCredentialSource.source));
+	assert.deepEqual([...words].sort(), [...MAIN_CREDENTIAL_SOURCES].sort(), "the five words the record keeps, each reached once");
+	assert.equal(JSON.stringify([declared.mainCredentialSource, subscribed.mainCredentialSource]).includes("private"), false, "a name and a word, never a value");
+});

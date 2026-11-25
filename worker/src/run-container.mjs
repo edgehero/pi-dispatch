@@ -10,7 +10,7 @@ import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-
 import { configError } from "./config.mjs";
 import { DEFAULT_EGRESS_PROXY, createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { grantOnAttach, removeGrantsOf } from "./endpoint-grants.mjs";
-import { buildContainerEnv } from "./env-allowlist.mjs";
+import { buildContainerEnvAndSource } from "./env-allowlist.mjs";
 import { authenticExitLines } from "./run-history.mjs";
 import { extensionsNotHere, leavesOut, leftOutOf, rebuildLoaded } from "./loaded-record.mjs";
 import { withCanaryPath } from "./package-canary.mjs";
@@ -489,7 +489,9 @@ export function makeRunContainer({
 				return null;
 			}
 		})();
-		const env = beforeSpawn(() => buildContainerEnv({
+		// Issue #998: `mainCredentialSource` is where the main model's credential came from, as the builder wrote it, for the
+		// run record: it rides on every answer of a container that was spawned (below), never on one stopped before.
+		const { env, mainCredentialSource } = beforeSpawn(() => buildContainerEnvAndSource({
 			size,
 			provider: job.provider,
 			...(job.answerDraft && job.answerDecisionModel ? { secondaryProvider: job.answerDecisionModel.provider } : job.questionGrouping && job.questionGroupModel ? { secondaryProvider: job.questionGroupModel.provider } : job.watch && job.watchDecisionModel ? { secondaryProvider: job.watchDecisionModel.provider } : {}),
@@ -1359,12 +1361,19 @@ export function makeRunContainer({
 		// container has already exited, its code is the job's answer, and a teardown fault must not rewrite
 		// that answer. What a failure leaves behind is a memberless network, which the boot reaper sweeps.
 		try {
-			const result = await run;
+			const ran = await run;
+			// An exit that says the container never started (`neverStartedExits`), and the worker did not abort it.
+			const neverStarted = !ran.aborted && (neverStartedExits ?? []).includes(ran.code);
+			// Issue #998: where the main credential came from rides on the answer of a container that started, and on no
+			// other: one that never started spent nothing on any key, so its record names none (the detached one below
+			// did start, and keeps it).
+			const credential = neverStarted ? {} : { mainCredentialSource };
+			const result = { ...ran, ...credential };
 			// Issue #596: the runtime refused the ceiling as above its CPU count. The count it was computed from is stale
 			// (Docker Desktop's VM given fewer CPUs since the facts were read), and every later job would fail the same
 			// way until a restart, so the facts are dropped and the next pickup reads them again. This attempt stays a
 			// never-started one (refunded and retried as infrastructure), and the line names both counts.
-			const runtimeCpus = !result.aborted && (neverStartedExits ?? []).includes(result.code) && Number.isSafeInteger(hostCpus) ? cpuRangeRefusal(stderrHead) : null;
+			const runtimeCpus = neverStarted && Number.isSafeInteger(hostCpus) ? cpuRangeRefusal(stderrHead) : null;
 			if (runtimeCpus !== null) {
 				log("cpu_ceiling_stale", { container: name, cpus: (cpuCeilingCenti(hostCpus, cpuBudgetCenti) ?? 0) / 100, hostCpus, runtimeCpus });
 				try {
@@ -1375,11 +1384,25 @@ export function makeRunContainer({
 			}
 			// Issue #345: an exit that says "never started" is checked against the cidfile BEFORE the network goes, so a
 			// container found running is stopped while its network still exists. Only when the worker did not abort it.
-			if (!result.aborted && (neverStartedExits ?? []).includes(result.code) && (await stopDetached({ spawnFn, cidFile, fs, bin, ...detachedCheck }))) {
-				return { ...result, detached: true };
+			if (neverStarted && (await stopDetached({ spawnFn, cidFile, fs, bin, ...detachedCheck }))) {
+				return { ...result, mainCredentialSource, detached: true };
 			}
-			// Issue #683: a copying venue brings its outputs back before the processor reads them. Its own throw stands.
-			if (typeof collectRun === "function") return await collectRun(result, { opts: buildOpts });
+			// Issue #683: a copying venue brings its outputs back before the processor reads them. Its own throw stands, with the
+			// credential's source on it (issue #998) when that container ran.
+			if (typeof collectRun === "function") {
+				try {
+					return { ...(await collectRun(result, { opts: buildOpts })), ...credential };
+				} catch (error) {
+					if (!neverStarted && error !== null && typeof error === "object" && error.mainCredentialSource === undefined) {
+						try {
+							error.mainCredentialSource = mainCredentialSource;
+						} catch {
+							// a frozen error keeps its own fields
+						}
+					}
+					throw error;
+				}
+			}
 			return result;
 		} finally {
 			// Issue #1021: the poll ends here, on every path, after one last look while docker's cidfile is still there (it

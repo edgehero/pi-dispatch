@@ -8,8 +8,9 @@
  * charset-checked ids, integers and booleans: never a record's free text (`why`, a failure reason), never a Job's
  * `.data`, never a transcript entry, never a session key (the key names a directory of UNREDACTED transcript, and a
  * host-local fork re-derives it on its own host, `sessionKeyOfRecord`). A viewer gets the same shape as an operator,
- * which is why the route is a viewer's: there is nothing in it to withhold. `says` is one of `chatModeOf`'s fixed
- * sentences.
+ * which is why the route is a viewer's, with one name taken out: `run.mainCredential`'s `variable` (issue #998), a
+ * declared secret's name, since a viewer's run page shows no secret name and this route names no other. `says` is one
+ * of `chatModeOf`'s fixed sentences.
  *
  * `?url=` RESOLVES THROUGH `forgeTargetOf`, the inverse of the link the console draws (`forgeLinkOf`), then through the
  * run history: the newest run on that target is the run. An Azure work item's URL names no repository, so its target is
@@ -30,7 +31,7 @@ import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { SESSION_NOT_SAVED } from "@edgehero/pi-dispatch/record-reason";
-import { modelRolesTelemetryOf, approvalRecordOf, recordedProgress } from "@edgehero/pi-dispatch/run-history";
+import { modelRolesTelemetryOf, approvalRecordOf, recordedMainCredential, recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { chatModeOf, pendingFactsOf, runStateOf } from "@edgehero/pi-dispatch/chat-mode";
 import { repoOfTarget } from "../costs.mjs";
 import { activeProgressOf, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, PENDING_STATES, pendingScanFor, recordRecovery, RUN_RECORD_UNREAD, RUNS_PAGE_EXAMINE_MAX, runAbsent, runPlaces, runPlacesText, targetKeyOf } from "../read-model.mjs";
@@ -151,6 +152,10 @@ function safeRunFields(id, record) {
     ...(modelRolesTelemetryOf(r.modelRoles) ? { modelRoles: modelRolesTelemetryOf(r.modelRoles) } : {}),
     ...(MODEL_WHY.includes(r.modelWhy) ? { modelWhy: r.modelWhy } : {}),
     ...(providerFailureOf(r.providerFailure) ? { providerFailure: providerFailureOf(r.providerFailure) } : {}),
+    // Issue #998: where the main model's credential came from, the worker's closed word and, for a declared key, its
+    // variable's name (never a value), rebuilt by the worker's own rule. A viewer's copy keeps the word alone (`getRun`),
+    // and so does an agent's (`agentReadProjection`).
+    ...(recordedMainCredential(r.mainCredential) ? { mainCredential: recordedMainCredential(r.mainCredential) } : {}),
     host: str(r.host, WORKER_NAME_RE),
     backend: str(r.backend, BACKEND_RE),
     project: str(r.project, PROJECT_ID_RE),
@@ -564,6 +569,9 @@ export async function getRun(ctx) {
     delete projected.transcriptMeta; delete projected.runProgress;
     return ctx.json(200, projected);
   }
+  // Issue #998: the declared variable's name is an operator's, as every secret name a run page shows; a viewer keeps the word.
+  const credential = got.doc.run?.mainCredential;
+  if (ctx.session?.role !== "operator" && credential?.variable !== undefined) return ctx.json(200, { ...got.doc, run: { ...got.doc.run, mainCredential: { source: credential.source } } });
   return ctx.json(200, got.doc);
 }
 
