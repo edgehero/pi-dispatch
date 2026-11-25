@@ -10,7 +10,10 @@ reference passes as source-unavailable rather than guessing from a transcript or
 Write rules by hand in the deployment’s `triggers.json`. The console shows them read only at `/parked/rules`.
 No model tool accepts either `answerRules` or `standingAnswers`, including nested or alternate spellings.
 This template uses placeholder model identities; replace both with explicit installed models, including a
-classifier-capable decision model with declared cost. No provider key belongs in this file. Both models take the
+classifier-capable decision model with declared cost, such as `openrouter/typesafe/jev-1.13` or, since pi 1.6.1,
+`github-copilot/gpt-6-luna-decisions` (on `COPILOT_GITHUB_TOKEN`; a Copilot sign-in is refused). A Radius decision
+model is refused: its cost comes from Radius's server, so the draft's cap cannot bound it
+([costs.md](costs.md#pi-140-summaries-and-radius)). No provider key belongs in this file. Both models take the
 host's credentials unless the rule names its own key by reference ([below](#a-key-of-the-rules-own)); a key a trigger
 declares in its `run.secrets` never reaches an answer draft.
 

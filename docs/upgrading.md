@@ -441,6 +441,17 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: pi 1.6.1 and its decision models (#1094)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Job image and workers | Both run pi 1.6.1. Upgrade the image first, then every worker, as [the order](#the-order) says: an image older than this release records no provider response id for a watch decision, and a worker older than it ignores one an upgraded image wrote. |
+| Valkey watch traces (`watch:trace:<finding>`) | A watch decision's trace entry may carry two new optional fields: `responseId` (the provider's id for the classify call, operator only) and `billed` (the provider billed the cost). An older worker drops both when it imports a trace, and an older console does not show them. The durable finding record is unchanged, so nothing needs moving. |
+| Triggers file | Unchanged in shape. A watch `decide` or the Zero touch grouping model on a Radius decision model, or on an overlay classifier whose protocol the cost bound does not price, is now refused before a container starts (it was refused inside one). `openai/gpt-6-luna` as a `decide` or grouping model now loads, where it was refused. |
+| Forks | A fork asking for thinking `off` on a Claude 5.5 model served through Amazon Bedrock, GitHub Copilot, Cloudflare AI Gateway or Vercel AI Gateway is refused as `thinking-level-unsupported`, since pi 1.6.1 would run it at the lowest level instead ([chat.md](chat.md)). |
+
+See [watch decisions](watch-decisions.md#which-decision-models).
+
 ### Unreleased: weights in a random model pool (#996)
 
 | Stored state | What changes and how to move it |
