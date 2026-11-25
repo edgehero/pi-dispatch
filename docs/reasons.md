@@ -1669,7 +1669,7 @@ What to do: Inspect its probabilities and thresholds if the outcome was unexpect
 
 The decision model or its bounded price was refused.
 
-What to do: Use a known input-only priced decision model and a sufficient reviewed cap.
+What to do: Use a known input-only priced decision model (not a Radius one) and a sufficient reviewed cap.
 
 ### decide-unanswered
 

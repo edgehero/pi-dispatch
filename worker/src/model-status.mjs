@@ -7,6 +7,15 @@ import { outputCapView, outputUnboundable } from "./output-cap.mjs";
 // This copy is pinned to the runner's PRICED_APIS by model-failover.test.mjs. The published worker cannot import
 // the image workspace, and a new runner API must not silently become eligible before its free bound is verified.
 export const FAILOVER_PRICED_APIS = Object.freeze(["anthropic-messages", "azure-openai-responses", "bedrock-converse-stream", "cloudflare-workers-ai-system-one", "google-generative-ai", "google-vertex", "mistral-conversations", "openai-codex-responses", "openai-completions", "openai-decisions", "openai-responses", "typesafe-system-one"]);
+/**
+ * Whether the runner's cost bound prices an api, read through the pinned copy above. Every decision feature (a watch
+ * rule's `decide`, an answer rule's decision model, the question grouping model) runs under a dollar cap, and inside the
+ * container a capped call on any other api is refused as unboundable. So the worker refuses such a decision model
+ * before a container starts, where it already resolves the model. pi 1.6.1's `pi-decision` (Radius's decision models)
+ * is the first classifier api the bound does not price.
+ */
+export const runnerPricesApi = (api) => typeof api === "string" && FAILOVER_PRICED_APIS.includes(api);
+
 /** Catalog/overlay composition is shared with the existing output-cap gate, rather than guessed from a URL or id. */
 export function failoverModelView(ref, { models = null, lookup = builtinModel } = {}) {
 	const split = splitModelEntry(ref);

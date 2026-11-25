@@ -75,6 +75,11 @@ test("agent reads rebuild counts and identifiers while unknown prose and private
   assert.ok(!JSON.stringify(projected).includes(privateText));
 });
 
+test("a watch decision's provider response id never reaches a model, and its billed yes does (pi 1.6.1)", () => {
+  const projected = agentReadProjection({ trace: [{ kind: "decide", status: "answered", responseId: "gen-1764081234-AbCdEf", billed: true }] });
+  assert.deepEqual(projected, { trace: [{ kind: "decide", status: "answered", billed: true }] });
+});
+
 test("paid grants are process-owned and both must be explicit", () => {
   const deployment = { PI_DISPATCH_RUN_ROOTS: "/allowed", PI_DISPATCH_RUN_PER_HOUR: "9" };
   assert.ok(paidStartEnvironment(deployment, {}).refusal);

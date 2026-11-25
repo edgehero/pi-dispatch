@@ -127,6 +127,24 @@ test("decision summary and durable action handoff survive a transient enqueue fa
 	assert.equal(f.handoffs.length, 1);
 	assert.equal(f.changes.find((change) => change.status === "decided").decision.action, "ignore");
 });
+test("a decision's provider id and billed cost reach its trace entry, and an older image's output works without them (pi 1.6.1)", async () => {
+	const answers = { act: { type: "choice", choice: "ignore", probabilities: { investigate: 0.02, ignore: 0.95, file_issue: 0.03 }, confidence: 0.9 } };
+	const f = fixture({ decision: true });
+	const resolved = await f.runtime.resolve(f.ref, "gate1");
+	writeFileSync(join(f.outboxDir, "decision.json"), JSON.stringify({ version: 1, stopReason: "stop", answers, usage: { input: 40, output: 0, totalTokens: 40, cost: { total: 0.000004, totalFromProvider: true } }, responseId: "gen-1764081234-AbCdEf" }));
+	await f.runtime.collect({ job: resolved.data, prepared: { outboxDir: f.outboxDir }, completed: true, usage: { costUsd: 0.000004 } });
+	const entry = f.traces.find((e) => e.id === "decision");
+	assert.equal(entry.responseId, "gen-1764081234-AbCdEf");
+	assert.equal(entry.billed, true);
+	assert.equal(f.changes.find((change) => change.status === "decided").decision.responseId, undefined, "the durable finding record is unchanged");
+	const older = fixture({ decision: true });
+	const again = await older.runtime.resolve(older.ref, "gate1");
+	writeFileSync(join(older.outboxDir, "decision.json"), JSON.stringify({ version: 1, stopReason: "stop", answers }));
+	await older.runtime.collect({ job: again.data, prepared: { outboxDir: older.outboxDir }, completed: true });
+	const plain = older.traces.find((e) => e.id === "decision");
+	assert.equal(plain.status, "watch-ignored");
+	assert.equal("responseId" in plain || "billed" in plain, false);
+});
 test("trace append failure preserves a valid decision and action handoff and names lost evidence", async () => {
 	let broken = false;
 	const f = fixture({ decision: true, storeOverrides: { async appendTrace() { if (broken) throw new Error("trace unavailable"); } } });

@@ -26,3 +26,12 @@ test("decision input rejects samples, nested state, writable selectors and malfo
 	assert.throws(() => readWatchDecision({ fs: { lstatSync: () => ({ isFile: () => true, size: 32769 }) } }));
 	assert.equal(readWatchDecision({ fs: { lstatSync() { throw Object.assign(new Error(), { code: "ENOENT" }); } } }), null);
 });
+test("the decision output carries the provider's response id when it is a plain token (pi 1.6.1)", async () => {
+	for (const [responseId, kept] of [["gen-1764081234-AbCdEf", true], ["resp_0a1b2c:3", true], ["id with spaces", false], ["x".repeat(129), false], [7, false]]) {
+		let written;
+		const result = await executeWatchDecision({ input: input(), runtime: { getModelsOfType: () => [{ id: input().model.id, cost: { input: 1, output: 0 } }], async classify() { return { stopReason: "stop", answers: { act: { choice: "ignore" } }, usage: { input: 3, output: 0, totalTokens: 3, cost: { total: 0.000003, totalFromProvider: true } }, responseId }; } }, fs: { writeFileSync(_path, value) { written = JSON.parse(value); } } });
+		assert.equal(result.ok, true);
+		assert.equal(written.responseId, kept ? responseId : undefined, String(responseId));
+		assert.equal(written.usage.cost.totalFromProvider, true, "pi's usage is passed through as it is");
+	}
+});

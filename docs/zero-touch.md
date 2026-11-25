@@ -75,9 +75,13 @@ Capture is opt-in. Add a reviewed `zeroTouch` section beside `triggers` in the d
 ```
 
 Use a typed classifier model available to the pinned runtime, with explicit finite input pricing, zero output
-pricing and a known context window. The configured cap must cover its conservative full-context input bound. The
-ordinary deployment text model remains the primary model for admission; no text-agent session executes. Configure
-both providers' normal credentials and declared endpoints as appropriate: the host's environment or pi's `auth.json`.
+pricing and a known context window, on a protocol the cost bound prices: a Radius decision model, or an overlay
+classifier on a protocol of its own, is refused as `question-group-refused` before anything is reserved. A builtin
+decision model whose id a chat model shares, such as `openai/gpt-6-luna`, resolves to the decision model. The
+configured cap must cover its conservative full-context input bound. The ordinary deployment text model remains the
+primary model for admission; no text-agent session executes. Configure both providers' normal credentials and declared
+endpoints as appropriate: an API key in the host's environment or in pi's `auth.json`. A sign-in stored in
+`auth.json` (OAuth or a subscription) is refused for the classifier's provider.
 A key a trigger declares in its `run.secrets` does not reach a grouping job. To give the grouping job keys of its own,
 add `secrets` (and `secretsProfile`) to this section as on a trigger: a provider's API-key variable mapped to a
 reference your resolver reads, never the key itself. A name that is not a provider's API-key variable (an OAuth or

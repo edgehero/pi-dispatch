@@ -193,8 +193,11 @@ const MIRRORED_PI_FILES = Object.freeze({
 	// supportsMessageThreads are new typed compat keys.
 	// Re-verified at 1.6.0: the Mistral schema gains supportsStrictMode, a boolean as in the four other schemas and the
 	// generic one, so the merged ProviderCompat already holds it exactly; the rest is description text.
-	"../pi-ai/dist/providers/compat-schema.js": "3aad400a8b4548a03be3d5be5e3aa3ec3e262f26f3773caabd26b3436add301c",
-	"../pi-ai/dist/providers/model-schema.js": "a8013ceaedd0105cbd2af886779d62f2691fbe202b16588ef2a977f35fa5270e",
+	// Re-verified at 1.6.1: a Google schema (google-generative-ai and google-vertex) whose one key is supportsStrictMode,
+	// the same boolean, joins the merge, so ProviderCompat is unchanged; model-schema.js changes the thinking map's
+	// description only.
+	"../pi-ai/dist/providers/compat-schema.js": "40fbaf1898631bb84aa0620fb6335b3f8751695e5ced7b1103b96387adf6442e",
+	"../pi-ai/dist/providers/model-schema.js": "b9a6997ae175f1ed74af6cf950eebf2587ccab2720b452889bad692cc1b654aa",
 });
 
 test("System One image compat accepts every transport and rejects malformed values before spend", () => {

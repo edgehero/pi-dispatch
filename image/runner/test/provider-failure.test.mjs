@@ -116,8 +116,10 @@ try { pi = await import("@earendil-works/pi-coding-agent"); } catch (error) {
 	if (process.env.PI_DISPATCH_REQUIRE_LOADER_TESTS === "1") throw error;
 }
 
-// Exercise the pinned runtime and real adapters: Anthropic's onResponse is not called on HTTP rejection.
-// A type-only assertion would miss that exact failure and turn a short rate limit into a quota cooldown.
+// Exercise the pinned runtime and real adapters. Through pi 1.6.0 Anthropic's onResponse was not called on an HTTP
+// rejection, which is why the observer reads failure headers through the per-call fetch. pi 1.6.1 calls onResponse
+// for every attempt, a rejection included, on these adapters; the fetch path stays, because it is the one the
+// observer is built on and a type-only assertion would miss a return of the old behaviour.
 for (const [provider, api] of [["anthropic", "anthropic-messages"], ["openai", "openai-responses"], ["groq", "openai-completions"]]) {
 	test(`pinned ${api} failure headers reach evidence through per-call fetch`, { skip: !pi }, async () => {
 		const root = tempDir("pi-failure-");
@@ -137,7 +139,7 @@ for (const [provider, api] of [["anthropic", "anthropic-messages"], ["openai", "
 			assert.equal(terminal.stopReason, "error");
 			assert.ok(calls > 0);
 			assert.deepEqual(observer.failure(terminal), { kind: "rate-limited", resetAt: NOW + 2000, ...(provider === "anthropic" ? { subscriptionProvider: "anthropic" } : {}) });
-			if (api === "anthropic-messages") assert.equal(responseHooks, 0, "failure headers cannot rely on Anthropic onResponse");
+			assert.equal(responseHooks, calls, "pi 1.6.1 hands every attempt's response, a rejection included, to onResponse");
 		} finally { observer.uninstall(); }
 	});
 }

@@ -15,7 +15,7 @@ function fixture(currentProjects) {
 	const runtime = makeQuestionGroupRuntime({
 		store: { privateInput: async () => ({ status: "ready", meta: { runId: "source", scopeId: "a".repeat(64), digest, project: "shop" }, excerpt: "private source", revision: 0, candidates: [] }), setStatus: async () => {} },
 		triggersPath: "/triggers.json", readFile: () => JSON.stringify({ triggers: [], zeroTouch: config }),
-		getSettings: () => ({ provider: "test", model: "chat" }), resolveClassifier: () => ({ type: "classifier", contextWindow: 4096, cost: { input: 0, output: 0 } }),
+		getSettings: () => ({ provider: "test", model: "chat" }), resolveClassifier: () => ({ type: "classifier", api: "typesafe-system-one", contextWindow: 4096, cost: { input: 0, output: 0 } }),
 	});
 	const redis = { get: async () => null, incr: async (key) => { ops.push(["incr", key]); return key.startsWith(scopeKeyPrefix("project:shop")) ? 2 : 1; }, decr: async () => 0, expire: async () => {}, del: async () => 0 };
 	const processor = makeProcessor({
@@ -61,7 +61,7 @@ test("issue #1013: a grouping job's declared keys reach its main and classifier 
 		const runtime = makeQuestionGroupRuntime({
 			store: { privateInput: async () => ({ status: "ready", meta: { runId: "source", scopeId: "a".repeat(64), digest, project: null }, excerpt: "private source", revision: 0, candidates: [] }), setStatus: async () => {} },
 			triggersPath: "/triggers.json", readFile: () => JSON.stringify({ version: 12, triggers: [], zeroTouch: block }), providerKeyNames: providerKeyCandidates, log: (event, fields) => logs.push({ event, fields }),
-			getSettings: () => ({ provider: "openrouter", model: "deepseek/deepseek-chat" }), resolveClassifier: () => ({ type: "classifier", contextWindow: 4096, cost: { input: 0, output: 0 } }),
+			getSettings: () => ({ provider: "openrouter", model: "deepseek/deepseek-chat" }), resolveClassifier: () => ({ type: "classifier", api: "typesafe-system-one", contextWindow: 4096, cost: { input: 0, output: 0 } }),
 		});
 		const redis = { get: async () => null, incr: async () => 1, decr: async () => 0, expire: async () => {}, del: async () => 0 };
 		const processor = makeProcessor({

@@ -105,7 +105,7 @@ test("outputCapView agrees with pi's own ModelRuntime on api, baseUrl and the fi
 	const overlay = {
 		providers: {
 			litellm: { api: "openai-completions", baseUrl: "http://litellm.lan:4000/v1", apiKey: "x", models: [{ id: "gw", cost: PRICED }] },
-			groq: { baseUrl: "http://proxy.lan:8080/openai/v1", compat: { maxTokensField: "max_tokens" }, models: [{ id: "new-groq", cost: PRICED }, { id: "own", cost: PRICED, compat: { maxTokensField: "max_completion_tokens" } }], modelOverrides: { "llama-3.1-8b-instant": { compat: { maxTokensField: "max_completion_tokens" } } } },
+			groq: { baseUrl: "http://proxy.lan:8080/openai/v1", compat: { maxTokensField: "max_tokens" }, models: [{ id: "new-groq", cost: PRICED }, { id: "own", cost: PRICED, compat: { maxTokensField: "max_completion_tokens" } }], modelOverrides: { "openai/gpt-oss-20b": { compat: { maxTokensField: "max_completion_tokens" } } } },
 			ollama: { api: "openai-completions", baseUrl: "http://host.docker.internal:11434/v1", apiKey: "x", models: [{ id: "qa", cost: PRICED, compat: { maxTokensField: "max_tokens" } }, { id: "qb", cost: PRICED }, { id: "qc", baseUrl: "http://gpu.lan:8000/v1" }] },
 			openrouter: { baseUrl: "http://or-proxy.lan/v1" },
 			// pi 1.0.3's azure catalog serves deepseek-v4-pro on openai-completions with an empty baseUrl (issue #587):
@@ -125,7 +125,9 @@ test("outputCapView agrees with pi's own ModelRuntime on api, baseUrl and the fi
 		if (saved === undefined) delete process.env.PI_OFFLINE;
 		else process.env.PI_OFFLINE = saved;
 	}
-	const refs = [["litellm", "gw"], ["groq", "new-groq"], ["groq", "own"], ["ollama", "qa"], ["ollama", "qb"], ["ollama", "qc"], ...catalogChatModels("groq").slice(0, 3).map((m) => ["groq", m.id]), ...catalogChatModels("openrouter").slice(0, 3).map((m) => ["openrouter", m.id]), ["azure", "deepseek-v4-pro"], ["azure", "gpt-5.4"]];
+	// The overridden groq model is named, not left to the catalog's first three: pi 1.6.1 dropped the model the override
+	// used to name, and the rule it exercises (a model override over the provider's compat) then went untested.
+	const refs = [["litellm", "gw"], ["groq", "new-groq"], ["groq", "own"], ["groq", "openai/gpt-oss-20b"], ["ollama", "qa"], ["ollama", "qb"], ["ollama", "qc"], ...catalogChatModels("groq").slice(0, 3).map((m) => ["groq", m.id]), ...catalogChatModels("openrouter").slice(0, 3).map((m) => ["openrouter", m.id]), ["azure", "deepseek-v4-pro"], ["azure", "gpt-5.4"]];
 	for (const [provider, modelId] of refs) {
 		const m = rt.getModel(provider, modelId);
 		assert.ok(m, `${provider}/${modelId}: pi composes it`);

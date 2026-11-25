@@ -62,7 +62,7 @@ function runtimeFixture(changes = {}) {
 	const source = { status: "ready", meta: { runId: "source", scopeId, digest, project: null }, excerpt: "PRIVATE QUESTION", revision: 0, candidates: [{ id: groupId, runId: "example", excerpt: "PRIVATE EXAMPLE" }] };
 	const calls = [];
 	const store = { privateInput: async () => source, setStatus: async (...args) => calls.push(["status", ...args]), assign: async args => (calls.push(["assign", args]), { status: "assigned", groupId }) };
-	const runtime = makeQuestionGroupRuntime({ store, triggersPath: "/triggers.json", readFile: () => JSON.stringify({ triggers: [], zeroTouch: config }), getSettings: () => ({ provider: "test", model: "chat" }), resolveClassifier: () => ({ type: "classifier", contextWindow: 4096, cost: { input: 1, output: 0 } }), ...changes });
+	const runtime = makeQuestionGroupRuntime({ store, triggersPath: "/triggers.json", readFile: () => JSON.stringify({ triggers: [], zeroTouch: config }), getSettings: () => ({ provider: "test", model: "chat" }), resolveClassifier: () => ({ type: "classifier", api: "typesafe-system-one", contextWindow: 4096, cost: { input: 1, output: 0 } }), ...changes });
 	const data = { kind: "question-grouping", questionGrouping: { runId: "source", digest, configDigest: questionGroupConfigDigest(config) } };
 	return { runtime, data, source, calls, store };
 }
@@ -119,8 +119,10 @@ test("fix recurrence counts untouched refusals and unanswered groups over equal 
 	assert.equal(compareZeroTouchFixes({ fixes: [questionFix], records, assignments: [{ scopeId, groupId, at: at + 1000 }], coverageFromMs: at - 10000, nowMs, windowDays: 30 })[0].afterCount, 1, "an unanswered recurrence still counts");
 	assert.equal(compareZeroTouchFixes({ fixes: [fix], records: [], coverageFromMs: nowMs - 30 * 86400000, nowMs, windowDays: 30 })[0].status, "observing");
 });
-test("classifier type, known context bound and configured cap are free pickup refusals", async () => {
-	for (const model of [null, { type: "text", contextWindow: 4096, cost: { input: 1, output: 0 } }, { type: "classifier", cost: { input: 1, output: 0 } }, { type: "classifier", contextWindow: 100000, cost: { input: 1, output: 0 } }, { type: "classifier", contextWindow: 4096, cost: { input: 1, output: 1 } }]) {
+test("classifier type, a priced api, known context bound and configured cap are free pickup refusals", async () => {
+	// pi 1.6.1's pi-decision (Radius) and an overlay's own api are refused before any reservation: the runner's bound does
+	// not price them, so the capped call would be refused inside a container instead.
+	for (const model of [null, { type: "classifier", api: "pi-decision", contextWindow: 4096, cost: { input: 1, output: 0 } }, { type: "classifier", contextWindow: 4096, cost: { input: 1, output: 0 } }, { type: "classifier", api: "llama-cpp-classify", contextWindow: 4096, cost: { input: 0, output: 0 } }, { type: "text", api: "typesafe-system-one", contextWindow: 4096, cost: { input: 1, output: 0 } }, { type: "classifier", api: "typesafe-system-one", cost: { input: 1, output: 0 } }, { type: "classifier", api: "typesafe-system-one", contextWindow: 100000, cost: { input: 1, output: 0 } }, { type: "classifier", api: "typesafe-system-one", contextWindow: 4096, cost: { input: 1, output: 1 } }]) {
 		const fixture = runtimeFixture({ resolveClassifier: () => model });
 		const result = await fixture.runtime.resolve(fixture.data, "job");
 		assert.equal(result.result.reason, "question-group-refused");

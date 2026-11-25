@@ -7895,6 +7895,8 @@ test("Zero touch boot shares tracking and private grouping dependencies, rereads
 	assert.equal(runtimeOptions.getSettings().provider, boot.captured.getSettings().provider);
 	const classifier = runtimeOptions.resolveClassifier({ provider: "openrouter", id: "typesafe/jev-1.13" });
 	assert.equal(classifier.type, "classifier", "the real pinned catalog, not a text-model-only lookup, reaches grouping preflight");
+	// openai/gpt-6-luna names a chat model and a decision model; grouping resolves the decision model (builtinClassifier).
+	assert.equal(runtimeOptions.resolveClassifier({ provider: "openai", id: "gpt-6-luna" })?.api, "openai-decisions");
 	// Issue #1013: both builders keep a block's declared keys by pi's own variable list, the one the credential gate reads.
 	for (const options of [runtimeOptions, answerOptions]) {
 		assert.equal(options.providerKeyNames, providerKeyCandidates);

@@ -1,4 +1,4 @@
-import { collectedWatchTrace } from "./watch-trace.mjs";
+import { collectedWatchTrace, decisionCallFacts } from "./watch-trace.mjs";
 import { makeRedactor } from "./redact-secrets.mjs";
 import { recordedWatchDecision } from "./watch-record.mjs";
 import * as nodeFs from "node:fs";
@@ -140,7 +140,7 @@ export function makeWatchRuntime({ store, triggersPath, readFile = nodeFs.readFi
 					const selected = completed ? selectWatchDecision(rule.decide, output) : { action: "file_issue", reason: policyRefused ? "decide-refused" : "decide-unanswered" };
 					const summary = recordedWatchDecision({ ...selected, model: rule.decide.model, questions: Object.keys(rule.decide.questions), shadow: rule.decide.shadow, costUsd: usage?.costUsd });
 					watch.decision = summary;
-					try { await store.appendTrace(watch.findingId, privateEntry({ id: "decision", kind: "decide", state: watch.gate.state, questions: rule.decide.questions, ...summary, modelReviewed: true, status: selected.reason ?? "answered" })); } catch { traceUnavailable = true; }
+					try { await store.appendTrace(watch.findingId, privateEntry({ id: "decision", kind: "decide", state: watch.gate.state, questions: rule.decide.questions, ...summary, ...(completed ? decisionCallFacts(output) : {}), modelReviewed: true, status: selected.reason ?? "answered" })); } catch { traceUnavailable = true; }
 					await store.updateFinding(watch.findingId, { status: "decided", decision: summary, ...(selected.reason ? { reason: selected.reason } : {}) });
 					await store.scheduleAction(watch.findingId, watch.ruleId);
 					await enqueue({ id: watch.findingId, ruleId: watch.ruleId, dueAt: now() }, { phase: "action" });

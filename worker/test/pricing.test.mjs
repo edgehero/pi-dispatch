@@ -255,8 +255,11 @@ test("piAiVersion default path resolves the real pin, and the pricing surface is
 	// At 1.5.0 calculateCost only adds usage.cost.totalFromProvider = false; reprice reads usage.cost.total alone, and tiers,
 	// cache writes and total are unchanged. Re-verified at 1.5.2: models.js changed only in the auth refresh (a provider
 	// whose refreshModelsAuth is "configured" refreshes without a credential) and in passing the call's signal on to
-	// dispatch; calculateCost is byte-identical to 1.5.0's.
+	// dispatch; calculateCost is byte-identical to 1.5.0's. Re-verified at 1.6.1: models.js changed only in
+	// createProvider, which merges dynamic models once per refresh and returns that one array from getAllModels and
+	// getModels instead of a fresh one per call; calculateCost is byte-identical to 1.5.2's, and the runner's one
+	// caller (pinPriceTable) reads the array and copies each price, never mutating it.
 	const models = readFileSync(join(dirname(entry), "models.js"));
-	assert.equal(createHash("sha256").update(models).digest("hex"), "f23dda9e5a472f9556c9b834d924504b771af8275d17a49496100a4f4b91e2dc", `pi-ai ${realPackage.version}'s dist/models.js changed: re-verify calculateCost and the pricing surface, then update this hash`);
+	assert.equal(createHash("sha256").update(models).digest("hex"), "2ff2fee9fba91b4bc823913c418c030c869dd4945cc81f667a894e019fc23808", `pi-ai ${realPackage.version}'s dist/models.js changed: re-verify calculateCost and the pricing surface, then update this hash`);
 	assert.equal(piAiVersion(), piAiVersion(), "cached: repeated calls agree");
 });

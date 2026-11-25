@@ -165,7 +165,7 @@ const posInt = T.int({ minimum: 1 });
 const ImageResize = T.obj({ maxWidth: opt(posInt), maxHeight: opt(posInt), maxBytes: opt(posInt), jpegQuality: opt(T.int({ minimum: 1, maximum: 100 })) });
 const ModelInputLimits = T.obj({ maxRequestBytes: opt(posInt), images: opt(T.obj({ resize: opt(ImageResize), maxPerMessage: opt(posInt), maxPerRequest: opt(posInt) })) });
 // compat-schema.js's ProviderCompatSchema: the merged properties of the OpenAI completions, OpenAI responses, Anthropic
-// messages, Bedrock, Mistral and System One schemas. A key two of them share takes pi's generic override, which for every shared
+// messages, Bedrock, Mistral, Google (1.6.1) and System One schemas. A key two of them share takes pi's generic override, which for every shared
 // key here is the same type as each api's own (a boolean, the three-way affinity format, or 1.5.2's three-way
 // promptCacheKeyMode), so the superset is exact.
 const bool = opt(T.bool());

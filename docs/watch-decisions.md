@@ -27,6 +27,25 @@ The decision sees bounded projected metadata, never samples. Optional `fields` e
 
 The public summary includes reviewed model/question identifiers, the selected choice, probabilities, confidence and cost. Input state belongs only to private evidence. A probability is a model answer, not proof of correctness.
 
+### Which decision models
+
+Any model pi's built-in catalog lists as a classifier with a known input price and an output price of 0 can decide, for example `openrouter/typesafe/jev-1.13`, `cloudflare-workers-ai/typesafe/jev` or `openai/gpt-6-luna`. Since pi 1.6.1 that includes GitHub Copilot's `github-copilot/gpt-6-luna-decisions`:
+
+- Its credential is `COPILOT_GITHUB_TOKEN` in the host environment. A Copilot sign-in in pi's `auth.json` is refused, as for every Copilot job.
+- Its recorded cost is the catalog's estimate (OpenAI's Decisions API prices), not what Copilot counts against your plan.
+- With a token, pi also offers `github-copilot/microsoft-decision-1`, which only Copilot Business and Enterprise plans have. On another plan Copilot refuses the call, and the decision is unanswered.
+
+Radius's decision models cannot decide. Their protocol reports the cost from Radius's server, so there is no local bound for the decision's cap ([costs.md](costs.md#pi-140-summaries-and-radius)).
+
+### What the trace records about the call
+
+Each decision's trace entry records two facts about its classifier call, when the provider supplies them:
+
+- **The provider's response id**, such as OpenRouter's generation id. Use it to find the call in the provider's own records. Only operators see it, in the entry's private evidence; viewers, model-facing reads and the durable finding record never carry it. A value that is not a plain token (letters, digits, `_`, `.`, `:` and `-`, at most 128 characters) is left out.
+- **Billed by the provider**: the cost is what the provider billed, not the catalog price applied to the token counts. OpenRouter's System One answers are billed this way since pi 1.6.1. The public trace line says "billed by the provider" after the cost.
+
+An image older than this release records neither, and a worker or console older than this release ignores them. Answer drafts and question grouping do not record them yet.
+
 ## Trusted tools
 
 A watch investigation may use `decide` with the reviewed classifier. Those calls use its own job reservation and process guard. The tool cannot select a different provider or endpoint.

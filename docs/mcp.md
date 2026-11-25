@@ -158,7 +158,11 @@ The job loads pi's MCP, codemode and tool_search, as the pi CLI does, and connec
   held to its model list, and under a cost cap refused when it cannot be bounded (every image call, and a classifier
   with an output price). A refused call stops the whole job, as any model call the cap or the list refuses does, so
   a job under a cap cannot try an image model and carry on. An image model pi's catalog prices at zero is counted
-  at zero. `"codemodeModels": false` at the top of the overlay's `mcp.json` turns them off for every job.
+  at zero. Since pi 1.6.1 a classify result carries the provider's `responseId`, which the script sees and the job
+  records nowhere, and an OpenRouter System One answer is counted at what OpenRouter billed rather than at the catalog
+  price. A Radius decision model is refused under a cap, its cost coming from Radius's server
+  ([costs.md](costs.md#pi-140-summaries-and-radius)). `"codemodeModels": false` at the top of the overlay's
+  `mcp.json` turns them off for every job.
 - **References.** The job resolves each `${NAME}` once, from its own environment. A value that starts with `!` is
   sent as text, never run.
 - **HTTP servers.** Each request goes to the server's own origin, through the egress proxy when it is on. A redirect

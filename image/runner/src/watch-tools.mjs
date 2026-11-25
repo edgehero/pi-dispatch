@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { configError } from "./outcome.mjs";
 import { LAYOUT } from "./layout.mjs";
 import { exactArguments } from "./exact-arguments.mjs";
+import { responseIdOf } from "./watch-decision.mjs";
 const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const only = (v, keys) => object(v) && Object.keys(v).every((k) => keys.includes(k));
 const name = (v) => typeof v === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(v) && !["constructor", "prototype", "__proto__"].includes(v);
@@ -78,7 +79,9 @@ export function createWatchTools({ config, runtime, outbox = LAYOUT.outbox, fetc
 			const result = await runtime.classify(model, args, { signal: AbortSignal.timeout(10000) });
 			const summary = { answers: result.answers, usage: result.usage, stopReason: result.stopReason };
 			if (Buffer.byteLength(JSON.stringify(summary)) > 16384) throw new Error("decide-oversize");
-			const traceId = trace({ kind: "decide", callId, status: result.stopReason === "stop" ? "completed" : "failed", ...summary });
+			const responseId = responseIdOf(result);
+			// The provider's id goes to the operator's trace, not to the model: it is not evidence the model needs.
+			const traceId = trace({ kind: "decide", callId, status: result.stopReason === "stop" ? "completed" : "failed", ...summary, ...(responseId && { responseId }) });
 			return reply({ ...summary, traceId }, result.stopReason !== "stop");
 		} catch {
 			try { trace({ kind: "decide", callId, status: "failed" }); } catch {}
