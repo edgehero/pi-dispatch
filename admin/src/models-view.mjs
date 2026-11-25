@@ -299,11 +299,15 @@ export async function readModelsHistory({ fleet, now, seed = null, within = null
  * that is sooner. Every bounded read here takes its bound through it, so on a Valkey that does not answer the reads end
  * together at the deadline, each as the unread one it is, and the view is still drawn from the files. A caller with no
  * deadline (a tool) passes none, and each read keeps its own bound.
+ *
+ * `files` (issue #1073) is the reader's `fileViews`, handed by a page whose snapshot failed: the settings overlay is
+ * then the one that load read, not a second reading of the file.
  */
-export async function readModelsView({ paths = {}, env = {}, deploymentDir = null, now = Date.now(), snapshot, fleet = null, fs = nodeFs, redis = null, reads = {}, within = null } = {}) {
+export async function readModelsView({ paths = {}, env = {}, deploymentDir = null, now = Date.now(), snapshot, files = null, fleet = null, fs = nodeFs, redis = null, reads = {}, within = null } = {}) {
   now = typeof now === "function" ? now() : now;
   let configUnknown = false, overlayUnknown = false, entries = [], modelRoles = {}, projects = [], limits = [], overlay = null, envList = null;
-  let settings = snapshot?.settings?.overlay ?? {};
+  const held = snapshot ?? (files !== null && typeof files === "object" ? files : null);
+  let settings = held?.settings?.overlay ?? {};
   // Which file stopped the policy, for the page's word (issue #988): `at` names the one being taken when the read threw.
   let at = "triggers file", configProblem = null;
   try {
@@ -318,8 +322,8 @@ export async function readModelsView({ paths = {}, env = {}, deploymentDir = nul
     const limitsText = reads.limits ? await reads.limits() : readText(paths.scopedLimitsPath, fs);
     limits = limitsText === null ? [] : parseScopedLimits(limitsText, paths.scopedLimitsPath);
     at = "settings overlay";
-    if (snapshot?.settings?.invalid) throw settingsRefusal(snapshot.settings.invalid);
-    if (!snapshot?.settings) { const view = readSettingsView({ settingsFile: paths.settingsFile, fs }); if (view.invalid) throw settingsRefusal(view.invalid); settings = view.overlay ?? {}; }
+    if (held?.settings?.invalid) throw settingsRefusal(held.settings.invalid);
+    if (!held?.settings) { const view = readSettingsView({ settingsFile: paths.settingsFile, fs }); if (view.invalid) throw settingsRefusal(view.invalid); settings = view.overlay ?? {}; }
     at = null;
     envList = allowedModelsFrom(env);
   } catch (error) {

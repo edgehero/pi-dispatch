@@ -6273,18 +6273,28 @@ export function createFleetReader(
      * what the files hold rather than draw them as empty. Not the trigger instructions or tasks (an overlay's alone),
      * and nothing a file cannot answer (the scoped counters, the event statuses, a secret profile's hosts). Each reader
      * is the one `snapshot()` calls and never throws: a file it cannot read is its own `{ unreadable }` or `{ invalid }`.
+     *
+     * The secret profiles and bundles (issue #1073) are the snapshot's two views over these same files and the
+     * deployment's environment, with no run and no host: what the files declare and bind, which `/config`'s two secret
+     * cards count. A profile's hosts are said as not read (`hostsUnreadable`), never as none.
      */
     fileViews() {
+      const triggers = readTriggersWithInstructions({ triggersPath: paths.triggersPath }).view;
+      const projects = readProjects({ projectsPath: paths.projectsFile });
+      const settings = readSettingsView({ settingsFile: paths.settingsFile });
+      const env = dollarEnvFn() ?? {};
       return {
-        triggers: readTriggersWithInstructions({ triggersPath: paths.triggersPath }).view,
-        projects: readProjects({ projectsPath: paths.projectsFile }),
-        settings: readSettingsView({ settingsFile: paths.settingsFile }),
+        triggers,
+        projects,
+        settings,
         scopedLimits: readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath }),
         pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
         stagedPackages: readStagedPackages({ globalPiDir: paths.globalPiDir }),
         overlayMcp: readOverlayMcpView({ globalPiDir: paths.globalPiDir }),
         schedulerStallMax: paths.schedulerStallMax,
         envelopeSet: typeof paths.envelopeFile === "string" && paths.envelopeFile !== "",
+        secretBundles: secretBundlesView({ triggers, settings, env, projects, runs: [], fs }),
+        secretProfiles: secretProfilesView({ triggers, settings, env, projects, runs: [], hosts: null, hostsUnreadable: true, fs }),
       };
     },
     /**
@@ -7670,9 +7680,10 @@ const RUNS_PAGE_BATCH = 200;
 
 /**
  * One page of the merged run history, newest first (issue #641): `{ runs, next, mirror, truncated, examined }`, or
- * `{ refusal }` for a cursor or limit it will not take, or `{ runs: [], next: null, mirror, unreachable }` when this
- * host's logs directory is unreadable (the `mergedRunsOn` posture: the mirror cannot stand in for this host's own
- * history).
+ * `{ refusal }` for a cursor or limit it will not take. When this host's logs directory is unreadable the page is the
+ * mirror's alone, with `unreachable` beside it (issue #1073): the mirror cannot stand in for this host's own history,
+ * so every caller treats such a page as incomplete, and a page says what is missing. With no client to ask the mirror
+ * it is `{ runs: [], next: null, mirror: "off", unreachable }`, as before.
  *
  * THE CURSOR IS A SCORE, NOT AN OFFSET. `before` (millis, exclusive) is the instant of the last run the previous page
  * showed, so a run that lands while an operator pages lands ABOVE every cursor already handed out and moves nothing: an
@@ -7700,8 +7711,13 @@ export async function readRunsPage(redis, { logsDir, before = null, limit = 50, 
   const bound = before === null || before === undefined ? null : before;
   const index = localIndex ?? makeLocalRunIndex({ logsDir, fs, now });
   const read = index.records();
-  if (!Array.isArray(read?.records)) return { runs: [], next: null, mirror: "off", ...read };
-  const local = bound === null ? read.records : read.records.filter((r) => runAt(r) < bound);
+  // This host's files unreadable (issue #1073): the mirror is still asked, and the page is what it holds, with the
+  // reader's `unreachable` beside it so a caller says this host's part is missing. It answered no run and a mirror it
+  // never asked, which left a fleet whose mirror holds every host's runs with an empty history.
+  const localUnread = Array.isArray(read?.records) ? null : { unreachable: read?.unreachable ?? "this host's run files could not be read" };
+  if (localUnread !== null && !redis) return { runs: [], next: null, mirror: "off", ...localUnread };
+  const records = localUnread === null ? read.records : [];
+  const local = bound === null ? records : records.filter((r) => runAt(r) < bound);
 
   let mirror = redis ? null : "off";
   let mirrored = [];
@@ -7760,7 +7776,7 @@ export async function readRunsPage(redis, { logsDir, before = null, limit = 50, 
         const exists = await withTimeout(Promise.resolve().then(() => redis.exists(RUNS_INDEX)).catch(() => null), timeoutMs, null);
         if (exists === 0) mirror = "off";
       }
-      return { runs, next, mirror: mirror ?? "off", truncated, examined };
+      return { runs, next, mirror: mirror ?? "off", truncated, examined, ...(localUnread ?? {}) };
     }
   }
 }

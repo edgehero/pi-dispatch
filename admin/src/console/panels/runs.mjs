@@ -51,10 +51,18 @@ export const RUNS_MIRROR_DEGRADED = "Other hosts' runs could not be read; showin
  */
 export const RUNS_MIRROR_DEGRADED_EMPTY = "Other hosts' runs could not be read, and this host holds no run that matches.";
 /**
- * After `RUNS_HOST_UNREADABLE` on an empty page: the reader lists no run without this host's files and does not ask the
- * mirror then (it answers `mirror: "off"` unasked), so the foot says nothing of the mirror, on or off.
+ * After `RUNS_HOST_UNREADABLE` where the mirror gave no row by being off, or by not being asked (a reader that holds no
+ * client answers it "off" unasked), so the foot says nothing of the mirror, on or off.
  */
 export const RUNS_NONE_WITHOUT_HOST = "No run is listed without it, another host's included.";
+/**
+ * After `RUNS_HOST_UNREADABLE` where the reader asked the mirror in its place (issue #1073), by what the mirror answered:
+ * the rows are the mirror's alone, and this host's runs it does not hold are what is missing; or the mirror holds none
+ * that matches, which is not "No run matches."; or the mirror did not answer either, so nothing is listed.
+ */
+export const RUNS_HOST_MISSING = "The rows are the fleet's run mirror's: this host's runs that the mirror does not hold are missing here.";
+export const RUNS_HOST_MISSING_EMPTY = "The fleet's run mirror holds no run that matches; this host's runs that the mirror does not hold are not known.";
+export const RUNS_HOST_MIRROR_UNREAD = "The fleet's run mirror could not be read either, so no run is listed.";
 /** No run passes the filter, said only where every side that was asked answered. */
 export const RUNS_EMPTY = "No run matches.";
 /**
@@ -393,8 +401,6 @@ export function runsTableModel(view) {
   // An empty page is "No run matches." only where every side answered: with the mirror or this host's files unread,
   // the sentence for the unread side says what is known instead.
   const mirrorUnread = mirrorWordUnread(page.mirror);
-  // With this host's files unread the reader answers no run and a mirror it never asked: its `mirror` word is not a fact.
-  const hostOnly = runs.length === 0 && Boolean(page.unreachable);
   const mirrorCut = mirrorStateOf(page.mirror) === "cut";
   if (runs.length === 0) {
     if (!mirrorUnread && !mirrorCut && !page.unreachable) foot.push(RUNS_EMPTY);
@@ -402,9 +408,17 @@ export function runsTableModel(view) {
     const source = runsSourceText(page);
     foot.push(`${count(runs.length)} ${runs.length === 1 ? "run" : "runs"}${source === null ? "" : `, ${source}`}.`);
   }
-  if (page.unreachable) foot.push(RUNS_HOST_UNREADABLE);
-  if (hostOnly) foot.push(RUNS_NONE_WITHOUT_HOST);
-  else if (mirrorStateOf(page.mirror) === "off") foot.push(RUNS_MIRROR_OFF);
+  if (page.unreachable) {
+    // This host's files unread (issue #1073): the reader asked the mirror in their place, and the foot says what that
+    // gave and what is missing. A reader that could not ask it answers it "off" with no row: nothing is said of it.
+    foot.push(RUNS_HOST_UNREADABLE);
+    if (mirrorStateOf(page.mirror) === "off") foot.push(RUNS_NONE_WITHOUT_HOST);
+    else if (mirrorUnread) foot.push(RUNS_HOST_MIRROR_UNREAD);
+    else {
+      foot.push(runs.length === 0 ? RUNS_HOST_MISSING_EMPTY : RUNS_HOST_MISSING);
+      if (mirrorCut) foot.push(runs.length === 0 ? RUNS_MIRROR_CUT_EMPTY : RUNS_MIRROR_CUT);
+    }
+  } else if (mirrorStateOf(page.mirror) === "off") foot.push(RUNS_MIRROR_OFF);
   else if (mirrorUnread) foot.push(runs.length === 0 ? RUNS_MIRROR_DEGRADED_EMPTY : RUNS_MIRROR_DEGRADED);
   else if (mirrorCut) foot.push(runs.length === 0 ? RUNS_MIRROR_CUT_EMPTY : RUNS_MIRROR_CUT);
   if (page.truncated) foot.push(runsTruncatedText(page.examined));

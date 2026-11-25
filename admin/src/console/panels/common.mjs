@@ -152,6 +152,18 @@ export const HOSTS_UNREAD_TEXT = "The hosts could not be read, so what they hold
  */
 export const hostsUnread = (snapshot) => !snapshot || (Boolean(snapshot.queue?.fleetDegraded) && snapshot.queue?.registryReadInPart !== true && snapshot.hostsReadAt === null);
 
+/**
+ * Whether THIS read of the registry failed after an earlier one succeeded (issue #1073): `queue.fleetDegraded`, not a
+ * read in part, with `hostsReadAt` set. The rows the reader holds are then as they were last read, which every list of
+ * hosts drawn from them says ("as last read"), and none of them is "no live host": that was the last read's answer, not
+ * this one's. `hostsUnread` is false here, which is why it cannot be the test.
+ */
+export const hostsAsLastRead = (snapshot) => Boolean(snapshot?.queue?.fleetDegraded) && snapshot?.queue?.registryReadInPart !== true && snapshot.hostsReadAt !== null;
+
+/** A list of hosts' names over such a read, or none, with the words that say so (issue #1073). */
+export const HOSTS_AS_LAST_READ = "as the registry was last read";
+export const NO_HOST_AS_LAST_READ = "no host when the registry was last read";
+
 /** Whether the snapshot's registry was read in part (issue #1062): it answered, some hosts' rows did not in time. */
 export const registryReadInPart = (snapshot) => Boolean(snapshot?.queue?.fleetDegraded) && snapshot?.queue?.registryReadInPart === true;
 

@@ -1,6 +1,7 @@
 import { NOW } from "../../../launch/fixture-deployment.mjs";
 import { loadPageData, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
 import { readUpdates } from "../../src/updates-view.mjs";
+import { noSnapshotFleet } from "./no-snapshot.mjs";
 
 const HOUR = 3600000;
 const LOOK = { v: 1, at: NOW - HOUR, everyHours: 24 };
@@ -44,10 +45,10 @@ export async function updatesFacts({ redis = {}, records = [], recordsPartial = 
 	return await readUpdates({ redis: valkey(redis), staged, records, recordsPartial, audit, pinned: PINNED, triggersDocument, triggersTrouble, now });
 }
 
-async function draw({ role = "operator", readOnly = false, facts = {}, unavailable = false } = {}) {
+async function draw({ role = "operator", readOnly = false, facts = {}, unavailable = false, fleet = null } = {}) {
 	const parsed = parsePageQuery("updates", "");
 	const made = unavailable ? null : await updatesFacts(facts);
-	const deps = { now: () => NOW, fleet: { snapshot: async () => ({}), parkedCount: async () => 0 }, updates: async () => made };
+	const deps = { now: () => NOW, fleet: fleet ?? { snapshot: async () => ({}), parkedCount: async () => 0 }, updates: async () => made };
 	const data = await loadPageData("updates", parsed.query, deps, { role, readOnly });
 	return String((await renderPage("updates", { data, query: parsed.query, session: { role, name: role === "operator" ? "ops" : "watcher" }, readOnly })).html);
 }
@@ -77,6 +78,8 @@ export const UPDATES_DRAW = Object.freeze({
 	"updates-stale.operator": () => draw({ facts: { now: NOW + 3 * 24 * HOUR } }),
 	"updates-unknown.operator": () => draw({ facts: { redis: { looks: [look("mini1", { pi: piRead({ newest: null, read: "unknown" }), packages: [row("pi-lint", "1.4.2", null, "unknown"), row("pi-test-runner", "0.9.0", null, "unknown")] })] } } }),
 	"updates-valkey-down.operator": () => draw({ facts: { redis: { down: true } } }),
+	// Issue #1073: the same outage as the console meets it, with the page's snapshot failing beside the updates' own reads.
+	"updates-no-snapshot.operator": () => draw({ fleet: noSnapshotFleet(), facts: { redis: { down: true } } }),
 	"updates-adopting.operator": () => draw({ facts: { records: [canaryRecord()], redis: { desiredRows: { "pi-lint": desired() }, appliedRows: { mini1: { "pi-lint": applied() } } } } }),
 	"updates-adopting-overdue.operator": () => draw({ facts: { now: NOW + 30 * HOUR, records: [canaryRecord()], redis: { doctorHosts: ["offline1"], desiredRows: { "pi-lint": desired() }, appliedRows: ALL_APPLIED } } }),
 	"updates-adopted.operator": () => draw({ facts: { records: [canaryRecord()], redis: { desiredRows: { "pi-lint": desired() }, appliedRows: ALL_APPLIED, facts: { "updates:canary:pi-lint@1.4.3": FACTS } } } }),

@@ -197,8 +197,13 @@ function pollerExpectedOf(env) {
  * that is sooner. Each publication read takes its bound through it, so on a Valkey that does not answer they end
  * together at the deadline, each as the unknown it already is, and the view is still drawn from the deployment's files.
  * A caller with no deadline passes none, and each reader is then called as before, with no bound named.
+ *
+ * `files` (issue #1073) is the reader's `fileViews`, which a caller hands where its snapshot failed: the triggers, the
+ * settings overlay, the overlay's MCP servers and the staged packages are the deployment's files, so with no snapshot
+ * they are drawn from there. What only Valkey holds (the hosts, doctor's records, the runs, the subscriptions) stays
+ * unread. With neither, the file sections say the files were not read, as before.
  */
-export async function readConnections({ deploymentDir, env = {}, paths = {}, snapshot = null, fs = nodeFs, now = Date.now(), redis = null, redisFn = makeRedisClient, reads = {}, publications = true, platform = process.platform, uid = process.geteuid?.(), within = null } = {}) {
+export async function readConnections({ deploymentDir, env = {}, paths = {}, snapshot = null, files = null, fs = nodeFs, now = Date.now(), redis = null, redisFn = makeRedisClient, reads = {}, publications = true, platform = process.platform, uid = process.geteuid?.(), within = null } = {}) {
   const bound = (ownMs) => (typeof within === "function" ? { timeoutMs: within(ownMs) } : {});
   let file = {};
   let metadata = null;
@@ -208,11 +213,13 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   } catch { metadata = { unreadable: true }; }
   const environmentUnknown = !metadata || Boolean(metadata.unreadable || metadata.untrusted || metadata.hazard || metadata.unread?.length || metadata.hazardSkipped?.length);
   const incompleteKeys = new Set([...(metadata?.unread ?? []).map((r) => r.key), ...(metadata?.hazardSkipped ?? [])]);
-  const triggers = snapshot?.triggers?.triggers;
+  // What the files hold: the snapshot's views, or with no snapshot the file views themselves (issue #1073).
+  const held = snapshot ?? (files !== null && typeof files === "object" ? files : null);
+  const triggers = held?.triggers?.triggers;
   // The triggers file was read and is refused (issue #988): "does not load", where a file nobody could read "could not be read".
-  const triggersRefused = !Array.isArray(triggers) && fileCaseOfView(snapshot?.triggers, "triggers") === "refused";
+  const triggersRefused = !Array.isArray(triggers) && fileCaseOfView(held?.triggers, "triggers") === "refused";
   let defaultProvider = null;
-  try { defaultProvider = snapshot?.settings?.overlay?.provider ?? providerFrom(file); } catch { /* The declaration remains shown as set; no malformed provider enters a source lookup. */ }
+  try { defaultProvider = held?.settings?.overlay?.provider ?? providerFrom(file); } catch { /* The declaration remains shown as set; no malformed provider enters a source lookup. */ }
   const providerNames = [...new Set([defaultProvider, ...(triggers ?? []).map((t) => t.provider)].filter((p) => safeName(p)))];
   // Discover key names through pi's pinned table, then read presence only from the same trusted file.
   const providerVars = [...new Set(providerNames.flatMap(providerKeyCandidates))];
@@ -325,8 +332,8 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
     try { egressOn = egressArmed(file); }
     catch { egressProblem = "PI_EGRESS must be unset, empty, 0 or 1; the worker refuses to start until it is corrected."; }
   }
-  const mcp = snapshot?.overlayMcp ?? null;
-  const packages = snapshot?.stagedPackages ?? null;
+  const mcp = held?.overlayMcp ?? null;
+  const packages = held?.stagedPackages ?? null;
   const forges = forgeConnections(file, triggers, { unknown: environmentUnknown });
   const loginFallback = environmentUnknown ? null : file.PI_AUTH_FROM_PI !== "0";
   const subscriptionAuth = await readSubscriptionAuthView({ snapshot, read: reads.subscriptionAuth, now });
@@ -342,7 +349,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
     endpointFleetDeclared, endpointStatus, endpointsMore,
     endpoints: Array.isArray(endpoints) || shownEndpoints.length ? shownEndpoints.map((ep) => ({ ...ep, used: slots.get(ep.id) ?? null })) : null,
     // A triggers file that is not there grants nothing; one that was not read (or no snapshot at all) leaves the grants unknown.
-    privateEndpoints: privateEndpointsView(privateDeclared, triggers, { triggersUnread: !Array.isArray(triggers) && snapshot?.triggers?.missing !== true, triggersRefused }),
+    privateEndpoints: privateEndpointsView(privateDeclared, triggers, { triggersUnread: !Array.isArray(triggers) && held?.triggers?.missing !== true, triggersRefused }),
     providers: providerNames.map((name) => {
       const variables = providerKeyCandidates(name);
       // The worker forwards every truthy candidate in pi's pinned precedence order; no value leaves this reader.
@@ -350,9 +357,10 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
       const selectedVariable = providerUnknown ? null : fromEnv[0] ?? null;
       return { name, unknown: providerUnknown, variables, fromEnv, selectedVariable, credentialSource: selectedVariable ? "deployment-env" : providerUnknown || loginFallback === null ? "unknown" : loginFallback ? "pi-login" : "worker-env", loginFallback, fallback: environmentUnknown ? "the deployment’s provider credential fallback is unknown" : loginFallback ? "pi login on each host is the configured fallback; actual credentials are not published here" : "pi login disabled by PI_AUTH_FROM_PI=0; each worker needs its environment key" };
     }),
-    notify: { hook: nonblank(file, "PI_ON_FAILURE") ? basename(file.PI_ON_FAILURE) : null, timeoutMs: positive(file.PI_ON_FAILURE_TIMEOUT_MS, 10_000), triggers: (triggers ?? []).filter((t) => t.statusComment === true).map((t) => t.index).filter(Number.isInteger), unknown: environmentUnknown, history: hookHistory, ...(!Array.isArray(triggers) && snapshot?.triggers?.missing !== true ? { triggersUnread: true, ...(triggersRefused ? { triggersRefused: true } : {}) } : {}) },
+    notify: { hook: nonblank(file, "PI_ON_FAILURE") ? basename(file.PI_ON_FAILURE) : null, timeoutMs: positive(file.PI_ON_FAILURE_TIMEOUT_MS, 10_000), triggers: (triggers ?? []).filter((t) => t.statusComment === true).map((t) => t.index).filter(Number.isInteger), unknown: environmentUnknown, history: hookHistory, ...(!Array.isArray(triggers) && held?.triggers?.missing !== true ? { triggersUnread: true, ...(triggersRefused ? { triggersRefused: true } : {}) } : {}) },
     mcp, packages, packageOptOuts: Array.isArray(triggers) ? triggers.filter((t) => t.packages === false).length : null,
-    problems: connectionsProblems(hosts, snapshot?.runs ?? [], forges, pollers), snapshotUnreadable: snapshot === null,
+    // `filesRead` (issue #1073): with no snapshot, the file sections were drawn from the file views.
+    problems: connectionsProblems(hosts, snapshot?.runs ?? [], forges, pollers), snapshotUnreadable: snapshot === null, ...(snapshot === null && held !== null ? { filesRead: true } : {}),
   };
 }
 

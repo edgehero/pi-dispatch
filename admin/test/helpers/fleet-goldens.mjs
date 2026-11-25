@@ -90,6 +90,9 @@ const states = {
   "host-outage.viewer": () => draw("host", { role: "viewer", fleet: noSnapshotFleet({ runsPage: async () => ({ ...RUNS_PAGE_IN_OUTAGE }) }), cap: null }),
   "host-registry-never-read.viewer": () => draw("host", { role: "viewer", snap: snapshot({ hostBudgets: [], queue: { ...snapshot().queue, fleetDegraded: "registry" }, hostsReadAt: null, doctor: { unreachable: "registry" } }) }),
   "venue-no-snapshot.operator": () => draw("venue", { name: "openshell", fleet: noSnapshotFleet() }),
+  // Issue #1073: a venue over a registry this read could not read after one that answered: its hosts are the last read's,
+  // and said so ("as the registry was last read"), never "no live host".
+  "venue-registry-unreadable.operator": () => draw("venue", { name: "openshell", snap: snapshot({ queue: { ...snapshot().queue, fleetDegraded: "registry" }, hostsReadAt: NOW - HOUR }) }),
   "host-unknown.viewer": () => draw("host", { role: "viewer", name: "unknown", snap: snapshot({ hostBudgets: [], doctor: { hosts: [], more: 0 } }) }),
   "host-retention-off.operator": () => draw("host", { snap: snapshot({ hostBudgets: [host({ sandboxes: [], sandboxRetentionHours: 0 })] }) }),
   "host-sandboxes-unreadable.operator": () => draw("host", { snap: snapshot({ hostBudgets: [host({ sandboxes: null, sandboxesMore: null })] }) }),

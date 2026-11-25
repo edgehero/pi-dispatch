@@ -9,7 +9,8 @@ import {
 import { VENUE_LABEL, listed } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
-import { HOSTS_UNREAD, hostsUnread, registryPartText, registryReadInPart, unreadHostsOf } from "./common.mjs";
+import { HOSTS_UNREAD, NO_HOST_AS_LAST_READ, hostsAsLastRead, hostsUnread, registryPartText, registryReadInPart, unreadHostsOf } from "./common.mjs";
+import { REGISTRY_UNREAD_TEXT } from "./overview.mjs";
 
 const model = (view) => venuesView(view.data?.snapshot?.hostBudgets ?? []);
 const selected = (view) =>
@@ -19,6 +20,8 @@ const holderOf = (venue) =>
 // With no snapshot, or one whose registry was never read, nothing was read about the hosts, which is not the same as
 // there being none.
 const read = (view) => !hostsUnread(view.data?.snapshot);
+const lastRead = (view) => hostsAsLastRead(view.data?.snapshot);
+const capital = (text) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 /**
  * The hosts of a registry read in part that this console has NO row of (issue #1036): a row that was not read and
  * was never read here, so what its host blesses, defaults to or publishes is in none of this page's lists. A host
@@ -33,13 +36,20 @@ const unnamed = (view) => registryReadInPart(view?.data?.snapshot) && (unreadHos
  */
 const names = (rows, view) => {
   if (!read(view)) return rows.length ? rows.join(", ") : HOSTS_UNREAD;
+  // This read of the registry failed after one that answered (issue #1073): the rows are the last read's, which the
+  // note under the card says, and none of them is "no live host".
+  if (lastRead(view)) return rows.length ? rows.join(", ") : capital(NO_HOST_AS_LAST_READ);
   const missing = unseen(view);
   const gap = missing.length > 0 ? `not known for ${listed(missing)}, whose ${missing.length === 1 ? "row was" : "rows were"} not read` : unnamed(view) ? "not known for a host whose row was not read" : null;
   if (gap === null) return rows.length ? rows.join(", ") : "no live host";
   return rows.length ? `${rows.join(", ")}; ${gap}` : `${gap.charAt(0).toUpperCase()}${gap.slice(1)}`;
 };
-/** The note under a card that lists hosts, over a registry read in part: which rows were not read, and what Valkey answered. */
-const partNote = (view) => (registryReadInPart(view.data?.snapshot) && read(view) ? html`<p class="note">${registryPartText(view.data.snapshot)}</p>` : null);
+/**
+ * The note under a card that lists hosts, over a registry read in part: which rows were not read, and what Valkey
+ * answered; over a registry this read could not read at all after one that answered (issue #1073), that the hosts are
+ * as it was last read.
+ */
+const partNote = (view) => (registryReadInPart(view.data?.snapshot) && read(view) ? html`<p class="note">${registryPartText(view.data.snapshot)}</p>` : lastRead(view) ? html`<p class="note">${REGISTRY_UNREAD_TEXT}</p>` : null);
 const word = (p) =>
   html`<span class="chip vw vw--${p.word}${p.word === "enforced" ? " tone-ok" : ""}">${ui.icon(p.word === "enforced" ? "shield" : p.word === "asserted" ? "done" : "minus")}${p.word}</span>`;
 const missing = () =>
@@ -99,7 +109,7 @@ export const venueSummary = panel(
                       .join(", ")}`,
                 )
                 .join("; ")
-            : read(view) ? (unseen(view).length > 0 || unnamed(view) ? "No host that was read published a floor" : "No live host published a floor") : HOSTS_UNREAD,
+            : read(view) ? (lastRead(view) ? `No host published a floor when the registry was last read` : unseen(view).length > 0 || unnamed(view) ? "No host that was read published a floor" : "No live host published a floor") : HOSTS_UNREAD,
         ],
       ],
       { cols: 1 },
@@ -145,7 +155,7 @@ export const venueProperties = panel(
 export const venueHosts = panel("OpenShell on each host", (v, _m, view) =>
   v.openshell === null
     ? html`<p>This venue runs no gateway.</p>`
-    : ui.tbl({
+    : html`${ui.tbl({
         label: `${v.name} gateways`,
         stack: true,
         heads: ["Host", "Engine", "Modes", "Gateway when the worker started"],
@@ -159,8 +169,8 @@ export const venueHosts = panel("OpenShell on each host", (v, _m, view) =>
             ? OPENSHELL_UNPUBLISHED_TEXT
             : (GATEWAY_TEXT[o.gateway] ?? GATEWAY_TEXT.unknown),
         ]),
-        empty: read(view) ? (unseen(view).length > 0 || unnamed(view) ? "No host that was read blesses this venue." : "No live host blesses this venue.") : "Not known: the hosts could not be read.",
-      }),
+        empty: read(view) ? (lastRead(view) ? "No host blessed this venue when the registry was last read." : unseen(view).length > 0 || unnamed(view) ? "No host that was read blesses this venue." : "No live host blesses this venue.") : "Not known: the hosts could not be read.",
+      })}${lastRead(view) && v.openshell.length ? html`<p class="note">${REGISTRY_UNREAD_TEXT}</p>` : null}`,
 );
 
 export const venueFix = panel(
