@@ -154,12 +154,13 @@ export function assembleCosts(paths, window, { flow, repo, project, pricing, now
  * `collectGraphInputs`, and the pure fold. All I/O lives in the read-model; this function only
  * aggregates its outputs into buildGraphModel's input shape. `pricing` is the façade (`needPricing`).
  */
-export async function assembleGraph(paths, { pricing, project, fullPaths = false, nowMs = Date.now(), readSchedulersFn = readSchedulers } = {}) {
+export async function assembleGraph(paths, { pricing, project, fullPaths = false, nowMs = Date.now(), readSchedulersFn = readSchedulers, timeoutMs } = {}) {
   needPricing(pricing);
   const triggers = readGraphTriggers({ triggersPath: paths.triggersPath, fullPaths });
   if (triggers.missing || triggers.invalid) return buildGraphModel({ triggers, nowMs });
   const triggerList = Array.isArray(triggers?.triggers) ? triggers.triggers : [];
-  const schedulers = await readSchedulersFn({ url: paths.valkeyUrl, readOnly: true });
+  // `timeoutMs` (issue #1073): the schedulers' bound where a caller names one (a page's, from its deadline).
+  const schedulers = await readSchedulersFn({ url: paths.valkeyUrl, readOnly: true, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
   const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs: nowMs - GRAPH_LIMITS.windowDays * 24 * 60 * 60 * 1000, nowMs });
   // A newer release's record is left out of every count below (issue #761): its trigger, chain and target are past the
   // stable core.
@@ -198,8 +199,18 @@ function posIntOrNull(v) {
  * `readBudget` is GET-only (CONST-BUDGET-BEFORE-TOKENS: observing the budget spends nothing). Exported with a Valkey
  * client seam (`redisFn`) for its tests, as `assembleAllocationView` is.
  */
-export async function assembleBudgetView(paths, { redisFn, env, nowMs = Date.now() } = {}) {
-  const raw = await readBudget({ url: paths.valkeyUrl, redisFn, now: new Date(nowMs) });
+export async function assembleBudgetView(paths, { redisFn, env, nowMs = Date.now(), timeoutMs } = {}) {
+  // Its three Valkey reads are made together (issue #1073): the job-slot counters, the scoped rows' and the dollar
+  // windows' need nothing of each other, and one after another a Valkey that does not answer cost three bounds.
+  // `timeoutMs` is each read's bound where a caller names one (a page's, from its deadline), their own otherwise.
+  const bound = timeoutMs === undefined ? {} : { timeoutMs };
+  const limitsView = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
+  const limits = Array.isArray(limitsView?.limits) ? limitsView.limits : [];
+  const [raw, scopedCounters, dollars] = await Promise.all([
+    readBudget({ url: paths.valkeyUrl, redisFn, now: new Date(nowMs), ...bound }),
+    limits.length > 0 ? readScopedBudget({ url: paths.valkeyUrl, limits, redisFn, now: new Date(nowMs), ...bound }) : { rows: [] },
+    env ? readDollarWindows({ paths, env, now: new Date(nowMs), redisFn, ...bound }) : null,
+  ]);
   const view = readSettingsView({ settingsFile: paths.settingsFile });
   const overlay = view && !view.invalid && view.overlay ? { ...view.overlay } : {};
   if (env) {
@@ -226,9 +237,6 @@ export async function assembleBudgetView(paths, { redisFn, env, nowMs = Date.now
   // ASSEMBLER-side with the worker's own windowState so they ride the payload as words (the insights
   // page's import allowlist forbids the worker import). Concurrency is CONFIG-only here -- per-scope
   // in-flight is worker-process state no redis read can see, and the panel never invents a number.
-  const limitsView = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
-  const limits = Array.isArray(limitsView?.limits) ? limitsView.limits : [];
-  const scopedCounters = limits.length > 0 ? await readScopedBudget({ url: paths.valkeyUrl, limits, redisFn, now: new Date(nowMs) }) : { rows: [] };
   const scoped = limits.map((l, i) => {
     const used = scopedCounters?.rows?.[i] ?? null;
     const win = (cap, key) => {
@@ -264,7 +272,10 @@ export async function assembleBudgetView(paths, { redisFn, env, nowMs = Date.now
   });
   return {
     unreachable,
-    ...(env ? { dollars: await readDollarWindows({ paths, env, now: new Date(nowMs), redisFn }), settingsInvalid: Boolean(view?.invalid), ...(view?.invalid ? { settingsCase: fileCaseOfView(view) } : {}), settings: overlay } : {}),
+    // The scoped rows' counters not read (issue #1073): each row's `used` is then null, which the page draws as unknown;
+    // this says it for a caller that keeps the view, which must not keep a read that failed for a good one's window.
+    ...(scopedCounters?.unreachable ? { scopedUnreachable: String(scopedCounters.unreachable) } : {}),
+    ...(env ? { dollars, settingsInvalid: Boolean(view?.invalid), ...(view?.invalid ? { settingsCase: fileCaseOfView(view) } : {}), settings: overlay } : {}),
     softHoldPct: pct,
     day: slotWindow("day", "dailyCap"),
     week: slotWindow("week", "weeklyCap"),
@@ -424,13 +435,14 @@ export const INSIGHTS_CAPACITY_NAMES_SHOWN = 5;
  * is) and the page's instant, cut to `capacityViewOf`. `{ unreachable }` when it could not be read; nothing here is
  * ever drawn as idle for that. `env` is the deployment's environment, `envFn()` when not given (`processEnv`).
  */
-export async function assembleCapacityView(paths, window, nowMs, { readCapacityFn = readCapacity, envFn = processEnv, env = envFn(), consoleDetails = false, sources = false } = {}) {
+export async function assembleCapacityView(paths, window, nowMs, { readCapacityFn = readCapacity, envFn = processEnv, env = envFn(), consoleDetails = false, sources = false, timeoutMs } = {}) {
   const bucketMs = INSIGHTS_CAPACITY_BUCKET_MS[window] ?? INSIGHTS_CAPACITY_BUCKET_MS["30d"];
   // The month's very first millisecond: a window of no time, which has nothing to read and is not a failure to read.
   const sinceMs = costsSinceMs(window, nowMs);
   if (sinceMs >= nowMs) return { noTime: true, fromMs: sinceMs };
   try {
-    const res = await readCapacityFn({ url: paths.valkeyUrl, env, window, now: () => nowMs, span: { sinceMs: (n) => costsSinceMs(window, n), bucketMs } });
+    // `timeoutMs` (issue #1073): the report's Valkey bound where a caller names one (a page's, from its deadline).
+    const res = await readCapacityFn({ url: paths.valkeyUrl, env, window, now: () => nowMs, span: { sinceMs: (n) => costsSinceMs(window, n), bucketMs }, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
     if (!res?.report) return { unreachable: String(res?.error ?? "no report") };
     // Inside the try: a report this cannot word (a host without its capacity, a coverage that is not an object) is this
     // section's own degraded state, never a failure of the whole page.
@@ -709,18 +721,50 @@ export function spendSummaryOf({ records, hosts, budget, project = null, nowMs, 
 }
 
 /**
+ * The bounds the console assembly's Valkey reads have of their own (issue #1073), named because under a page's deadline
+ * each is handed its own or what is left of the deadline, whichever is sooner (`within`): 2.5 s for the budget
+ * counters, the scoped rows', the dollar windows', the registry's, the split's and the schedulers' reads (each of those
+ * readers' own default), and 2 s for the capacity report's (`readCapacity`'s). A caller with no deadline passes none,
+ * and each reader keeps its own. `insights-views.test.mjs` holds each to the reader's signature.
+ */
+export const INSIGHTS_READ_MS = 2_500;
+export const INSIGHTS_CAPACITY_READ_MS = 2_000;
+
+/**
  * Console-only assemblies (#749). Each route reads its own slices, so an unavailable capacity report cannot spoil
  * Breakdown and an operator's plan text is never even read for a viewer. The old static export stays unchanged.
  * `reads` injects the I/O boundaries for tests; every fallback names its failed slice instead of inventing zero.
+ *
+ * UNDER THE PAGE'S DEADLINE (issue #1073). A view's Valkey reads need nothing of each other, and were made one after
+ * another, so on a Valkey that does not answer `/insights` took the sum of their bounds (11.3 s measured with an
+ * envelope, a scoped limit and a dollar cap): the counters, the scoped rows, the dollar windows, the registry and the
+ * split. They are now made together, before the folds over the run records, and each is handed its
+ * own bound or what is left of the page's deadline (`within`, the page's `pageDeadline`), whichever is sooner. Before
+ * the folds and not after them: the folds hold the event loop, so a read started before one would see its own timer
+ * fire first and call a Valkey that answered unread. The folds read files alone and are not timed, as on every page.
+ *
+ * `partsUnread: true` (issue #1073) when a part of the view was not read: a Valkey read that failed or that the
+ * deadline cut (each answers in its own words, so a cut read reads as one that failed), or this host's run records.
+ * Nothing draws it; the console's cache keeps such a view for the short floor and not its whole window
+ * (`FAILED_READ_KEEP_MS`), so a page reads whole again within seconds of Valkey answering.
  */
-export async function assembleInsightsView(paths, window, { view = "spend", project = null, role = "viewer", fullPaths = false, pricing, nowMs = Date.now(), envFn = processEnv, reads = {} } = {}) {
+export async function assembleInsightsView(paths, window, { view = "spend", project = null, role = "viewer", fullPaths = false, pricing, nowMs = Date.now(), envFn = processEnv, reads = {}, within } = {}) {
   needPricing(pricing);
-  const io = { costs: assembleCosts, graph: assembleGraph, budget: assembleBudgetView, allocation: assembleAllocationView, capacity: assembleCapacityView, sizing: assembleSizingView, hosts: readHosts, projects: readProjects, scan: scanRunRecords, subscriptions: readSubscriptions, settings: readSettingsView, ...reads };
+  const io = { costs: assembleCosts, graph: assembleGraph, budget: assembleBudgetView, allocation: assembleAllocationView, capacity: assembleCapacityView, sizing: assembleSizingView, hosts: readHosts, projects: readProjects, scan: scanRunRecords, subscriptions: readSubscriptions, settings: readSettingsView, schedulers: readSchedulers, ...reads };
   const opts = { pricing, project, nowMs, envFn, fullPaths: role === "operator" && fullPaths };
   const out = { window, view, project, nowMs };
+  const bound = (ownMs) => (typeof within === "function" ? { timeoutMs: within(ownMs) } : {});
+  const unread = () => { out.partsUnread = true; };
+  const registryRead = () => io.hosts({ url: paths.valkeyUrl, now: () => nowMs, prune: false, ...bound(INSIGHTS_READ_MS) });
+  // The registry not read whole is a part not read, beside what each view says of it.
+  const hostsUnread = (hosts) => (hosts?.unreachable || hosts?.incomplete || !Array.isArray(hosts?.hosts) ? unread() : null);
   if (view === "capacity") {
-    out.capacity = await io.capacity(paths, window, nowMs, { envFn, consoleDetails: true });
-    const registry = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs, prune: false });
+    // `sources`: whether the report's registry and mirror both answered, for `partsUnread` alone.
+    const [capacity, registry] = await Promise.all([io.capacity(paths, window, nowMs, { envFn, consoleDetails: true, sources: true, ...bound(INSIGHTS_CAPACITY_READ_MS) }), registryRead()]);
+    const { sourcesRead, ...shown } = capacity ?? {};
+    out.capacity = capacity && typeof capacity === "object" ? shown : capacity;
+    if (capacity?.unreachable || sourcesRead === false) unread();
+    hostsUnread(registry);
     const live = Array.isArray(registry?.hosts) ? registry.hosts : null;
     const byName = new Map((live ?? []).map((row) => [row.name, row]));
     const reportHosts = Array.isArray(out.capacity?.hosts) ? out.capacity.hosts : [];
@@ -739,6 +783,48 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
     out.capacity.totalSlots = !out.capacity.venuesUnreadable && slots.length > 0 && slots.every((n) => Number.isSafeInteger(n) && n > 0) && Number.isSafeInteger(slots.reduce((sum, n) => sum + n, 0)) ? slots.reduce((sum, n) => sum + n, 0) : null;
     return out;
   }
+  if (view === "budget-split") {
+    const [allocation, hosts] = await Promise.all([io.allocation(paths, null, { consoleView: true, role, fullPaths: role === "operator" && fullPaths, envFn, nowMs, ...bound(INSIGHTS_READ_MS) }), registryRead()]);
+    out.allocation = allocation;
+    if (allocation?.unreachable) unread();
+    hostsUnread(hosts);
+    out.hosts = Array.isArray(hosts?.hosts) ? hosts.hosts : [];
+    if (hosts?.unreachable) out.hostsUnreadable = true;
+    // Issue #1062: the hosts it lists are the rows that answered; a host whose row did not is not among them.
+    else if (hosts?.incomplete) out.hostsReadInPart = true;
+    const pv = io.projects({ projectsPath: paths.projectsFile });
+    out.projects = Array.isArray(pv?.projects) ? pv.projects.map(({ id, name }) => ({ id, name })) : [];
+    if (pv?.invalid ?? pv?.unreachable) out.projectsUnreadable = true;
+    const sinceMs = costsSinceMs(out.allocation.window === "day" ? "24h" : out.allocation.window === "week" ? "week" : "mtd", nowMs);
+    const start = out.allocation.window === "day" ? Math.floor(nowMs / INSIGHTS_DAY_MS) * INSIGHTS_DAY_MS : sinceMs;
+    const records = io.scan({ logsDir: paths.logsDir, sinceMs: start, nowMs });
+    if (!Array.isArray(records)) unread();
+    out.allocation.counts = splitCounts(records);
+    const writer = Array.isArray(records) && records.find((r) => r.jobId === out.allocation.state?.jobId);
+    if (writer && out.allocation.state) Object.assign(out.allocation.state, { provider: writer.provider ?? null, model: writer.model ?? null });
+    out.allocation.hosts = out.hosts.map((h) => ({ name: h.name, fpEnvelope: h.fpEnvelope ?? null }));
+    return out;
+  }
+  // The flows' schedulers, the one Valkey read of that view, through a seam that notes one that was not read: the graph
+  // draws such a list as none (a residual of its own), and the cache must not keep it for a good one's window.
+  const schedulersRead = async (args) => {
+    const got = await io.schedulers(args);
+    if (!Array.isArray(got)) unread();
+    return got;
+  };
+  const graphRead = view === "flows" ? io.graph(paths, { ...opts, readSchedulersFn: schedulersRead, ...bound(INSIGHTS_READ_MS) }) : null;
+  // The spend view's three Valkey reads, made at once, before its folds.
+  const env = view === "spend" ? envFn() : null;
+  const spendReads = view === "spend"
+    ? Promise.all([
+      io.budget(paths, { env, nowMs, ...bound(INSIGHTS_READ_MS) }),
+      registryRead(),
+      io.allocation(paths, null, { consoleView: true, role: "viewer", fullPaths: role === "operator" && fullPaths, envFn, nowMs, ...bound(INSIGHTS_READ_MS) }),
+    ])
+    : null;
+  // Awaited before the folds below hold the event loop (see above); each read handles its own failure, so none rejects.
+  const graph = await graphRead;
+  const spend = await spendReads;
   const pv = io.projects({ projectsPath: paths.projectsFile });
   out.projects = Array.isArray(pv?.projects) ? pv.projects.map(({ id, name }) => ({ id, name })) : [];
   const projectsError = pv?.invalid ?? pv?.unreachable;
@@ -747,27 +833,12 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
     const costs = io.costs(paths, window, opts);
     out.fold = costs?.fold ?? null;
     out.costsUnreachable = costs?.unreachable ? String(costs.unreachable) : null;
+    if (costs?.unreachable) unread();
     return costs;
   };
-  if (view === "budget-split") {
-    out.allocation = await io.allocation(paths, null, { consoleView: true, role, fullPaths: role === "operator" && fullPaths, envFn, nowMs });
-    const hosts = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs, prune: false });
-    out.hosts = Array.isArray(hosts?.hosts) ? hosts.hosts : [];
-    if (hosts?.unreachable) out.hostsUnreadable = true;
-    // Issue #1062: the hosts it lists are the rows that answered; a host whose row did not is not among them.
-    else if (hosts?.incomplete) out.hostsReadInPart = true;
-    const sinceMs = costsSinceMs(out.allocation.window === "day" ? "24h" : out.allocation.window === "week" ? "week" : "mtd", nowMs);
-    const start = out.allocation.window === "day" ? Math.floor(nowMs / INSIGHTS_DAY_MS) * INSIGHTS_DAY_MS : sinceMs;
-    const records = io.scan({ logsDir: paths.logsDir, sinceMs: start, nowMs });
-    out.allocation.counts = splitCounts(records);
-    const writer = Array.isArray(records) && records.find((r) => r.jobId === out.allocation.state?.jobId);
-    if (writer && out.allocation.state) Object.assign(out.allocation.state, { provider: writer.provider ?? null, model: writer.model ?? null });
-    out.allocation.hosts = out.hosts.map((h) => ({ name: h.name, fpEnvelope: h.fpEnvelope ?? null }));
-    return out;
-  }
   const costs = loadCosts();
   if (view === "flows") {
-    out.graph = await io.graph(paths, opts);
+    out.graph = graph;
     const records = costs?.records;
     const triggers = readTriggers({ triggersPath: paths.triggersPath });
     if (Array.isArray(records) && !triggers?.unreadable) {
@@ -787,11 +858,12 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
     out.repoProjects = Object.fromEntries([...groups].map(([key, ids]) => [key, [...ids].sort((a, b) => String(a).localeCompare(String(b)))]));
     return out;
   }
-  const env = envFn();
+  const [budget, hosts, allocation] = spend;
   const subs = io.subscriptions({ subscriptionsPath: paths.subscriptionsPath });
   const subscriptions = subs?.subscriptions ?? [];
-  out.budget = await io.budget(paths, { env, nowMs });
-  const hosts = await io.hosts({ url: paths.valkeyUrl, now: () => nowMs, prune: false });
+  out.budget = budget;
+  if (budget?.unreachable || budget?.scopedUnreachable || budget?.dollars?.countersUnreachable || budget?.dollars?.recordsUnreachable) unread();
+  hostsUnread(hosts);
   out.hosts = Array.isArray(hosts?.hosts) ? hosts.hosts : [];
   if (hosts?.unreachable) out.hostsUnreadable = true;
   // Issue #1062: read in part, the money held is that of the hosts whose rows answered, so its total is not known.
@@ -801,6 +873,7 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
   const { jobCapMicros } = deploymentDollarCaps(overlay, env);
   out.settings = { ...overlay, provider: overlay.provider ?? env.PI_PROVIDER ?? DEFAULT_PROVIDER, model: overlay.model ?? env.PI_MODEL ?? DEFAULT_MODEL, maxCostMicros: jobCapMicros };
   const scannedAll = io.scan({ logsDir: paths.logsDir, sinceMs: Math.min(costsSinceMs("week", nowMs), nowMs - INSIGHTS_DAY_MS), nowMs });
+  if (!Array.isArray(scannedAll)) unread();
   // Without a newer release's records (issue #761): every read below goes past the stable core (money, model, trigger).
   // `spendSummaryOf` would leave them out anyway; leaving them out here keeps the loops below to readable ones too.
   const scanned = Array.isArray(scannedAll) ? readableRecords(scannedAll).records : scannedAll;
@@ -859,7 +932,8 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
     const trigger = Number.isInteger(r.triggerIndex) ? `row ${r.triggerIndex + 1}` : r.triggerId ?? null;
     if (trigger && !(out.triggersByModel[key] ?? []).includes(trigger)) (out.triggersByModel[key] ??= []).push(trigger);
   }
-  out.allocation = await io.allocation(paths, null, { consoleView: true, role: "viewer", fullPaths: role === "operator" && fullPaths, envFn, nowMs });
+  out.allocation = allocation;
+  if (allocation?.unreachable) unread();
   const writer = Array.isArray(scanned) && scanned.find((r) => r.jobId === out.allocation.state?.jobId);
   if (writer && out.allocation.state) Object.assign(out.allocation.state, { provider: writer.provider ?? null, model: writer.model ?? null });
   return out;

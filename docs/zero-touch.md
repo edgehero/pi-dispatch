@@ -113,6 +113,9 @@ The fixes log compares occurrences of the same refusal reason or question group 
 and after the change. Untouched refusals and unanswered questions still count. It shows workload exposure and
 incomplete coverage. No subsequent runs means observing, not proof that a fix worked. Reverted instruction fixes
 remain visible as reverted. Viewers see safe change descriptions and counts, without instruction text or actors.
+A fix stays in the log for the history's retention (`PI_LOG_RETENTION_DAYS`, at most 365 days, and 365 when history
+is kept forever), counted from its change; settling it or undoing it does not extend that. Then it leaves the log,
+and the page does not count it as missing (2026-11-25, #1072).
 
 Accounting publication can fail after a successful action. Pending intents and exact-proof settling make that visible
 without repeating the action. Read the returned warning, restore the unavailable source and settle it from the Zero
@@ -121,7 +124,8 @@ partial.
 
 Opening the page never settles anything (2026-11-25, #1076): a page view is a read. The page counts what waits, and an
 operator settles it with **Preview settling** and **Confirm** on a writable console. A settle records an action that
-ran and whose touch was not recorded, once, and completes a fix whose change landed and whose completion was lost.
+ran and whose touch was not recorded, once, completes a fix whose change landed and whose completion was lost, and
+closes one whose change the console knows was not made (see below).
 It never runs an action again, and settling twice records nothing twice. The worker's daily sweep also records
 unfinished touches on a host that shares the logs folder. An action interrupted before it said whether it ran stays
 unknown: no settle can prove it, and while it is pending the touch rate is not shown.
@@ -134,6 +138,16 @@ change did not finish and its file does not show it, so no settle records it", w
 (the history's retention). If the same bytes are written later, by the same change made again or by hand, a settle
 completes the open entry too, so one change can read as two fixes; that needs Valkey silent exactly at a refusal's
 accounting.
+
+Since 2026-11-25 (#1072) the console also writes how a change ended to a small file on its own disk,
+`<PI_LOGS_DIR>/zero-touch-outcomes/<fix id>.json`, before it writes that accounting to Valkey, and removes the file once
+Valkey has answered. A settle reads the file first. A change that was made is completed whatever its file reads by
+then. A change that was not made is closed and never listed as a fix, whatever bytes are written later; until the
+settle the page says "1 change that was not made is waiting to be settled". An entry with no such file keeps the rule
+above: one staged before the upgrade, one whose console stopped before it knew how the change ended, one whose file
+could not be written (the console's log says `zero_touch_outcome_unwritten`), and one settled from another console
+that does not share the logs folder. The worker's daily sweep removes a file whose entry is gone once it is older than
+the history's retention.
 
 ## Roles and interaction
 

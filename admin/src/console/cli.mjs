@@ -162,22 +162,51 @@ export function waitedFor(reading, ms, late) {
 export const AUDIT_VERIFY_CACHE_MS = 30_000;
 
 /**
- * `fn(window, opts)` memoised per key for `ttlMs` on `now`; a rejection is not kept, so the next call tries again. The
- * key includes view, window, project, role and path permission. An operator's reasons and full paths must never
- * reach a viewer's request. Project ids are user-selected, so the cache drops its oldest entry past 128 keys.
+ * The short floor of the two caches below (issue #1073, the reader's `FAILED_READ_KEEP_MS`): an answer `failed` says
+ * failed (a read that did not answer, or one a page's deadline cut) is kept `failedMs` from when it came, never past
+ * the window a good answer has (`entry.until`). A `failed` that throws counts the answer as failed. Kept at all, and
+ * not dropped at once, so an outage runs the read at most once per floor rather than once per page load. A cache given
+ * `failed` with no `failedMs` is refused: it would keep every failure for the whole window, the fault this exists for.
  */
-export function cachedPerWindow(fn, { now = () => Date.now(), ttlMs = INSIGHTS_CACHE_MS } = {}) {
+function floorOfFailed({ failed, failedMs }) {
+  if (failed === null || failed === undefined) return null;
+  if (typeof failed !== "function" || !Number.isFinite(failedMs) || failedMs < 0) throw new TypeError("a cache that tells a failed answer needs failedMs, how long to keep one");
+  return (entry, now) => {
+    entry.promise.then((got) => {
+      let bad;
+      try {
+        bad = failed(got) === true;
+      } catch {
+        bad = true;
+      }
+      if (bad) entry.until = Math.min(entry.until, now() + failedMs);
+    }, () => {});
+  };
+}
+
+/**
+ * `fn(window, opts)` memoised per key for `ttlMs` on `now`; a rejection is not kept, so the next call tries again, and
+ * an answer `failed` says failed is kept `failedMs` (`floorOfFailed`). The key includes view, window, project, role and
+ * path permission. An operator's reasons and full paths must never reach a viewer's request. Project ids are
+ * user-selected, so the cache drops its oldest entry past 128 keys. What else `opts` carries (a page's `within`)
+ * reaches `fn` and is no part of the key: an assembly a load started under its deadline is shared with the loads that
+ * follow inside its window.
+ */
+export function cachedPerWindow(fn, { now = () => Date.now(), ttlMs = INSIGHTS_CACHE_MS, failed = null, failedMs } = {}) {
   const held = new Map();
+  const floor = floorOfFailed({ failed, failedMs });
   return (window, opts) => {
     const fullPaths = opts?.fullPaths === true;
     const key = JSON.stringify([String(window), opts?.view ?? "spend", opts?.project ?? null, opts?.role === "operator" ? "operator" : opts?.role === "agent" ? "agent" : "viewer", fullPaths]);
     const t = now();
     const hit = held.get(key);
-    if (hit && t >= hit.at && t - hit.at < ttlMs) return hit.promise;
+    if (hit && t >= hit.at && t < hit.until) return hit.promise;
     const promise = Promise.resolve().then(() => (opts ? fn(window, { ...opts, fullPaths }) : fn(window)));
+    const entry = { at: t, until: t + ttlMs, promise };
     held.delete(key);
-    held.set(key, { at: t, promise });
+    held.set(key, entry);
     while (held.size > 128) held.delete(held.keys().next().value);
+    floor?.(entry, now);
     promise.catch(() => {
       if (held.get(key)?.promise === promise) held.delete(key);
     });
@@ -187,15 +216,18 @@ export function cachedPerWindow(fn, { now = () => Date.now(), ttlMs = INSIGHTS_C
 
 /**
  * `fn()` memoised for `ttlMs` on `now`: `cachedPerWindow`'s rule for a call with no key. A rejection is not kept (the
- * next call tries again, rather than serving a failure for 30 s), and a clock that went backwards is a miss.
+ * next call tries again, rather than serving a failure for 30 s), an answer `failed` says failed is kept `failedMs`
+ * (`floorOfFailed`), and a clock that went backwards is a miss.
  */
-export function cachedFor(fn, { now = () => Date.now(), ttlMs } = {}) {
+export function cachedFor(fn, { now = () => Date.now(), ttlMs, failed = null, failedMs } = {}) {
   let held = null;
+  const floor = floorOfFailed({ failed, failedMs });
   return () => {
     const t = now();
-    if (held && t >= held.at && t - held.at < ttlMs) return held.promise;
-    const entry = { at: t, promise: Promise.resolve().then(() => fn()) };
+    if (held && t >= held.at && t < held.until) return held.promise;
+    const entry = { at: t, until: t + ttlMs, promise: Promise.resolve().then(() => fn()) };
     held = entry;
+    floor?.(entry, now);
     entry.promise.catch(() => {
       if (held === entry) held = null;
     });
@@ -865,9 +897,13 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
         readExposure: () => m.consoleActions.readSetupExposure({ a: actionDeps, fs, now }),
       }),
     }) ?? null;
-    const triggerHistory = cachedFor(() => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
+    // A read that failed is kept the reader's short floor, never the whole window (issue #1073, `FAILED_READ_KEEP_MS`):
+    // this host's scan that could not list the run files, a side of the fleet's records not read (a mirror cut at its
+    // bound is no failure, and is kept), and the hosts' doctor runs not read.
+    const failedMs = m.readModel.FAILED_READ_KEEP_MS;
+    const triggerHistory = cachedFor(() => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS, failed: (got) => !Array.isArray(got), failedMs });
     // The fleet's records and not this host's: a canary runs on whichever host took the job, and Adopt's gate reads its record.
-    const updatesHistory = cachedFor(() => m.readModel.scanFleetRunRecords({ redis, logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
+    const updatesHistory = cachedFor(() => m.readModel.scanFleetRunRecords({ redis, logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS, failed: (got) => got?.unread === true, failedMs });
     // The page's and the actions' one read, so an Adopt's gate reads what the page drew.
     // One end for the Valkey part of the read (issue #961): its reads go out in waves of one bound each, and past
     // `UPDATES_FACTS_TIMEOUT_MS` the facts are the files' and the run records' alone, as a console without a Valkey
@@ -908,7 +944,7 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       fleet,
       sandboxes,
       // Doctor publishes these once a run, usually daily, and a run page reads them every tick: `doctorResults`' reason.
-      hostLoads: cachedFor(() => m.hostLoadsView?.readHostLoadsView(redis, { now }) ?? null, { now, ttlMs: INSIGHTS_CACHE_MS }),
+      hostLoads: cachedFor(() => m.hostLoadsView?.readHostLoadsView(redis, { now }) ?? null, { now, ttlMs: INSIGHTS_CACHE_MS, failed: (got) => got?.unreachable === true, failedMs }),
       gatewayView: async () => {
         if (gateway) return gateway.view();
         const read = gatewayRegistry();
@@ -987,7 +1023,8 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       // The page load's one log line (issue #962): a Zero touch read that threw, by its code, since the page says only that it failed.
       log,
       zeroTouchRuns: zeroTouch ? (query) => zeroTouch.runs(query) : undefined,
-      insights: cachedPerWindow((window, opts) => (m.insights.assembleInsightsView ?? m.insights.assembleInsights)(side.paths, window, { ...opts, pricing, nowMs: now(), envFn: () => side.env }), { now }),
+      // An assembly with a part not read, or one a page's deadline cut (`partsUnread`, issue #1073), is kept the floor.
+      insights: cachedPerWindow((window, opts) => (m.insights.assembleInsightsView ?? m.insights.assembleInsights)(side.paths, window, { ...opts, pricing, nowMs: now(), envFn: () => side.env }), { now, failed: (got) => got?.partsUnread === true, failedMs }),
       // The what-if (REQ-COST-ANALYTICS): one shared record scan at the scan's 92-day ceiling per 30 s, the answers
       // bounded and cached per (model, flow, scan window) (`whatif.mjs`).
       ...(m.whatif ? { whatIf: m.whatif.makeWhatIfReader({ pricing, scan: () => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, nowMs: now(), fs }), subscriptions: () => m.readModel.readSubscriptions({ subscriptionsPath: side.paths.subscriptionsPath, fs })?.subscriptions ?? [], now }), pricedModels: memoOnce(() => m.whatif.pricedModelIds(pricing)) } : {}),

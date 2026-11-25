@@ -520,6 +520,26 @@ queue keys and the accounting keys are unchanged; no migration, backup path or o
 console keeps settling on a view. After upgrading, open the Zero touch page once as an operator and settle anything it
 says is waiting. See [Zero touch](zero-touch.md).
 
+### Unreleased: the Zero touch fix history keeps its retention (#1072)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Valkey `zero-touch:fixes:meta:<id>` | A settle, a refusal and an Undo now keep the expiry the record was given when its change was staged, where each gave it a new retention. Records written before keep the expiry they have. Nothing moves, and no older-state detector applies. |
+| Valkey `zero-touch:fixes:index` | Each new fix now also removes the entries older than the retention. The page no longer reads an entry past the retention, so a fix whose record expired is no longer counted as missing and the page stops saying "Fix history is incomplete" for it. Nothing moves: the entries already there are trimmed with the next fix. |
+| Mixed versions | An older console reads the whole index, so it says the history is incomplete whenever a fix's record has expired and no newer console has recorded a fix since. A settle or an Undo on an older console still gives the record a new retention; a newer console leaves such a fix out once its change is older than the retention. Upgrade every console. |
+
+See [Zero touch](zero-touch.md).
+
+### Unreleased: the Zero touch fix history records how a change ended (#1072)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| `<PI_LOGS_DIR>/zero-touch-outcomes/<fix id>.json` | New folder, written by the console: one small file per fix whose change ended while its accounting in Valkey was not yet written, holding only the outcome (`applied` or `refused`) and its time. The console removes it once Valkey answers, a settle removes it once it settles the fix, and the worker's sweep removes one older than the history's retention. Nothing to move or create; back it up with the rest of the logs folder ([backup](backup.md)). No older-state detector applies. |
+| Fixes staged before the upgrade | They have no such file, so a settle judges them by their file's bytes, as before. |
+| Mixed versions | An older console neither writes nor reads the folder, so a fix it settles is judged by its bytes. An older worker does not sweep the folder; the console and a settle still remove what they wrote. |
+
+See [Zero touch](zero-touch.md#fix-a-recurring-cause).
+
 ### Unreleased: warnings before the turn and time limits (#1055)
 
 A job is now told once, at 70% of its turn limit (`run.maxTurns`) and at 70% of its time limit (`run.maxMinutes`,
@@ -549,6 +569,17 @@ exited 1 and the queue ran the whole paid job again. The worker gives the stop i
 | Mixed versions | A job image older than this release still exits 1 on a refusal, which the queue retries as before: upgrade the image for the stop to take effect. A worker older than this release reads the new exit line as `runner-policy`, which is not retried either, with that reason's comment. Upgrade both in one window ([the order](#the-order)). |
 
 See [reasons.md](reasons.md#provider-stop-refusal).
+
+### Unreleased: the worker sweeps the held-jobs index (#1075)
+
+Workers now remove the stale entries of the held-jobs index (`wait:held`, the jobs held on `run.waitFor`) on their
+retention sweep, every `PI_SWEEP_INTERVAL_HOURS` (not at boot, and not at all at `0`). An entry is stale when its job's
+hold record is gone or has no start time; before, only the `/dispatch` panel and `/dispatch status` removed one, so a
+deployment run from the tools and the web console grew the index until `dispatch_waits` said its list was not
+`complete`. The panel and `/dispatch status` now remove through the same one step as the sweep. The key, its members
+and the hold records are unchanged; no migration, backup path or older-state detector is needed. The index is shared,
+so one upgraded worker sweeps it for the whole fleet. An older panel or `/dispatch status` still prunes as before. See
+[watching and cancelling](wait-for.md#watching-and-cancelling).
 
 ### 5.4.2
 

@@ -11183,6 +11183,20 @@ that only the jobs of the triggers naming them may reach through the egress prox
   (`INT-DEFER-REASON-KEY`), so a page can draw it: the fleet reader's held rows gain `checks`, `after` and `answers`
   (at most four, sorted by profile), and so does `readWaiting`'s hold; the `dispatch_waits` listing keeps its keys
   (`jobId`, `target`, `waitedMs`, `checks`, issue #1037; never the label).
+- **The held index and who prunes it** (issue #1075): `wait:held` is a SET of held job ids, an index and never a source
+  of truth. `hold` adds a member AFTER it writes the hash's `since` (HSETNX), and `release` removes its own. A member
+  whose `wait:job:<id>` has no `since` (absent or empty) is stale: the hash expired, the hold was released without the
+  index, or only a counter made it. Every reader skips such a member; three remove it, all through ONE script
+  (`HELD_PRUNE_SCRIPT`, `pruneHeld`, exported from `@edgehero/pi-dispatch/wait-state`), which looks at the hash and
+  removes in one step, every key declared (`KEYS[1]` the index, then each member's hash; `ARGV` the members), and
+  keeps a member whose hash Valkey answers with an error: the `/dispatch` panel's reader and `/dispatch status` as
+  they read, and the worker's retention sweep (`sweepHeld`, the `held_index` reaper) every `PI_SWEEP_INTERVAL_HOURS`,
+  never at boot, an SSCAN walk in pages of 64 that looks at no more than `HELD_SWEEP_LOOK_MAX` (10,000) members a
+  pass and logs `held_index_swept { looked, removed, more }`, counts only. Because `since` lands before the member,
+  no pruner removes a hold being written, and pruners at once (several hosts' sweeps, a sweep and a reader) remove
+  each member once, without a lock. The read tools and the console prune nothing. A reader still walks past stale
+  members to `HELD_LOOK_MAX` and never depends on a prune, since the sweep can be off and a crowd can grow between
+  two passes.
 - **The 30s floor is load-bearing twice**, and lowering it would break the second silently: it is also what
   distinguishes a POLLED wait deferral from a scope deferral by wake instant, since a scope deferral wakes after
   5s, 10s or 20s (`SCOPE_BUSY_RECHECK_MS` up to `SCOPE_BUSY_RECHECK_MAX_MS`, issue #1023; it was a fixed 5s before)
@@ -11870,8 +11884,8 @@ issued, so a `DEL` lost at shutdown leaves the same TTL-less row with or without
 live server, `PTTL -1` on the pre-#302 code and the fixed code alike. A server-outage residual of the
 bounded-write design, recorded beside the fix so the asymmetry above is not read as a guarantee.
 
-**The index leak is handled by the READER**, exactly as `wait:held`'s is and for the measured reason
-recorded there: a SET cannot expire its members, and the alternative -- no index and a `SCAN host:h:*`
+**The index leak is handled by the READER**, exactly as `wait:held`'s was (since issue #1075 the worker's retention
+sweep prunes that one too, `INT-WAIT-PROFILES-CONTRACT`) and for the measured reason recorded there: a SET cannot expire its members, and the alternative -- no index and a `SCAN host:h:*`
 instead -- walks HARDEST on deployments with nothing to show, because the early exit never fires, while
 the panel reads every second.
 
@@ -15417,7 +15431,26 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 - `zero-touch:fixes:meta:*` stores safe typed fix facts: opaque id, `instructions` or `config` kind, time, source run,
   scope/project, one refusal reason or group id, optional trigger index, state and optional undone time. Bounded
   private Undo/proof state is separate. Index entries expire with history retention, with a finite 365-day/5,000-row
-  ceiling when history is unlimited.
+  ceiling when history is unlimited. CORRECTED 2026-11-25 (#1072): the entries did not expire. Every add renewed the
+  whole index's expiry, and a commit, a refusal or an Undo gave its record a new retention counted from the mark, so a
+  record expired while its entry stayed and the read counted the entry as a missing row: from the day the first record
+  expired the page said "Fix history is incomplete" for as long as fixes kept being made. Now a mark rewrites its
+  record with `SET ... KEEPTTL XX`, which keeps the expiry its stage gave it and writes nothing once the record has
+  expired (a mark answers false then, where a SET made the record again); each add removes, in its own transaction,
+  the entries whose score is older than the retention (`ZREMRANGEBYSCORE`, beside the 5,000-row trim) and then adds
+  its entry with `ZADD NX`, so a second stage of the same id keeps the first stage's time with the record its `SET NX`
+  kept (a plain `ZADD` moved the score forward past the record's expiry), and a stale entry of an id whose record
+  expired is gone before the NX, so the new record gets an entry of its own time; and the read
+  and the proof (`publicSnapshot`, `settleable`) read only entries newer than the retention less `FIX_CLOCK_SKEW_MS`
+  (one hour, for the clocks of the host that staged an entry and the host that reads it), so a record that expired
+  with the retention is no row at all. A record that exists and does not read, and one that is gone while its entry is
+  inside that window, is still a missing row. An entry's score is its stage's time on the console's clock and its
+  record's expiry runs on Valkey's, so a skew of more than the hour between the host that reads and the host that
+  staged can still show one such row for that long. Consoles with different `PI_LOG_RETENTION_DAYS` share the index:
+  an add trims by its own console's retention, so the shortest wins once that console adds, and a console with a
+  longer retention counts a shorter one's expired record as a missing row until then. A console from before this
+  correction reads the whole index and renews a record it marks, so it says "incomplete" of an expired record until a
+  newer console's add trims its entry.
 - Stage a pending fix before a nonurgent write, then commit or refuse its metadata. Exact file/trigger proof can
   repair an applied write without executing it again. Arbitrary paths outside the configured file allowlist are
   never read for repair; uncertain conflicting state remains partial. Safe public reads omit instruction text and actors.
@@ -15432,6 +15465,29 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
   landed in part. The read reports `waiting: { touches, unknown, fixes }` (the outbox's applied and pending intents,
   and the pending fixes proved), `fixesOpen` is the pending rows a proof that ran to its end did not prove (one that
   failed leaves it 0 and the page keeps "Reload to retry"), and the page says of those that no settle records them.
+  AMENDED 2026-11-25 (#1072), the outcome of a change: `<PI_LOGS_DIR>/zero-touch-outcomes/<fixId>.json` (folder 0700,
+  file 0600, written to `<name>.tmp` and renamed, `worker/src/zero-touch-outcomes.mjs`, package export
+  `@edgehero/pi-dispatch/zero-touch-outcomes`) holds exactly `{ v: 1, outcome: "applied" | "refused", at }`; anything
+  else under such a name, a link or a file over 256 bytes is no outcome and is counted, never read. The console writes
+  it when it knows how the change ended, before the row's mark: `applied` before the commit of a change that landed,
+  `refused` before the refusal of one that was not made, and `refused` under the id the stage would give (`fixIdOf`)
+  for a stage that threw other than by Valkey's own refusal, since the change is then not made and the row may still
+  land. It removes the file once the mark is answered, true or false; a mark that throws keeps it. A file that fails
+  to write is logged (`zero_touch_outcome_unwritten` with the error's code) and changes nothing else. `settleable`
+  takes `outcomeOf(id)` (the console reads its folder once per call) and answers `{ ready, refused, closed }`: a pending
+  row recorded `applied` is `ready` and one recorded `refused` is `refused`, whatever its file or trigger shows; a
+  pending row with no outcome keeps the byte rule; `closed` is a row that no longer reads pending and still has an
+  outcome. `repair` commits `ready`, refuses `refused`, calls `forget(id)` for each `closed` row and each row whose mark
+  was answered (the console removes the file there), and answers `{ settled, refused }`. The read's `waiting` gains
+  `refused`, the rows a settle refuses, and `fixesOpen` leaves them out; the page says "N change(s) that was/were not
+  made is/are waiting to be settled: ... A settle closes it, and it is never listed as a fix." beside the fixes that
+  wait, with one action. The settle's preview carries one more `summary` line for them and `settle.refused`, and its
+  confirm's `settled` carries `refused`; nothing waiting is still `ready`, `refused` and the outbox's applied entries
+  all empty. The worker's retention sweep reaper `zero_touch_outcomes` (also run at boot) removes a file whose `at`
+  (its last write when it does not read) is older than the fix history's retention, and a `.tmp` left behind, and
+  nothing of another name. A row with no file keeps the byte rule, the residual `DES-OPERATOR-CONSOLE` names: one
+  staged before this release, one whose console stopped before it knew the outcome or could not write the file, and
+  one settled from a console that does not share the logs folder.
 - Instruction planning is console-only, uses retained source-job identity plus the current loader's trigger match,
   and binds the raw trigger digest and file comparison to the ticket. Kind/index alone is insufficient. A stale or
   expired source refuses. Append obeys the existing 2,000-character limit and cron restriction. Undo requires the
@@ -16552,3 +16608,6 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-25 (#1076) | **`INT-TOUCH-INDEX` AMENDED**: who publishes an applied outbox entry (the worker's sweep and an operator's settle, never a page view), the read's `inspect`, and the report's `unresolvedOnly` mark. **`INT-ZERO-TOUCH-FIXES` AMENDED**: the fix store's `settleable` proof by reads alone, `repair` committing what it proves and throwing on a commit not answered, the read's `waiting` counts and its `fixesOpen` from the proof, and the `zero-touch-settle` action with its preview, refusal and confirm answers. **`INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked**: a settle is audited as a `write` row whose kind is `zero-touch-settle`, as each other zero touch action is under its own kind, so no action word is added. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: the action routes are generated per action, and the settle's statuses follow the rules #987 set for a preview and a partial confirm. |
 | 2026-11-25 (#1055) | **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: NEW **The time limit's warning**: `PI_JOB_MAX_MS` and `PI_JOB_LEFT_MS`, both or neither, each 1 ms to 31 days and the second no more than the first, env-internal, removed before any extension loads, any other value a `config` refusal; the runner watches what had passed plus its monotonic clock and warns once at 70%, never stopping the job for it. NEW tokens keys last, after `costWarned`: `turnsWarned` on every line whose run watched its turn limit, capped or not, the fallback's too, and `timeWarned` only with a time limit; the worker's closed list admits both, an older one drops them. The measured worst-case line, the two keys at the width of every other counter, is now 8,215 characters before the writer fits it, 8,708 with a supervisor's line, and through the writer 6,765 and 7,258 (the `subscriptionCode` paragraph's figure moves with it); `EXIT_LINE_MAX_BYTES`, the message room and their reasoning UNCHANGED, checked. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_JOB_MAX_MS` and `PI_JOB_LEFT_MS`, the ceiling and what was left of it as the environment was built, read on the processor's clock from the timer's own deadline, written only while that timer is armed and time is left, to every image (no capability: an older runner ignores them), never empty or 0, reserved (`CONTAINER_ENV_NAMES`) so neither `run.secrets`, a secret bundle, an overlay MCP server nor `PI_FORWARD_ENV` can set them; the capability table UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `tokens.turnsWarned` and `tokens.timeWarned` (0 or 1) last on the closed key list, each only when its limit was watched, shown on the run page; `buildRecord` and the record's version UNCHANGED, checked (tokens pass through it as parsed, so the record fixtures do not move). `INT-JOB-ACTIVITY-FILE` UNCHANGED, checked: the counters and the backstop do not read the new variables. **Code evidence**: image/runner/src/cost-warning.mjs -> readTimeLimit, LIMIT_WARNINGS; image/runner/run-job.mjs; worker/src/env-allowlist.mjs -> buildContainerEnv; worker/src/reserved-env.mjs -> CONTAINER_ENV_NAMES; worker/src/run-container.mjs; worker/src/run-history.mjs -> TOKEN_KEYS. |
 | 2026-11-25 (#1074) | **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED** in one clause, its rule UNCHANGED, checked: when a slot is full the log says `endpoint_busy_deferred` (its fields as before) at the first such miss of a wait and when the job comes to wait for another endpoint, never at a wake that changed nothing, and NEW `endpoint_busy_ended` (`jobId`, `kind`, `waitedMs`, `deferrals`) once when the job holds its slots, where it said a line at every miss (`DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, *The other gates' waits*). The 7 s delay, the release of every hold, the lease and its keys are as they were. **`INT-WAIT-PROFILES-CONTRACT` UNCHANGED, checked**: no deferral's instant moved (the endpoint's 7 s and the budget's 9 s stay fixed, and a backoff was rejected because it would pass the 30 s floor). **`INT-PRIVATE-ENDPOINTS-FILE-CONTRACT` UNCHANGED, checked**: it names no log line for a full device. **`INT-DEFER-REASON-KEY` UNCHANGED, checked**: the defer record is still written on every deferral; only the log lines are per wait. |
+| 2026-11-25 (#1075) | **`INT-WAIT-PROFILES-CONTRACT` AMENDED**: NEW bullet **The held index and who prunes it**: `wait:held` is an index, `hold` adds its member after the hash's `since`, `release` removes its own; a member whose hash has no `since` is stale; three pruners, all through one script (`HELD_PRUNE_SCRIPT`, `pruneHeld`, exported from `@edgehero/pi-dispatch/wait-state`), the panel's reader and `/dispatch status` as they read and the worker's retention sweep (`sweepHeld`) every `PI_SWEEP_INTERVAL_HOURS`, never at boot, at most 10,000 members a pass, logging `held_index_swept` with counts only; no hold being written is removed and pruners at once are harmless without a lock; the read tools and the console prune nothing, and a reader never depends on a prune. **`INT-HOST-REGISTRY-CONTRACT` AMENDED** in one clause, its rule UNCHANGED, checked: "exactly as `wait:held`'s is" now says that index has the worker's sweep too. **`INT-CANCEL-CHANNEL-CONTRACT` UNCHANGED, checked**: `removeHeldJob` deletes the hold hash before it removes the member, so a sweep between the two removes only what the cancel was removing, and a member whose `SREM` the cancel lost is now swept. |
+| 2026-11-25 (#1072) | **`INT-ZERO-TOUCH-FIXES` CORRECTED**, the first bullet: index entries did not expire with the history's retention, which it said they did. Every add renewed the whole index and a mark gave its record a new retention, so an expired record's entry stayed and the read counted it as a missing row, and the page said "Fix history is incomplete" for good. A mark now writes `SET ... KEEPTTL XX` (the stage's expiry kept, an expired record never made again, the mark answering false then), an add trims the entries past the retention by score in its transaction and then adds its entry `NX` (a second stage of the same id keeps the first stage's time, which its record's expiry counts from), and `publicSnapshot` and `settleable` read only entries newer than the retention less `FIX_CLOCK_SKEW_MS` (one hour). A record that exists and does not read, or that is gone inside that window, is still a missing row. The named residuals: a clock skew past the hour, consoles with different `PI_LOG_RETENTION_DAYS` sharing the index, and an older console, which says "incomplete" of an expired record until a newer console's add trims its entry. The record's keys, `validFix`, the private record, the index's name and its 5,000-row bound, and the read's answer shape UNCHANGED, checked. **`INT-TOUCH-INDEX` UNCHANGED, checked**: the touch index has its own store and expiry. |
+| 2026-11-25 (#1072) | **`INT-ZERO-TOUCH-FIXES` AMENDED**, the second bullet: the outcome of a change. NEW file contract `<PI_LOGS_DIR>/zero-touch-outcomes/<fixId>.json`, `{ v: 1, outcome: "applied" or "refused", at }` (written whole by a rename, folder 0700, file 0600, package export `@edgehero/pi-dispatch/zero-touch-outcomes`), written by the console before a row's commit or refusal, and after a stage that threw and may land (`refused`, under `fixIdOf`), removed once the mark is answered. `settleable` takes `outcomeOf` and answers `{ ready, refused, closed }`, the outcome before the bytes; `repair` refuses `refused`, calls `forget` and answers `{ settled, refused }`; the read's `waiting.refused`, `fixesOpen` without them, the settle preview's line and `settle.refused`, the confirm's `settled.refused`; the worker's reaper `zero_touch_outcomes`. A row with no file keeps the byte rule (`DES-OPERATOR-CONSOLE`, the residual narrowed). The record's keys and `validFix`, the private record's two shapes, the index and every Valkey key UNCHANGED, checked: an older console reads every row as before. **`INT-TOUCH-INDEX` UNCHANGED, checked**: the touch outbox, its folder and its settle are as they were. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: the settle's statuses and its refusal are as #1076 set them. |

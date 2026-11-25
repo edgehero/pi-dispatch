@@ -193,7 +193,7 @@ test("the zero touch page's read writes nothing, with accounting pending that it
   } });
   const service = makeZeroTouchService({ paths: { valkeyUrl: "redis://127.0.0.1:1", logsDir: logs, triggersPath }, redisFn, now: () => NOW });
   const report = await service.read({ days: 30 });
-  assert.deepEqual(report.waiting, { touches: 1, unknown: 0, fixes: 1 });
+  assert.deepEqual(report.waiting, { touches: 1, unknown: 0, fixes: 1, refused: 0 });
   // Every command is a read: the named ones by name, and each script by the commands it calls (the touch index's read
   // calls none that write; the run mirror's read holds writes only in helpers it never calls, the named read script
   // of the wire test). The old repair sent SET (the fix's commit) and the touch index's WRITE script, which calls
@@ -201,4 +201,6 @@ test("the zero touch page's read writes nothing, with accounting pending that it
   const WRITES = /redis\.call\(\s*["'](?:SET|HSET|HDEL|ZADD|DEL|PEXPIRE|ZREMRANGEBYSCORE|ZREMRANGEBYRANK|EXPIRE)["']/i;
   assert.deepEqual(sent.filter(([name, first]) => name === "eval" ? first !== READ_SCRIPT && WRITES.test(first) : !READS.has(name)), [], JSON.stringify(sent.map(([name]) => name)));
   assert.ok(existsSync(intent), "the intent's file is still there: only a settle publishes and removes it");
+  // Issue #1072: the fix outcomes are read from their folder, never written by a read.
+  assert.ok(!existsSync(join(logs, "zero-touch-outcomes")), "a page view writes no outcome");
 });

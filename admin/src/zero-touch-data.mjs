@@ -6,7 +6,8 @@ import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connecti
 import { makeQueue, closeWithin, enqueueQuestionGroupJob } from "@edgehero/pi-dispatch/queue";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { makeQuestionGroupStore } from "@edgehero/pi-dispatch/question-groups";
-import { makeZeroTouchFixStore } from "@edgehero/pi-dispatch/zero-touch-fixes";
+import { fixIdOf, makeZeroTouchFixStore } from "@edgehero/pi-dispatch/zero-touch-fixes";
+import { makeZeroTouchOutcomes, ZERO_TOUCH_OUTCOMES_DIR } from "@edgehero/pi-dispatch/zero-touch-outcomes";
 import { makeTouchStore } from "@edgehero/pi-dispatch/touch-state";
 import { makeTouchOutbox } from "@edgehero/pi-dispatch/touch-outbox";
 import { readZeroTouch, ZERO_TOUCH_NO_PROJECT, zeroTouchProjectMatches } from "@edgehero/pi-dispatch/zero-touch";
@@ -56,6 +57,12 @@ const stageRefusal = (err) => {
   if (refusedByValkey(err)) return { invalid: ACCOUNTING_UNPREPARED };
   return { invalid: err?.message === "fix metadata unavailable" ? FIX_STAGE_IN_PART : FIX_STAGE_UNCONFIRMED, partial: true };
 };
+/**
+ * Whether a stage that threw may have left its row behind (issue #1072): everything but Valkey's own refusal of the
+ * whole transaction. The change is not made after such a stage, so its outcome is known, and a row that lands later
+ * is one a settle refuses (`outcomes`), never one it commits by its bytes.
+ */
+const stageMayLand = (err) => !refusedByValkey(err);
 /**
  * What an Undo says when its instruction was put back in the triggers file and its fix could not then be marked undone
  * (issue #987): a change that landed in part, said as one, in the bar and in the audit row. The file is changed by
@@ -110,6 +117,24 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
   // What proves a pending fix landed: the triggers file's entry, and a configuration file only on the console's own
   // allowlist (a path a peer wrote into the row never chooses a read). The page's read and the settle use the same two.
   const proof = { readTrigger: (index) => JSON.parse(fs.readFileSync(paths.triggersPath, "utf8")).triggers?.[index], readFile: (path) => repairFiles.has(path) ? fs.readFileSync(path, "utf8") : null };
+  // How each change ended, where the console knew it and its mark may not have landed (issue #1072): written before the
+  // commit or the refusal, removed once that is answered, read by the proof before the bytes. A failure to write it is
+  // logged, and the row keeps the byte rule, as before the file existed.
+  const outcomes = makeZeroTouchOutcomes({ dir: join(paths.logsDir, ZERO_TOUCH_OUTCOMES_DIR), fs, now, log });
+  // The proof with what this host's folder holds, read once per call, and the settle's removal of a settled row's file.
+  const proved = () => { const known = outcomes.inspect().outcomes; return { ...proof, outcomeOf: (id) => known.get(id) ?? null }; };
+  const forget = (id) => outcomes.remove(id);
+  /**
+   * The row's mark, with its outcome recorded first (issue #1072). The file goes once the mark is answered, true or
+   * false: a false is a row that is gone or no longer pending, which the file cannot help. One that throws keeps the
+   * file for a settle, and throws on.
+   */
+  const marked = async (id, outcome, mark) => {
+    outcomes.record(id, outcome);
+    const answer = await mark();
+    outcomes.remove(id);
+    return answer;
+  };
   // Every path on the console's bounded client (issue #961): a command a Valkey took and never answered ends at the
   // bound, with `valkeyMayStillRun`. `timeoutMs` is for a path that only READS for its answer (the page, a preview): it
   // ends there whatever is still waiting, its client dropped so nothing more is sent. NEVER for a path that carries a
@@ -164,7 +189,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
    */
   async function untrack({ fixes, outbox }, fixId, intent, landed) {
     if (!landed) {
-      try { await fixes.reject(fixId); }
+      try { await marked(fixId, "refused", () => fixes.reject(fixId)); }
       catch (err) { log("zero_touch_fix_reject_pending", { cause: causeOf(err) }); }
     }
     try {
@@ -204,14 +229,16 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
    */
   async function planSettle(stores) {
     const touches = stores.outbox.inspect();
-    const { ready } = await valkeyRead(stores.fixes.settleable(proof));
-    if (touches.applied === 0 && ready.length === 0) return { refusal: SETTLE_NOTHING };
+    const { ready, refused } = await valkeyRead(stores.fixes.settleable(proved()));
+    if (touches.applied === 0 && ready.length === 0 && refused.length === 0) return { refusal: SETTLE_NOTHING };
     const lines = [
       ...(touches.applied > 0 ? [`${plural(touches.applied, "action")} that ran and whose touch was not recorded: each is recorded once, and none runs again.`] : []),
       ...(ready.length > 0 ? [`${plural(ready.length, "fix", "fixes")} whose change landed and whose accounting did not finish: each is listed under Fixes that worked.`] : []),
+      // Issue #1072: a change this console knows was not made, whose refusal Valkey did not take. Closed, never a fix.
+      ...(refused.length > 0 ? [`${plural(refused.length, "change")} that ${refused.length === 1 ? "was" : "were"} not made and whose accounting did not finish: each is closed, and none is listed as a fix.`] : []),
       ...(touches.pending > 0 ? [touches.pending === 1 ? "1 action interrupted before it said whether it ran stays unknown: a settle begins it again and cannot prove it." : `${touches.pending} actions interrupted before they said whether they ran stay unknown: a settle begins them again and cannot prove them.`] : []),
     ];
-    return { plan: { title: "Settle pending Zero touch accounting", summary: lines, target: "Zero touch accounting", settle: { touches: touches.applied, fixes: ready.length } } };
+    return { plan: { title: "Settle pending Zero touch accounting", summary: lines, target: "Zero touch accounting", settle: { touches: touches.applied, fixes: ready.length, refused: refused.length } } };
   }
   /**
    * The settle itself: the outbox's repair, then the fix store's. Each is idempotent (an intent is published once by
@@ -222,10 +249,10 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
   async function settle(stores) {
     const touches = await stores.outbox.repair();
     let fixes;
-    try { fixes = await stores.fixes.repair(proof); }
+    try { fixes = await stores.fixes.repair({ ...proved(), forget }); }
     catch (err) { log("zero_touch_fix_settle_pending", { cause: causeOf(err) }); return { invalid: SETTLE_IN_PART, partial: true }; }
     const left = stores.outbox.inspect().applied;
-    return { ok: true, settled: { touches: touches.repaired, fixes: fixes.settled }, ...(left > 0 ? { note: `${plural(left, "touch")} could not be recorded: Valkey did not take ${left === 1 ? "it" : "them"}. Settle again once Valkey answers` } : {}) };
+    return { ok: true, settled: { touches: touches.repaired, fixes: fixes.settled, refused: fixes.refused }, ...(left > 0 ? { note: `${plural(left, "touch")} could not be recorded: Valkey did not take ${left === 1 ? "it" : "them"}. Settle again once Valkey answers` } : {}) };
   }
   return {
     // `within` (issue #988) is a page's deadline: a read's own bound, or what the deadline has left when that is
@@ -244,7 +271,8 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         const touches = ownOutbox.inspect();
         let inspected = true;
         let settleable = 0;
-        try { settleable = (await fixes.settleable(proof)).ready.length; }
+        let refusedWaiting = 0;
+        try { const found = await fixes.settleable(proved()); settleable = found.ready.length; refusedWaiting = found.refused.length; }
         catch (err) { inspected = false; log("zero_touch_fix_inspect_failed", { cause: causeOf(err) }); }
         // One word per case (issue #988): a triggers file that does not exist configures no grouping, which is an
         // answer; one nobody could read is unread; one that was read and is refused does not load.
@@ -268,10 +296,11 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         report.fixesPartial = changes.partial;
         // What waits for a settle (issue #1076): touches this host's outbox holds as applied, ones it holds as pending
         // (unknown, which a settle cannot prove), and fixes whose change is proved landed.
-        report.waiting = { touches: touches.applied, unknown: touches.pending, fixes: settleable };
+        // Issue #1072: and the changes this host knows were not made, whose refusal a settle records.
+        report.waiting = { touches: touches.applied, unknown: touches.pending, fixes: settleable, refused: refusedWaiting };
         // The changes whose accounting is open and that no settle can commit, since their file does not show them, and for
         // how many days such a row lives at most: its record's retention, by the fix store's own rule.
-        report.fixesOpen = inspected && changes.state === "ok" && Number.isSafeInteger(changes.pendingCount) ? Math.max(0, changes.pendingCount - settleable) : 0;
+        report.fixesOpen = inspected && changes.state === "ok" && Number.isSafeInteger(changes.pendingCount) ? Math.max(0, changes.pendingCount - settleable - refusedWaiting) : 0;
         report.fixesOpenDays = Math.min(retentionDays > 0 ? retentionDays : 365, 365);
         report.groups = report.groups.map((group) => {
           const fix = report.fixes.filter((f) => f.groupId === group.id && !f.undoneAt).sort((a, b) => b.at - a.at)[0];
@@ -303,8 +332,10 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         const cause = entry.payload.touchContext;
         const intent = await outbox.begin({ ...cause, cause: "config-fix", at: now(), nonce: entry.ticketDigest ?? entry.afterDigest });
         let staged;
-        try { staged = await fixes.stage({ ...cause, kind: "config" }, { identity: entry.ticketDigest ?? entry.afterDigest, privateUndo: entry.target && entry.afterDigest ? { file: entry.target, afterDigest: entry.afterDigest } : null }); }
-        catch (err) { await outbox.abort(intent).catch(() => {}); return stageRefusal(err); }
+        const value = { ...cause, kind: "config" };
+        const identity = entry.ticketDigest ?? entry.afterDigest;
+        try { staged = await fixes.stage(value, { identity, privateUndo: entry.target && entry.afterDigest ? { file: entry.target, afterDigest: entry.afterDigest } : null }); }
+        catch (err) { if (stageMayLand(err)) outcomes.record(fixIdOf(value, identity), "refused"); await outbox.abort(intent).catch(() => {}); return stageRefusal(err); }
         if (!staged.ok) { await outbox.abort(intent); return { invalid: staged.invalid ?? "The source refusal is not available; nothing was changed." }; }
         // The change itself. Its own answer is the answer, whatever the tracking does after it (issue #987): the
         // staged row's refusal went through the fix store, whose timer threw in place of an answer that said what had
@@ -314,7 +345,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         catch (error) { await untrack({ fixes, outbox }, staged.fix.id, intent, error?.valkeyMayStillRun === true); throw error; }
         if (!result?.ok) { await untrack({ fixes, outbox }, staged.fix.id, intent, result?.partial === true); return result; }
         let pending = false;
-        try { pending = !await fixes.commit(staged.fix.id); } catch (err) { pending = true; log("zero_touch_fix_pending", { cause: causeOf(err) }); }
+        try { pending = !await marked(staged.fix.id, "applied", () => fixes.commit(staged.fix.id)); } catch (err) { pending = true; log("zero_touch_fix_pending", { cause: causeOf(err) }); }
         const tracked = await outbox.applied(intent);
         return { ...result, ...(pending || !tracked.ok ? { warning: "The configuration was changed; its accounting is waiting to be settled on the Zero touch page. Do not repeat the change." } : {}) };
       });
@@ -379,7 +410,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         let staged;
         if (intent) {
           try { staged = await stores.fixes.stage(p, { privateUndo: p.privateUndo, identity: entry.ticketDigest ?? entry.afterDigest }); }
-          catch (err) { await stores.outbox.abort(intent).catch(() => {}); return stageRefusal(err); }
+          catch (err) { if (stageMayLand(err)) outcomes.record(fixIdOf(p, entry.ticketDigest ?? entry.afterDigest), "refused"); await stores.outbox.abort(intent).catch(() => {}); return stageRefusal(err); }
           if (!staged.ok) { await stores.outbox.abort(intent); return { invalid: staged.invalid ?? "The fix could not be recorded; nothing was changed." }; }
         }
         // The file's write. Refused or thrown, the accounting staged for it is taken back (issue #987): a write that
@@ -391,7 +422,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         if (result.invalid || result.ok === false) { if (intent) await untrack(stores, staged.fix.id, intent, false); return result; }
         if (name === "zero-touch-instruction") {
           let fixPending = false;
-          try { fixPending = !await stores.fixes.commit(staged.fix.id); }
+          try { fixPending = !await marked(staged.fix.id, "applied", () => stores.fixes.commit(staged.fix.id)); }
           catch (err) { fixPending = true; log("zero_touch_fix_pending", { cause: causeOf(err) }); }
           const tracked = await stores.outbox.applied(intent);
           return { ok: true, fixId: staged.fix.id, ...(tracked.ok && !fixPending ? {} : { warning: "The instruction was saved; its accounting is waiting to be settled on the Zero touch page. Do not repeat the edit." }) };

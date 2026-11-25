@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { renderHeldJobs } from "../src/render.mjs";
 import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
+import { HELD_PRUNE_SCRIPT, HELD_SET } from "@edgehero/pi-dispatch/wait-state";
 
 /**
  * Issue #230, the panel's held-jobs surface. The property that matters most here is what does NOT reach the
@@ -12,8 +13,12 @@ import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
  * about a field is therefore also an assertion about the fields that are absent.
  */
 
-/** A fake redis with just the surface the held reader uses: SMEMBERS, HGETALL, SREM. */
-function fakeRedis(hashes, { members } = {}) {
+/**
+ * A fake redis with just the surface the held reader uses: SMEMBERS, HGETALL and the worker's prune script, which it
+ * runs as the script reads (issue #1075): a member goes only while its hash, looked at in the same step, has no `since`.
+ * `beforePrune(id)` runs first, for a hold that lands between the reader's look and the prune.
+ */
+function fakeRedis(hashes, { members, beforePrune = () => {} } = {}) {
 	const set = new Set(members ?? Object.keys(hashes).map((k) => k.slice("wait:job:".length)));
 	return {
 		smembersCalls: 0,
@@ -33,6 +38,23 @@ function fakeRedis(hashes, { members } = {}) {
 			this.srems.push(id);
 			set.delete(id);
 			return 1;
+		},
+		async eval(script, numKeys, ...args) {
+			assert.equal(script, HELD_PRUNE_SCRIPT, "the only script this reader sends is the worker's prune");
+			const [index, ...hashKeys] = args.slice(0, numKeys);
+			const ids = args.slice(numKeys);
+			assert.equal(index, HELD_SET);
+			let removed = 0;
+			for (const [i, key] of hashKeys.entries()) {
+				beforePrune(ids[i]);
+				const h = hashes[key];
+				if (h === "WRONGTYPE") continue;
+				if (!h?.since && set.delete(ids[i])) {
+					this.srems.push(ids[i]);
+					removed += 1;
+				}
+			}
+			return removed;
 		},
 		async get() {
 			return null;
@@ -92,6 +114,25 @@ test("readHeldJobs prunes stale index members as it reads them", async () => {
 	const held = await readHeldJobs({ url: "redis://x", redisFn: () => redis, now: () => NOW });
 	assert.deepEqual(held.rows.map((r) => r.jobId), ["live"]);
 	assert.deepEqual(redis.srems.sort(), ["counters-only", "ghost"], "both pruned: neither carries a hold clock");
+});
+
+// Issue #1075: the reader looked at a member's hash, then sent a separate SREM. A hold written between the two (its hash
+// had expired and its job's next wake renewed it) lost its member until the wake after. The prune now looks again in the
+// step that removes.
+test("readHeldJobs prunes through the worker's script: a hold written between the reader's look and the prune keeps its member (#1075)", async () => {
+	const { readHeldJobs } = await import("../src/read-model.mjs");
+	const hashes = { "wait:job:live": { since: String(NOW - 1000), target: "o/r#1", label: "jira" } };
+	const redis = fakeRedis(hashes, {
+		members: ["live", "renewed", "ghost"],
+		beforePrune: (id) => {
+			if (id === "renewed") hashes["wait:job:renewed"] = { since: String(NOW), target: "o/r#2", label: "ci" };
+		},
+	});
+	const held = await readHeldJobs({ url: "redis://x", redisFn: () => redis, now: () => NOW });
+	assert.deepEqual(held.rows.map((r) => r.jobId), ["live"], "this read saw the renewed hold as stale, as it was when it looked");
+	assert.deepEqual(redis.srems, ["ghost"], "and the prune kept it, since it had its clock by then");
+	const again = await readHeldJobs({ url: "redis://x", redisFn: () => redis, now: () => NOW });
+	assert.deepEqual(again.rows.map((r) => r.jobId).sort(), ["live", "renewed"], "the next read lists it");
 });
 
 // Issue #1036: the index was cut at 200 members BEFORE the stale ones were skipped, so a reader that prunes nothing
@@ -749,7 +790,8 @@ test("the panel's held reader and the tool's cannot diverge on the four things t
 
 	for (const [what, needle] of [
 		["reads the index rather than scanning the keyspace", "smembers"],
-		["prunes a stale member as it reads", "srem"],
+		// Through the worker's one prune script since issue #1075, never a bare SREM after the look.
+		["prunes a stale member as it reads", "pruneHeld(redis, [jobId])"],
 		// Since issue #1036 both take the bound and the walk past stale members from one function, so they cannot differ on it.
 		["bounds what it hydrates and what it looks at, by the one walk", "walkHeldIndex("],
 		["reports a truncated index rather than stating a total it cannot know", "truncated"],
