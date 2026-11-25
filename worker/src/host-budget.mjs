@@ -50,6 +50,11 @@ export const HOST_BUDGET_KEYS = Object.freeze({
  * (5 s, 10 s and 20 s as a scope stays busy, issue #1023), the endpoint re-check (7 s), the wait throttle floor (11 s)
  * and the supersede re-ask (15 s). A test keeps them apart. Short, because a hold keeps the room meanwhile: the wait is
  * the latency of a freed slot, not a queue position.
+ * It does not back off as the scope re-check does (issue #1074 kept it fixed): the ranked hold keeps room for its job
+ * while the job is away, so a longer delay is reserved room left idle for longer, and nothing wakes a delayed job early;
+ * a waiter must ask again before `HOLD_VERIFY_AFTER_MS`, or its hold is verified against the queue on every absence (a
+ * test pins that order). The log line per wake that the scope's backoff also cured is cured by the worker's wait
+ * episode instead: `host_budget_deferred` when the wait starts or its `why` changes, `host_budget_ended` at admission.
  */
 export const BUDGET_RECHECK_MS = 9_000;
 

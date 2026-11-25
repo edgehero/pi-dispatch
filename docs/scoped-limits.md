@@ -377,6 +377,15 @@ The worker's log says `scope_busy_deferred` once, when a job starts to wait for 
 sum of the delays those deferrals gave it. That is the time its scope cost it, not the time between the two
 lines: a pause window that held the job meanwhile is not in it. A job that waits one re-check says both lines.
 
+The other waits a worker logs the same way, one line when the wait starts and one when it ends: a job waiting for its
+machine's budget (`host_budget_deferred`, `host_budget_ended`, asked again every 9 seconds), and one waiting for a
+model server's slot (`endpoint_busy_deferred`, `endpoint_busy_ended`) or a private endpoint's
+(`private_endpoint_busy_deferred`, `private_endpoint_busy_ended`), asked again every 7 seconds. Each is a wait of its
+own: a job that waited for its scope and then waits for a model server says both pairs. Unlike a scope wait, these
+say the first line again when what the job waits for changes (another endpoint, or the budget's reason, such as the
+machine's memory where it was the project's share). Their delays do not grow: nothing wakes a waiting job when room
+or a slot frees, so a longer delay would only leave it unused for longer.
+
 Not every first line gets its second:
 
 - A job that one host deferred and another host ran. Each worker knows only its own pickups, so the host that ran
