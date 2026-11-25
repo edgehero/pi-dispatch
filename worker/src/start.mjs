@@ -10,6 +10,7 @@ import { makeReadModelRoles } from "./model-roles-file.mjs";
 import { makeWatchStore } from "./watch-store.mjs";
 import { makeTouchStore } from "./touch-state.mjs";
 import { makeTouchOutbox } from "./touch-outbox.mjs";
+import { makeZeroTouchOutcomeReaper } from "./zero-touch-outcomes.mjs";
 import { makeQuestionGroupStore } from "./question-groups.mjs";
 import { makeQuestionGroupRuntime } from "./question-group-runtime.mjs";
 import { makeAnswerDraftStore } from "./answerer.mjs";
@@ -1733,6 +1734,12 @@ export async function startWorker(
 	// re-runs this closure, so boot and every tick read the one value.
 	const reapConsoleAudit = makeConsoleAuditReaper({ logsDir: config.logsDir, retentionDays: config.consoleAuditRetentionDays, log });
 	await reapConsoleAudit();
+	// Issue #1072: the console's zero touch outcome files (`zero-touch-outcomes/<fixId>.json`). A settle removes the file of
+	// every row it settles; what is left belongs to a row that is gone, removed here once it is older than the fix
+	// history's retention, by which time that row has expired too. The worker runs it for the console's reason above.
+	// Never throws.
+	const reapZeroTouchOutcomes = makeZeroTouchOutcomeReaper({ logsDir: config.logsDir, retentionDays: config.logRetentionDays, log });
+	await reapZeroTouchOutcomes();
 
 	// REQ-RESURRECTABLE-SANDBOX: sweep retained per-job directories past their window, so what `cleanup`
 	// kept for re-opening stays bounded. Third in the row and deliberately its own sweep -- a different
@@ -4084,6 +4091,7 @@ export async function startWorker(
 					{ name: "allocation_log", reap: reapAllocationLogs },
 					{ name: "console_audit", reap: reapConsoleAudit },
 					{ name: "touch_outbox", reap: () => touchOutbox.repair() },
+					{ name: "zero_touch_outcomes", reap: (options) => reapZeroTouchOutcomes(options) },
 					// Its result goes to the follow-ups (issue #978), which run outside this sweep's in-flight guard.
 					{ name: "sandbox", reap: async (options) => sandboxFollowUps.after(await reapSandboxes(options)) },
 					// Issue #920: the artifacts store, its own retention, beside the sandbox store it is kept apart from.

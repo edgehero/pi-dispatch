@@ -530,6 +530,16 @@ says is waiting. See [Zero touch](zero-touch.md).
 
 See [Zero touch](zero-touch.md).
 
+### Unreleased: the Zero touch fix history records how a change ended (#1072)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| `<PI_LOGS_DIR>/zero-touch-outcomes/<fix id>.json` | New folder, written by the console: one small file per fix whose change ended while its accounting in Valkey was not yet written, holding only the outcome (`applied` or `refused`) and its time. The console removes it once Valkey answers, a settle removes it once it settles the fix, and the worker's sweep removes one older than the history's retention. Nothing to move or create; back it up with the rest of the logs folder ([backup](backup.md)). No older-state detector applies. |
+| Fixes staged before the upgrade | They have no such file, so a settle judges them by their file's bytes, as before. |
+| Mixed versions | An older console neither writes nor reads the folder, so a fix it settles is judged by its bytes. An older worker does not sweep the folder; the console and a settle still remove what they wrote. |
+
+See [Zero touch](zero-touch.md#fix-a-recurring-cause).
+
 ### Unreleased: warnings before the turn and time limits (#1055)
 
 A job is now told once, at 70% of its turn limit (`run.maxTurns`) and at 70% of its time limit (`run.maxMinutes`,

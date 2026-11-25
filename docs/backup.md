@@ -16,6 +16,7 @@ Both exist because getting them wrong is silent.
 | Allocation audit | `<PI_LOGS_DIR>/allocations/` | `PI_LOGS_DIR` | The record of each priorities plan applied. The plan in force is in Valkey (`alloc:plan`) |
 | Run artifacts | `~/.pi-dispatch/artifacts` | `PI_ARTIFACTS_DIR` (kept for `PI_ARTIFACTS_RETENTION_DAYS`) | The files forge jobs kept in `/artifacts` (screenshots, reports, logs), one folder per run with its `manifest.json`, which the run page lists and serves ([artifacts](artifacts.md)). Agent output: text files are cleaned of the job's secrets, images and other files are kept as written. The run records still say how many each run kept |
 | Touch outbox | `<PI_LOGS_DIR>/touch-outbox/` | `PI_LOGS_DIR` | Interventions (an answer, an approval, a re-run, a steer, a cancel) not yet published to Valkey for the [zero-touch](zero-touch.md) report |
+| Zero touch fix outcomes | `<PI_LOGS_DIR>/zero-touch-outcomes/` | `PI_LOGS_DIR` | How a fix's change ended, kept by the console only while Valkey has not taken its accounting. Without it a settle goes back to the file's bytes for that fix, as before 2026-11-25 ([zero-touch](zero-touch.md#fix-a-recurring-cause)) |
 | Settings overlay | `~/.pi-dispatch/settings.json` | `PI_SETTINGS_FILE` | Every cap you tuned from the panel. **Losing it does not stop jobs, it widens them.** See below |
 | Subscription credentials | `subscription-auth/` beside the settings file | `PI_AUTH_STORE_DIR` | The subscription logins this host holds. Secret: back it up encrypted, like `.env` |
 | Auth connections | (none: set it) | `PI_AUTH_CONNECTIONS_FILE` | Which subscription connections exist |
@@ -236,7 +237,7 @@ SET. Stopping first is what buys the group.
    `~/.pi-dispatch/sessions`, which is what `docs/sessions.md` suggests, then copying that whole
    directory takes the transcripts with it. Decide that deliberately.
    ```bash
-   cp -a ~/.pi-dispatch/logs            /backup/run-history     # with console-audit/, allocations/ and touch-outbox/
+   cp -a ~/.pi-dispatch/logs            /backup/run-history     # with console-audit/, allocations/, touch-outbox/ and zero-touch-outcomes/
    cp -a ~/.pi-dispatch/settings.json   /backup/settings.json
    cp -a ~/.pi-dispatch/subscription-auth /backup/subscription-auth  # secret: keep the backup encrypted
    cp -a /path/to/deployment            /backup/deployment      # includes .env, the *.pem and console-tokens.json

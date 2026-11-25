@@ -3246,7 +3246,9 @@ console settles them with **Preview settling**, then **Confirm**: the preview li
 records each once and never runs an action again. Settling twice records nothing twice, and the worker's daily sweep
 also records unfinished touches on a host that shares the logs folder. A viewer, and an operator on a read-only
 console, see who can settle. An action interrupted before it said whether it ran stays unknown: a settle cannot prove
-it.
+it. A change the console knows was not made, whose refusal Valkey did not take, waits for the same settle (2026-11-25,
+#1072): "1 change that was not made is waiting to be settled". The settle closes it, and it is never listed as a fix,
+whatever bytes its file shows later ([Zero touch](zero-touch.md#fix-a-recurring-cause)).
 Ordinary record-field filters remain unchanged.
 
 

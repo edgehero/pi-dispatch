@@ -3095,7 +3095,7 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	// The allocation audit files (issue #504 part B) second: boot reaps them right after the logs, and a tick re-runs that
 	// same closure in the same place.
 	// Issue #645: the host-lost sweep on every host, last; the checkpoint store's retention only where there is a store.
-	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "touch_outbox", "sandbox", "artifacts", "session", "recovery_host_lost"], "boot's own order (issue #920: the artifacts store beside the sandbox store)");
+	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "touch_outbox", "zero_touch_outcomes", "sandbox", "artifacts", "session", "recovery_host_lost"], "boot's own order (issue #920: the artifacts store beside the sandbox store; issue #1072: the zero touch outcome files beside the touch outbox)");
 	assert.equal(captured.extraClosers.length, 9 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the sandbox follow-ups + the sweep + the doctor runs (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
 });

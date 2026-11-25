@@ -60,11 +60,11 @@ test("pending fix survives a lost completion write, stays partial and repairs on
 		await store.repair({ readTrigger: async () => ({ ...entry, on: { type: "label", any: ["different"] } }) });
 		assert.equal((await store.publicSnapshot()).pendingCount, 1);
 		// Issue #1076: what a settle would commit, proved by reads alone; the Zero touch page asks this and writes nothing.
-		assert.deepEqual(await store.settleable({ readTrigger: async () => ({ ...entry, on: { type: "label", any: ["different"] } }) }), { ready: [] });
-		assert.deepEqual(await store.settleable({ readTrigger: async () => entry }), { ready: [staged.fix.id] });
-		assert.deepEqual(await store.settleable({}), { ready: [] }, "with no proof to read, nothing is proved");
+		assert.deepEqual(await store.settleable({ readTrigger: async () => ({ ...entry, on: { type: "label", any: ["different"] } }) }), { ready: [], refused: [], closed: [] });
+		assert.deepEqual(await store.settleable({ readTrigger: async () => entry }), { ready: [staged.fix.id], refused: [], closed: [] });
+		assert.deepEqual(await store.settleable({}), { ready: [], refused: [], closed: [] }, "with no proof to read, nothing is proved");
 		assert.equal((await store.publicSnapshot()).pendingCount, 1, "proving commits nothing");
-		assert.deepEqual(await store.repair({ readTrigger: async () => entry }), { settled: 1 });
+		assert.deepEqual(await store.repair({ readTrigger: async () => entry }), { settled: 1, refused: 0 });
 		assert.equal((await store.publicSnapshot()).pendingCount, 0);
 		assert.equal((await store.publicSnapshot()).fixes.length, 1);
 		assert.ok(!JSON.stringify(await store.publicSnapshot()).includes("Use pnpm"));
@@ -186,7 +186,7 @@ test("a fix's record keeps the expiry its stage gave it, and the history reads a
 		snapshot = await store.publicSnapshot();
 		assert.equal(snapshot.partial, false, "an entry whose record expired with the retention is not a missing row");
 		assert.equal(snapshot.pendingCount, 0);
-		assert.deepEqual(await store.settleable({ readFile: async () => "bytes" }), { ready: [] });
+		assert.deepEqual(await store.settleable({ readFile: async () => "bytes" }), { ready: [], refused: [], closed: [] });
 		assert.ok((await redis.zscore(`${prefix}index`, old.fix.id)) !== null, "the entry stays in the index until an add trims it");
 
 		// An add trims, in its own transaction, every entry older than the retention, whatever its record still holds.
@@ -216,5 +216,51 @@ test("a fix's record keeps the expiry its stage gave it, and the history reads a
 		const renewed = await store.stage(value("twice"), { identity: "twice" });
 		assert.equal(Number(await redis.zscore(`${prefix}index`, renewed.fix.id)), t, "a new record has its own entry");
 		assert.equal((await store.publicSnapshot()).pendingCount, 1);
+	} finally { const keys = await redis.keys(`${prefix}*`); if (keys.length) await redis.del(...keys); await redis.quit(); }
+});
+
+test("a recorded outcome settles a pending row before its bytes do: applied commits, refused refuses even when the bytes are written later, and none keeps the byte rule (#1072)", { skip }, async () => {
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const redis = makeRedisClient(url), prefix = `test-fixes-${randomBytes(8).toString("hex")}:`;
+	let t = nowMs;
+	const store = makeZeroTouchFixStore({ redis, prefix, now: () => t });
+	const file = "/approved/settings.json", made = "settings that read 35", other = "settings that read 40";
+	const stage = async (runId, bytes) => (await store.stage({ kind: "config", runId, scopeId, reason: "secret-unresolved" }, { privateUndo: { file, afterDigest: hash(bytes) }, identity: runId })).fix.id;
+	try {
+		// A change that landed and whose commit was lost, and whose file was changed again since: the bytes no longer
+		// prove it, the outcome does. A change refused whose refusal was lost, whose bytes are in the file now (the same
+		// change made again by hand): the bytes would commit it, the outcome refuses it. A row with no outcome and one
+		// whose outcome is not one of the two words: the byte rule, as before.
+		const landed = await stage("landed", made); t += 1;
+		const refused = await stage("refused", made); t += 1;
+		const plain = await stage("plain", made); t += 1;
+		const odd = await stage("odd", other); t += 1;
+		// A row whose commit landed after all, with its file still there: `closed`, for a settle to remove the file.
+		const done = await stage("done", other); t += 1;
+		assert.equal(await store.commit(done), true);
+		const recorded = new Map([[landed, "applied"], [refused, "refused"], [odd, "maybe"], [done, "applied"]]);
+		const readers = { readFile: async path => path === file ? made : null, outcomeOf: id => recorded.get(id) ?? null };
+		const found = await store.settleable(readers);
+		assert.deepEqual({ ready: found.ready.sort(), refused: found.refused, closed: found.closed }, { ready: [landed, plain].sort(), refused: [refused], closed: [done] });
+		assert.deepEqual(await store.settleable({ outcomeOf: readers.outcomeOf }), { ready: [landed], refused: [refused], closed: [done] }, "the outcome needs no proof to read");
+		assert.deepEqual(await store.settleable({ readFile: readers.readFile, outcomeOf: () => { throw new Error("unreadable folder"); } }), { ready: [plain, refused, landed], refused: [], closed: [] }, "an outcome that cannot be asked is none: the byte rule");
+		// The settle: commits `ready`, refuses `refused`, and forgets each row whose mark was answered and each closed row.
+		const forgotten = [];
+		assert.deepEqual(await store.repair({ ...readers, forget: id => forgotten.push(id) }), { settled: 2, refused: 1 });
+		assert.deepEqual(forgotten.sort(), [landed, refused, plain, done].sort());
+		assert.deepEqual(await Promise.all([landed, refused, plain, odd, done].map(async id => (await store.read(id)).state)), ["applied", "refused", "applied", "pending", "applied"]);
+		const snapshot = await store.publicSnapshot();
+		assert.deepEqual([snapshot.fixes.length, snapshot.pendingCount], [3, 1], "the refused change is never a fix");
+		// A mark the store does not answer throws after the rows before it, and forgets nothing it did not mark.
+		const late = await stage("late", made);
+		const silent = new Proxy(redis, { get(target, name) {
+			if (name === "set") return async () => { throw new Error("fix-store-timeout"); };
+			return typeof target[name] === "function" ? target[name].bind(target) : target[name];
+		} });
+		const cut = makeZeroTouchFixStore({ redis: silent, prefix, now: () => t });
+		forgotten.length = 0;
+		await assert.rejects(cut.repair({ readFile: readers.readFile, outcomeOf: id => (id === late ? "refused" : null), forget: id => forgotten.push(id) }), /fix-store-timeout/);
+		assert.deepEqual(forgotten, [], "the outcome of a refusal that was not answered stays for the next settle");
+		assert.equal((await store.read(late)).state, "pending");
 	} finally { const keys = await redis.keys(`${prefix}*`); if (keys.length) await redis.del(...keys); await redis.quit(); }
 });
