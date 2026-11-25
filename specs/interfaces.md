@@ -1376,8 +1376,9 @@ refactor apart.
   subscription entries (`PI_SUBSCRIPTION_AUTH`); every other exit line is byte-identical to before. A number of US
   dollars: the part of `cost` priced on calls of a provider the runner holds notional (its verified entry marked
   `notional: true` by the worker, a connection with no paid extra usage, with the subscription admission and a model
-  list), which the cost guard admitted with no bound or charge. 0 when no entry is marked. Never above `cost`, and
-  never a child's (a child process has no subscription admission). The worker's closed key list admits it.
+  list), which the cost guard admitted with no bound or charge, and since issue #1098 the price of the children's
+  ledger rows on those same providers that the child marked as let through by its own admission (each row's
+  `notional`, ledger version 4; the runner judges them by its own set). 0 when no entry is marked. Never above `cost`. The worker's closed key list admits it.
   **`allowanceMicros` (issue #1008)** is written by the subscription allowance's guard right after `modelRefused`
   (before issue #985's four charge keys), and ONLY when the job carries an allowance (`PI_SUBSCRIPTION_ALLOWANCE_MICROS`): the allowance in integer micro-dollars,
   what the `costNotional` beside it was held to. With no allowance the exit line is byte-identical to before. The
@@ -1392,8 +1393,10 @@ refactor apart.
   `usage` rows merge theirs, and so do the guard counters the parent writes (`costRefused`, `boundExceeded`,
   `longContext`, `costUnjudged`, `costUnanswered`, `modelRefused`, each only where the parent's own guard writes it),
   and so does the meter's `costUnreported`, guard or no guard, so a child's partial count floors the settlement as the
-  parent's would. A child ledger is version 3 since `costUnreported` (issue #571); one of an older version counts as an
-  unmetered child. Every exit line of a metered run carries the
+  parent's would. A child ledger is version 3 since `costUnreported` (issue #571), and version 4 since each row's `notional` (issue #1098):
+  the part of its cost the child's own subscription admission let through, absent for 0, never above the row's cost,
+  which the runner counts notional only on a provider of its own verified set; one of an older version counts as an
+  unmetered child (runner and children are always one image). Every exit line of a metered run carries the
   children's final fold, the SIGTERM line and the outer catch's included. The worker's closed key list admits the three
   (part F), and `unmeteredChildren` is a floor counter of the dollar settlement (`DES-DOLLAR-RESERVE-AND-SETTLE`); a
   worker from before part F drops them, and the `total` it keeps already includes the children. The fallback line carries `metered: false` and the four
@@ -2685,6 +2688,15 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
     completes. And the baked guards, meter, role tool, in-process child and loader on a sealed stand-in Anthropic adapter:
     the child's call is metered and judged, no provider is registered after the seal, and the same call before the seal
     is refused as `subscription-child-unsupported`. Neither run reaches a network or holds a real credential.
+    **`subscriptionChildren`** (issue #1098) declares that a separate pi process a job starts on a subscription holds an
+    admission of its own: the baked preload loads the child meter first, which verifies the entries and the adapter's
+    content, guards and seals the provider's registration and admits the child's calls, and the runner folds them as
+    notional. It is NOT a `CAPABILITY_GATES` row: an image without it refuses such a child's subscription calls before
+    they are sent, as before, so nothing is spent and the worker refuses nothing. Its evidence is an offline real pi
+    child through the baked preload on an OpenAI subscription (`image/runner/test/fixtures/subscription-child-smoke.mjs`,
+    every request answered in the child and every outbound socket refused): the call carries the subscription's token
+    and is on the child's ledger, the fold with the job's notional set charges it nothing and adds it to
+    `costNotional`, and a model off the job's list is never sent.
     **`exitAuth`** (issue #545) declares that the baked runner reads the exit line's key from stdin when
     `PI_EXIT_AUTH=stdin`, signs its exit line with it, writes a real exit line on SIGTERM, and is started by the
     entrypoint under the exec-only `/opt/pi-dispatch/runner-node`, every key holder with `--disable-sigusr1`
@@ -15899,8 +15911,9 @@ Cross-provider fallback may use another explicitly bound subscription provider a
 there is still one active connection per provider and no account rotation within an attempt. Claude's admitted
 root runtime and children sharing that runtime are supported. Independent legacy Anthropic compatibility calls
 and fresh runtimes without the admitted adapter refuse; only the root runtime's own internal reentry is allowed.
-Separate pi CLI and Node child processes do not inherit attested subscription admission; subscription dispatch
-from them refuses, while child sessions sharing the root runtime retain its policy. Since issue #946 the job's role
+Separate pi CLI and Node child processes do not inherit attested subscription admission; since issue #1098 a pi child
+runs one of its own in its child meter (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`), and subscription dispatch from a
+child without one refuses, while child sessions sharing the root runtime retain its policy. Since issue #946 the job's role
 child on a subscription is such a session, run inside the runner on the admitted runtime (`DES-MODEL-ROLES`, **On a
 subscription**); a staged package's own pi child process still refuses. The file's shape is unchanged.
 
@@ -16240,6 +16253,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-25 (#1098) | **`INT-AUTH-CONNECTIONS-FILE-CONTRACT` AMENDED**: a pi child runs a subscription admission of its own, and one without it is refused; the file's shape is unchanged. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: `tokens.costNotional` adds the price of the children's ledger rows on the job's notional providers that the child marked as let through by its own admission, judged by the runner's own set. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: NEW capability token `subscriptionChildren`, not a `CAPABILITY_GATES` row (an older image refuses such a child's calls before they are sent), proved offline by a real pi child through the baked preload on an OpenAI subscription. **The child ledger** AMENDED: version 4, each row's optional `notional` mark, which the runner counts only on its own verified set. UNCHANGED, checked: `PI_SUBSCRIPTION_AUTH`'s shape, the worker's closed key list and the reason enum (no new token). **Code evidence**: image/runner/src/usage-meter.mjs -> startChildMeter, ledgerNotional, ledgerSettled, foldChildLedgers, spentFile, createUsageMeter; image/runner/src/child-route.mjs -> subscriptionAdapterRoots; image/runner/src/child-watch.mjs -> createChildWatch; image/Dockerfile; image/verify-image.sh. |
 | 2026-11-25 (#1096) | **`INT-HISTORY-READ-TRANSPORT` AMENDED**: a history subscription that fails at boot is retried for as long as the worker runs, after 5 s doubling to a 60 s cap, each attempt with a reader of its own, never awaited by boot or a job; `history_reader_unavailable` once at the first failure and NEW `history_reader_recovered` once at the recovery, with `failedAttempts` and `waitedSeconds` and no error text; shutdown ends a pending wait and closes a held subscription once. **`INT-ARTIFACTS-CHANNEL` AMENDED**, the producer's boot sentence and the mixed-versions paragraph: the artifacts subscription is retried the same way, with its own retries, `artifacts_channel_unavailable` once and NEW `artifacts_channel_recovered` once, and a worker of #942's release whose subscription failed at boot named as unavailable until it restarts. UNCHANGED, checked: the request and reply channels, their bounds and the wire format of both, and `INT-RUN-HISTORY-FILE-CONTRACT` (no file shape moves). **Code evidence**: worker/src/keep-serving.mjs -> keepServing, keepServingWaitMs; worker/src/start.mjs -> startWorker; worker/src/history-reader.mjs -> serveHistory; worker/src/artifacts-channel.mjs -> serveArtifacts. |
 | 2026-11-25 (#946) | **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: NEW capability token and last `CAPABILITY_GATES` row `subscriptionRoles` (`job-image-subscription-roles-unsupported`, pre-spend), needed by a job with a role map that holds a subscription, proved offline by the baked `run-job.mjs` on an OpenAI subscription with a role map and by the baked modules on a sealed stand-in Anthropic adapter; the `subscriptionAllowance` row is no longer the last and says it follows every older row. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum gains `job-image-subscription-roles-unsupported`, and the role refusal reasons gain `subscription-child-unsupported`, a child on a subscription the runner could not run inside itself, refused before it started. **`INT-AUTH-CONNECTIONS-FILE-CONTRACT` AMENDED**: the job's role child on a subscription is a session sharing the admitted runtime, a staged package's own pi child still refuses, and "in the initial release" is gone; the file's shape is unchanged. **`INT-REASON-CATALOG` UNCHANGED, checked**: its contract covers every enum token, and the new row is the image refusal's sentence. **Code evidence**: worker/src/image-preflight.mjs -> CAPABILITY_GATES; worker/src/run-history.mjs -> MODEL_ROLE_REFUSAL_REASONS; worker/src/reason-catalog.mjs; image/runner/src/model-roles.mjs -> createRoleSubagents; image/runner/src/role-child-session.mjs -> createRoleChildSessions; image/Dockerfile; image/verify-image.sh. |
 | 2026-11-25 (#1094, pi 1.6.1, part 3) | **`INT-QUESTION-GROUPS` AMENDED**, the free gate: the classifier's api must be one the runner's bound prices, so `pi-decision` or an overlay's own classifier api is refused at pickup as `question-group-refused` before any reservation, and a builtin classifier is resolved by its type, so `openai/gpt-6-luna` (a chat model and a decision model under one id) resolves to the decision model where the first match, the chat model, was refused. |

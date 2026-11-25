@@ -482,7 +482,13 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # process (the parent's subagent call is answered by an in-process child, metered as a second session, and the job
 # completes, with no separate process); and the baked guards, meter, role tool, in-process child and loader on a sealed
 # stand-in Anthropic adapter (the same call is refused by name before the seal).
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary,idleWatch,credentialRefresh,subscriptionLease,mergePolicy,secretFiles,subscriptionAllowance,subscriptionRoles"
+# `subscriptionChildren` (issue #1098) tells the worker a separate pi process that a job's own tool starts on a subscription
+# holds an admission of its own: the child meter, which the preload loads first in every pi child, verifies the
+# subscription entries, guards the provider's registration and seals it, and the runner takes the child's calls as
+# notional. NOT a gate: an image without it refuses such a child's calls as before, and nothing is spent on them.
+# verify-image.sh starts a real pi child through the baked preload on an OpenAI subscription offline
+# (image/runner/test/fixtures/subscription-child-smoke.mjs).
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary,idleWatch,credentialRefresh,subscriptionLease,mergePolicy,secretFiles,subscriptionAllowance,subscriptionRoles,subscriptionChildren"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it

@@ -985,6 +985,18 @@ IWHANG
 				[ "$sa_run_code" = 2 ] && echo "$sa_exit" | grep -q 'PI_SUBSCRIPTION_ALLOWANCE_MICROS' \
 					|| fail "the image declares 'subscriptionAllowance' but a job with a malformed PI_SUBSCRIPTION_ALLOWANCE_MICROS was not refused before its first call (exit $sa_run_code: $sa_exit)"
 				;;
+			subscriptionChildren)
+				# Issue #1098. The claim is that a separate pi process a job's tool starts on a subscription is admitted on its own:
+				# the baked preload loads the child meter first, which verifies the entries, guards and seals the provider's
+				# registration and admits its call, and the runner's fold takes that call as notional. Proved offline with a real pi
+				# child on an OpenAI subscription, every request answered in the child and every outbound socket refused: the call
+				# carries the subscription's token, is on the child's ledger, costs the cap nothing in the fold, and a model off the
+				# job's list is never sent. An older image refuses the child's call, which the proof never allows.
+				sc_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges \
+					--entrypoint node "$IMAGE_REF" /app/image/runner/test/fixtures/subscription-child-smoke.mjs 2>&1) && sc_code=0 || sc_code=$?
+				[ "$sc_code" = 0 ] && echo "$sc_out" | grep -q '^subscription child capability holds$' \
+					|| fail "the image declares 'subscriptionChildren' but its offline pi child admission proof failed (exit $sc_code): $sc_out"
+				;;
 			subscriptionRoles)
 				# Issue #946. The claim is that a subscription job's role child runs inside the runner, on the runtime the runner
 				# admitted and sealed, so the parent's subagent call is answered and the job goes on. Proved offline, twice. First the

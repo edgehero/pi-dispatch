@@ -1,6 +1,6 @@
 // env-internal PI_SUBSCRIPTION_AUTH: host-approved access snapshot metadata, never an operator override.
-import { validateSubscriptionRequest } from "./community-auth-adapter.mjs";
-import { subscriptionAccess, subscriptionRequestOverrides } from "./subscription-credentials.mjs";
+import { installSubscriptionRegistrationGuard, validateSubscriptionRequest, verifySubscriptionAuthEntries } from "./community-auth-adapter.mjs";
+import { installSubscriptionCredentials, subscriptionAccess, subscriptionRequestOverrides } from "./subscription-credentials.mjs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeSync } from "node:fs";
@@ -361,6 +361,10 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 	// the separator because it is a byte neither id can carry; the ids themselves live on the row, so
 	// the key never has to be parsed back apart.
 	const byModel = new Map();
+	// Issue #1098: the notional part of each row's cost, by the row's key ("" for the bucket): what a CHILD's ledger rows
+	// mark as let through by its own subscription admission (rows() below). Kept apart from the rows themselves, so the
+	// exit line's `usage` rows, which the worker reads by a closed key list, never carry it.
+	const notionalByKey = new Map();
 	// Where a call lands when its ctx names no model: kept OFF the map, so a provider literally named
 	// "other" can never merge into it. Same honesty rule as `unpriced` above -- a model-less call is
 	// COUNTED here, never guessed onto whichever model a heuristic liked.
@@ -434,6 +438,10 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 				row = { provider, model: modelId, ...emptyRow() };
 				byModel.set(key, row);
 			}
+		}
+		if (priced && notionalProviders !== null && notionalProviders.has(ctx.provider)) {
+			const mark = row === other ? "" : `${provider}\u0000${modelId}`;
+			notionalByKey.set(mark, (notionalByKey.get(mark) ?? 0) + price);
 		}
 		foldRow(row, {
 			calls: 1,
@@ -600,9 +608,9 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 			...(children === null ? {} : { childTotal: children.total, childProcesses: children.processes, unmeteredChildren: children.unmetered }),
 			// Issue #571: on every metered line, the children's included (their ledgers carry it).
 			costUnreported: state.unreported + (children?.unreported ?? 0),
-			// Issue #1008: only for a job with subscription entries. A child never makes a notional call (it has no
-			// subscription admission), so the children's cost is all in `cost` and none of it here.
-			...(notionalProviders === null ? {} : { costNotional: state.costNotional }),
+			// Issue #1008: only for a job with subscription entries. Issue #1098: a pi child holds a subscription admission of
+			// its own, so the children's rows on this job's notional providers are notional here too (childNotional).
+			...(notionalProviders === null ? {} : { costNotional: state.costNotional + childNotional() }),
 		};
 	}
 
@@ -616,7 +624,17 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 	 * `costNotional` is made of (that key stays the sum of the prices that were read).
 	 */
 	function notionalMicros() {
-		return state.notionalUnread > 0 ? Infinity : Math.ceil(state.costNotional * 1e6);
+		return state.notionalUnread > 0 ? Infinity : Math.ceil((state.costNotional + childNotional()) * 1e6);
+	}
+
+	/**
+	 * Issue #1098: the children's notional part, as the last fold counted it (foldChildLedgers `notionalCost`): the cost
+	 * each child's ledger marked as let through by its own subscription admission, on a provider of this job's notional
+	 * set. 0 without a notional set or a fold. A high-water mark, so it only grows.
+	 */
+	function childNotional() {
+		if (notionalProviders === null || children === null) return 0;
+		return children.notional ?? 0;
 	}
 
 	/**
@@ -660,6 +678,8 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 			unmetered: carry(fold?.unmetered ?? 0),
 			// Issue #571: the children's broken-usage calls, a high-water mark like the totals.
 			unreported: high("unreported", fold?.costUnreported ?? 0),
+			// Issue #1098: the children's notional cost the fold counted (marked rows on the job's own notional set).
+			notional: high("notional", fold?.notionalCost ?? 0),
 			rows: [...rows.values()],
 		};
 		if (cap !== null && combinedTotal() > cap) stop(TOKEN_BUDGET, combinedTotal());
@@ -677,12 +697,20 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 	function rows() {
 		const kept = [];
 		const bucket = { ...other };
-		for (const row of byModel.values()) {
+		// Issue #1098: each row's notional mark (notionalByKey), the folded rows' marks into the bucket's, written only when
+		// above 0: a mark lands only on a provider of the child's own admitted set, so on at most the model list's 16 models,
+		// and the rows of every other call keep the size they had.
+		const mark = (value) => (value > 0 ? { notional: value } : {});
+		let bucketNotional = notionalByKey.get("") ?? 0;
+		for (const [key, row] of byModel) {
 			const recordable = recordableId(row.provider) && recordableId(row.model);
-			if (recordable && kept.length < CHILD_LEDGER_ROWS - 1) kept.push({ ...row });
-			else foldRow(bucket, row);
+			if (recordable && kept.length < CHILD_LEDGER_ROWS - 1) kept.push({ ...row, ...mark(notionalByKey.get(key) ?? 0) });
+			else {
+				foldRow(bucket, row);
+				bucketNotional += notionalByKey.get(key) ?? 0;
+			}
 		}
-		if (bucket.calls > 0) kept.push({ provider: null, model: null, ...bucket });
+		if (bucket.calls > 0) kept.push({ provider: null, model: null, ...bucket, ...mark(bucketNotional) });
 		return kept;
 	}
 
@@ -2578,8 +2606,8 @@ export function unreportedUsage(message, api) {
  * rest of the job by. It is admitted before the turn is read, so it never takes a turn, never waits behind a waiter and
  * never claims one (it takes no room), and it adds nothing to charges() (`costChargedMicros`, `costLiftedMicros`,
  * `costWaited`) or to a refusal's numbers. The meter still prices it into `tokens.cost` and `costNotional`. The checks stay because the price
- * a notional call is metered at must be the pinned one too. `notional` is null in a child process (it has no
- * subscription admission), so a child's calls always count.
+ * a notional call is metered at must be the pinned one too. In a child process `notional` is the child's own set
+ * (issue #1098): empty, so every call counts, unless it holds a subscription admission of its own (startChildMeter `admit`).
  */
 /** Whether the call's model carries the pinned entry's api, cost (tiers included) and compat (fallbacks, maxTokensField). */
 function pricedAsPinned(model, pinned) {
@@ -3606,10 +3634,11 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
  * The providers whose calls are NOTIONAL in this runner (issue #1008): a subscription with no paid extra usage bills
  * nothing per call, so its list price is not money and leaves the cost cap and the dollar windows. A new Set, EMPTY
  * unless all of these hold, so any doubt counts the call against the cap:
- *   - `subscriptions` is the runner's own VERIFIED entry list (run-job.mjs, verifySubscriptionAuthEntries), never a copy
- *     a child process parses from its environment;
- *   - `subscriptionAdmission` is a function: the parent wired the adapter's registration check, without which no call
- *     on that provider is a subscription call (a child has none, and its model guard refuses every subscription call);
+ *   - `subscriptions` is a VERIFIED entry list (verifySubscriptionAuthEntries, adapter content included): the runner's
+ *     own (run-job.mjs), or since issue #1098 a pi child's, verified by its own meter, never an unverified copy;
+ *   - `subscriptionAdmission` is a function: the process wired the adapter's registration check, without which no call
+ *     on that provider is a subscription call (a child without an admission of its own has none, and its model guard
+ *     refuses every subscription call);
  *   - a model list is set, so the model guard exists: it refuses a subscription provider's call on another api or base
  *     URL (validateSubscriptionRequest) and injects the subscription's own key (createModelGuard `prepare`), so a call's
  *     provider says which credential carried it;
@@ -3644,7 +3673,7 @@ export function notionalProviders({ subscriptions = null, subscriptionAdmission 
  * and a call refused only because others were in flight would stop work the allowance had room for.
  *
  * NEVER a billed call. `notional` is the very set the cost guard admits without a charge, so a call outside it (an
- * API-key call, a call on a connection with paid extra usage, any call in a child process, where `notional` is null)
+ * API-key call, a call on a connection with paid extra usage, any call of a child process with no admission of its own)
  * passes here untouched and is judged by the cap alone; nothing here can admit a call the cap refused, because a guard
  * only refuses. A notional call's model must also carry its pinned price (pricedAsPinned, the cost guard's check), or
  * the price the meter settles it at, which this guard trusts, would be the caller's: refused, logged `why: "unboundable"`.
@@ -3849,8 +3878,13 @@ export const CHILD_LEDGER_ROWS = 120;
  */
 export const CHILD_LEDGER_MAX_FILES = 512;
 export const CHILD_LEDGER_STATES = Object.freeze(["starting", "running", "done"]);
-/** The ledger format's version. 2 since the four floor counters (issue #500 part E's review), 3 since `costUnreported` (issue #571). */
-export const CHILD_LEDGER_VERSION = 3;
+/**
+ * The ledger format's version. 2 since the four floor counters (issue #500 part E's review), 3 since `costUnreported` (issue
+ * #571), 4 since each row's `notional` (issue #1098): the part of its cost the child's own subscription admission let
+ * through, which the parent counts notional only on a provider of its own verified set. Parent and child are always
+ * one image, so no job holds two versions.
+ */
+export const CHILD_LEDGER_VERSION = 4;
 /**
  * A COPY of the worker's id rule (worker/src/model-ref.mjs MODEL_REF_PATTERN, which run-history.mjs imports as
  * USAGE_ID_PATTERN), because the image does not carry the worker. A copy is held to its source by a test that reads
@@ -3941,11 +3975,17 @@ export function parseChildLedger(text) {
 			if (!whole(given[key])) return null;
 			row[key] = given[key];
 		}
+		// Issue #1098: the row's notional mark, absent for 0, never above its own cost (a mark of more is not a ledger the
+		// meter wrote). Absent is no mark: the row is charged in full.
+		if (given.notional !== undefined && (!amount(given.notional) || (given.notional > given.cost && !agrees(given.notional, given.cost)))) return null;
+		row.notional = given.notional === undefined ? 0 : Math.min(given.notional, given.cost);
 		foldRow(sum, row);
 		const key = rowKey(row);
 		const into = ledger.rows.get(key);
-		if (into) foldRow(into, row);
-		else ledger.rows.set(key, row);
+		if (into) {
+			foldRow(into, row);
+			into.notional += row.notional;
+		} else ledger.rows.set(key, row);
 	}
 	// The rows partition the totals (the meter's own invariant): a file whose rows say less than its totals, or more,
 	// is not a ledger the meter wrote.
@@ -3971,7 +4011,7 @@ function reached(high, next) {
 	if (!MONOTONE_GUARD.every((key) => next[key] >= high[key])) return false;
 	for (const [key, row] of high.rows) {
 		const now = next.rows.get(key);
-		if (!now || ![...ROW_AMOUNTS, ...ROW_COUNTS].every((field) => now[field] >= row[field])) return false;
+		if (!now || ![...ROW_AMOUNTS, ...ROW_COUNTS, "notional"].every((field) => (now[field] ?? 0) >= (row[field] ?? 0))) return false;
 	}
 	return true;
 }
@@ -4067,11 +4107,11 @@ const DEFAULT_LEDGER_FS = { readdirSync, lstatSync, openSync, fstatSync, readSyn
  * aggregate (`{ count, names, pids, high, charge, settled }`). `refusal` is the first child cost refusal a fold read,
  * `{ why, numbers }` (issue #985), or null. `meter.setChildren()` takes the result as it is.
  */
-export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, retire = null } = {}) {
+export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, retire = null, notional = null } = {}) {
 	const files = new Map(prev?.files ?? []);
 	const retired = prev?.retired
 		? { ...prev.retired, names: new Set(prev.retired.names), pids: new Set(prev.retired.pids), high: cloneLedger(prev.retired.high) }
-		: { count: 0, names: new Set(), pids: new Set(), high: emptyLedger(), charge: 0, settled: 0 };
+		: { count: 0, names: new Set(), pids: new Set(), high: emptyLedger(), charge: 0, settled: 0, notional: 0 };
 	let names = [];
 	let missing = false;
 	try {
@@ -4131,8 +4171,9 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 			retired.pids.add(entry.pid);
 			retired.count += 1;
 			addLedger(retired.high, entry.high);
-			retired.charge = saturatingAdd(retired.charge, ledgerCharge(entry.high));
-			retired.settled = saturatingAdd(retired.settled, ledgerSettled(entry.high));
+			retired.charge = saturatingAdd(retired.charge, ledgerCharge(entry.high, notional));
+			retired.settled = saturatingAdd(retired.settled, ledgerSettled(entry.high, notional));
+			retired.notional = (retired.notional ?? 0) + ledgerNotional(entry.high, notional);
 		}
 	}
 	const flooded = Math.max(prev?.flooded ?? 0, beyond);
@@ -4141,13 +4182,16 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 	let unmetered = flooded;
 	let chargeMicros = retired.charge;
 	let settledMicros = retired.settled;
+	// Issue #1098: the children's notional cost, in dollars, the part of `totals.cost` ledgerNotional counts.
+	let notionalCost = retired.notional ?? 0;
 	let liveInflightMicros = 0;
 	let liveWaiting = 0;
 	for (const entry of files.values()) {
 		if (entry.unmetered) unmetered += 1;
 		addLedger(sum, entry.high);
-		chargeMicros = saturatingAdd(chargeMicros, ledgerCharge(entry.high));
-		settledMicros = saturatingAdd(settledMicros, ledgerSettled(entry.high));
+		chargeMicros = saturatingAdd(chargeMicros, ledgerCharge(entry.high, notional));
+		settledMicros = saturatingAdd(settledMicros, ledgerSettled(entry.high, notional));
+		notionalCost += ledgerNotional(entry.high, notional);
 		liveInflightMicros = saturatingAdd(liveInflightMicros, ledgerInflight(entry));
 		liveWaiting = saturatingAdd(liveWaiting, ledgerWaiting(entry));
 	}
@@ -4157,7 +4201,7 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 	merged.delete("");
 	const rows = [...merged.values(), ...(modelless ? [modelless] : [])];
 	const counters = Object.fromEntries(LEDGER_GUARD_COUNTS.map((key) => [key, sum[key]]));
-	return { processes: files.size + flooded + retired.count, unmetered, flooded, totals: sum.totals, rows, ...counters, settledMicros, chargeMicros, liveInflightMicros, liveWaiting, waited: sum.waited, liftedMicros: sum.liftedMicros, refusal, missing, files, retired };
+	return { processes: files.size + flooded + retired.count, unmetered, flooded, totals: sum.totals, rows, ...counters, settledMicros, chargeMicros, notionalCost, liveInflightMicros, liveWaiting, waited: sum.waited, liftedMicros: sum.liftedMicros, refusal, missing, files, retired };
 }
 
 /** A copy of a ledger mark, its rows copied too. */
@@ -4173,8 +4217,10 @@ function addLedger(into, from) {
 	for (const key of ["waited", "liftedMicros"]) into[key] = saturatingAdd(into[key] ?? 0, from[key] ?? 0);
 	for (const [key, row] of from.rows) {
 		const there = into.rows.get(key);
-		if (there) foldRow(there, row);
-		else into.rows.set(key, { ...row });
+		if (there) {
+			foldRow(there, row);
+			there.notional = (there.notional ?? 0) + (row.notional ?? 0);
+		} else into.rows.set(key, { ...row });
 	}
 }
 
@@ -4186,15 +4232,32 @@ const saturatingAdd = (a, b) => Math.min(Number.MAX_SAFE_INTEGER, a + b);
  * PI_MAX_COST_MICROS from its environment) reports `spentMicros: 0` while its meter still prices every call, so the
  * cost is what counts it. Saturates at Number.MAX_SAFE_INTEGER.
  */
-export function ledgerSettled(high) {
-	const cost = Math.ceil((high?.totals?.cost ?? 0) * 1e6);
+export function ledgerSettled(high, notional = null) {
+	// Issue #1098: a child's calls on the job's notional providers are notional, as the runner's own are: they leave the
+	// cap (the child's own cost guard admitted them without a charge), so they leave what the parent charges it too.
+	const cost = Math.ceil(Math.max(0, (high?.totals?.cost ?? 0) - ledgerNotional(high, notional)) * 1e6);
 	const value = Math.max(high?.spentMicros ?? 0, Number.isFinite(cost) ? cost : Number.MAX_SAFE_INTEGER);
 	return Math.min(Number.MAX_SAFE_INTEGER, value);
 }
 
 /** What a ledger holds against a cap: ledgerSettled() plus its in-flight bounds. */
-export function ledgerCharge(high) {
-	return saturatingAdd(ledgerSettled(high), high?.inflightMicros ?? 0);
+export function ledgerCharge(high, notional = null) {
+	return saturatingAdd(ledgerSettled(high, notional), high?.inflightMicros ?? 0);
+}
+
+/**
+ * Issue #1098: the notional part of a ledger mark's cost: what its rows on the job's `notional` providers (the runner's
+ * notionalProviders set) marked as notional (CHILD_LEDGER_VERSION 4), 0 with none. A row's provider is the model's it
+ * dispatched on; the model-less row names none and is never notional.
+ */
+export function ledgerNotional(high, notional = null) {
+	if (!(notional instanceof Set) || notional.size === 0 || !(high?.rows instanceof Map)) return 0;
+	let sum = 0;
+	// Both, never one: the child MARKED the row's cost as let through by its own subscription admission (a child with no
+	// admission marks nothing, whatever provider its billed key is filed under), AND the row's provider is in the
+	// runner's own verified set (a mark on a provider the runner does not hold notional is a billed call).
+	for (const row of high.rows.values()) if (typeof row?.provider === "string" && notional.has(row.provider) && amount(row.cost) && amount(row.notional)) sum += Math.min(row.notional, row.cost);
+	return sum;
 }
 
 /**
@@ -4233,7 +4296,7 @@ export function ledgerWaiting(entry) {
  * since which someone has waited without a break (only while someone waits). A number that cannot be carried
  * saturates at Number.MAX_SAFE_INTEGER.
  */
-export function spentFile(fold, parentMicros, parentInflightMicros = 0, generation = null, waiting = 0, waitingSince = null) {
+export function spentFile(fold, parentMicros, parentInflightMicros = 0, generation = null, waiting = 0, waitingSince = null, notional = null) {
 	// Whole micro-dollars, rounded UP: externalFor() reads only safe integers, so the writer must never emit a file its
 	// own reader refuses, and rounding up only overcharges.
 	const carry = (value) => (typeof value === "number" && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? Math.ceil(value) : Number.MAX_SAFE_INTEGER);
@@ -4242,7 +4305,8 @@ export function spentFile(fold, parentMicros, parentInflightMicros = 0, generati
 	let total = saturatingAdd(carry(parentMicros), carry(fold?.retired?.charge ?? 0));
 	let inflight = Math.min(carry(parentInflightMicros), carry(parentMicros));
 	for (const [name, entry] of fold?.files ?? []) {
-		const part = carry(ledgerCharge(entry.high));
+		// Issue #1098: its notional calls are no charge, as in the fold (`notional`, the job's set; null outside a subscription job).
+		const part = carry(ledgerCharge(entry.high, notional));
 		byLedger[name] = part;
 		total = saturatingAdd(total, part);
 		// Only a nonzero part is written: a name absent is 0, and the file stays inside CHILD_LEDGER_MAX_BYTES with every
@@ -4680,6 +4744,7 @@ export async function startChildMeter({
 	dir,
 	name,
 	lazy = false,
+	admit = false,
 	state = {},
 	fs = DEFAULT_LEDGER_FS,
 	writeFs = DEFAULT_WRITE_FS,
@@ -4752,7 +4817,35 @@ export async function startChildMeter({
 			return child;
 		}
 		child.metered = true;
-		child.meter = createUsageMeter({ maxTokens: null, maxCostMicros, allowedModels, onChange: () => child.write("running") });
+		// Issue #1098: the child's OWN subscription admission, the contract the job's runner runs (run-job.mjs), never one
+		// borrowed from it: verify the entries the runner keeps current in PI_SUBSCRIPTION_AUTH, adapter content included,
+		// and install the credential and registration guards on this child's class, here, at the meter's load, which comes
+		// before every other extension's (the preload puts the meter first): so the approved adapter's registration, loaded
+		// right after the meter (child-route.mjs subscriptionAdapterRoots), is the one the guard selects, and any other
+		// registration of that provider latches the conflict. The seal waits for the session's runtime (verify() below, on
+		// session_start). Only for the extension's route (`admit`): a library child (the preload's hook) has no session
+		// start to seal at, and stays refused. Nothing here throws: whatever fails (entries that do not verify, an adapter
+		// that is not the approved one, a guard pi cannot take) leaves no admission, and the model guard, which reads the
+		// entries from the environment itself, refuses every subscription call, as before.
+		let subscriptions = null;
+		let registration = null;
+		if (admit) {
+			try {
+				const verified = verifySubscriptionAuthEntries(JSON.parse(env.PI_SUBSCRIPTION_AUTH ?? "[]"));
+				if (verified.length > 0) {
+					installSubscriptionCredentials({ ModelRuntime, entries: verified, env });
+					registration = installSubscriptionRegistrationGuard({ ModelRuntime, entries: verified });
+					subscriptions = verified;
+				}
+			} catch {
+				registration = null;
+				subscriptions = null;
+			}
+		}
+		const subscriptionAdmission = registration ? (provider) => registration.admitted(provider) : null;
+		// Its notional providers by the runner's own rule (notionalProviders): only with the admission and a model list.
+		const notional = notionalProviders({ subscriptions, subscriptionAdmission, allowedModels });
+		child.meter = createUsageMeter({ maxTokens: null, maxCostMicros, allowedModels, onChange: () => child.write("running"), ...(subscriptions ? { notionalProviders: notional } : {}) });
 		// ONE read of SPENT per judgement (issue #985): `external` reads the file, and `externalInflight`, which the cost
 		// guard asks right after it, answers from that same read, so a total from one tick is never paired with an
 		// in-flight part from the next. A read that throws leaves the in-flight part at 0 (the guard refuses anyway).
@@ -4795,6 +4888,9 @@ export async function startChildMeter({
 			maxCostMicros,
 			allowedModels,
 			env,
+			subscriptionAdmission,
+			subscriptions,
+			notional,
 			external,
 			externalInflight: () => spentRead.inflight,
 			claim,
@@ -4899,6 +4995,13 @@ export async function startChildMeter({
 		child.ok = true;
 		child.verify = (runtime) => {
 			if (!child.metered) return false;
+			// Issue #1098: the seal, on the runtime the session dispatches through, once every extension has registered. One
+			// that cannot be sealed (the adapter missing or not the approved one, a conflict) admits nothing.
+			try {
+				registration?.seal(runtime);
+			} catch {
+				// registration.admitted() stays false, so every subscription call of this child is refused.
+			}
 			if (child.handles.some((handle) => handle.covers?.(runtime))) return true;
 			child.unmetered();
 			return false;

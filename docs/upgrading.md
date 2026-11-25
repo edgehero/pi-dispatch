@@ -444,6 +444,22 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: a pi child on a subscription holds an admission of its own (#1098)
+
+A job image from this release lets a separate pi process that the job starts, a staged package's own child among them,
+use the job's subscription through an admission of its own, which the child meter the image loads first in every pi
+child runs, as the job's runner does. Before, such a child's first call was refused and the job stopped as
+`model-not-allowed`.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Image capability `subscriptionChildren` | New, not a gate: an image without it refuses such a child's subscription calls before they are sent, as before, so no worker refuses anything for it. |
+| Run record `tokens.costNotional` | Same key, same meaning, wider: it now also holds the list price of a child's calls on the job's notional subscription providers, so the dollar windows settle only the billed rest, as for the runner's own calls: only the calls the child's own admission let through, which its ledger marks. Nothing moves, and no older-state detector applies. |
+| Child ledgers (in the job, never kept) | Version 4: each row may mark the part of its cost the child's admission let through. A runner and its children are always one image, so no job holds two versions. |
+| Mixed versions | Any worker reads the image's `costNotional` as it reads it today. An older image refuses the child's calls, as before. |
+
+See [subscription authentication](subscription-auth.md#supported-jobs-and-visibility).
+
 ### Unreleased: a subagent on a subscription (#946)
 
 A job image from this release runs a subscription job's role child inside the runner, on the subscription it admitted,

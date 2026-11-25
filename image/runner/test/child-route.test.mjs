@@ -106,6 +106,15 @@ test("ledgerDirProblem: a writable directory is fine; unset, relative, missing, 
 	assert.equal(ledgerDirProblem(dir, { access: () => { throw new Error("odd"); } }), "unusable");
 });
 
+test("runAsPiCli: a nested runner of an Anthropic subscription job loads the staged adapter right after the meter, as a preloaded child does (#1098)", async () => {
+	const dir = tempDir("pi-dispatch-route-adapter-");
+	const argv = ["node", RUN_JOB_PATH, "--mode", "json", "-p", "hi"];
+	const entries = [{ provider: "anthropic", root: "/opt/pi-global/packages/auth" }, { provider: "openai" }];
+	const env = { [CHILD_LEDGER_ENV]: dir, PI_SUBSCRIPTION_AUTH: JSON.stringify(entries) };
+	assert.equal(await runAsPiCli({ env, argv, warn: () => assert.fail("no warning"), setExitCode: () => assert.fail("no exit code"), load: async () => {} }), "cli");
+	assert.deepEqual(argv.slice(2), ["-e", CHILD_METER_PATH, "--no-mcp", "-e", "/opt/pi-global/packages/auth", "--mode", "json", "-p", "hi"]);
+});
+
 test("runAsPiCli: a usable directory injects -e first (once) and loads pi's unbundled dist/cli.js", async () => {
 	const dir = tempDir("pi-dispatch-route-cli-");
 	const loaded = [];

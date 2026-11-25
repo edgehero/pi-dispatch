@@ -58,7 +58,7 @@ import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realp
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PI_ENTRIES, RUN_JOB_PATH } from "./child-route.mjs";
-import { COST_CAP, MODEL_NOT_ALLOWED, TOKEN_BUDGET } from "./outcome.mjs";
+import { COST_CAP, MODEL_NOT_ALLOWED, SUBSCRIPTION_ALLOWANCE, TOKEN_BUDGET } from "./outcome.mjs";
 import { claimWait, foldChildLedgers, SPENT_FILE, spentFile, STOP_FILE, stopFile, waitClaimName, waitClaimTaken, writeFileAtomic } from "./usage-meter.mjs";
 
 /**
@@ -287,6 +287,9 @@ export function createChildWatch({
 	meter,
 	guard = () => null,
 	log = () => {},
+	// Issue #1098: the job's notional providers (usage-meter.mjs notionalProviders, the runner's own set), or null outside
+	// a subscription job. A child's calls on them are notional, as the runner's own: no charge against the cap or in SPENT.
+	notional = null,
 	proc = linuxProc(),
 	now = () => performance.now(),
 	fold = foldChildLedgers,
@@ -298,6 +301,8 @@ export function createChildWatch({
 }) {
 	let prev = null;
 	let ticks = 0;
+	// Issue #1098: the children's notional cost as of the last judgement, so the allowance acts on what they add.
+	let lastChildNotional = 0;
 	let peak = 0;
 	/** pid -> the tick it was first seen alive as a pi process. */
 	const seen = new Map();
@@ -399,7 +404,7 @@ export function createChildWatch({
 	const offList = (row) => row.provider !== null && row.model !== null && !meter.allowed.some((entry) => entry.provider === row.provider && entry.model === row.model);
 
 	/** Step 3: the children into the meter, then the stop rules (first stop wins: meter.stop keeps the first). */
-	function judge() {
+	function judge({ final = false } = {}) {
 		const view = current();
 		count = unmeteredCount(view);
 		const ledgered = ledgerPids(view);
@@ -413,6 +418,16 @@ export function createChildWatch({
 			if (own.spentMicros + view.settledMicros > meter.costCap || view.costRefused > 0) meter.stop(COST_CAP);
 		}
 		if (meter.allowed !== null && (view.modelRefused > 0 || view.rows.some(offList))) meter.stop(MODEL_NOT_ALLOWED);
+		// Issue #1098: the subscription allowance, on what the CHILDREN add, judged as the parent's own guard judges its own
+		// calls (the next call refused, so a job may end above it). A child's guard has no allowance, so its calls are judged
+		// here: once a child's notional spend has settled while the job's notional total (the meter's notionalMicros, its
+		// own and the children's) is at or past the allowance, the job stops and STOP brakes every child. Never on the
+		// runner's own spend, which its own guard judges at its next call, and never at teardown, when no call follows: a
+		// job whose last call, its own or a child's, took it past the allowance ends above it, as before.
+		const allowance = guard()?.allowance?.snapshot?.()?.allowanceMicros;
+		const childNotional = view.notionalCost ?? 0;
+		if (!final && Number.isSafeInteger(allowance) && childNotional > lastChildNotional && meter.notionalMicros() >= allowance) meter.stop(SUBSCRIPTION_ALLOWANCE);
+		lastChildNotional = Math.max(lastChildNotional, childNotional);
 		if (count > 0) {
 			if (!warned) {
 				warned = true;
@@ -464,7 +479,7 @@ export function createChildWatch({
 			generation += 1;
 			const waiting = waitingCount();
 			waitingSince = waiting > 0 ? (waitingSince ?? generation) : null;
-			writeControl(SPENT_FILE, JSON.stringify(spentFile(prev, own.spentMicros + own.inflightMicros, own.inflightMicros, generation, waiting, waitingSince)));
+			writeControl(SPENT_FILE, JSON.stringify(spentFile(prev, own.spentMicros + own.inflightMicros, own.inflightMicros, generation, waiting, waitingSince, notional)));
 			// The claim of three generations back is read by no rule any more: a turn checks its own generation and the one
 			// before, and a reader judges one SPENT inside one synchronous admit. Best effort; a claim left behind only
 			// takes a name no generation will have again.
@@ -491,7 +506,7 @@ export function createChildWatch({
 				if (entry.state === "starting") settleDeadStarting(name, entry);
 				return true;
 			};
-			const next = fold({ dir, prev, retire, ...(foldFs ? { fs: foldFs } : {}) });
+			const next = fold({ dir, prev, retire, notional, ...(foldFs ? { fs: foldFs } : {}) });
 			if (next.missing) {
 				if (!dirLost) note("missing");
 				dirLost = true;
@@ -581,7 +596,7 @@ export function createChildWatch({
 			if (!closed) {
 				writeStop(meter.state.stopReason ?? TOKEN_BUDGET);
 				foldAndDetect({ final: true });
-				judge();
+				judge({ final: true });
 				closed = true;
 			}
 			return { distinct: proc === null ? null : seen.size, peak: proc === null ? null : peak, unmetered: count };

@@ -2265,7 +2265,8 @@ test("the child route's own files: the preload imports no pi module, the child m
 		'import { basename, dirname, join, sep } from "node:path";',
 		'import { fileURLToPath, pathToFileURL } from "node:url";',
 		'import { isMainThread } from "node:worker_threads";',
-		'import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_ENTRIES, PI_SUBCOMMANDS } from "./child-route.mjs";',
+		// Issue #1098: subscriptionAdapterRoots, which reads only the environment.
+		'import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_ENTRIES, PI_SUBCOMMANDS, subscriptionAdapterRoots } from "./child-route.mjs";',
 	], "child-preload.mjs imports changed: no pi module, and node:module only as a namespace");
 	// The parent's children hook (issue #500 part E) runs in the job runner: no static pi import (it resolves pi's package
 	// root by specifier only to name the entry files), and not the preload, which runs on import.

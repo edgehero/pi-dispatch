@@ -342,7 +342,8 @@ test("run-job hands the meter the children hook on the ledger directory, and the
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	const ledger = src.indexOf("const childLedger = openChildLedger(");
 	const meter = src.indexOf("const meter = createUsageMeter({");
-	const watch = src.indexOf("childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });");
+	// Issue #1098: and the job's notional set, only for a job with subscription entries.
+	const watch = src.indexOf("childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log, notional: subscriptionEntries.length > 0 ? notional : null });");
 	const guard = src.indexOf("const policyGuard = createPolicyGuard(");
 	const install = src.indexOf("await installProcessUsageMeter(");
 	assert.ok(ledger > 0 && meter > ledger && watch > meter && guard > watch && install > guard, "the ledger, the meter, the hook (which sets the empty fold, so the three keys are on every exit line), the guard, the install");
