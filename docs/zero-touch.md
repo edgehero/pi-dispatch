@@ -113,6 +113,9 @@ The fixes log compares occurrences of the same refusal reason or question group 
 and after the change. Untouched refusals and unanswered questions still count. It shows workload exposure and
 incomplete coverage. No subsequent runs means observing, not proof that a fix worked. Reverted instruction fixes
 remain visible as reverted. Viewers see safe change descriptions and counts, without instruction text or actors.
+A fix stays in the log for the history's retention (`PI_LOG_RETENTION_DAYS`, at most 365 days, and 365 when history
+is kept forever), counted from its change; settling it or undoing it does not extend that. Then it leaves the log,
+and the page does not count it as missing (2026-11-25, #1072).
 
 Accounting publication can fail after a successful action. Pending intents and exact-proof settling make that visible
 without repeating the action. Read the returned warning, restore the unavailable source and settle it from the Zero
