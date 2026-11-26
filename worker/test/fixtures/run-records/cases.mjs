@@ -211,6 +211,8 @@ export function caseInput(name) {
 					notionalProviders: ["anthropic"],
 					// Issue #998: where the main model's credential came from, a declared key by its variable's name.
 					mainCredential: { source: "run-secret", variable: "ANTHROPIC_API_KEY" },
+					// Issue #1106: the provider's own message beside a provider error, redacted and bounded (here only so the record holds the key).
+					providerMessage: '403: {"message":"Workspace monthly budget of $50.00 exceeded. Contact your org admin.","code":403}',
 					openshell: { mode: "copy", ruleHosts: ["github.com", "api.anthropic.com"], ruleHostCount: 2, providers: 1, placeholders: 1 },
 					touches: [{ runId: "gh-9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d-r2", at: ms("2026-09-14T14:10:00.000Z"), cause: "steer" }],
 					touchLineageSkipped: "source-unavailable",

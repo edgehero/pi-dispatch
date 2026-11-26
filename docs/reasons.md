@@ -102,10 +102,14 @@ What to do: read the job log for the budget it reached or the refusal, and adjus
 ### provider-auth-refused
 
 The AI provider refused the worker's credentials. Either the key is wrong or revoked, or it may not use this model or
-route.
+route. One kind of refusal is not counted here: OpenRouter's 403 for a used-up workspace budget or a key past its limit,
+told apart by the sentence that begins OpenRouter's message ("Workspace monthly budget of $50.00 exceeded.", "Key limit
+exceeded"), is a used-up quota ([container-infra-exit](#container-infra-exit)). Any other provider's or gateway's
+spending-limit refusal is read as before: one shaped like a refused credential is still counted here. The run
+record's `providerMessage` holds what the provider said, with the job's secrets taken out, so you can tell which it was.
 
-What to do: check the provider key on the worker and what it is allowed to use, then run the job again. See
-[notifications.md](notifications.md).
+What to do: read the record's `providerMessage`, check the provider key on the worker and what it is allowed to use,
+then run the job again. See [notifications.md](notifications.md).
 
 ### provider-stop-refusal
 
@@ -718,13 +722,16 @@ left. The container ran, so its spend is counted and partial work may exist. A r
 that has a checkpoint continues from it instead, and that attempt's record says `recovery-enqueued`.
 
 When the runner read a closed failure from the provider, the record's `providerFailure` names its kind. A used-up
-quota (`quota-exhausted`), such as a ChatGPT subscription past its plan's usage limit, cools the model down, and a
-listed fallback model on another connection runs the retry ([model-failover.md](model-failover.md)). When no attempt
-is left, the issue's comment says the provider refused the job's model because the account's usage limit or quota is
-used up; every other kind posts the general failure comment.
+quota (`quota-exhausted`), such as a ChatGPT subscription past its plan's usage limit or an OpenRouter workspace budget
+or key limit that is reached, cools the model down, a random pool draws among its other models meanwhile, and a listed
+fallback model runs the retry ([model-failover.md](model-failover.md)). When no attempt is left, the issue's comment
+says the provider refused the job's model because the account's usage limit or quota is used up; every other kind posts
+the general failure comment. When the provider answered with an error, the record's `providerMessage` holds what it
+said (at most 500 characters, the job's secrets taken out); the comment never does.
 
-What to do: read the `exit` line in the job log for what the runner met, then run the job again if every attempt was
-used. For a used-up quota, wait for the limit to reset or list a fallback model for the trigger
+What to do: read the record's `providerMessage`, or the `exit` line in the job log, for what the runner met, then run
+the job again if every attempt was used. For a used-up quota, wait for the limit to reset, raise it with the provider
+(for OpenRouter, the workspace budget or the key's limit), or list a fallback model for the trigger
 ([subscription-auth.md](subscription-auth.md)). See [durable-runs.md](durable-runs.md).
 
 ### container-exit-unknown

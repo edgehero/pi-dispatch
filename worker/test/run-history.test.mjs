@@ -2923,3 +2923,71 @@ test("issue #998: mainCredential is rebuilt from closed words, carries a variabl
 	assert.deepEqual(buildRecord({ job, error: Object.assign(new Error("boom"), { mainCredential: { source: "pi-login" } }), ...at }).mainCredential, { source: "pi-login" });
 	for (const result of [{ outcome: "completed" }, { outcome: "completed", mainCredential: { source: "vault" } }]) assert.equal("mainCredential" in buildRecord({ job, result, ...at }), false);
 });
+
+// --- Issue #1106: the provider's own message beside a provider error ---
+
+test("issue #1106: the exit line's message is read beside a refused credential or a provider's error only, and the record keeps it bounded, after mainCredential", async () => {
+	const { parseExitProviderMessage, providerMessageOf, recordedProviderMessage, PROVIDER_MESSAGE_MAX_CHARS } = await import("../src/run-history.mjs");
+	const { makeRedactor, redactCutEnd } = await import("../src/redact-secrets.mjs");
+	const said = '403: {"message":"Workspace monthly budget of $50.00 exceeded.","code":403}';
+	const line = (fields) => `${JSON.stringify({ event: "exit", jobId: "gh-1", message: said, ...fields })}\n`;
+	assert.equal(parseExitProviderMessage(line({ code: 1, reason: "error" })), said);
+	assert.equal(parseExitProviderMessage(line({ code: 2, reason: "provider-auth-refused" })), said);
+	// Any other row keeps no text: a content refusal (issue #950), a config error's message, a mismatched code, none at all.
+	for (const fields of [{ code: 2, reason: "provider-stop-refusal" }, { code: 2, reason: "config" }, { code: 1, reason: "command-error" }, { code: 2, reason: "error" }, { code: 1, reason: "provider-auth-refused" }, { code: 0, reason: "stop" }, { code: 1, reason: "error", message: "" }, { code: 1, reason: "error", message: 7 }]) {
+		assert.equal(parseExitProviderMessage(line(fields)), null, JSON.stringify(fields));
+	}
+	assert.equal(parseExitProviderMessage(`${line({ code: 1, reason: "error" })}${JSON.stringify({ event: "exit", code: 0, reason: "stop" })}\n`), null, "only the decisive line counts");
+
+	// Every secret value the attempt held comes out, in each spelling the redactor knows, before the record's cut. An opaque
+	// value, so no token shape of the redactor's second rule takes it in place of the value itself.
+	const secret = "opaque-provider-credential-0123456789abcdef";
+	const redact = makeRedactor({ values: [secret] });
+	const redactEnd = (text) => redactCutEnd(text, [secret]);
+	const kept = providerMessageOf(`401: {"message":"Invalid key ${secret} for this route"}`, { redact, redactEnd });
+	assert.equal(kept, '401: {"message":"Invalid key [redacted] for this route"}');
+	// Cut to its bound on whole code points with the runner's marker, a long body and an astral character alike.
+	const long = providerMessageOf(`500: ${"\u{1F600}".repeat(600)}`, { redact, redactEnd });
+	assert.ok(Array.from(long).length <= PROVIDER_MESSAGE_MAX_CHARS, `${Array.from(long).length}`);
+	assert.match(long, /^500: \u{1F600}+\.\.\. \[truncated \d+ chars\]$/u);
+	assert.equal(recordedProviderMessage(long), long);
+	// A secret our own cut would split is never left half: the redactor ran on the whole message first (cut first, 15 of
+	// its characters would stay).
+	const late = providerMessageOf(`${"y".repeat(460)}${secret}tail`, { redact, redactEnd });
+	assert.equal(late, `${"y".repeat(460)}[redacted]tail`);
+	// The runner's own cut (inside the container, where no secret is known) may end partway through a value.
+	const cutByRunner = providerMessageOf(`401: bad key ${secret.slice(0, 20)}... [truncated 1300 chars]`, { redact, redactEnd });
+	assert.equal(cutByRunner, "401: bad key [redacted]... [truncated 1300 chars]");
+	assert.equal(providerMessageOf(`401: bad key ${secret.slice(0, 5)}... [truncated 1300 chars]`, { redact, redactEnd }), "401: bad key [redacted]... [truncated 1300 chars]", "at the cut, a few characters are the value's start too");
+	assert.equal(providerMessageOf(`401: bad key ${secret.slice(0, 5)}`, { redact, redactEnd }), `401: bad key ${secret.slice(0, 5)}`, "a message the runner did not cut has no cut end");
+	for (const value of [null, undefined, "", 7]) assert.equal(providerMessageOf(value, { redact }), null);
+	assert.equal(providerMessageOf(said, {}), null, "no redactor, no message");
+
+	// On a record: after mainCredential, before v; absent on a run with none and on a value outside its shape.
+	const job = { id: "gh-1", data: { kind: "github", repo: "acme/web", target: { type: "issue", number: 1 } } };
+	const at = { startedAt: "2026-11-26T10:00:00.000Z", endedAt: "2026-11-26T10:01:00.000Z" };
+	const failed = buildRecord({ job, error: Object.assign(new Error("exit 1"), { reason: "container-infra-exit", providerFailure: { kind: "quota-exhausted" }, mainCredential: { source: "run-secret", variable: "OPENROUTER_API_KEY" }, providerMessage: said }), ...at });
+	assert.equal(failed.providerMessage, said);
+	assert.deepEqual(Object.keys(failed).slice(-3), ["mainCredential", "providerMessage", "v"]);
+	assert.equal(buildRecord({ job, result: { outcome: "policy", reason: "provider-auth-refused", providerMessage: said }, ...at }).providerMessage, said);
+	for (const result of [{ outcome: "completed" }, { outcome: "failed", providerMessage: "" }, { outcome: "failed", providerMessage: "z".repeat(PROVIDER_MESSAGE_MAX_CHARS + 1) }, { outcome: "failed", providerMessage: { text: said } }]) {
+		assert.equal("providerMessage" in buildRecord({ job, result, ...at }), false, JSON.stringify(result).slice(0, 80));
+	}
+});
+
+test("issue #1106: a real sink hands on the provider's message only from the signed decisive line, even when logs are disabled", async () => {
+	const key = "ab".repeat(32);
+	const genuine = { event: "exit", code: 1, reason: "error", message: "402: insufficient credits", providerFailure: { kind: "quota-exhausted" }, toolsStarted: false, replaySafe: true };
+	const body = JSON.stringify(genuine);
+	const signed = `${body.slice(0, -1)},"auth":"${createHmac("sha256", key).update(body).digest("hex")}"}`;
+	const read = async (text, options) => {
+		const sink = makeLogSink({ enabled: false })("j", options);
+		sink.write(Buffer.from(text));
+		return sink.close();
+	};
+	assert.equal((await read(`${signed}\n`, { exitKey: key })).providerMessage, "402: insufficient credits");
+	const forged = JSON.stringify({ ...genuine, message: "a tool's own words" });
+	assert.equal((await read(`${forged}\n`, { exitKey: key })).providerMessage, undefined, "an unsigned line under a key");
+	assert.equal((await read(`${forged}\n`, {})).providerMessage, undefined, "no key, no message: the tail is the job's to write");
+	assert.equal("providerMessage" in (await read(`${JSON.stringify({ event: "exit", code: 0, reason: "stop" })}\n`, {})), false);
+});

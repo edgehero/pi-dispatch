@@ -11,7 +11,7 @@ import { configError } from "./config.mjs";
 import { DEFAULT_EGRESS_PROXY, createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { grantOnAttach, removeGrantsOf } from "./endpoint-grants.mjs";
 import { buildContainerEnvAndSource } from "./env-allowlist.mjs";
-import { authenticExitLines } from "./run-history.mjs";
+import { authenticExitLines, providerMessageOf } from "./run-history.mjs";
 import { extensionsNotHere, leavesOut, leftOutOf, rebuildLoaded } from "./loaded-record.mjs";
 import { withCanaryPath } from "./package-canary.mjs";
 import { parsePackageCanary } from "./package-canary-record.mjs";
@@ -20,7 +20,7 @@ import { resolveJobImage } from "./image-preflight.mjs";
 import { LIVE_FILE_NAME, stageLiveFile } from "./live-transcript.mjs";
 import { steerTargetOf } from "./inbox-relay.mjs";
 import { InfraRetry } from "./processor.mjs";
-import { makeRedactor, secretValuesOf, secretFileRedactionValues, makeOutputRedactor } from "./redact-secrets.mjs";
+import { makeRedactor, secretValuesOf, secretFileRedactionValues, makeOutputRedactor, redactCutEnd } from "./redact-secrets.mjs";
 import { makeSteerAck } from "./steer-ack.mjs";
 import { keyFrame } from "./steer-framing.mjs";
 import { makeStderrTranscript } from "./stderr-transcript.mjs";
@@ -1350,6 +1350,8 @@ export function makeRunContainer({
 				// Issue #985: that refusal's numbers, beside it, already rebuilt by parseExitCostRefusal.
 				let exitCostRefusal = null;
 				let providerFailure = null;
+				// Issue #1106: the exit line's message beside a provider error, raw off the signed line until `why` below.
+				let providerMessage = null;
 				let modelRoles = null;
 				let toolsStarted = null;
 				let replaySafe = null;
@@ -1373,7 +1375,7 @@ export function makeRunContainer({
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ canaryLoad = null, loaded: lineLoaded = null, turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitCostRefusal = null, modelRoles = null, providerFailure = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null, answerDraftDigest = null, questionRefDigest = null } = await sink.close());
+					({ canaryLoad = null, loaded: lineLoaded = null, turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, exitCostRefusal = null, modelRoles = null, providerFailure = null, providerMessage = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null, answerDraftDigest = null, questionRefDigest = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -1386,6 +1388,7 @@ export function makeRunContainer({
 					exitWhy = null;
 					exitCostRefusal = null;
 					providerFailure = null;
+					providerMessage = null;
 					modelRoles = null;
 					toolsStarted = null;
 					replaySafe = null;
@@ -1412,6 +1415,7 @@ export function makeRunContainer({
 					exitWhy = null;
 					exitCostRefusal = null;
 					providerFailure = null;
+					providerMessage = null;
 					modelRoles = null;
 					toolsStarted = null;
 					replaySafe = null;
@@ -1428,7 +1432,10 @@ export function makeRunContainer({
 				if (job.awaitInput && code === 0 && exitReason === "awaiting-input" && exitKey !== null && exitAuthResult === "verified" && /^[a-f0-9]{64}$/.test(questionRefDigest ?? "")) Object.defineProperty(prepared, "questionRefDigest", { value: questionRefDigest, configurable: true });
 				// `exitWhy` only when the line named one, so every other run resolves the object it always did, and its numbers
 				// (`exitCostRefusal`, issue #985) the same.
-				const why = { ...(exitKey !== null && exitAuthResult === "verified" && modelRoles ? { modelRoles } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(exitCostRefusal !== null ? { exitCostRefusal } : {}), ...(exitKey !== null && exitAuthResult === "verified" && providerFailure ? { providerFailure } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof toolsStarted === "boolean" ? { toolsStarted } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof replaySafe === "boolean" ? { replaySafe } : {}) };
+				// Issue #1106: the provider's message only off a verified line, with every secret this attempt held taken out by its
+				// own redactor (`retainedSecrets`, renewals included) and cut to the record's bound, before it leaves this function.
+				const providerSaid = exitKey !== null && exitAuthResult === "verified" ? providerMessageOf(providerMessage, { redact, redactEnd: (text) => redactCutEnd(text, retainedSecrets) }) : null;
+				const why = { ...(exitKey !== null && exitAuthResult === "verified" && modelRoles ? { modelRoles } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(exitCostRefusal !== null ? { exitCostRefusal } : {}), ...(exitKey !== null && exitAuthResult === "verified" && providerFailure ? { providerFailure } : {}), ...(providerSaid !== null ? { providerMessage: providerSaid } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof toolsStarted === "boolean" ? { toolsStarted } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof replaySafe === "boolean" ? { replaySafe } : {}) };
 				// `resources` (issue #596) only when the exit line carried a block, so every other run resolves the object it always did.
 				// `memoryLimit` only beside the OOM report, the one place it is read, for the same reason.
 				const used = { ...(resources !== null && resources !== undefined ? { resources } : {}), ...(exitOomKilled === true ? { exitOomKilled: true, memoryLimit } : {}) };

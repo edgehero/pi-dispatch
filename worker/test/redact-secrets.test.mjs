@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { EGRESS_ENV_KEYS, MIN_SECRET_LENGTH, NON_SECRET_ENV_KEYS, REDACTED, makeRedactor, secretValuesOf } from "../src/redact-secrets.mjs";
+import { EGRESS_ENV_KEYS, MIN_SECRET_LENGTH, NON_SECRET_ENV_KEYS, REDACTED, makeRedactor, redactCutEnd, secretValuesOf } from "../src/redact-secrets.mjs";
 import { egressEnv } from "../src/egress.mjs";
 
 // Issue #643: the live transcript's redaction. Built from this job's secret values and known token shapes; a match is
@@ -191,4 +191,22 @@ test("an Authorization header with a quoted credential after its scheme, or with
 	assert.equal(redact('"authorization": "c4f3d00dc4f3d00d",'), '"authorization": "[redacted]",');
 	assert.equal(redact("Authorization: Bearer abcdefgh12345678"), "Authorization: Bearer [redacted]", "the scheme form is unchanged");
 	assert.equal(redact("authorization is required"), "authorization is required", "prose is not a header");
+});
+
+test("issue #1106: a cut text loses the start of a held value at its end, in each spelling and however short", () => {
+	// A value with a quote, a slash and a plus, so each spelling's start differs from the others'.
+	const value = 'opaque"provider/credential+0123456789';
+	const json = 'opaque\\"provider/credential+0123456789';
+	const url = encodeURIComponent(value);
+	assert.equal(JSON.stringify(value).slice(1, -1), json, "the JSON-escaped spelling, as a provider's JSON body holds it");
+	assert.equal(url.slice(0, 12), "opaque%22pro");
+	for (const [spelling, kept] of [["literal", value.slice(0, 14)], ["JSON", json.slice(0, 14)], ["URL", url.slice(0, 16)], ["URL lower-case", url.slice(0, 16).toLowerCase()]]) {
+		assert.equal(redactCutEnd(`401: bad key ${kept}`, [value]), `401: bad key ${REDACTED}`, spelling);
+	}
+	// At a cut end the floor does not hold: from 1 to 7 characters of a value are still its start.
+	for (const n of [1, 4, 7]) assert.equal(redactCutEnd(`key ${value.slice(0, n)}`, [value]), `key ${REDACTED}`, `${n}`);
+	assert.equal(redactCutEnd("key xyz", [value]), "key xyz", "an end that begins no value is kept");
+	assert.equal(redactCutEnd(`key ${value.slice(1, 9)}`, [value]), `key ${value.slice(1, 9)}`, "the middle of a value is no start of it");
+	assert.equal(redactCutEnd("key o", ["opaque!"]), "key o", "a value under the floor is no secret anywhere");
+	assert.equal(redactCutEnd("key o", []), "key o");
 });

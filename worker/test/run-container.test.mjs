@@ -1206,6 +1206,82 @@ test("exitAuth: a sink that verified nothing (or predates the field) nulls every
 	}
 });
 
+test("issue #1106: the provider's message reaches the result off the signed line only, every secret the attempt held taken out and cut to the record's bound", { skip }, async () => {
+	const { makeLogSink, PROVIDER_MESSAGE_MAX_CHARS } = await import("../src/run-history.mjs");
+	const { createExitWriter } = await import("../../image/runner/src/exit-line.mjs");
+	const providerKey = `sk-or-v1-${"5".repeat(40)}`;
+	const job = { kind: "local", provider: "openrouter", model: "deepseek/deepseek-v4.1-flash-1017", maxTurns: 5 };
+	const fs = { mkdirSync() {}, createWriteStream: () => null };
+	// The runner's own writer signs the line with the minted key, as in the container; the worker's real sink reads it.
+	const run = async (fields, { exitAuth = true } = {}) => {
+		let line = "";
+		createExitWriter({ key: exitAuth ? MINTED : null, jobId: "j1", write: (text) => (line += text), exit() {} }).writeExit(fields);
+		const spawnFn = () => {
+			const child = new EventEmitter();
+			child.stdout = new EventEmitter();
+			child.stderr = new EventEmitter();
+			child.stdin = new EventEmitter();
+			child.stdin.end = () => {};
+			queueMicrotask(() => {
+				child.stdout.emit("data", Buffer.from(line));
+				child.emit("close", fields.code);
+			});
+			return child;
+		};
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: { OPENROUTER_API_KEY: providerKey }, spawnFn, mintExitKey: () => MINTED, onOutput: () => {}, openJobLog: makeLogSink({ logsDir: "/logs", enabled: false, fs }) });
+		return runContainer({ job, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth });
+	};
+	const refused = await run({ code: 2, reason: "provider-auth-refused", message: `401: {"message":"Invalid key ${providerKey}","detail":"${"d".repeat(900)}"}` });
+	assert.equal(refused.exitAuth, "verified");
+	assert.equal(refused.providerMessage.includes(providerKey), false, "the job's own provider key never reaches the record or the log");
+	assert.ok(refused.providerMessage.startsWith('401: {"message":"Invalid key [redacted]","detail":"ddd'), refused.providerMessage.slice(0, 80));
+	assert.ok(refused.providerMessage.length <= PROVIDER_MESSAGE_MAX_CHARS, `${refused.providerMessage.length}`);
+	assert.match(refused.providerMessage, /\.\.\. \[truncated \d+ chars\]$/);
+	const budget = '403: {"message":"Workspace monthly budget of $50.00 exceeded. Contact your org admin.","code":403}';
+	const quota = await run({ code: 1, reason: "error", message: budget, providerFailure: { kind: "quota-exhausted" }, toolsStarted: false, replaySafe: true });
+	assert.equal(quota.providerMessage, budget);
+	assert.deepEqual(quota.providerFailure, { kind: "quota-exhausted" });
+	// No key issued: the tail is the job's own to write, so it says nothing. A completed run has nothing to say.
+	assert.equal("providerMessage" in (await run({ code: 1, reason: "error", message: budget }, { exitAuth: false })), false);
+	assert.equal("providerMessage" in (await run({ code: 0, reason: "stop" })), false);
+});
+
+test("issue #1106: a message the runner cut partway through a held secret's JSON spelling reaches the result without that secret's start", { skip }, async () => {
+	const { makeLogSink } = await import("../src/run-history.mjs");
+	const { createExitWriter } = await import("../../image/runner/src/exit-line.mjs");
+	const { capExitMessage } = await import("../../image/runner/src/outcome.mjs");
+	// A held value with a quote, so a provider's JSON body holds it escaped: the spelling the cut lands in.
+	const providerKey = 'opaque"provider/credential+0123456789';
+	const json = JSON.stringify(providerKey).slice(1, -1);
+	// Control characters cost six each against the runner's 1700, so it keeps 26 characters of that spelling, then its
+	// marker: fewer than 500 code points in all, so the cut end reaches the record whole.
+	const outcome = { code: 1, reason: "error", message: `${"\u0001".repeat(278)}k: ${json}"} and more text after it` };
+	const capped = capExitMessage(outcome);
+	assert.ok(capped.message.endsWith('k: opaque\\"provider/credential... [truncated 36 chars]'), "the premise: the runner cut inside the spelling");
+	assert.ok(Array.from(capped.message).length < 500);
+	let line = "";
+	createExitWriter({ key: MINTED, jobId: "j1", write: (text) => (line += text), exit() {} }).writeExit({ ...capped, toolsStarted: false, replaySafe: true });
+	const spawnFn = () => {
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.stdin = new EventEmitter();
+		child.stdin.end = () => {};
+		queueMicrotask(() => {
+			child.stdout.emit("data", Buffer.from(line));
+			child.emit("close", 1);
+		});
+		return child;
+	};
+	const fs = { mkdirSync() {}, createWriteStream: () => null };
+	const job = { kind: "local", provider: "openrouter", model: "deepseek/deepseek-v4.1-flash-1017", maxTurns: 5 };
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: { OPENROUTER_API_KEY: providerKey }, spawnFn, mintExitKey: () => MINTED, onOutput: () => {}, openJobLog: makeLogSink({ logsDir: "/logs", enabled: false, fs }) });
+	const result = await runContainer({ job, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
+	assert.equal(result.exitAuth, "verified");
+	assert.ok(result.providerMessage.endsWith("k: [redacted]... [truncated 36 chars]"), JSON.stringify(result.providerMessage.slice(-60)));
+	assert.equal(result.providerMessage.includes("opaque"), false, "no start of the held value, in any spelling");
+});
+
 test("exitAuth off (an image that does not declare it): stdin ignored, no -i, no PI_EXIT_AUTH, no key minted, result unchanged", { skip }, async () => {
 	const rec = {};
 	let minted = 0;

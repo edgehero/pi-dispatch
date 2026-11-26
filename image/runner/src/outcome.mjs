@@ -4,6 +4,8 @@
  * The exit code IS the mechanism CONST-RETRY-INFRA-ONLY is implemented by: it is the
  * worker's only channel to tell "the agent ran and said no" from "the container died".
  */
+import { providerSpendLimit } from "./provider-failure.mjs";
+
 export const EXIT_COMPLETED = 0; // agent ran -- INCLUDING concluding "I cannot fix this"
 export const EXIT_INFRA = 1; // retryable: provider 5xx/429, network, our own bug
 export const QUESTION_GROUP_REFUSED = "question-group-refused";
@@ -214,7 +216,10 @@ export function captureTerminal(previous, event) {
 // `parked` (issue #625) is true only when the job was armed with run.awaitInput AND the run ended on that tool's own
 // result (await-input.mjs parkedTerminal). It ranks below every budget stop and a classified rejection, which are the
 // better-named causes, and above everything else: a parked run is completed, and its reason is what the worker reads.
-export function decideExit({ budgetAborted, budgetTurns, meterStop = null, tokenAborted, activityStop = null, terminal, command = null, isRetryable = null, rejected = null, parked = false, approval = false }) {
+// `measured` (issue #1106) is what the provider-failure observer measured for `terminal` (provider-failure.mjs, the
+// observer's `measured`), or null: the credential branch reads its status, so a spending limit is judged on the same
+// evidence as the failover classification.
+export function decideExit({ budgetAborted, budgetTurns, meterStop = null, tokenAborted, activityStop = null, terminal, command = null, isRetryable = null, measured = null, rejected = null, parked = false, approval = false }) {
 	if (budgetAborted) {
 		return { code: EXIT_POLICY, reason: "turn_budget", turns: budgetTurns };
 	}
@@ -247,10 +252,10 @@ export function decideExit({ budgetAborted, budgetTurns, meterStop = null, token
 	// Budget aborts stay FIRST, above: a handler-driven fanout is bounded by both budgets.
 	if (command) {
 		if (command.failed) return { code: EXIT_INFRA, reason: "command-error" };
-		if (terminal) return classifyStopReason(terminal, isRetryable);
+		if (terminal) return classifyStopReason(terminal, isRetryable, measured);
 		return { code: EXIT_COMPLETED, reason: "command-completed" };
 	}
-	return classifyStopReason(terminal, isRetryable);
+	return classifyStopReason(terminal, isRetryable, measured);
 }
 
 /**
@@ -382,11 +387,18 @@ const PROVIDER_AUTH_REFUSED = [
  * runner cannot tell transient from determinate without it, and the false determinate is the costlier
  * error. The residual this buys is named in INT-RUNNER-EXIT-CODE-PROTOCOL: a genuine refusal whose body
  * happens to carry one of pi's retry words (a "500" inside a request id, say) still retries.
+ *
+ * A provider's spending limit is not a refused credential (issue #1106): OpenRouter answers a used-up workspace budget
+ * with a 403 that matches the status shape and that pi's predicate calls permanent, and read as a refusal it told the
+ * operator to check a key that was fine and never cooled the model down. `providerSpendLimit` (provider-failure.mjs),
+ * the function the failover classification asks too, decides it from `measured`, the observer's evidence for this
+ * message, so the stop takes the infrastructure branch and its `quota-exhausted` evidence.
  */
-export function providerAuthRefused(terminal, isRetryable) {
+export function providerAuthRefused(terminal, isRetryable, measured = null) {
 	const errorMessage = terminal?.errorMessage;
 	if (typeof errorMessage !== "string") return false;
 	if (!PROVIDER_AUTH_REFUSED.some((pattern) => pattern.test(errorMessage))) return false;
+	if (providerSpendLimit(terminal, measured)) return false;
 	if (typeof isRetryable !== "function") return false;
 	try {
 		return isRetryable(terminal) === false;
@@ -527,7 +539,7 @@ export function capExitMessage(outcome) {
  * `terminal` is undefined when no assistant message was ever seen (e.g. the agent loop
  * never produced one). That is not success -- we have no evidence the agent ran.
  */
-export function classifyStopReason(terminal, isRetryable = null) {
+export function classifyStopReason(terminal, isRetryable = null, measured = null) {
 	if (!terminal) {
 		return { code: EXIT_INFRA, reason: "no-terminal-message" };
 	}
@@ -559,10 +571,11 @@ export function classifyStopReason(terminal, isRetryable = null) {
 			// worker hands the container the same key each attempt, so retrying pays for a container to
 			// rediscover a determinate refusal (issue #437, CONST-RETRY-INFRA-ONLY). It rides the EXISTING
 			// policy code with its own reason, never a new exit code (INT-RUNNER-EXIT-CODE-PROTOCOL).
-			if (providerAuthRefused(terminal, isRetryable)) {
+			if (providerAuthRefused(terminal, isRetryable, measured)) {
 				return { code: EXIT_POLICY, reason: "provider-auth-refused", message: terminal.errorMessage };
 			}
-			// Provider 5xx/429/network. Retryable -- this is what attempts: 2 is for.
+			// Provider 5xx/429/network, and since issue #1106 a provider's spending limit, whose failover evidence
+			// (`quota-exhausted`) cools the model down. Retryable -- this is what attempts: 2 is for.
 			return { code: EXIT_INFRA, reason: "error", message: terminal.errorMessage };
 
 		case "length":

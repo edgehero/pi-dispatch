@@ -179,6 +179,32 @@ export function makeRedactor({ values = [], extraPatterns = [] } = {}) {
 }
 
 /**
+ * `text` with the start of a secret taken off its end (issue #1106). Text another process cut short, as the runner cuts
+ * its exit line's `message` inside the container where nothing knows the secrets, can end partway through a value,
+ * where `makeRedactor`, which matches whole values, sees only its first characters. The longest end of `text` that
+ * begins a spelling of one of `values` (each of at least MIN_SECRET_LENGTH characters, as everywhere) becomes REDACTED,
+ * however short that end is: the floor keeps a common word from being redacted all through a text, and at a cut end
+ * there is one place to look, where even a few characters are the start of the value. The cost is a last character or
+ * two of an ordinary cut text, when they happen to begin a value. Never throws.
+ */
+export function redactCutEnd(text, values = []) {
+	const source = String(text ?? "");
+	let longest = 0;
+	for (const value of values) {
+		if (typeof value !== "string" || value.length < MIN_SECRET_LENGTH) continue;
+		for (const form of spellingsOf(value)) {
+			for (let n = Math.min(form.length, source.length); n > longest; n -= 1) {
+				if (source.endsWith(form.slice(0, n))) {
+					longest = n;
+					break;
+				}
+			}
+		}
+	}
+	return longest > 0 ? `${source.slice(0, source.length - longest)}${REDACTED}` : source;
+}
+
+/**
  * The container env keys that carry NO secret: everything `buildContainerEnv` (env-allowlist.mjs) writes from a
  * structural input, so a path, a flag, a model name or a count is never redacted out of a transcript.
  *

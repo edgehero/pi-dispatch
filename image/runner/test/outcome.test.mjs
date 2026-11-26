@@ -705,7 +705,7 @@ test("run-job.mjs caps every exit line and hands decideExit the pinned retry pre
 	assert.match(exitLines[0], /\.\.\.capExitMessage\(outcome\)/, "the decided outcome's exit line must be capped");
 	assert.match(src, /const capped = capExitMessage\(outcome\);\s*exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\), costRefusalNumbers\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\), \.\.\.activityExitFields\(\) \}\)/, "the throw path's exit line must be capped");
 	assert.match(src, /loadRetryPredicate\(\{ module: usageMeter\.ok \? usageMeter\.module : null, candidates: resolvePiAiCompat\(\) \}\)/);
-	assert.match(src, /decideExit\(\{[\s\S]*?\n\t\tisRetryable,\n\t\trejected,\n[\s\S]*?\n\t\tparked: awaitInput !== null && parkedTerminal\(terminal\),\n\t\}\);/, "decideExit must receive isRetryable, the classified rejection, and whether the run parked (issue #625)");
+	assert.match(src, /decideExit\(\{[\s\S]*?\n\t\tisRetryable,\n[^\n]*\n\t\tmeasured: failureObserver\.measured\(terminal\),\n\t\trejected,\n[\s\S]*?\n\t\tparked: awaitInput !== null && parkedTerminal\(terminal\),\n\t\}\);/, "decideExit must receive isRetryable, the observer's evidence for the terminal message (issue #1106), the classified rejection, and whether the run parked (issue #625)");
 });
 
 test("run-job.mjs classifies a prompt() rejection only through classifyPromptRejection, and rethrows the rest (issue #509)", () => {

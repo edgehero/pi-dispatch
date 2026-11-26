@@ -8,8 +8,7 @@ import { modelSelectionRedis } from "./helpers/model-selection-redis.mjs";
 
 const NOW = 1_800_000_000_000;
 const pool = ["openai/a", "anthropic/b"];
-function fixture({ container = async () => ({ code: 0, aborted: false }), runtime, data = {}, deps = {}, options = {} } = {}) {
-	const redis = modelSelectionRedis();
+function fixture({ container = async () => ({ code: 0, aborted: false }), runtime, data = {}, deps = {}, options = {}, redis = modelSelectionRedis(), jobId = "random-j" } = {}) {
 	const seen = [], records = [];
 	const processor = makeProcessor({
 		redis, cancelJob: () => {}, stopContainer: () => {}, now: () => NOW,
@@ -18,7 +17,7 @@ function fixture({ container = async () => ({ code: 0, aborted: false }), runtim
 		deps: { imagePreflight: async () => ({ ok: true, capabilities: ["exitAuth", "modelPolicy", "modelFailover"] }), now: new Date(NOW), checkFailoverCandidate: async () => null, randomInt: (max) => max - 1, mintToken: async () => (seen.push("mint"), "token"), isDefaultBranchProtected: async () => true, prepareWorkspace: async () => (seen.push("clone"), { workspaceDir: "/w", jobDir: "/j" }), cleanup: async () => {}, comment: async () => {}, log: () => {}, runContainer: async (ctx) => { seen.push(ctx.job); return container(ctx); }, ...(runtime ? { subscriptionRuntime: runtime } : {}), ...deps },
 		...options,
 	});
-	const queued = { queueName: "github", id: "random-j", timestamp: NOW, attemptsMade: 0, name: "github", data: { kind: "github", repo: "org/repo", models: pool, modelSelection: { strategy: "random", candidates: pool }, modelSelectionGeneration: "12345678-1234-4234-8234-123456789abc", maxCostMicros: 100, ...data }, moveToDelayed: async (until) => seen.push({ delayed: until }) };
+	const queued = { queueName: "github", id: jobId, timestamp: NOW, attemptsMade: 0, name: "github", data: { kind: "github", repo: "org/repo", models: pool, modelSelection: { strategy: "random", candidates: pool }, modelSelectionGeneration: "12345678-1234-4234-8234-123456789abc", maxCostMicros: 100, ...data }, moveToDelayed: async (until) => seen.push({ delayed: until }) };
 	return { redis, queued, seen, records, id: identityForModelSelection(queued), run: () => processor(queued, "lock", new AbortController().signal) };
 }
 
@@ -252,4 +251,80 @@ test("a pre-start quota reselection in a mixed pool stays in the subscription cl
 	assert.equal(f.records.at(-1).result.modelWhy, "random-subscription-limit");
 	assert.equal((await readModelSelection(f.redis, f.id)).billing, "subscription");
 	assert.equal(asked.includes(three[1]), false, "the API-key candidate is never asked about");
+});
+
+test("issue #1106: the runner's exit for OpenRouter's budget 403 cools the drawn model, the next random draw skips it, its retry waits, and the record keeps the provider's message", async () => {
+	const { capExitMessage, classifyStopReason } = await import("../../image/runner/src/outcome.mjs");
+	const { classifyProviderFailure } = await import("../../image/runner/src/provider-failure.mjs");
+	const { createExitWriter } = await import("../../image/runner/src/exit-line.mjs");
+	const { buildRecord, makeLogSink, providerMessageOf } = await import("../src/run-history.mjs");
+	const { makeRedactor } = await import("../src/redact-secrets.mjs");
+	const { MODEL_COOLDOWN_MAX_MS, MODEL_RECHECK_MS, readModelCooldown } = await import("../src/model-failover.mjs");
+	// The exit line the runner writes for the measured answer (pi's message, the observer's 403), signed and read back by
+	// the worker's own sink, then redacted and bounded as runContainer does: what the processor gets from the container.
+	const budget = '403: {"message":"Workspace monthly budget of $50.00 exceeded. Contact your org admin. $50.07 of $50.00 used; resets 2026-12-01T00:00:00.000Z.","code":403,"metadata":{"limit_source":"openrouter_workspace_budget","scope":"workspace","limit_usd":50}}';
+	const terminal = { role: "assistant", stopReason: "error", errorMessage: budget };
+	const measured = { status: 403 };
+	const outcome = classifyStopReason(terminal, () => false, measured);
+	const providerFailure = classifyProviderFailure(terminal, measured);
+	const key = "ab".repeat(32);
+	let line = "";
+	createExitWriter({ key, jobId: "random-j", write: (text) => (line += text), exit() {} }).writeExit({ ...capExitMessage(outcome), turns: 1, toolsStarted: false, replaySafe: true, ...(providerFailure ? { providerFailure } : {}) });
+	const sink = makeLogSink({ enabled: false })("random-j", { exitKey: key });
+	sink.write(Buffer.from(line));
+	const closed = await sink.close();
+	const exit = { code: outcome.code, aborted: false, ...closed, providerMessage: providerMessageOf(closed.providerMessage, { redact: makeRedactor({ values: ["sk-or-v1-test-not-a-key"] }) }) };
+
+	const openrouter = "openrouter/deepseek/deepseek-v4.1-flash-1017";
+	const drawn = [openrouter, "anthropic/b"];
+	const logs = [];
+	const f = fixture({ container: async () => exit, data: { models: drawn, modelSelection: { strategy: "random", candidates: drawn } }, deps: { log: (event, fields) => logs.push({ event, fields }) } });
+	await assert.rejects(f.run, (error) => error.name === "InfraRetry" && error.reason === "container-infra-exit", "exit 1: the retryable infrastructure exit, never the credential refusal");
+	assert.equal(f.seen.filter((value) => value?.model).length, 1);
+	assert.equal(f.seen.find((value) => value?.model).provider, "openrouter", "the draw landed on the OpenRouter model");
+	// The existing quota road: a six-hour cooldown on the exact model, shared by every worker.
+	assert.deepEqual(await readModelCooldown(f.redis, openrouter, { now: () => NOW }), { ref: openrouter, kind: "quota-exhausted", until: NOW + MODEL_COOLDOWN_MAX_MS });
+	// The record: container-infra-exit with the signed evidence and the provider's own words, which the log line carries too.
+	const record = buildRecord(f.records.at(-1));
+	assert.equal(record.reason, "container-infra-exit");
+	assert.deepEqual(record.providerFailure, { kind: "quota-exhausted" });
+	assert.equal(record.providerMessage, budget);
+	assert.deepEqual(logs.filter((row) => row.event === "provider_error").map((row) => row.fields), [{ jobId: "random-j", provider: "openrouter", model: "deepseek/deepseek-v4.1-flash-1017", reason: "error", message: budget }]);
+
+	// Another job's random draw over the same pool passes the cooling model over and runs the other candidate.
+	const next = fixture({ redis: f.redis, jobId: "random-k", data: { models: drawn, modelSelection: { strategy: "random", candidates: drawn } } });
+	assert.equal((await next.run()).model, "b");
+	assert.deepEqual(next.seen.filter((value) => value?.model).map((value) => value.models), [["anthropic/b"]]);
+	assert.equal("providerMessage" in buildRecord(next.records.at(-1)), false, "a run with no provider error keeps no message");
+	// The failed job keeps its API-key draw (issue #968): its retry waits, free, rechecking each minute, while the model cools.
+	f.queued.attemptsMade = 1;
+	await assert.rejects(f.run, { name: "DelayedError" });
+	assert.deepEqual(f.seen.at(-1), { delayed: NOW + MODEL_RECHECK_MS });
+	assert.equal(f.seen.filter((value) => value?.model).length, 1, "no second container while it cools");
+
+	// A refused credential stays the policy stop, not retried, and its record and log keep the provider's words too.
+	const refusal = "401: Incorrect API key provided.";
+	const refusedLogs = [];
+	const refused = fixture({ jobId: "random-r", container: async () => ({ code: 2, aborted: false, exitAuth: "verified", exitLineCode: 2, exitReason: "provider-auth-refused", providerMessage: refusal }), data: { models: drawn, modelSelection: { strategy: "random", candidates: drawn } }, deps: { log: (event, fields) => refusedLogs.push({ event, fields }) } });
+	const policy = await refused.run();
+	assert.deepEqual([policy.outcome, policy.reason], ["policy", "provider-auth-refused"]);
+	assert.equal(buildRecord(refused.records.at(-1)).providerMessage, refusal);
+	assert.deepEqual(refusedLogs.filter((row) => row.event === "provider_error").map((row) => row.fields.reason), ["provider-auth-refused"]);
+});
+
+test("issue #1106: the provider's message is kept only off a verified line that names the container's own exit and was not stopped by the worker", async () => {
+	const { buildRecord } = await import("../src/run-history.mjs");
+	const said = "403: Workspace monthly budget exceeded.";
+	const verified = { code: 1, aborted: false, exitAuth: "verified", exitLineCode: 1, providerMessage: said };
+	for (const [patch, why] of [[{ exitLineCode: 2 }, "a line naming another code than the container's"], [{ exitLineCode: null }, "no decisive line"], [{ code: 137, exitLineCode: 137, aborted: true }, "a container the worker stopped"], [{ exitAuth: "unverified" }, "an unverified line"]]) {
+		const logs = [];
+		const f = fixture({ container: async () => ({ ...verified, ...patch }), deps: { log: (event, fields) => logs.push({ event, fields }) } });
+		try { await f.run(); } catch {}
+		assert.equal("providerMessage" in buildRecord(f.records.at(-1)), false, why);
+		assert.equal(logs.some((row) => row.event === "provider_error"), false, why);
+	}
+	// The control: the same answer with a matching, verified, unstopped line keeps it.
+	const f = fixture({ container: async () => verified });
+	await assert.rejects(f.run, { name: "InfraRetry" });
+	assert.equal(buildRecord(f.records.at(-1)).providerMessage, said);
 });

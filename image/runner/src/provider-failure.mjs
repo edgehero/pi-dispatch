@@ -190,6 +190,65 @@ export function resetFromHeaders(headers, now, maxResetMs = MAX_RESET_MS) {
 	return candidates.length ? Math.min(Math.ceil(Math.max(...candidates)), now + maxResetMs) : null;
 }
 
+// Explicit parameter and credential wordings: a message holding one is never quota evidence, whatever else it says.
+const PARAMETER_OR_AUTH_WORDING = /invalid_api_key|authentication_error|unauthorized|invalid[_ ]parameter|unsupported[_ ]parameter/;
+
+/**
+ * The wordings of a provider's spending-limit refusal under a 403, each the start of the provider's own error message
+ * and close to what was measured (issue #1106). OpenRouter answers both before any work is done, so a refused call costs
+ * nothing:
+ * - its workspace budget, measured 2026-11-26 on both of its apis: through pi-ai's openai-completions as
+ *   `403: {"message":"Workspace monthly budget of $50.00 exceeded. Contact your org admin. ...","code":403,...}`, and
+ *   through anthropic-messages as `403 {"type":"error","error":{"type":"permission_error","message":"Workspace monthly
+ *   budget of $50.00 exceeded. ..."},...}`; the interval word and the amount are values, the rest is the measured
+ *   sentence;
+ * - its per-key credit limit, "Key limit exceeded".
+ * Any other spending-limit wording under a 403 stays a credential refusal, a named residual of
+ * INT-RUNNER-EXIT-CODE-PROTOCOL.
+ */
+const SPEND_LIMIT_403_WORDING = [/^Workspace [a-z]+ budget of \$\d[\d,]*(?:\.\d+)? exceeded\./, /^Key limit exceeded\b/];
+
+/**
+ * How pi's message begins for a 403 that carried a JSON body, the two forms measured: pi-ai's unprefixed
+ * `<status>: <body>` (utils/error-body.js `formatProviderError`, openai-completions) and the Anthropic SDK's
+ * `<status> <body>` (anthropic-messages, which pi-ai passes on as it is). The credential rule's shape reads both.
+ */
+const STATUS_403_WITH_BODY = /^403:? (?=\{)/;
+
+/** An own field of a plain object, else undefined: a parsed body is the provider's, so nothing inherited is read. */
+const ownField = (value, key) => (value !== null && typeof value === "object" && !Array.isArray(value) && Object.hasOwn(value, key) ? value[key] : undefined);
+
+/**
+ * True when a terminal error is a provider's refusal for a spending limit that is reached (issue #1106): a used-up
+ * quota, not a refused credential, so the runner's outcome (outcome.mjs `providerAuthRefused`) and its failover evidence
+ * (`classifyProviderFailure` below) both ask this one function and cannot disagree. Never throws.
+ *
+ * The status is the one the observer measured when there is one (`measured.status`): a 402 (Payment Required) is a
+ * spending limit whatever its body says, and any other status but 403 is not one. A 403 is one only when pi's message
+ * is the status and a JSON body (`STATUS_403_WITH_BODY`) whose top-level `message`, or whose `error.message`, begins
+ * with a measured wording above. The wording decides, never an error type: Anthropic's own `permission_error` and
+ * OpenRouter's budget refusal share the type, and only the second is a spending limit. The body is PARSED, never
+ * byte-matched, so key order cannot matter and a wording quoted inside another field does not count. With no measured
+ * status (an api the observer does not wrap), the `403` that begins pi's message is the status, as the credential rule
+ * already reads it. An explicit credential or parameter wording anywhere in the message wins: such a message is never a
+ * spending limit.
+ */
+export function providerSpendLimit(terminal, measured = null) {
+	const text = typeof terminal?.errorMessage === "string" ? terminal.errorMessage : "";
+	if (measured?.connection === true || PARAMETER_OR_AUTH_WORDING.test(text.toLowerCase())) return false;
+	const status = Number.isInteger(measured?.status) ? measured.status : null;
+	if (status === 402) return true;
+	const head = STATUS_403_WITH_BODY.exec(text);
+	if ((status !== null && status !== 403) || head === null) return false;
+	let body;
+	try {
+		body = JSON.parse(text.slice(head[0].length));
+	} catch {
+		return false;
+	}
+	return [ownField(body, "message"), ownField(ownField(body, "error"), "message")].some((message) => typeof message === "string" && SPEND_LIMIT_403_WORDING.some((wording) => wording.test(message)));
+}
+
 export function classifyProviderFailure(terminal, measured = null) {
 	if (terminal?.stopReason !== "error" || (terminal.role !== undefined && terminal.role !== "assistant")) return null;
 	// A request on an api whose fetch the observer wraps that got no HTTP answer at all (the connection, the egress
@@ -201,7 +260,9 @@ export function classifyProviderFailure(terminal, measured = null) {
 	const diagnostic = Array.isArray(terminal.diagnostics) ? terminal.diagnostics.findLast((d) => d?.type === "bedrock_response_failure" && Number.isInteger(d.details?.status) && d.details.status >= 100 && d.details.status <= 599) : null;
 	const status = measured?.status ?? diagnostic?.details.status;
 	// Explicit parameter/auth errors win over any incidental quota wording in a request's diagnostics.
-	if (/invalid_api_key|authentication_error|unauthorized|invalid[_ ]parameter|unsupported[_ ]parameter/.test(text.toLowerCase())) return null;
+	if (PARAMETER_OR_AUTH_WORDING.test(text.toLowerCase())) return null;
+	// Issue #1106: a provider's spending limit is a used-up quota, under a 403 too, so it is read before the 401/403 rule.
+	if (providerSpendLimit(terminal, measured)) return { kind: "quota-exhausted", ...(Number.isSafeInteger(measured?.resetAt) ? { resetAt: measured.resetAt } : {}) };
 	if (status === 401 || status === 403) return null;
 	if (measured?.subscriptionCode && SUBSCRIPTION_CODES.has(measured.subscriptionCode)) return { kind: "quota-exhausted", subscriptionCode: measured.subscriptionCode, subscriptionProvider: measured.subscriptionProvider, ...(Number.isSafeInteger(measured.resetAt) ? { resetAt: measured.resetAt } : {}) };
 	let kind;
@@ -301,6 +362,9 @@ export function installProviderFailureObserver({ ModelRuntime, now = Date.now, f
 		get rootCalls() { return rootCalls; },
 		get nonRootCalls() { return nonRootCalls; },
 		failure: (terminal) => classifyProviderFailure(terminal, messages.get(terminal)),
+		// What this observer measured for one terminal message (its status, a reset, a closed code), or null: decideExit
+		// hands it to the credential rule, so a spending limit is judged on the same evidence as `failure` (issue #1106).
+		measured: (terminal) => messages.get(terminal) ?? null,
 		uninstall() {
 			for (const [method, original] of originals) if (ModelRuntime.prototype[method] === wrappers.get(method)) ModelRuntime.prototype[method] = original;
 		},

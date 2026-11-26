@@ -334,6 +334,54 @@ export function parseExitProviderFailure(text) {
 	return parsed?.code === 1 ? providerFailureOf(parsed.providerFailure) : null;
 }
 
+/**
+ * The most characters a record's `providerMessage` holds (issue #1106, INT-RUN-HISTORY-FILE-CONTRACT): enough for a
+ * provider's own sentence and the start of its body, and a small part of the exit line's message (1700 at most, image
+ * outcome.mjs `EXIT_MESSAGE_MAX_CHARS`), so a long HTML error page does not swell every copy of the record.
+ */
+export const PROVIDER_MESSAGE_MAX_CHARS = 500;
+
+/**
+ * The exit line's `message` for a provider error the runner reported (issue #1106), or null: only beside `code: 2` and
+ * `reason: "provider-auth-refused"` (a refused credential) or `code: 1` and `reason: "error"` (a provider's error after
+ * pi's own retries, a used-up quota or budget among them), the two rows that copy pi's terminal error message onto the
+ * line. Read off the decisive line, and by the sink only off a signed one, so a job's own printout cannot fill it. Never
+ * `provider-stop-refusal` (issue #950), whose line carries no message, or any other row. Raw: `providerMessageOf`
+ * removes the job's secrets and bounds it before it goes anywhere. NEVER throws.
+ */
+export function parseExitProviderMessage(text) {
+	const parsed = decisiveExitLine(text);
+	const provider = (parsed?.code === 2 && parsed.reason === "provider-auth-refused") || (parsed?.code === 1 && parsed.reason === "error");
+	return provider && typeof parsed.message === "string" && parsed.message !== "" ? parsed.message : null;
+}
+
+// The runner's own cut of a long message (image outcome.mjs `capExitMessage`, exit-line.mjs): kept text, then this marker.
+const RUNNER_CUT_MARKER = /\.\.\. \[truncated \d+ chars\]$/;
+
+/**
+ * A provider error's message as the record and the worker log keep it (issue #1106), or null for none: every secret
+ * value this attempt held taken out by the job's own redactor (`redact`, run-container.mjs over its retained secrets),
+ * then cut to PROVIDER_MESSAGE_MAX_CHARS on whole code points with the runner's marker. The redactor runs on the whole
+ * message before the cut, so a value is never split by this cut. The runner may already have cut it, inside the
+ * container, where nothing knows the secrets: what it kept can end partway through a value, so that end goes through
+ * `redactEnd` (redact-secrets.mjs `redactCutEnd`) first. Pure; never throws for a string.
+ */
+export function providerMessageOf(message, { redact, redactEnd = (text) => text } = {}) {
+	if (typeof message !== "string" || message === "" || typeof redact !== "function") return null;
+	const cut = RUNNER_CUT_MARKER.exec(message);
+	const safe = String(redact(cut ? `${redactEnd(message.slice(0, cut.index))}${cut[0]}` : message));
+	const chars = Array.from(safe);
+	if (chars.length <= PROVIDER_MESSAGE_MAX_CHARS) return safe === "" ? null : safe;
+	// The marker for the whole length is at least as long as the one finally written, so the result stays in bound.
+	const keep = PROVIDER_MESSAGE_MAX_CHARS - `... [truncated ${chars.length} chars]`.length;
+	return `${chars.slice(0, keep).join("")}... [truncated ${chars.length - keep} chars]`;
+}
+
+/** A record's `providerMessage` kept: a non-empty string of at most PROVIDER_MESSAGE_MAX_CHARS characters, else null. */
+export function recordedProviderMessage(value) {
+	return typeof value === "string" && value !== "" && Array.from(value).length <= PROVIDER_MESSAGE_MAX_CHARS ? value : null;
+}
+
 export function parseExitReplaySafe(text) {
 	const parsed = decisiveExitLine(text);
 	return typeof parsed?.replaySafe === "boolean" ? parsed.replaySafe : null;
@@ -1518,6 +1566,13 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// `notionalProviders`: present only for a run whose container was built, so a refusal before it and every older
 		// record are byte-identical. Additive, so `v` stays.
 		...(recordedMainCredential(source.mainCredential) !== null ? { mainCredential: recordedMainCredential(source.mainCredential) } : {}),
+		// The provider's own message beside a provider error (issue #1106, INT-RUN-HISTORY-FILE-CONTRACT): what the signed exit
+		// line said for a refused credential or a provider's error, a used-up quota or budget among them, every secret value
+		// the attempt held taken out and cut to PROVIDER_MESSAGE_MAX_CHARS (`providerMessageOf`, run-container.mjs), so the
+		// record says why the provider refused without the transcript. The one field of provider text, a named residual of
+		// the PII-free rule: never in a comment. CONDITIONAL, after `mainCredential`: present only for such an attempt, so
+		// every other record is byte-identical. Additive, so `v` stays.
+		...(recordedProviderMessage(source.providerMessage) !== null ? { providerMessage: recordedProviderMessage(source.providerMessage) } : {}),
 		// The record's version (issue #761, `RUN_RECORD_VERSION`), the LAST key on every record and after every conditional
 		// key, so it stays last whatever a record carries and every earlier position is untouched. Unconditional: a reader
 		// asks one key, and a missing one reads as 1.
@@ -1858,6 +1913,9 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			const exitCostRefusal = parseExitCostRefusal(exitText);
 			const modelRoles = keyed && exitAuth === "verified" ? parseExitModelRoles(exitText) : null;
 			const providerFailure = keyed && exitAuth === "verified" ? parseExitProviderFailure(exitText) : null;
+			// Issue #1106: the provider's own words beside a provider error, off a signed line only (raw here; runContainer
+			// redacts and bounds it before it reaches the record or the log).
+			const providerMessage = keyed && exitAuth === "verified" ? parseExitProviderMessage(exitText) : null;
 			const toolsStarted = keyed && exitAuth === "verified" ? parseExitToolsStarted(exitText) : null;
 			const replaySafe = keyed && exitAuth === "verified" ? parseExitReplaySafe(exitText) : null;
 			const turns = parseExitTurns(exitText);
@@ -1903,7 +1961,8 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// (issue #507) only when the line named one, for the same reason, and `exitCostRefusal` (issue #985) the same.
 			// `resources` (issue #596) only when the line carried a block, and `exitOomKilled` only when true, for the same reason.
 			// `recovery` (issue #645) only when the line carried one, for the same reason, and `steer` (issue #646) the same.
-			return { ...(canaryLoad !== null ? { canaryLoad } : {}), ...(loaded !== null ? { loaded } : {}), turns, tokens, session, usage, context, exitReason, exitLineCode, ...(answerDraftDigest ? { answerDraftDigest } : {}), ...(questionRefDigest ? { questionRefDigest } : {}), ...(modelRoles ? { modelRoles } : {}), ...(providerFailure ? { providerFailure } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(exitCostRefusal !== null ? { exitCostRefusal } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
+			// `providerMessage` (issue #1106) only beside a provider error on a signed line, for the same reason.
+			return { ...(canaryLoad !== null ? { canaryLoad } : {}), ...(loaded !== null ? { loaded } : {}), turns, tokens, session, usage, context, exitReason, exitLineCode, ...(answerDraftDigest ? { answerDraftDigest } : {}), ...(questionRefDigest ? { questionRefDigest } : {}), ...(modelRoles ? { modelRoles } : {}), ...(providerFailure ? { providerFailure } : {}), ...(providerMessage !== null ? { providerMessage } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(exitCostRefusal !== null ? { exitCostRefusal } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };
