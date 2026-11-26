@@ -379,3 +379,187 @@ test("random scheduler generation persists through the pinned BullMQ template an
 		await teardown({ queue, redis });
 	}
 });
+
+// 8. ISSUE #1104: A CRON RUN WHOSE `docker run` NEVER RETURNS. A real Worker, the real processor, and the local venue
+//    through the real registry, as start.mjs wires it (its runContainer, stop and gone-check, the host budget's sweep
+//    asking the registry), with a FAKE container CLI under a test directory that never answers: its `run` writes a
+//    container id into its cidfile, prints nothing and ignores SIGTERM and SIGINT; `stop`, `ps` and `rm` print nothing
+//    and wait (each lives 30 s at most), until the test makes the runtime answer again, when it lists the container
+//    `running` (started late). A POSIX `sh` script, so it starts as fast on a small Linux runner as anywhere. The
+//    schedule is a real one's shape (retention only, no attempts). The job's ceiling (one 1 s minute) stops it, its
+//    activity watch armed: the attempt kills its own client at its bound, records `container-never-started` and fails
+//    (a scheduled tick has no attempts), gives its folder slot back, keeps its container as a killed client's orphan,
+//    the next tick waits `workspace-orphan`, and the sweep removes the container once the runtime answers. No process
+//    of the fake is left.
+test("issue #1104: a cron run whose docker run never returns ends at its limit as container-never-started, frees its folder slot, and its container is removed through the registry once the runtime answers", { skip }, async () => {
+	const { Queue, Worker, parseConnection, makeRedisClient, makeProcessor } = await load();
+	const { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+	const { join } = await import("node:path");
+	const { tempDir } = await import("./helpers/temp-dir.mjs");
+	const { makeRunContainer } = await import("../src/run-container.mjs");
+	const { makeContainerGone, makeLocalBackend, makeStopContainer, reaperExec } = await import("../src/backend-local.mjs");
+	const { makeBackendRegistry } = await import("../src/backend-registry.mjs");
+	const { hostBudgetSettings, makeHostBudget } = await import("../src/host-budget.mjs");
+	const { makeInFlight } = await import("../src/scoped-limits.mjs");
+	const { readLocalWorkspaceIdentity } = await import("../src/local-workspace.mjs");
+	const { DEFER_KEY } = await import("../src/defer-reasons.mjs");
+
+	const dir = tempDir("stuck-runtime-");
+	const folder = join(dir, "folder");
+	mkdirSync(folder);
+	const calls = join(dir, "calls.log");
+	const answers = join(dir, "answers");
+	const cli = join(dir, "fake-cli");
+	writeFileSync(
+		cli,
+		[
+			"#!/bin/sh",
+			`echo "$1 $$" >> '${calls}'`,
+			"case \"$1\" in",
+			"run)",
+			"\tfor a in \"$@\"; do",
+			`\t\tcase "$a" in --cidfile=*) printf '%s' '${"c".repeat(64)}' > "\${a#--cidfile=}" ;; esac`,
+			"\tdone",
+			"\ttrap '' TERM INT",
+			"\texec sleep 30 ;;",
+			"ps)",
+			`\tif [ -e '${answers}' ]; then`,
+			"\t\tprev=''",
+			"\t\tfor a in \"$@\"; do",
+			"\t\t\tif [ \"$prev\" = --filter ]; then printf '%s\\trunning\\n' \"${a#name=}\"; fi",
+			"\t\t\tprev=\"$a\"",
+			"\t\tdone",
+			"\t\texit 0",
+			"\tfi ;;",
+			"rm)",
+			`\tif [ -e '${answers}' ]; then exit 0; fi ;;`,
+			"esac",
+			"exec sleep 30",
+			"",
+		].join("\n"),
+	);
+	chmodSync(cli, 0o755);
+	const pidsOf = (verb) =>
+		existsSync(calls)
+			? readFileSync(calls, "utf8")
+					.split("\n")
+					.filter((l) => l.startsWith(`${verb} `))
+					.map((l) => Number(l.split(" ")[1]))
+			: [];
+	const alive = (pid) => {
+		try {
+			process.kill(pid, 0);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+
+	const name = uniqueQueueName();
+	const schedulerId = `t1104-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+	const conn = parseConnection(url);
+	const redis = makeRedisClient(url);
+	const queue = new Queue(name, { connection: conn });
+	let worker;
+	const fixedNow = new Date(Date.UTC(2099, 0, 3, 12, 0, 0));
+	const budgetKey = "budget:2099-01-03";
+	const logs = [];
+	const records = [];
+	const log = (event, fields) => logs.push({ event, ...fields });
+	const inFlight = makeInFlight();
+	const noop = async () => ({});
+	// The local venue as start.mjs builds it, on the fake CLI, behind the registry every caller below asks.
+	const local = makeLocalBackend({
+		runContainer: makeRunContainer({ image: "pi-job:x", hostEnv: { ANTHROPIC_API_KEY: "sk-test-1104" }, bin: cli, onOutput: () => {}, log, clientKillMs: 2_000, teardownStepMs: 1_000 }),
+		imagePreflight: noop,
+		egressPreflight: noop,
+		stopContainer: makeStopContainer({ timeoutMs: 2_000, bin: cli }),
+		reap: async () => ({ reaped: true }),
+		containerGone: makeContainerGone({ exec: reaperExec({ timeoutMs: 2_000 }), binOf: () => cli }),
+	});
+	const registry = makeBackendRegistry({ bundles: [local], defaultName: "local" });
+	const hostBudget = makeHostBudget({ settings: hostBudgetSettings({ PI_HOST_MEMORY_BUDGET: "16g", PI_HOST_CPU_BUDGET: "4" }, { memMiB: 512, cpuCenti: 50 }), jobDefault: { memMiB: 512, cpuCenti: 50 }, countLimit: () => 3, containerGone: registry.containerGone, log });
+	await hostBudget.ready;
+	try {
+		await redis.del(budgetKey).catch(() => {});
+		await queue.obliterate({ force: true }).catch(() => {});
+		const processor = makeProcessor({
+			cancelJob: (id, reason) => worker.cancelJob(id, reason),
+			stopContainer: registry.stopContainer,
+			containerName: registry.containerName,
+			redis,
+			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 100, concurrency: 3 }),
+			hostBudget,
+			inFlight,
+			abortGraceMs: 10_000,
+			jobLimits: () => ({ idleMinutes: 15, stallMinutes: 0, maxMinutes: 1 }),
+			minuteMs: 1_000,
+			recordRun: (r) => records.push(r),
+			deps: {
+				...localDeps({ runContainer: registry.runContainer, now: fixedNow }),
+				log,
+				prepareWorkspace: async () => {
+					const jobDir = join(dir, `job-${Math.random().toString(36).slice(2, 10)}`);
+					mkdirSync(jobDir, { recursive: true });
+					return { workspace: folder, jobDir };
+				},
+				cleanup: async (prepared) => rmSync(prepared.jobDir, { recursive: true, force: true }),
+				imagePreflight: async () => ({ ok: true, image: "pi-job:x", capabilities: ["idleWatch"] }),
+				localWorkspaceIdentity: readLocalWorkspaceIdentity,
+				localContainerGone: registry.containerGone,
+			},
+		});
+		worker = new Worker(name, processor, { connection: { ...conn, maxRetriesPerRequest: null }, concurrency: 2 });
+		worker.on("error", () => {});
+		const data = { kind: "local", folder, flow: "tidy", task: "nightly", provider: "anthropic", model: "m", maxTurns: 7, trigger: { id: schedulerId, pattern: "every 4 s" } };
+		await queue.upsertJobScheduler(schedulerId, { every: 4_000 }, { name: "local", data, opts: RETENTION });
+
+		// The ceiling stops it; the stop never answers; the client is killed; the attempt is recorded as never started.
+		const first = await waitFor(() => records.find((r) => r.error?.reason === "container-never-started"), { timeoutMs: 30_000 });
+		assert.match(first.job.id, new RegExp(`^repeat:${schedulerId}:`));
+		assert.ok(logs.some((l) => l.event === "run_client_killed"), "the attempt killed its own client");
+		assert.ok(!logs.some((l) => l.event === "stop_did_not_take"), "inside the processor's grace");
+		assert.equal(first.limits?.channel, "file", "the watch was armed, and was disarmed with the child: no backstop or renewal left running");
+		// A scheduled tick has no attempts: it failed, refunded, and is not run again.
+		await waitFor(async () => (await queue.getJob(first.job.id))?.finishedOn > 0, { timeoutMs: 20_000 });
+		assert.equal((await queue.getJob(first.job.id)).attemptsMade, 1);
+		// The next tick waits on the folder while the old container may still be started. Reaching the budget's folder rule
+		// means it took the folder's slot first, so the first attempt had given that slot back; and it gives it back too.
+		const next = await waitFor(() => logs.find((l) => l.event === "host_budget_deferred" && l.jobId !== first.job.id && l.why === "workspace-orphan"), { timeoutMs: 30_000 });
+		assert.match(next.jobId, new RegExp(`^repeat:${schedulerId}:`));
+		const folderKey = readLocalWorkspaceIdentity(folder).key;
+		assert.equal(inFlight.tryAcquire(folderKey, 1), true, "the folder slot is free");
+		inFlight.release(folderKey);
+		const [orphan] = hostBudget.entries();
+		assert.deepEqual([orphan.id, orphan.orphan?.killedClient], [first.job.id, true], "a killed client's orphan holds its room and its folder");
+		// One run spawned and killed, and no second container. (On a loaded runner the kill can land before the fake's
+		// shell writes its own line, so the run is counted by the worker's line, the fake's at most once.)
+		assert.equal(logs.filter((l) => l.event === "run_client_killed").length, 1, "no second container");
+		assert.ok(pidsOf("run").length <= 1);
+		// The fake's client and stop are both gone: killed at their bounds.
+		await waitFor(() => pidsOf("run").every((pid) => !alive(pid)), { timeoutMs: 20_000 });
+		await waitFor(() => pidsOf("stop").every((pid) => !alive(pid)), { timeoutMs: 20_000 });
+		// The runtime answers again and lists the container running: the sweep, asking through the registry with force,
+		// removes it by its exact name and gives the hold back.
+		writeFileSync(answers, "");
+		await waitFor(
+			async () => {
+				await hostBudget.sweep();
+				return hostBudget.entries().length === 0;
+			},
+			{ timeoutMs: 40_000, intervalMs: 200 },
+		);
+		assert.ok(pidsOf("rm").length >= 1, "removed");
+		await waitFor(() => ["run", "stop", "ps", "rm"].every((verb) => pidsOf(verb).every((pid) => !alive(pid))), { timeoutMs: 20_000 });
+	} finally {
+		await worker?.close(true).catch(() => {});
+		for (const verb of ["run", "stop", "ps", "rm"]) {
+			for (const pid of pidsOf(verb)) {
+				if (alive(pid)) process.kill(pid, "SIGKILL");
+			}
+		}
+		const deferred = await redis.keys(`${DEFER_KEY}repeat:${schedulerId}:*`).catch(() => []);
+		if (deferred.length > 0) await redis.del(...deferred).catch(() => {});
+		await teardown({ queue, redis, budgetKeys: [budgetKey] });
+	}
+});

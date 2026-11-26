@@ -281,9 +281,12 @@ export function makeBackendRegistry({ bundles = [], defaultName, blessed = null,
 		// Issue #681: the host budget's gone-check, asked of the venue that holds the container. `venue` is the job's data or
 		// `{ backend }`, as the budget keeps it. A venue no bundle answers for is `null` (unknown), never a throw: the
 		// caller is the budget's sweep, and `null` keeps the hold, which is the safe answer for room nobody can account for.
-		containerGone: async (name, venue) => {
+		// Issue #1104: ONE signature on every side, `(name, venue, options)`, the registry's own and every bundle's
+		// (`makeContainerGone` for local and podman, the OpenShell bundle's), so the sweep's `{ force: true }` for a killed
+		// client's container reaches the venue as its third argument; `options` is `{}` for every other question.
+		containerGone: async (name, venue, options) => {
 			const bundle = byName.get(resolveBackendName(venue ?? {}, defaultName));
-			return bundle ? bundle.containerGone(name) : null;
+			return bundle ? bundle.containerGone(name, venue ?? null, options ?? {}) : null;
 		},
 		// Each registered venue's leftover-container lister, keyed by name, for the budget's boot seed.
 		// Called ON the bundle, as `containerGone` is, so an adapter whose lister is a method reading `this` still works.

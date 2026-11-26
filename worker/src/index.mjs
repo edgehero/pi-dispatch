@@ -178,8 +178,17 @@ const THROTTLE_FLOOR_MS = 11_000;
  * `docker stop -t 5` is SIGTERM then an unignorable SIGKILL five seconds later, so a reachable daemon ends
  * the container well inside this. The margin is for the daemon being slow, not for the container being
  * stubborn -- a container cannot outlive SIGKILL.
+ *
+ * Since issue #1104 the attempt kills its own CLI child 10 s after the abort (run-container.mjs `RUN_CLIENT_KILL_MS`),
+ * and that child's close path then ends the attempt: the live publisher's finish (bounded at 3 s plus 5 s) and the
+ * teardown, whose runtime steps are bounded after a kill (`TEARDOWN_STEP_AFTER_KILL_MS`, two of 2.5 s for a job
+ * network), 23 s at the very most. This is the last resort behind that path, for a step that cannot be bounded, so it
+ * comes after all of it, at 25 s; and it ends 5 s before the worker's shutdown bound (`CONSUMER_SHUTDOWN_MS` and the
+ * units' `TimeoutStopSec=30`), so a shutdown during a wedge records its jobs before the service manager's SIGKILL. A
+ * test pins that order. Its result says nothing of a kill, so a stop that reaches it is classified as every stop was
+ * before that issue.
  */
-const ABORT_GRACE_MS = 30_000;
+export const ABORT_GRACE_MS = 25_000;
 
 /**
  * The longest `boundAfterAbort` waits for its give-up hook (the host budget hold, and since issue #644 the live
@@ -379,7 +388,7 @@ function makeBeforePickupRecorder({ projects, settleSteerBeforePickup, recordRun
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, privateEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, jobLimits = () => ({}), claimRefreshMs = CLAIM_REFRESH_MS, minuteMs = 60_000, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs(), valkeyTag = null, waitEpisodes = makeWaitEpisodes() }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, privateEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, jobLimits = () => ({}), claimRefreshMs = CLAIM_REFRESH_MS, minuteMs = 60_000, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, shuttingDown = () => false, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs(), valkeyTag = null, waitEpisodes = makeWaitEpisodes() }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
@@ -1142,10 +1151,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// release anywhere else in this function. Last taken, first given back: the endpoint holds (issue #503), then the
 		// scope holds (project, then repo), then the host slot, then the budget.
 		//
-		// `orphan` is the finally's: when the container's stop did not take (`stop_did_not_take`), the container may still
-		// run, so the budget hold becomes an ORPHAN that keeps its room until the runtime says the container is gone
-		// (`host-budget.mjs` `sweep`; the boot reaper is the backstop). The count slots OUTSIDE the budget (the scope, the
-		// project and the endpoint slots, and the host slot when there is no budget) still go back: they bound starts, and
+		// `orphan` is the finally's: when the container's stop did not take (`stop_did_not_take`, or since issue #1104 a CLI
+		// child the attempt had to kill), the container may still run, so the budget hold becomes an ORPHAN that keeps its
+		// room until the runtime says the container is gone (`host-budget.mjs` `sweep`; the boot reaper is the backstop).
+		// The count slots OUTSIDE the budget (the scope, the project and the endpoint slots, and the host slot when there is
+		// no budget) still go back: they bound starts, and
 		// the 30-minute bound already ended this job. The `PI_CONCURRENCY` slot does NOT: with a budget the count is the
 		// budget's third dimension, so an orphan, like a seeded survivor, holds one job slot until its container
 		// is gone (gate round 2 of phase 2).
@@ -1157,6 +1167,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// This pickup's entry in the running jobs (issue #599, phase 2), null until it is admitted below.
 		let runningKey = null;
 		let stopDidNotTake = false;
+		// Issue #1104: the attempt's CLI child had to be killed (`clientKilled` on its result), so its container's state is
+		// not known and the budget hold becomes an orphan the sweep REMOVES once the runtime answers (`releaseAllHolds`).
+		let killedClient = false;
 		let localContainerAttempted = false;
 		// Issue #644: the attempt's live publisher finish, handed over by runContainer's `onLive` (null until it is open).
 		let finishLive = null;
@@ -1193,7 +1206,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			}
 			if (budgetHeld) {
 				budgetHeld = false;
-				if (orphan) hostBudget.orphan(job.id, { name, venue, ticket: budgetState.ticket });
+				if (orphan) hostBudget.orphan(job.id, { name, venue, ticket: budgetState.ticket, ...(killedClient ? { killedClient: true } : {}) });
 				else hostBudget.release(job.id, { ticket: budgetState.ticket });
 			}
 			return Promise.all([endpointsReleased, scopesReleased]);
@@ -1806,7 +1819,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// container's observed exit, when runJob returns, and in the error handler. `pollStopped` is set first and read by
 		// the tick synchronously right before it aborts and acknowledges, so after a stop no cancel is ever acknowledged;
 		// a tick already past that point has aborted the signal and writes its ack before the stop's await returns. So
-		// "acknowledged" and "the signal says operator-cancel" are the same fact by the time anything is decided.
+		// "acknowledged" and "the signal says operator-cancel" are the same fact by the time anything is decided, except
+		// for a signal a time limit had already aborted, whose reason a later cancel does not change (`cancelAsked`).
 		//
 		// BOUNDED (gate round 4 of PR #479): the worker's Valkey client queues commands while offline, so a tick's read can
 		// hang for a whole outage, and an unbounded await held the job's outcome (its record, comment and slot) with it: a
@@ -1815,6 +1829,42 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// decision sees the cancel even while its ack write waits. Said once per job when the bound is hit.
 		let pollStopped = false;
 		let stopBoundSaid = false;
+		// Issue #1104: whether the poll handed a cancel to `cancelJob` during this attempt. Set BEFORE the call, so a cancel
+		// the stop's bound cut short still counts. It is needed beside the signal: a cancel acknowledged after a time limit
+		// already aborted the signal leaves `signal.reason` the time limit's, so the signal alone cannot say a person asked
+		// for the job to end, and a stop a person asked to end must never be retried as never-started.
+		let cancelAsked = false;
+		// Issue #1104: whether a cancel request is waiting that the poll has not read yet. Read once, for a killed client's
+		// result, before it is classified; never acknowledged or consumed here (its requester then reads the job's record,
+		// as for any request that lands while the outcome is decided). BOUNDED like the poll's stop (`cancelStopBoundMs`):
+		// it runs after the abort bound has resolved, so a Valkey that stays connected and stops answering would otherwise
+		// hold the job's record and its completion, the hang this issue is about. A read that fails or runs past the bound
+		// counts as a request: the job is then recorded as the stop it was, the direction that retries nothing.
+		const cancelPending = async () => {
+			if (typeof redis?.get !== "function") return false;
+			let bound;
+			const read = Promise.resolve()
+				.then(async () => (await redis.get(cancelReqKey(job.id))) != null || (await redis.get(agentCancelReqKey(job.id))) != null)
+				.catch(() => true);
+			const late = new Promise((resolve) => {
+				bound = setTimeout(() => resolve(true), cancelStopBoundMs);
+				bound.unref?.();
+			});
+			try {
+				return await Promise.race([read, late]);
+			} finally {
+				clearTimeout(bound);
+			}
+		};
+		// Issue #1104: whether the worker is shutting down (createWorker's `stop`), read when a killed client is classified.
+		// A seam that throws reads as shutting down, the direction that retries nothing.
+		const shuttingDownNow = () => {
+			try {
+				return shuttingDown() === true;
+			} catch {
+				return true;
+			}
+		};
 		const stopCancelPoll = async () => {
 			pollStopped = true;
 			clearInterval(cancelPoll);
@@ -1951,7 +2001,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// The operator-cancel poll (issue #287). `cancelJob` is reachable only from THIS process, so the
 			// CLI and the panel leave a `cancel:req:<jobId>` key instead, and the worker that holds the job
 			// answers. Polled beside the kill timer rather than subscribed, for the reasons cancel-state.mjs
-			// records; one GET per 2s per active job is invisible against the 30s abort grace. Guarded on
+			// records; one GET per 2s per active job is invisible against the 25 s abort grace. Guarded on
 			// `redis.get` because bare test wirings pass a redis with only `incr`/`expire` -- they arm
 			// nothing and stay byte-identical. Each tick is re-entrancy-guarded and swallows redis faults:
 			// a blip may cost the ack, never the job.
@@ -1973,6 +2023,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 							// Bound to this worker (the injection comment in createWorker): `false` means the job
 							// left the tracked map in this same instant, in which case the finally below clears
 							// this interval anyway and the request's TTL reaps the key.
+							cancelAsked = true;
 							const took = await Promise.resolve(cancelJob(job.id, agentReq === null ? "operator-cancel" : "agent-cancel")).catch(() => false);
 							if (took === false) return;
 							// Ack first, then consume the request: losing the DEL to a blip costs one redundant
@@ -2180,14 +2231,17 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				...(deps?.checkWaitSkew ? { checkWaitSkew: (j, ...rest) => deps.checkWaitSkew({ ...j, models: job.data?.models, fallbackModels: job.data?.fallbackModels, auxiliaryModels: job.data?.auxiliaryModels, modelSelection: job.data?.modelSelection, maxCostUsd: job.data?.maxCostUsd, maxSubscriptionUsd: job.data?.maxSubscriptionUsd }, ...rest) } : {}),
 				// #227. BOUNDED AFTER THE ABORT, and this is what makes `abortable` an honest declaration.
 				//
-				// `makeRunContainer`'s promise settles ONLY on the docker child's `close` or `error`. Nothing
-				// else ends that await -- the signal is read at entry and captured at close, never passed to
-				// the spawn. So `stopContainer` is the sole kill channel, and if it does not take (an
-				// unreachable daemon, a wiring whose stop is a no-op) the container keeps running, `docker
-				// run` never exits, and the processor awaits FOREVER: an active job renewing its lock and
+				// `makeRunContainer`'s promise settles ONLY on the docker child's `close` or `error`. Before
+				// issue #1104 nothing else ended that await -- the signal was read at entry and captured at
+				// close, never acted on after the spawn. So `stopContainer` was the sole kill channel, and if it
+				// did not take (an unreachable daemon, a wiring whose stop is a no-op) the container kept running,
+				// `docker run` never exited, and the processor awaited FOREVER: an active job renewing its lock and
 				// holding its in-flight slot, its host slot, its scope lease and its budget reservation, with
 				// nothing in the log and nothing in the record. REQ-JOB-TIMEOUT-30M's Acceptance says "the
-				// slot is freed", and it was not.
+				// slot is freed", and it was not. Since issue #1104 the attempt kills its own child 10 s after the
+				// abort (`RUN_CLIENT_KILL_MS`), which ends it through that `close`, with `clientKilled` on the
+				// result; this bound stays behind it for a step of that close path that cannot be bounded, or a
+				// runContainer that does not kill its child.
 				//
 				// So once the abort has fired, the wait is bounded. On expiry this resolves the SAME shape a
 				// killed container returns -- `{ code: 137, aborted: true }`, which `run-container.mjs`
@@ -2235,6 +2289,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						// A bind-mounted sandbox may outlive its command even without an abort. Only the runtime's
 						// positive-gone sweep can free its folder, regardless of the terminal code it reported.
 						if (r?.lingering === true) stopDidNotTake = true;
+						// Issue #1104: a killed CLI child is a stop that did not take, by the attempt's own bound rather than this
+						// file's (which it comes before): the runtime may still start the container, so the hold becomes an orphan,
+						// marked so the sweep removes the container once the runtime answers. The folder's gone check in the
+						// `finally` is skipped with it, since the runtime that did not answer the stop will not answer that either.
+						if (r?.clientKilled === true) {
+							stopDidNotTake = true;
+							killedClient = true;
+						}
 						// Only signed, matching terminal metadata can permit a later cross-model replay. The pessimistic
 						// marker written before spawn survives crashes and tools that terminate the runner.
 						if (r?.exitAuth === "verified" && r?.exitLineCode === r?.code && r?.aborted !== true) modelRolesRan = r.modelRoles ?? null;
@@ -2277,7 +2339,15 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						const raced = r && r.aborted !== true && signal.aborted === true && ["operator-cancel", "agent-cancel"].includes(signal.reason);
 						if (raced) deps.log?.("cancel_acked_as_container_exited", { jobId: job.id, exitCode: r.code ?? null });
 						const run = raced ? { ...r, aborted: true } : r;
-						return run?.aborted ? { ...run, abortReason: typeof signal.reason === "string" ? signal.reason : null } : run;
+						// Issue #1104: a killed client whose job a person also asked to end (the poll handed on a cancel after the time
+						// limit's stop, or a request is waiting) says so, and so does one this worker classifies while it is shutting
+						// down (a shutdown that lands after the time limit's stop leaves the signal's reason the time limit's, and a
+						// container's orphan mark dies with the process, so no later attempt may count on the sweep). The processor
+						// then records the stop as it always did, neither refunded nor retried, with the time limit's reason.
+						const killedRun = run?.aborted === true && run.clientKilled === true;
+						const workerShuttingDown = killedRun && shuttingDownNow();
+						const cancelRequested = killedRun && !workerShuttingDown && (cancelAsked || (await cancelPending()));
+						return run?.aborted ? { ...run, abortReason: typeof signal.reason === "string" ? signal.reason : null, ...(cancelRequested ? { cancelRequested: true } : {}), ...(workerShuttingDown ? { workerShuttingDown: true } : {}) } : run;
 					});
 				},
 				// REQ-TRIGGER-SECRETS. The resolver runs INSIDE the 30-minute kill timer armed above, so it has
@@ -2344,6 +2414,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				runningJobs: deps.runningJobs ?? runningJobs,
 				// Observability follows the actual reservation, never the configured cap before admission.
 				onDollarHold: (hold) => runningJobs.update?.(runningKey, { holdMicros: hold?.amountMicros ?? 0, holdAt: hold?.at ?? Date.parse(startedAt) }),
+				// Issue #1104: whether this processor removes a killed client's container before that job's retry can start, which
+				// its host budget's sweep does (`killedClient` above), and no other host can start it meanwhile. The hold is this
+				// host's process memory, so only a job no other host drains qualifies: one on this host's own queue, or any job
+				// of a worker with no host queue (the never-fits refusal's predicate above). A job on a fleet's shared queue is
+				// recorded as the stop it was. After the `...deps` spread, like the bound injections above: a wiring cannot
+				// claim a removal its processor does not make.
+				killedClientSafeguard: hostBudget !== null && (!multiHost || (job.queueName ?? QUEUE) !== QUEUE),
 			});
 			// Gate round 4 of PR #479: stopped again as runJob returns, before anything is recorded (a result with no
 			// container never passed the exit stop above). A cancel that lands after is never acknowledged, and its
@@ -2442,7 +2519,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			await stopCancelPoll();
 			const retryable = error instanceof InfraRetry;
 			if (randomSelection && retryable && error.reason === "container-never-started") {
-				// This reason is the runtime/processor's positive never-started verdict, never inferred from absent output.
+				// This reason is the runtime's or the processor's never-started verdict: an exit or a spawn fault, a pre-start
+				// gate, or (issue #1104) a killed client whose watched runner never wrote its first line, which an image that
+				// honours the watch writes before its first model call. Never mere silence from a runner nothing watched.
 				const reset = await markModelSelectionNeverStarted(redis, randomSelectionId, randomSelection, { proven: true });
 				if (reset.ok) randomSelection = reset.state;
 			}
@@ -2802,7 +2881,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 
 /**
  * How long the stop of a job's cancel poll waits for a tick already in flight (gate round 4 of PR #479). About one Valkey
- * round trip under load, and far under the 30 s abort grace; past it a read still hanging cannot acknowledge anything.
+ * round trip under load, and far under the 25 s abort grace; past it a read still hanging cannot acknowledge anything.
  */
 export const CANCEL_STOP_BOUND_MS = 1_000;
 
@@ -2851,6 +2930,8 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 	const names = hostQueue ? [QUEUE, hostQueue] : [QUEUE];
 	const workers = [];
 	let failureShutdown;
+	// Issue #1104: whether `stop` (below) has begun, read by every processor when it classifies a killed client.
+	let shutdownRequested = false;
 	let fatalExit = false;
 	const consumerSupervisor = makeConsumerSupervisor({ onFatal: (fault) => { fatalExit = true; void failureShutdown(fault); } });
 
@@ -2888,6 +2969,9 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			// Bound to THIS worker: a job on the host queue is cancelled by the worker draining that queue,
 			// and the shared handle could not reach it.
 			cancelJob: (id, reason) => worker.cancelJob(id, reason),
+			// Issue #1104: set by `stop` below before it aborts the jobs, so a killed client classified during a shutdown is
+			// recorded as the stop it was rather than refunded for a later attempt that this process's orphan cannot guard.
+			shuttingDown: () => shutdownRequested,
 			// Issue #287: the name the cancel poll writes into its ack, so the operator's terminal can say
 			// WHICH host took the cancel. `name` is already the registry/client identity; "" for a
 			// deployment that never declared one, and the ack's reader prints it as such.
@@ -3003,6 +3087,8 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 
 	let stopping;
 	const stop = () => stopping ??= (async () => {
+		// Issue #1104: first, before any job is aborted (`shuttingDown` in each processor).
+		shutdownRequested = true;
 		consumerSupervisor.stop();
 		// Abort active jobs (=> docker stop via onAbort), then close. Without the cancel,
 		// worker.close() would wait up to 30 minutes for the container. ONE shutdown for every queue: two

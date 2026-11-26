@@ -1516,7 +1516,10 @@ export function makeOpenshellBackend(opts = {}) {
 			(await listOwned(run))
 				.filter((s) => isJobNamespace(s.name) && ofMode(mode)(s) && !SANDBOX_GONE_PHASES.has(s.phase))
 				.map((s) => ({ name: s.name, memMiB: intLabel(s.labels?.[SIZE_LABEL_MEM]), cpuCenti: intLabel(s.labels?.[SIZE_LABEL_CPU]) })),
-		containerGone: async (name) => {
+		// `(name, venue, { force })`, the registry's signature (issue #1104, backend-local.mjs `makeContainerGone`): the
+		// sandbox of a job whose CLI client had to be killed is deleted in any phase that is not gone, never while an attempt
+		// here holds it. The venue is this bundle's own and is not read.
+		containerGone: async (name, _venue = null, { force = false } = {}) => {
 			if (typeof name !== "string" || !isJobNamespace(name)) return null;
 			const sandbox = sandboxNameOf(name);
 			// A sandbox an attempt in this process is between its create and its delete is not gone, whatever name the
@@ -1537,7 +1540,7 @@ export function makeOpenshellBackend(opts = {}) {
 						.catch(() => {});
 					return true;
 				}
-				if (!SANDBOX_UNSTARTED_PHASES.has(s.phase)) return false;
+				if (force !== true && !SANDBOX_UNSTARTED_PHASES.has(s.phase)) return false;
 				// Issue #686 part 3: the other mode's sandbox is the other bundle's to delete; its live attempts are in its own
 				// `live`, which this one cannot see. Not gone, so the hold stays.
 				if (!ofMode(mode)(s)) return false;

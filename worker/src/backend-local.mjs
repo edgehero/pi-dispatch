@@ -23,15 +23,12 @@
 
 import { JOB_NAME_PREFIX, jobContainerName } from "./container-names.mjs";
 import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { scrubCredentials } from "./redact.mjs";
 import { BACKENDS, DEFAULT_BACKEND, DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { DEFAULT_EGRESS_PROXY, ENDPOINT_LISTED_STATES, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { makeDetachGate } from "./netns-keeper.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
 import { SIZE_LABEL_CPU, SIZE_LABEL_MEM } from "./container-spec.mjs";
-
-const execDocker = promisify(execFile);
 
 /**
  * The boot reaper's step bound (issue #452, gate round 2). Its `exec` had none, so a wedged daemon held the worker's boot
@@ -61,6 +58,14 @@ export function reaperExec({ execFileFn = execFile, timeoutMs = REAPER_STEP_TIME
 		});
 }
 const execReaperBounded = reaperExec();
+
+/**
+ * The bound on the abort's `stop -t 5` (issue #1104): the stop's own five seconds of grace plus 5 s for a runtime that
+ * is slow, the same composition as the job's CLI child's bound (run-container.mjs `RUN_CLIENT_KILL_MS`) and never above
+ * it, so a shutdown during a wedge leaves no stop child behind. A runtime that answers ends a stop inside it; one that
+ * does not would otherwise keep the stop's child for as long as it is wedged.
+ */
+export const STOP_TIMEOUT_MS = 10_000;
 
 // Naming is a leaf so operator guidance uses the runtime's exact rule without loading its implementation.
 export { JOB_NAME_PREFIX, jobContainerName } from "./container-names.mjs";
@@ -208,8 +213,13 @@ export const LOCAL_NEVER_STARTED_EXITS = DOCKER_NEVER_STARTED_EXITS;
  * processor already holds, not the exit code, because a worker SIGKILL and a kernel OOM both surface as
  * 137. An adapter implements "stop this job" however its runtime spells it and the classification is
  * unchanged.
+ *
+ * BOUNDED (issue #1104, `STOP_TIMEOUT_MS`). Nothing awaits it, but an unbounded stop on a runtime that stopped
+ * answering left one `docker stop` process behind per abort, for as long as the runtime stayed wedged. Past the
+ * bound the child is SIGKILLed and the stop rejects, which the abort path logs as `stop_container_failed`; the
+ * job's own CLI child is killed on its own bound (run-container.mjs `RUN_CLIENT_KILL_MS`).
  */
-export function makeStopContainer({ exec = execDocker, bin = "docker" } = {}) {
+export function makeStopContainer({ timeoutMs = STOP_TIMEOUT_MS, exec = reaperExec({ timeoutMs }), bin = "docker" } = {}) {
 	// Issue #354: `bin` is the venue's CLI. A stop sent to a runtime other than the one that runs the job answers "no such
 	// container" while the job runs on, which is the unstoppable runaway this function exists to rule out.
 	return async function stopContainer(name) {
@@ -502,9 +512,14 @@ function psRows(stdout) {
  * it: an unanswered listing must never free room a running container may still use. `-a` with the STATE, because a
  * stopped container is listed by `ps -a` and is gone in every sense the budget cares about, and the anchored name test,
  * because `--filter name=` is a SUBSTRING match (the reaper's measured reason).
+ *
+ * `{ force: true }` (issue #1104) is the sweep's question about the container of a job whose CLI client had to be
+ * killed: that job has ended and nothing is attached to its container, so one the runtime lists in ANY state that still
+ * runs something (one that started late, after the runtime answered again) is a runaway, and is removed too, by its
+ * exact name, once the listing has answered. Without it a running container keeps its hold, as before.
  */
 export function makeContainerGone({ exec = execReaperBounded, binOf = () => "docker" } = {}) {
-	return async (name, venue) => {
+	return async (name, venue, { force = false } = {}) => {
 		if (typeof name !== "string" || !isJobNamespace(name)) return null;
 		const bin = binOf(venue);
 		try {
@@ -512,7 +527,7 @@ export function makeContainerGone({ exec = execReaperBounded, binOf = () => "doc
 			const row = psRows(stdout).find((r) => r.name === name);
 			if (!row) return true;
 			if (CONTAINER_GONE_STATES.has(row.state)) return true;
-			if (!CONTAINER_UNSTARTED_STATES.has(row.state)) return false;
+			if (force !== true && !CONTAINER_UNSTARTED_STATES.has(row.state)) return false;
 			await exec(bin, ["rm", "-f", name]);
 			return true;
 		} catch {

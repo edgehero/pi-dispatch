@@ -777,6 +777,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     it, and so does a venue no registered bundle answers for (`null`, never a throw: the caller is the sweep, and room
     nobody can account for is room not given back). Every count slot outside the budget (scope, project,
     endpoint) still goes back at the 30-minute bound.
+    **AMENDED 2026-11-26 (#1104)**: the orphan of a job whose CLI client had to be killed (`killedClient`, the
+    processor's `clientKilled`) is asked with `{ force: true }`, through the registry to its venue, the third argument
+    of the one signature every venue's `containerGone` takes, `(name, venue, options)` (local and podman
+    `makeContainerGone`, the OpenShell bundle's): that job has ended and nothing is attached, so a container listed in
+    ANY state that still runs (one the runtime started late) is removed by its exact name once the listing answered, and
+    only then is the hold given back. Never a name a live entry carries (the sweep's rule above). The job's next attempt
+    carries the same id and name, so the gate defers it as `running-here` (a local job's as `workspace-orphan`, the
+    folder's rule, checked first), and every other job on that folder waits `workspace-orphan`, until then. That wait is
+    this host's alone, which is why only a job no other host can take may be retried as `container-never-started` at a
+    stop (`DES-CONTAINER-BACKEND-REGISTRY`, the abort bound).
   - **Seeded at boot**: the ledger is process memory, so a worker that restarts starts empty while a job container
     its boot reaper could not remove may still run. After the reaper it asks every BLESSED registered venue's own
     bundle for its remaining job containers (`listJobContainers`, issue #681: for `local` and `podman` a `ps -a` by
@@ -11879,6 +11889,39 @@ a tunnel.
   container, which the next boot reaper sweeps; what no longer leaks is the slot. `createWorker` also
   REFUSES a wiring with no `stopContainer`, because a throw inside an AbortSignal listener surfaces as an
   uncaughtException and takes the whole worker down mid-job.
+  **AMENDED 2026-11-26 (#1104), a runtime that does not answer.** The bound freed the slot, but the attempt itself kept
+  running inside the worker until the CLI child closed, which on a wedged daemon was never (a `docker run` lived 28
+  hours): its credential renewals, its activity backstop, its relay and its credentials folder stayed, and every abort
+  left an unbounded `docker stop` behind. Now `makeRunContainer` kills its own child with SIGKILL 10 s after the abort
+  (`RUN_CLIENT_KILL_MS`: the stop's 5 s grace plus 5 s for a slow runtime), logs
+  `run_client_killed { container, afterMs }`, and the child's ordinary `close` ends the attempt, its result carrying
+  `clientKilled: true` and `started` (`true` on any stdout byte, verified record or activity reading; `false` when the
+  watch was armed and nothing came back; `null` without the watch). After a kill each runtime step of the teardown (the
+  job network's detach and removal) is bounded at 2.5 s (`TEARDOWN_STEP_AFTER_KILL_MS`), a network left for the boot
+  reaper. `makeStopContainer` is bounded at 10 s (`STOP_TIMEOUT_MS`, never above the kill) and kills its own child; the
+  OpenShell venue's stop already ran through the reaper's 30 s bound. This bound is now the last resort behind that
+  close path, at 25 s (`ABORT_GRACE_MS`): after the kill path's worst case (the kill, the live publisher's finish of 3 s
+  plus 5 s, the two teardown steps: 23 s), and 5 s before the worker's shutdown bound (`CONSUMER_SHUTDOWN_MS`, the
+  units' `TimeoutStopSec=30` and `ExitTimeOut` 30), so a shutdown during a wedge records its jobs before the service
+  manager's SIGKILL; a test pins that order. A copying venue's own teardown (its stage's delete, 30 s) is not in it, and
+  a kill there may reach this bound and be classified as before. A killed client is a stop that did not take: the hold
+  becomes an orphan marked `killedClient`, which `DES-HOST-BUDGET`'s sweep removes. **The classification**: such a stop
+  is `container-never-started`, refunded, only when its client was killed, its watched container wrote nothing, a time
+  limit stopped it, no person asked for the job to end as well (a cancel the poll handed on after the stop leaves the
+  signal's reason the time limit's, so the processor is told separately, and a request waiting unread is read once
+  before the classification, within the poll's own bound, a read that fails or runs past it counting as a request), the
+  worker was not shutting down when it classified the stop (createWorker's `stop` marks that before it aborts any job: a
+  shutdown after the stop also leaves the time limit's reason, and the orphan that guards a later attempt dies with the
+  process), the worker holds a host budget, and no other host can take the job again (this host's own queue, or a worker
+  with no fleet), since the orphan is in this host's memory alone (`isNeverStartedExit`, so the dollar settlement and
+  the refund give one answer). It is retried while the job has attempts left; a scheduled tick has none and fails there,
+  refunded, its next tick waiting on the folder. **Rejected: retrying every killed client**, since a container that
+  wrote anything may have spent, and a job a person asked to end must not come back. **Rejected: inferring "never
+  started" from silence alone**, since only an image that honours the watch promises a first line before its first model
+  call. **Residuals**: a container the runtime starts late runs until the sweep's first listing that answers removes it
+  (the sweep asks every 5 s, one listing at a time, each bounded at 30 s), and what it spends in that time is not in the
+  refunded attempt's record; a cancel request that lands after the classification is not acknowledged, as for any
+  request that lands while an outcome is decided.
 - **`pausable` is the fourteenth property, and the first an honest venue may declare `absent` without any job being
   refused** (issue #645, AMENDED in). What `absent` costs is recovery: a venue that cannot freeze gets exit checkpoints
   only, taken once the container is gone, so its jobs are not recovered from a worker crash mid-run. It asks whether a running job can be frozen by the cgroup freezer (`docker pause`,
@@ -11886,8 +11929,10 @@ a tunnel.
   one consistent state while nothing in the container runs, which is what a workspace checkpoint needs. A bundle that
   claims it carries `pause(name)` and `unpause(name)`, each resolving `{ ok: true }` or `{ ok: false, reason }` with a
   fixed token and never throwing, bounded at 15 s (`PAUSE_TIMEOUT_MS`) through `execDockerBounded`, the bounded runner,
-  and not through `makeStopContainer`'s unbounded exec: the abort path does not await its stop, and a checkpointer
-  awaits its freeze. A name that is not a runtime name is refused before any spawn, on both venues and before
+  and not through `makeStopContainer`'s exec: the abort path does not await its stop, and a checkpointer awaits its
+  freeze. **CORRECTED 2026-11-26 (#1104)**: that exec was unbounded and is now bounded too (10 s, `STOP_TIMEOUT_MS`, the
+  stop's own grace plus a margin), which is still not the freezer's bound.
+  A name that is not a runtime name is refused before any spawn, on both venues and before
   `podman`'s cgroup gate, because `docker pause --help` exits 0 and freezes nothing; the only process a verb starts is
   the CLI's own `pause` or `unpause`. `local` declares it `enforced`; a rootless Docker on cgroup v1 cannot freeze, and
   there the CLI's own non-zero exit comes back as `{ ok: false }` rather than the word being lowered for every rootful
@@ -21119,6 +21164,7 @@ still checked inside its draft job: its load reads only the reference's syntax.
 
 | Date | Change |
 |---|---|
+| 2026-11-26 (#1104) | **`DES-CONTAINER-BACKEND-REGISTRY` AMENDED**, the `abortable` bullet (the abort bound): the attempt kills its own CLI child 10 s after the abort and ends through its close, with `clientKilled` and `started` on the result; the teardown's runtime steps bounded at 2.5 s after a kill; `makeStopContainer` bounded at 10 s, the OpenShell stop checked (already 30 s); `ABORT_GRACE_MS` 25 s, after the kill path's worst case and 5 s before the worker's shutdown bound, the order pinned by a test; the never-started classification with all seven conditions (a killed client, a watched container that wrote nothing, a time limit, no cancel acknowledged or waiting, its read bounded, no shutdown under way, a host budget, no other host able to take the job), retried only while attempts are left; two rejected alternatives and two residuals. **`DES-CONTAINER-BACKEND-REGISTRY` CORRECTED**, the `pausable` bullet: `makeStopContainer`'s exec is no longer unbounded. **`DES-HOST-BUDGET` AMENDED**, the orphan bullet: a killed client's orphan is asked with `force` through the registry's one `containerGone(name, venue, options)` signature and its container removed in any state once the runtime answers; its next attempt and its folder wait until then, on this host alone. UNCHANGED, checked: `DES-JOB-ACTIVITY-WATCH` (the backstop asks for the stop as before; the kill follows the stop), `DES-DOLLAR-RESERVE-AND-SETTLE` (a never-started attempt is refunded, never settled, by the one `isNeverStartedExit` answer). **Code evidence**: worker/src/run-container.mjs -> RUN_CLIENT_KILL_MS, TEARDOWN_STEP_AFTER_KILL_MS, boundedSpawn, makeRunContainer; worker/src/backend-local.mjs -> STOP_TIMEOUT_MS, makeStopContainer, makeContainerGone; worker/src/backend-openshell.mjs -> makeOpenshellBackend; worker/src/backend-registry.mjs -> makeBackendRegistry; worker/src/host-budget.mjs -> makeHostBudget; worker/src/processor.mjs -> isNeverStartedExit, NEVER_STARTED_STOP_REASONS; worker/src/index.mjs -> ABORT_GRACE_MS, makeProcessor. |
 | 2026-11-25 (#1098) | **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: NEW bullet **A child's subscription admission**: the child meter runs the runner's admission contract in the child (entries and adapter content verified, credential and registration guards before any other extension, the adapter loaded after the meter, the seal at session start), a library child stays refused, and the child's ledger marks each row's notional part (ledger version 4) and the parent counts a row notional only when marked AND on its own verified set (no charge in the fold or in SPENT, part of `costNotional` and the allowance); the hook stops the job at the allowance only once a child's notional spend settled at or past it, never on the runner's own spend and never at teardown; the measurement, three rejected alternatives and the allowance residual (a child's own guard has no allowance). **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` AMENDED**: separate pi processes run an admission of their own, the notional marker read for their rows by the runner. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: the rejected child-notional alternative says what changed. **`DES-MODEL-ROLES` AMENDED**: its residual is closed. **Code evidence**: image/runner/src/usage-meter.mjs -> startChildMeter, ledgerNotional, ledgerSettled, foldChildLedgers, spentFile, createUsageMeter; image/runner/src/child-route.mjs -> subscriptionAdapterRoots, injectChildMeter; image/runner/src/child-preload.mjs; image/runner/src/child-meter.ts; image/runner/src/child-watch.mjs -> createChildWatch; image/runner/run-job.mjs. |
 | 2026-11-25 (#946) | **`DES-MODEL-ROLES` AMENDED**: NEW bullet **On a subscription**: a role child whose model is on a provider the runner holds as a subscription runs inside the runner as a second session on the admitted and sealed root runtime, never as a pi process, which held the token without the admission and stopped the whole job at its first call; routed after resolution and the batch preflight and again as each child starts, only while the registration guard admits the provider, else refused before it starts as `subscription-child-unsupported` with the parent going on; its loader runs no extension code (built-in tools, the job's skills, guardrails, personas and the agent's prompt, no `subagent`); tools, exclusions, thinking, prompt and abort as the CLI child, and its 1 MiB limit counted on the text of the child's answers rather than on a JSON stream; the same meter, model guard, cap and allowance; the pickup refusal `job-image-subscription-roles-unsupported` for an image without `subscriptionRoles`; three rejected alternatives and the staged package's own pi child as the named residual. **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` AMENDED**: the child sentence names the role child as a session sharing the admitted runtime and drops "in the initial release" for separate processes, which still refuse. UNCHANGED, checked: `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` and `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` (the in-process child is one more session on the wrapped prototype, judged and counted as any), `DES-MODEL-FAILOVER` (a role child still never widens the selected singleton). **Code evidence**: image/runner/src/model-roles.mjs -> createRoleSubagents; image/runner/src/role-child-session.mjs -> createRoleChildSessions; image/runner/src/loader.mjs -> buildRoleChildResourceLoader; image/runner/run-job.mjs; worker/src/image-preflight.mjs -> CAPABILITY_GATES. |
 | 2026-11-25 (#1094, pi 1.6.1, part 4) | **`DES-DISPATCHER-DECISION-ENGINE` AMENDED** (still PROPOSED, spec only): its evidence moves from pi-ai 1.4.0 to the pinned 1.6.1 and its five classifier apis; a dispatcher decision uses the watch rule's model admission as built (a builtin classifier resolved by its type, input-only priced, on an api the runner's bound prices), which admits Jev, OpenAI's and Copilot's Luna Decisions and Microsoft-Decision-1 and refuses Radius's `pi-decision` models under the decision's cap; a decision records the provider's `responseId` (operator only) and `billed` as a watch decision does. **`DES-DISPATCHER-ADMISSION` AMENDED** (still PROPOSED), the durability protocol: a `responseId` proves an answered paid call and may be journaled as that proof, and its absence proves nothing, so it narrows an uncertain decision in one direction only. `REQ-DISPATCHERS`, `DES-DISPATCHER-LLM-ENGINE` and `DES-DISPATCHER-TRIGGER-PROPOSALS` UNCHANGED, checked: pi 1.6.1 changes no input, lifetime or proposal question, and a resident decision container stays rejected. `CONST-ISOLATION-CONTAINER-PER-JOB` UNCHANGED, checked. |

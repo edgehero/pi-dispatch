@@ -688,8 +688,18 @@ What to do: start it, or set `PI_EGRESS=0`. See [egress.md](egress.md).
 The container runtime never handed control to the job. It could not create or start the container, or a check before
 it (an image probe, an egress probe, a secret read) could not run. Nothing was spent, and the job was retried.
 
+It also ends a run that a time limit (`idle`, `stalled`, `max-minutes` or the 30-minute limit) stopped while its
+container had not yet written a line, on a runtime that did not answer the stop, when the job image watches the job's
+activity, nobody asked to cancel the job, the worker was not shutting down, and no other host could pick it up again.
+The worker then killed the command that was starting the container, and because such an image writes its first line
+before its first call to a model, nothing was spent. A job with attempts left runs again only once the worker has
+removed that container; a scheduled cron run has none and ends here, and the trigger's next run waits for the same
+removal. A job someone also cancelled, a shutdown, or a container that wrote anything keeps the result it had before
+([job-limits.md](job-limits.md#when-the-runtime-does-not-answer)).
+
 What to do: run `pi-dispatch doctor` on the worker and check the container runtime. See
-[notifications.md](notifications.md).
+[notifications.md](notifications.md). When the worker logged `run_client_killed`, restart the runtime: the next run
+waits for it.
 
 ### container-detached
 

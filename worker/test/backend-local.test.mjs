@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
-import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, REAPER_STEP_TIMEOUT_MS, reaperExec, ENDPOINT_LISTED_STATES, ENDPOINT_SHOWN_MAX, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, endpointShown, execDockerBounded, isJobNamespace, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makePauseVerbs, PAUSE_TIMEOUT_MS, makeReaper, makeStopContainer, parseDockerEndpoint, quotedShown } from "../src/backend-local.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
+import { BACKEND_FUNCTIONS, DOCKER_ENDPOINT_ARGS, REAPER_STEP_TIMEOUT_MS, reaperExec, ENDPOINT_LISTED_STATES, ENDPOINT_SHOWN_MAX, JOB_NAME_PREFIX, classifyDockerEndpoint, classifyEndpointFailure, endpointShown, execDockerBounded, isJobNamespace, jobContainerName, makeDockerEndpointResolver, makeLocalBackend, makePauseVerbs, PAUSE_TIMEOUT_MS, makeReaper, makeStopContainer, parseDockerEndpoint, quotedShown, STOP_TIMEOUT_MS } from "../src/backend-local.mjs";
 import { BACKENDS, DEFAULT_BACKEND } from "../src/backends.mjs";
 import { networkNameFor } from "../src/egress.mjs";
 
@@ -1099,4 +1101,117 @@ test("the local bundle carries the host budget's two questions, docker's by defa
 	assert.equal(own.listJobContainers, list);
 	assert.equal(own.containerGone, gone);
 	assert.throws(() => makeLocalBackend({ ...parts, containerGone: "yes" }), /containerGone must be a function/);
+});
+
+// --- issue #1104: a runtime that stopped answering -------------------------------------------------------------------
+
+/** A container CLI that never answers: it writes its pid and sleeps (bounded, 30 s). A shell script, POSIX on both hosts. */
+function silentCli(dir) {
+	const path = join(dir, "silent-cli");
+	writeFileSync(path, `#!/bin/sh\necho $$ > "${join(dir, "pid")}"\nexec sleep 30\n`);
+	chmodSync(path, 0o755);
+	return path;
+}
+
+test("issue #1104: the abort's stop is bounded, 10 s by default, and a stop past its bound is killed and rejects, leaving no child", async () => {
+	assert.equal(STOP_TIMEOUT_MS, 10_000, "the stop's own five seconds of grace plus 5 s");
+	const dir = tempDir("silent-cli-");
+	const stop = makeStopContainer({ timeoutMs: 1000, bin: silentCli(dir) });
+	let pid = null;
+	try {
+		const outcome = await Promise.race([
+			stop("pi-job-a").then(
+				() => "resolved",
+				(err) => (err.killed === true ? "killed" : `rejected ${err.code}`),
+			),
+			new Promise((resolve) => setTimeout(() => resolve("still waiting"), 8000)),
+		]);
+		pid = Number(readFileSync(join(dir, "pid"), "utf8"));
+		assert.equal(outcome, "killed");
+		assert.throws(() => process.kill(pid, 0), (err) => err.code === "ESRCH", "no stop child is left behind");
+	} finally {
+		if (Number.isSafeInteger(pid)) {
+			try {
+				process.kill(pid, "SIGKILL");
+			} catch {}
+		}
+	}
+});
+
+test("issue #1104: with `force`, makeContainerGone removes a killed client's container in any state the runtime lists, only once the listing answered", async () => {
+	const { makeContainerGone } = await import("../src/backend-local.mjs");
+	const asked = [];
+	let stdout = "";
+	let fail = false;
+	let rmFails = false;
+	const gone = makeContainerGone({
+		exec: async (bin, args) => {
+			asked.push(args.join(" "));
+			if (fail || (rmFails && args[0] === "rm")) throw new Error("daemon down");
+			return { stdout: args[0] === "rm" ? "" : stdout };
+		},
+	});
+	for (const state of ["running", "paused", "restarting", "something-new", "created"]) {
+		asked.length = 0;
+		stdout = `pi-job-7\t${state}\n`;
+		assert.equal(await gone("pi-job-7", null, { force: true }), true, state);
+		assert.deepEqual(asked.at(-1), "rm -f pi-job-7", `${state}: removed by its exact name`);
+	}
+	// Gone already: nothing to remove.
+	for (const out of ["", "pi-job-70\trunning\n", "pi-job-7\texited\n"]) {
+		asked.length = 0;
+		stdout = out;
+		assert.equal(await gone("pi-job-7", null, { force: true }), true);
+		assert.ok(!asked.some((a) => a.startsWith("rm")), JSON.stringify(out));
+	}
+	// No answer, no removal and no room given back; an unanswered removal keeps it too.
+	asked.length = 0;
+	fail = true;
+	assert.equal(await gone("pi-job-7", null, { force: true }), null);
+	assert.ok(!asked.some((a) => a.startsWith("rm")));
+	fail = false;
+	rmFails = true;
+	stdout = "pi-job-7\trunning\n";
+	assert.equal(await gone("pi-job-7", null, { force: true }), null);
+	rmFails = false;
+	// Without it a running container keeps its hold, as before.
+	asked.length = 0;
+	assert.equal(await gone("pi-job-7", null), false);
+	assert.ok(!asked.some((a) => a.startsWith("rm")));
+	assert.equal(await gone("not-a-job", null, { force: true }), null, "never a name outside the job namespace");
+});
+
+test("issue #1104: the sweep's force reaches the local bundle through the registry, so a killed client's container listed running is removed", async () => {
+	const { makeContainerGone } = await import("../src/backend-local.mjs");
+	const { makeBackendRegistry } = await import("../src/backend-registry.mjs");
+	const { hostBudgetSettings, makeHostBudget } = await import("../src/host-budget.mjs");
+	const asked = [];
+	let listed = "running";
+	const exec = async (bin, args) => {
+		asked.push([bin, ...args].join(" "));
+		return { stdout: args[0] === "ps" ? `pi-job-x\t${listed}\n` : "" };
+	};
+	// The bundle as start.mjs builds it, with its gone-check on a fake runtime, and the registry the budget is wired to.
+	const registry = makeBackendRegistry({ bundles: [makeLocalBackend({ ...fns(), containerGone: makeContainerGone({ exec }) })], defaultName: "local" });
+	assert.equal(await registry.containerGone("pi-job-x", { backend: "local" }), false, "without force a running container keeps its hold");
+	assert.ok(!asked.some((a) => a.startsWith("docker rm")));
+	assert.equal(await registry.containerGone("pi-job-x", { backend: "local" }, { force: true }), true);
+	assert.equal(asked.at(-1), "docker rm -f pi-job-x", "removed by its exact name");
+	// The host budget wired as start.mjs wires it: a killed client's orphan, its container started late.
+	asked.length = 0;
+	const size = { memMiB: 512, cpuCenti: 50 };
+	const budget = makeHostBudget({ settings: hostBudgetSettings({ PI_HOST_MEMORY_BUDGET: "16g", PI_HOST_CPU_BUDGET: "4" }, size), jobDefault: size, countLimit: () => 3, containerGone: registry.containerGone });
+	await budget.ready;
+	const ticket = budget.enter("job-1");
+	assert.deepEqual(budget.gate({ id: "job-1", ticket, size, venue: { backend: "local" }, name: "pi-job-x" }), { admitted: true });
+	budget.orphan("job-1", { name: "pi-job-x", venue: { backend: "local" }, ticket, killedClient: true });
+	budget.leave("job-1");
+	await budget.sweep();
+	assert.deepEqual(budget.entries(), [], "removed, then given back");
+	assert.deepEqual(asked, ["docker ps -a --filter name=pi-job-x --format {{.Names}}\t{{.State}}", "docker rm -f pi-job-x"]);
+	// A container that ended by itself meanwhile is gone with nothing to remove.
+	asked.length = 0;
+	listed = "exited";
+	assert.equal(await registry.containerGone("pi-job-x", { backend: "local" }, { force: true }), true);
+	assert.ok(!asked.some((a) => a.startsWith("docker rm")));
 });

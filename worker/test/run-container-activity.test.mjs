@@ -267,3 +267,168 @@ test("issue #1055: the job's ceiling and what is left of it are read when the en
 		await quiet.done;
 	}
 });
+
+/**
+ * Issue #1104: a CLI child on a runtime that stopped answering. It ignores every signal but SIGKILL, which closes it as
+ * a kill does (code null). `network` steps hang the same way (`hang: true`), so a teardown step only ends when killed.
+ */
+function stuckSpawn(recorder, { hang = false } = {}) {
+	recorder.killed = [];
+	recorder.steps = [];
+	return (cmd, args) => {
+		const step = args[0] === "network" ? `network ${args[1]}` : args[0];
+		recorder.steps.push(step);
+		const child = new EventEmitter();
+		child.stdout = new EventEmitter();
+		child.stdout.setEncoding = () => {};
+		child.stderr = new EventEmitter();
+		child.kill = (sig) => {
+			recorder.killed.push(`${step} ${sig}`);
+			if (sig === "SIGKILL") setImmediate(() => child.emit("close", null, "SIGKILL"));
+			return true;
+		};
+		if (args[0] === "run") {
+			recorder.args = args;
+			recorder.run = child;
+			recorder.close = (code) => child.emit("close", code);
+		} else if (!(hang && (step === "network disconnect" || step === "network rm"))) {
+			setImmediate(() => child.emit("close", 0));
+		}
+		return child;
+	};
+}
+
+/** A run whose signal the test aborts, on the stuck CLI above. */
+function abortableRun({ activityWatch = { idleMs: 15 * MIN, stallMs: null, keepWallClock: false }, credentialRefresh = null, extra = {}, hang = false } = {}) {
+	const recorder = {};
+	const ac = new AbortController();
+	const h = { t: 1_000_000, ticks: [], stops: [], noted: [], logs: [] };
+	const jobDir = tempDir("stuck-run-");
+	const run = mod.makeRunContainer({
+		image: "pi-job:x",
+		hostEnv: HOST,
+		spawnFn: stuckSpawn(recorder, { hang }),
+		log: (event, fields) => h.logs.push({ event, ...fields }),
+		activityClock: () => h.t,
+		activityTimers: { setInterval: (fn) => (h.ticks.push(fn), { unref() {} }), clearInterval: () => (h.ticks = []) },
+		clientKillMs: 20,
+		...extra,
+	});
+	const done = run({
+		job: JOB,
+		prepared: { workspace: jobDir, jobDir },
+		name: "pi-job-stuck-1",
+		jobId: "stuck-1",
+		signal: ac.signal,
+		...(activityWatch ? { activityWatch, onActivityArmed: () => {}, requestStop: (reason) => h.stops.push(reason), noteActivity: (fields) => h.noted.push(fields) } : {}),
+		...(credentialRefresh ? { credentialRefresh } : {}),
+	});
+	h.tick = (ms) => {
+		h.t += ms;
+		for (const fn of h.ticks) fn();
+	};
+	return { h, recorder, ac, done };
+}
+
+test("issue #1104: a CLI child still there after the abort's bound is killed, which ends the attempt, its renewals and its backstop, and the result says a watched container that wrote nothing never started", { skip }, async () => {
+	let mints = 0;
+	const credentialRefresh = { forge: { expiresAt: 1_000_000 + 10 * MIN, mint: async () => ((mints += 1), { token: "ghs_renewed", expiresAt: Date.now() + 7_200_000 }) }, subscriptions: [], extend: async () => null };
+	const { h, recorder, ac, done } = abortableRun({ credentialRefresh });
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.ok(h.ticks.length >= 2, "the backstop and the renewals run while the child does");
+	h.tick(MIN);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(mints, 1, "a renewal before the abort");
+	ac.abort("idle");
+	const ran = await done;
+	assert.deepEqual(recorder.killed, ["run SIGKILL"], "SIGKILL, the one signal a wedged CLI cannot ignore, and only to the run");
+	assert.equal(ran.aborted, true);
+	assert.equal(ran.code, 137);
+	assert.equal(ran.clientKilled, true);
+	assert.equal(ran.started, false, "the watch was armed and nothing came back");
+	assert.deepEqual(h.logs.filter((l) => l.event === "run_client_killed"), [{ event: "run_client_killed", container: "pi-job-stuck-1", afterMs: 20 }]);
+	assert.deepEqual(h.ticks, [], "the backstop and the renewal timers are gone with the child");
+	h.tick(60 * MIN);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(mints, 1, "no renewal after the kill");
+	assert.deepEqual(h.stops, [], "and no stop asked of a job that has ended");
+	assert.equal(h.noted.at(-1).channel, "file", "the record hears what the backstop saw");
+});
+
+test("issue #1104: a child that ends inside the bound after the abort is never signalled, and its result is the one it always was", { skip }, async () => {
+	const { recorder, ac, done } = abortableRun({ extra: { clientKillMs: 60 } });
+	await new Promise((resolve) => setImmediate(resolve));
+	ac.abort("idle");
+	recorder.close(143);
+	const ran = await done;
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	assert.deepEqual(recorder.killed, []);
+	assert.equal(ran.aborted, true);
+	assert.equal(Object.hasOwn(ran, "clientKilled"), false);
+	assert.equal(Object.hasOwn(ran, "started"), false);
+	// And a child that ends with no abort at all is never signalled either, however long it ran.
+	const plain = abortableRun();
+	await new Promise((resolve) => setTimeout(resolve, 60));
+	plain.recorder.close(0);
+	const ended = await plain.done;
+	assert.deepEqual(plain.recorder.killed, []);
+	assert.equal(Object.hasOwn(ended, "clientKilled"), false);
+});
+
+test("issue #1104: a killed client's container started on any stdout byte, and nothing is known of one no watch covered", { skip }, async () => {
+	const wrote = abortableRun();
+	await new Promise((resolve) => setImmediate(resolve));
+	wrote.recorder.run.stdout.emit("data", Buffer.from("{\"event\":\"activity_watch\"}\n"));
+	wrote.ac.abort("max-minutes");
+	assert.equal((await wrote.done).started, true);
+	const read = abortableRun();
+	await new Promise((resolve) => setImmediate(resolve));
+	const { writeFileSync: write } = await import("node:fs");
+	write(join(read.recorder.args.find((a) => a.endsWith(":/session")).split(":")[0], "activity.json"), '{"v":1,"steps":0,"active":0}\n');
+	read.h.tick(15_000);
+	read.ac.abort("idle");
+	assert.equal((await read.done).started, true, "an activity reading is evidence too");
+	const unwatched = abortableRun({ activityWatch: null });
+	await new Promise((resolve) => setImmediate(resolve));
+	unwatched.ac.abort("job-timeout-30m");
+	const ran = await unwatched.done;
+	assert.equal(ran.clientKilled, true);
+	assert.equal(ran.started, null, "silence from a runner nothing watched proves nothing");
+});
+
+test("issue #1104: the bound is armed at once for a signal that aborted after the entry check and before the spawn", { skip }, async () => {
+	const recorder = {};
+	const ac = new AbortController();
+	const jobDir = tempDir("stuck-run-");
+	const stuck = stuckSpawn(recorder);
+	// The abort lands while the job network is being built, where the stop it sends finds no container yet.
+	const spawnFn = (cmd, args) => {
+		if (args[0] === "network" && args[1] === "connect") ac.abort("idle");
+		return stuck(cmd, args);
+	};
+	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn, egress: true, clientKillMs: 20 });
+	const ran = await run({ job: JOB, prepared: { workspace: jobDir, jobDir }, name: "pi-job-stuck-2", signal: ac.signal });
+	assert.ok(recorder.steps.includes("run"), "the entry check had passed, so the run was spawned");
+	assert.deepEqual(recorder.killed, ["run SIGKILL"]);
+	assert.equal(ran.clientKilled, true);
+});
+
+test("issue #1104: after a kill each teardown step is bounded, so a job network's detach and removal on a runtime that does not answer still end the attempt", { skip }, async () => {
+	const { recorder, ac, done } = abortableRun({ hang: true, extra: { egress: true, teardownStepMs: 20, teardownRuntime: () => ({ podman: false, rootless: false, version: "27.4.0" }) } });
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.deepEqual(recorder.steps.slice(0, 3), ["network create", "network connect", "run"]);
+	ac.abort("idle");
+	const ran = await done;
+	assert.equal(ran.clientKilled, true);
+	assert.deepEqual(recorder.killed, ["run SIGKILL", "network disconnect SIGKILL", "network rm SIGKILL"]);
+});
+
+test("issue #1104: a child whose spawn fails after the abort is never signalled, however long the bound", { skip }, async () => {
+	const { recorder, ac, done } = abortableRun();
+	await new Promise((resolve) => setImmediate(resolve));
+	ac.abort("idle");
+	recorder.run.emit("error", Object.assign(new Error("spawn docker ENOENT"), { code: "ENOENT" }));
+	await assert.rejects(done, (err) => err.reason === "container-never-started");
+	await new Promise((resolve) => setTimeout(resolve, 80));
+	assert.deepEqual(recorder.killed, [], "the bound was cleared with the child's error");
+});

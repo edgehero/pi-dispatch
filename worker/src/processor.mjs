@@ -177,12 +177,34 @@ function egressProxyFix(venue, proxy = DEFAULT_EGRESS_PROXY) {
  *
  * A detached container (issue #345) DID start, and an aborted one is classified by its flag first, so neither is
  * never-started whatever its code. The runner's own three codes are never the venue's never-started set's to claim.
+ *
+ * ONE aborted container is never-started (issue #1104, a runtime that stopped answering): its CLI client had to be
+ * killed after the stop (`clientKilled`), its activity watch was armed and nothing came back at all
+ * (`started === false`: an image that honours the watch writes its first line before its first model call, so its
+ * runner never asked a provider anything), a time limit stopped it (`NEVER_STARTED_STOP_REASONS`), no person asked for
+ * the job to end as well (`cancelRequested`: a cancel the poll handed on after that stop, or one waiting unread), the
+ * worker was not shutting down when it classified the stop (`workerShuttingDown`: the orphan that guards a later
+ * attempt dies with the process), and the wiring removes that container before any later attempt can start and no other
+ * host can start one (`safeguarded`, the processor's `killedClientSafeguard`). Then the exit switch's aborted branch
+ * throws it as `container-never-started`, refunded (retried while the job has attempts left; a scheduled tick has none)
+ * and the settlement leaves its hold for the catch's refund, by this same answer. Every other abort is not
+ * never-started, as before.
  */
-export function isNeverStartedExit({ code, aborted, detached }, neverStartedCodes) {
-	if (detached === true || aborted) return false;
+export function isNeverStartedExit({ code, aborted, detached, clientKilled = false, started = null, abortReason = null, safeguarded = false, cancelRequested = false, workerShuttingDown = false }, neverStartedCodes) {
+	if (detached === true) return false;
+	if (aborted) return clientKilled === true && started === false && safeguarded === true && cancelRequested !== true && workerShuttingDown !== true && NEVER_STARTED_STOP_REASONS.includes(abortReason);
 	if (code === EXIT_COMPLETED || code === EXIT_POLICY || code === EXIT_INFRA) return false;
 	return (neverStartedCodes ?? []).includes(code);
 }
+
+/**
+ * The abort reasons a never-started stop may carry (issue #1104): the job's time limits, the reasons index.mjs and the
+ * activity backstop pass to `cancelJob`, which come from the clock alone. Never an operator's or an agent's cancel (a
+ * person asked for the job to end, and a retry would undo that), a shutdown (the worker is stopping, and the next
+ * boot's reaper owns that container), or `credential-expired` (the job was ended for its credential, not its clock).
+ * Closed and exact like `ABORT_RECORD_REASONS`.
+ */
+export const NEVER_STARTED_STOP_REASONS = Object.freeze(["job-timeout-30m", "max-minutes", "idle", "stalled"]);
 
 /** The key prefixes of a job's model dollar ledgers (`modelDollarRows`), to tell a model window's keys in a hold apart. */
 function modelPrefixesOf(modelDollars) {
@@ -737,6 +759,12 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// runtime this repo ships, so a wiring that omits this keeps today's behaviour exactly; an adapter
 		// that normalises to `container-never-started` itself returns an empty list.
 		neverStartedExits = () => DOCKER_NEVER_STARTED_EXITS,
+		// Issue #1104: whether this wiring removes the container of a job whose CLI client had to be killed before any later
+		// attempt of that job can start, and no other host can start one meanwhile (index.mjs passes true when it holds a
+		// host budget, whose sweep does that removal, and the job is on a queue only this host drains). Only then may such a
+		// stop be never-started (`isNeverStartedExit`); false, the default, keeps every such stop the policy result it always
+		// was, since without that removal a container started late could run beside the next attempt.
+		killedClientSafeguard = false,
 		// (job) => scoped short-lived token. Takes the JOB, not the repo: which forge mints -- and therefore
 		// which credential the container gets -- is a property of `job.kind`, and only the wiring knows the
 		// map. Called for forge-backed jobs and for local jobs opted in via `github: true`; unflagged local
@@ -2907,7 +2935,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// device (`unenforced`), and the record says so rather than imply a binding nobody enforced.
 		if (privateGrant.length > 0) privateFacts.value = { ids: privateGrant.map((e) => e.id), basis: egress?.proxy ? "proxy" : "unenforced" };
 		if (notional.size > 0) notionalFacts.value = [...notional].sort();
-		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitCostRefusal = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await ranNoting(() => runContainer({ job: containerJob, token, prepared, checkSecretFilesPlacement: () => checkSecretFilesPlacement(job, { prepared }), secrets, ...(mainDeclared !== null ? { mainCredential: mainDeclared } : {}), ...(roleDeclared !== null ? { secondaryCredential: roleDeclared } : {}), ...(Object.keys(secretFiles).length > 0 ? { secretFiles } : {}), ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(privateGrant.length > 0 ? { privateEndpoints: privateGrant } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}), ...(activityWatch !== null ? { activityWatch, onActivityArmed: deps.onActivityArmed ?? null, requestStop: deps.requestStop ?? null, noteActivity: deps.noteActivity ?? null, ...(credentialRefresh !== null ? { credentialRefresh } : {}) } : {}), ...(timeLimit !== null ? { timeLimit } : {}) }), credentialFacts);
+		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitCostRefusal = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false, clientKilled = false, started = null, cancelRequested = false, workerShuttingDown = false } = await ranNoting(() => runContainer({ job: containerJob, token, prepared, checkSecretFilesPlacement: () => checkSecretFilesPlacement(job, { prepared }), secrets, ...(mainDeclared !== null ? { mainCredential: mainDeclared } : {}), ...(roleDeclared !== null ? { secondaryCredential: roleDeclared } : {}), ...(Object.keys(secretFiles).length > 0 ? { secretFiles } : {}), ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(privateGrant.length > 0 ? { privateEndpoints: privateGrant } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}), ...(activityWatch !== null ? { activityWatch, onActivityArmed: deps.onActivityArmed ?? null, requestStop: deps.requestStop ?? null, noteActivity: deps.noteActivity ?? null, ...(credentialRefresh !== null ? { credentialRefresh } : {}) } : {}), ...(timeLimit !== null ? { timeLimit } : {}) }), credentialFacts);
 		const answeredPark = prepared.session?.parkedSource;
 		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
 		// answers its question. A held receipt also identifies an answer whose legacy source cannot be proved.
@@ -2980,7 +3008,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// never a worker's abort, an OOM kill, a completed or policy exit (none of those recovers) nor a never-started one
 		// (nothing ran, and today's retry is cheaper). The container is dead, so nothing is paused. B1's handle is read
 		// defensively: absent, or without `exit`, means no exit checkpoint, never a failure. Neither call may throw out of here.
-		const neverStartedExit = isNeverStartedExit({ code, aborted, detached }, neverStartedExits(job));
+		const neverStartedExit = isNeverStartedExit({ code, aborted, detached, clientKilled, started, abortReason, safeguarded: killedClientSafeguard, cancelRequested, workerShuttingDown }, neverStartedExits(job));
 		const recoverable = armed && !aborted && !oomKilled && code !== EXIT_COMPLETED && code !== EXIT_POLICY && !neverStartedExit;
 		// Issue #686 part 3, review round 2 of #714: a venue whose box was not confirmed gone after the run (`lingering`,
 		// `openshell-bind`) takes NO exit checkpoint: the host tree may still be written, so a snapshot of it is not a state
@@ -3134,6 +3162,19 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// `abortReason` itself never reaches the record -- buildRecord copies named fields only.
 		// exitCode/turns/tokens carry the container's own exit, turn count, and usage totals; budgetReserved true post-reserve.
 		if (aborted) {
+			// Issue #1104: a time limit stopped a container that never wrote a line, on a runtime that did not answer the stop,
+			// so its CLI client had to be killed (`isNeverStartedExit` holds the whole rule). Its runner never reached a model
+			// call, so it is refunded as never-started: retried while the job has attempts left (a forge job's or a queued local
+			// run's), failed when it has none (a scheduled tick), and any later attempt on that container's name or folder waits
+			// until the host budget's sweep has removed the old container (index.mjs makes its hold a killed client's orphan).
+			// No `dollars` here: the settlement above asked the same question and left the hold, which the catch refunds whole
+			// with the job-count slots. No comment either: an infrastructure throw says nothing until it is the last
+			// (start.mjs's failed listener).
+			if (neverStartedExit) {
+				// Issue #998's rule: a container that never started spent nothing on any key, so its record names no credential.
+				credentialFacts.value = null;
+				throw new InfraRetry("the container never started before its time limit stopped it, and the runtime did not answer the stop", { reason: "container-never-started", exitCode: code, turns, tokens, usage, provider: job.provider ?? null, model: job.model ?? null, session: mergeSession(prepared, session), resources });
+			}
 			const reason = Object.hasOwn(ABORT_RECORD_REASONS, abortReason ?? "") ? ABORT_RECORD_REASONS[abortReason] : "worker-abort";
 			// Awaited bare like every determinate refusal above: the adapter never throws by contract, and
 			// the one swallowed comment in this file (the catch's) justifies itself by its position.

@@ -404,8 +404,8 @@ before the container starts always says why on the item: its own comment, or, wh
 [reasons.md](reasons.md) gives for its reason (issue #969). The label that started the job stays on: once the
 cause is fixed, remove it and add it again to start a new job. On GitHub and Forgejo another label event on the item
 (an unrelated label, a reopen) can also start one, as described under the label matching above. If the worker
-logs `stop_did_not_take`, inspect the runtime before starting more work: cancellation was recorded, but the old
-container's exit could not be confirmed and its existing resource holds remain.
+logs `stop_did_not_take` or `run_client_killed`, inspect the runtime before starting more work: cancellation was
+recorded, but the old container's exit could not be confirmed and its existing resource holds remain.
 
 The receiver and poller also repair a window left by a completed policy job when they see the next event. A running
 or waiting job keeps its normal window, as does an ordinary successful run. Sending the original delivery again

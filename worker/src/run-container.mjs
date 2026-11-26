@@ -34,6 +34,53 @@ import { AUTH_RENEWABLE_MIN_RUNWAY_MS } from "./auth-connections.mjs";
 const NOT_COUNTED = Object.freeze({ started() {}, ended() {} });
 
 /**
+ * How long the CLI child (`docker run`, `podman run`, a sandbox's exec) may stay after the job's abort before this side
+ * kills it with SIGKILL (issue #1104). The abort's stop is `docker stop -t 5`, SIGTERM then SIGKILL five seconds later,
+ * so a runtime that answers ends the container and with it the child inside this; the 5 s on top is for a runtime that
+ * is slow, not for a container that is stubborn. A child still there after it is waiting on a runtime that stopped
+ * answering (issue #1104: a `docker run` lived 28 hours on a wedged daemon), and only killing it ends the attempt
+ * inside the worker: the credential renewals, the activity backstop, the relay and the live publisher all stop at the
+ * child's `close`. THE ORDER OF THE BOUNDS, pinned by a test: this, plus the close path's live finish (3 s plus 5 s at
+ * most) and the two bounded teardown steps below, ends before index.mjs's `ABORT_GRACE_MS`, so the result that says the
+ * child was killed is the one the processor classifies; and that grace ends 5 s before the worker's shutdown bound
+ * (`CONSUMER_SHUTDOWN_MS`, the units' `TimeoutStopSec=30` and `ExitTimeOut` 30), so a shutdown during a wedge ends
+ * through this path before the service manager's SIGKILL.
+ *
+ * Killing the client does not stop the container: a runtime that answers again later may still start it. So a killed
+ * client is never a container known to be gone, and the processor keeps the job's host budget hold as an orphan, which
+ * the budget's sweep removes once the runtime answers (host-budget.mjs `sweep`).
+ */
+export const RUN_CLIENT_KILL_MS = 10_000;
+
+/**
+ * The bound on each runtime step of the teardown after a killed client (issue #1104): the job network's detach and
+ * removal. The runtime that did not stop the container will not answer those either, and an unbounded step would hold
+ * the attempt in its `finally` for as long as it is wedged. A step killed by this bound leaves the network, which the
+ * boot reaper removes, as a failed teardown always has.
+ */
+export const TEARDOWN_STEP_AFTER_KILL_MS = 2_500;
+
+/**
+ * A spawn whose every child is SIGKILLed once it has run `ms` (issue #1104), for the teardown after a killed client.
+ * The callers (egress.mjs) already read a child killed this way as a step that did not succeed.
+ */
+function boundedSpawn(spawnFn, ms) {
+	return (bin, args, opts) => {
+		const child = spawnFn(bin, args, opts);
+		const timer = setTimeout(() => {
+			try {
+				child?.kill?.("SIGKILL");
+			} catch {
+				// already gone
+			}
+		}, ms);
+		child?.on?.("close", () => clearTimeout(timer));
+		child?.on?.("error", () => clearTimeout(timer));
+		return child;
+	};
+}
+
+/**
  * The real `runContainer` the processor injects. Launches one job container and returns
  * `{ code, aborted, turns, tokens, session, usage, context, exitReason, resources?, exitOomKilled?, memoryLimit?, progress? }`, where `aborted` records whether the WORKER initiated the stop (docker stop on
  * the 30-min timeout or graceful shutdown), which the processor classifies as POLICY (no retry) per
@@ -44,9 +91,10 @@ const NOT_COUNTED = Object.freeze({ started() {}, ended() {} });
  * expected outcomes, not errors to reject on. The exit code comes from the `close` event.
  *
  * The container is stopped on abort by the worker wiring (index.mjs onAbort -> docker stop), which
- * causes `docker run` to exit and this promise to resolve. We only handle the entry case here: if
- * the signal is ALREADY aborted (the 30-min timeout fired during a slow prepare), do not start a
- * container at all.
+ * causes `docker run` to exit and this promise to resolve. Here: if the signal is ALREADY aborted at entry
+ * (the 30-min timeout fired during a slow prepare), do not start a container at all; and once it has
+ * aborted, a CLI child still there after `clientKillMs` is killed (issue #1104, `RUN_CLIENT_KILL_MS`), and the
+ * result says so with `clientKilled: true` and `started` (`true`, `false` or `null`, at the close handler).
  *
  * Output is streamed to `onOutput` (default: the worker's stdout) so the operator watches the agent
  * work on their own machine -- the natural local UX. When raw capture is enabled
@@ -115,6 +163,10 @@ export function makeRunContainer({
 	stageLive = stageLiveFile,
 	// Issue #645: the bound on each step of stopping a container whose unpause never took.
 	checkpointStopTimeoutMs = 15_000,
+	// Issue #1104: how long after the abort the CLI child may stay before it is killed (`RUN_CLIENT_KILL_MS`), and the
+	// bound on each runtime step of the teardown after that kill. Seams so a test does not wait out the real bounds.
+	clientKillMs = RUN_CLIENT_KILL_MS,
+	teardownStepMs = TEARDOWN_STEP_AFTER_KILL_MS,
 	// Issue #646: `({ runId, jobId, inboxDir, targetKey, ref, forge }) => relay`, the inbox relay's opener (inbox-relay.mjs
 	// `makeInboxRelay`, bound in start.mjs to the worker's Valkey client and host name). Null arms no job: a steer job is
 	// then run without steering and its record says `steerSkipped: "no-transcript"`, never a silent no-op. Issue #686: a
@@ -1002,16 +1054,25 @@ export function makeRunContainer({
 				noteActivity?.(backstop !== null ? { channel: activityChannel, lastStepAt: new Date(backstop.state.lastStepAt).toISOString(), lastActivityAt: new Date(backstop.state.lastActivityAt).toISOString() } : { channel: null, unavailable: activityUnavailable });
 			} catch {}
 		};
+		// Issue #1104: the evidence that this attempt's container ran, for a result whose CLI child had to be killed
+		// (`started` in the close handler): any stdout byte (nothing but the container's own output reaches the CLI's
+		// stdout), any record that verified under this attempt's key, or any activity reading. Set by the listeners below.
+		let sawOutput = false;
+		let sawRecord = false;
+		const recorded = (fn) => (...args) => {
+			sawRecord = true;
+			return fn(...args);
+		};
 		const demux = stdioArmed
 			? makeDemux({
 					key: exitKey,
 					runId: name,
-					onBaseline: (size) => live?.setBaseline?.(size),
-					onLine: (line, end) => live?.push?.(line, end),
-					onGap: (missing) => live?.skip?.(missing),
-					onReset: (size) => live?.reset?.(size),
+					onBaseline: recorded((size) => live?.setBaseline?.(size)),
+					onLine: recorded((line, end) => live?.push?.(line, end)),
+					onGap: recorded((missing) => live?.skip?.(missing)),
+					onReset: recorded((size) => live?.reset?.(size)),
 					// Issue #888: the activity counters, as the file on a binding venue holds them.
-					onActivity: (bytes) => backstop?.observe(parseActivityCounters(Buffer.from(bytes).toString("utf8"))),
+					onActivity: recorded((bytes) => backstop?.observe(parseActivityCounters(Buffer.from(bytes).toString("utf8")))),
 				})
 			: null;
 		let demuxEnded = false;
@@ -1050,6 +1111,9 @@ export function makeRunContainer({
 		// Each line carries its wall time (`time`, from the worker's log closure, issue #1040), so the spawn is `ms` before
 		// the first output line's `time`.
 		let stopCreated = () => {};
+		// Issue #1104: whether this attempt's CLI child had to be killed after the abort (`RUN_CLIENT_KILL_MS`). Read by the
+		// close handler for the result and by the `finally` below, whose runtime steps are then bounded.
+		let clientKilled = false;
 		const run = new Promise((resolve, reject) => {
 			const timed = args.includes(`--cidfile=${cidFile}`);
 			const startClock = createdCheck.now ?? (() => Date.now());
@@ -1059,6 +1123,35 @@ export function makeRunContainer({
 			if (timed) child.stdout?.once?.("data", () => log("container_first_output", { container: name, ms: Math.max(0, Math.round(startClock() - spawnedAt)) }));
 			// Issue #888: the container exists from here, so the backstop's clocks start now.
 			armActivity();
+			// Issue #1104: the client's bound, armed once the job's signal has aborted (at once when it already had: the abort
+			// landed between this function's entry and the spawn, while its stop found no container). The stop the abort sent
+			// (index.mjs `onAbort`) ends the container and so this child well inside the bound on a runtime that answers;
+			// past it the child is waiting on a runtime that does not, and is killed, so the `close` below ends the attempt.
+			// Cleared at the child's `close` or `error`, so a child that ended in time is never signalled.
+			let childEnded = false;
+			let killTimer = null;
+			const armClientKill = () => {
+				if (childEnded || killTimer !== null) return;
+				killTimer = setTimeout(() => {
+					killTimer = null;
+					if (childEnded) return;
+					clientKilled = true;
+					log("run_client_killed", { container: name, afterMs: clientKillMs });
+					try {
+						child.kill?.("SIGKILL");
+					} catch {
+						// already gone: its `close` comes anyway
+					}
+				}, clientKillMs);
+			};
+			const disarmClientKill = () => {
+				childEnded = true;
+				if (killTimer !== null) clearTimeout(killTimer);
+				killTimer = null;
+				signal?.removeEventListener?.("abort", armClientKill);
+			};
+			if (signal?.aborted) armClientKill();
+			else signal?.addEventListener?.("abort", armClientKill, { once: true });
 			// Issue #686: a stdin-steered attempt's key is frame 1, written at the spawn, and the pipe is NOT closed: it is
 			// handed to the relay, which writes each message as a frame after it and closes the pipe at its stop. The relay
 			// writes nothing before the publisher's baseline (the runner's signed baseline record and the lines up to it, so a
@@ -1107,6 +1200,10 @@ export function makeRunContainer({
 			// stops being a start the retention sweep waits for. On every chunk, since the report is idempotent and a
 			// spawn seam need not have `once`.
 			child.stdout?.on("data", containerUp);
+			// Issue #1104: a stdout byte is the container's own (`sawOutput` says why), so its evidence that it ran.
+			child.stdout?.on("data", (chunk) => {
+				if (chunk?.length > 0) sawOutput = true;
+			});
 			// Review round 1, M1: a stdin-steered attempt's pipe is ended as soon as the runner's exit line is out, so a CLI
 			// that waited for EOF before it exits could never wait on the relay (OpenShell 0.1.4 does not wait, measured on
 			// the real gateway; this is the defence, and the close at the relay's stop stays). A line that VERIFIES under the
@@ -1177,6 +1274,7 @@ export function makeRunContainer({
 			// (CONST-RETRY-INFRA-ONLY). `reason` also cues the processor to release the budget slot,
 			// since a container that never started spent nothing.
 			child.on("error", (err) => {
+				disarmClientKill();
 				containerUp();
 				disarmActivity();
 				stderrOut(endDemux());
@@ -1188,12 +1286,20 @@ export function makeRunContainer({
 			});
 			child.on("close", async (code) => {
 				const aborted = signal?.aborted === true; // capture BEFORE the await
+				disarmClientKill();
 				containerUp();
 				disarmActivity();
 				// Issue #686: the demux's held tail (a last line with no newline) goes out before anything closes, and every
 				// record it completed is in the publisher before the final flush below.
 				stderrOut(endDemux());
 				finishOutput();
+				// Issue #1104: a killed client's result says so, and whether its container ran: `true` on any evidence
+				// (`sawOutput`), `false` when the activity watch was armed and nothing came back (an image that honours the watch
+				// writes its first line before its first model call, so its runner never reached one), and `null` without the
+				// watch, where silence proves nothing. Spread only for a killed client, so every other run resolves the object it
+				// always did.
+				const ranEvidence = sawOutput || sawRecord || (backstop?.state?.readings ?? 0) > 0;
+				const killed = clientKilled ? { clientKilled: true, started: ranEvidence ? true : backstop !== null ? false : null } : {};
 				// Issue #686 part 3, review round 2: the venue's box ended and confirmed gone first (see `settleRun`).
 				let settled = null;
 				if (typeof settleRun === "function") {
@@ -1353,7 +1459,7 @@ export function makeRunContainer({
 				// resolves the object it always did, and the processor's image-only value stands.
 				const loadedShown = lineLoaded !== null || leavesOut(loadedKnown.leftOut) ? { loaded: rebuildLoaded(lineLoaded, loadedKnown) } : {};
 				const liveShown = { ...(liveSkipped !== null ? { liveSkipped } : {}), ...(canaryLoad !== null ? { canaryLoad } : {}), ...loadedShown };
-				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered });
+				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered, ...killed } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered });
 			});
 		});
 
@@ -1411,7 +1517,9 @@ export function makeRunContainer({
 			await teardown();
 			dropGrant();
 			if (network) {
-				await removeJobNetwork(spawnFn, {
+				// Issue #1104: after a killed client each step is bounded (`TEARDOWN_STEP_AFTER_KILL_MS` says why); otherwise the
+				// teardown runs as it always did.
+				await removeJobNetwork(clientKilled ? boundedSpawn(spawnFn, teardownStepMs) : spawnFn, {
 					network,
 					proxy: egressProxy,
 					bin,

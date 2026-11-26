@@ -1491,3 +1491,26 @@ test("createWorker gives the processors of both its queues one memory of the job
 		await Promise.resolve(worker?.hostWorker?.close()).catch(() => {});
 	}
 });
+
+test("issue #1104: the order of the bounds: a killed client's whole close path ends before the abort grace, and the grace before the worker's shutdown bound", { skip }, async () => {
+	const { RUN_CLIENT_KILL_MS, TEARDOWN_STEP_AFTER_KILL_MS } = await import("../src/run-container.mjs");
+	const { STOP_TIMEOUT_MS } = await import("../src/backend-local.mjs");
+	const { FINISH_TIMEOUT_MS } = await import("../src/live-transcript.mjs");
+	const { SINK_FINISH_TIMEOUT_MS } = await import("../src/run-progress.mjs");
+	const { CONSUMER_SHUTDOWN_MS } = await import("../src/consumer-supervision.mjs");
+	// The kill, then the close path's own bounded steps: the live publisher's finish (stream, then sink) and the job
+	// network's two teardown steps.
+	const killPath = RUN_CLIENT_KILL_MS + FINISH_TIMEOUT_MS + SINK_FINISH_TIMEOUT_MS + 2 * TEARDOWN_STEP_AFTER_KILL_MS;
+	assert.ok(RUN_CLIENT_KILL_MS > 5_000, "after the stop's own five seconds of grace (`stop -t 5`)");
+	assert.ok(STOP_TIMEOUT_MS > 5_000 && STOP_TIMEOUT_MS <= RUN_CLIENT_KILL_MS, "the stop has its grace, and ends no later than the kill, so a shutdown leaves no local or podman stop child (OpenShell's stop has the reaper's own 30 s bound)");
+	assert.ok(killPath < mod.ABORT_GRACE_MS, `the kill path (${killPath} ms) ends before the grace (${mod.ABORT_GRACE_MS} ms), so its result is the one classified`);
+	// The service managers' bounds: systemd's TimeoutStopSec in both unit copies and the installer's render, and
+	// launchd's ExitTimeOut, each SIGKILLs a worker still draining after it.
+	const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
+	const managers = [CONSUMER_SHUTDOWN_MS];
+	for (const unit of ["../../deploy/worker.service", "../deploy/worker.service"]) managers.push(Number(read(unit).match(/^TimeoutStopSec=(\d+)$/m)[1]) * 1000);
+	for (const plist of ["../../deploy/com.pi-dispatch.worker.plist", "../deploy/com.pi-dispatch.worker.plist"]) managers.push(Number(read(plist).match(/<key>ExitTimeOut<\/key>\s*<integer>(\d+)<\/integer>/)[1]) * 1000);
+	managers.push(Number(read("../src/service.mjs").match(/"TimeoutStopSec=(\d+)"/)[1]) * 1000);
+	const shutdown = Math.min(...managers);
+	assert.ok(mod.ABORT_GRACE_MS + 5_000 <= shutdown, `the grace (${mod.ABORT_GRACE_MS} ms) ends 5 s before the first shutdown bound (${shutdown} ms), so a shutdown during a wedge records its jobs first`);
+});

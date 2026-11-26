@@ -58,7 +58,7 @@ export const liveKeyFor = (jobId) => `${LIVE_KEY_PREFIX}${sanitizeJobId(jobId)}`
 /** Each Valkey call's bound. Short: a viewer can wait half a second longer, the job must not. */
 const OP_TIMEOUT_MS = 1_000;
 /** The whole of `finish`'s bound, final read and flush included, so a dead Valkey adds at most this to a run's end. */
-const FINISH_TIMEOUT_MS = 3_000;
+export const FINISH_TIMEOUT_MS = 3_000;
 /**
  * How many entries, and how many bytes of their field values (UTF-16, two per code unit: what they occupy in memory),
  * may wait for a write. Past either bound the OLDEST are dropped and counted, never buffered: a viewer watching live

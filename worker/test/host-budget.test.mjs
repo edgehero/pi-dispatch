@@ -987,3 +987,59 @@ test("budget explanations select memory then CPU then count without changing sha
 	assert.deepEqual(admit({ ...base, budget: { memMiB: 2, cpuCenti: 2, count: 0 } }), { ok: false, why: "count" });
 	assert.deepEqual(admit({ ...base, budget: { memMiB: 2, cpuCenti: 2, count: 0 }, shareOf: () => 50 }), { ok: false, why: "share" });
 });
+
+test("issue #1104: a killed client's orphan is asked with force, given back once the runtime has answered and removed it, and its retry waits running-here meanwhile", async () => {
+	const asked = [];
+	let answer = null;
+	const { b, logs } = budgetWith({ gone: async (name, venue, ...rest) => (asked.push([name, ...rest]), answer) });
+	await b.ready;
+	const size = { memMiB: 512, cpuCenti: 25 };
+	const t1 = b.enter("j");
+	assert.deepEqual(b.gate({ id: "j", ticket: t1, size, name: "pi-job-j" }), { admitted: true });
+	b.leave("j");
+	assert.equal(b.orphan("j", { name: "pi-job-j", venue: { backend: "local" }, ticket: t1, killedClient: true }), true);
+	assert.deepEqual(logs.find((l) => l.event === "host_budget_orphan").fields, { jobId: "j", memMiB: 512, cpuCenti: 25, killedClient: true });
+	// The retry: the same id and the same container name, deferred and holding nothing while the old container may start.
+	const retry = () => b.gate({ id: "j", ticket: b.enter("j"), size, name: "pi-job-j" });
+	assert.deepEqual(retry(), { admitted: false, why: "running-here", rank: -1 });
+	assert.equal(b.waiting().length, 0, "no waiter: it holds no room of its own");
+	await b.sweep();
+	assert.deepEqual(asked, [["pi-job-j", { force: true }]], "asked to remove it whatever its state");
+	assert.equal(b.entries().length, 1, "an unanswered runtime keeps the hold");
+	assert.deepEqual(retry(), { admitted: false, why: "running-here", rank: -1 });
+	answer = true;
+	await b.sweep();
+	assert.equal(b.entries().length, 0, "removed, then given back");
+	assert.ok(logs.some((l) => l.event === "host_budget_orphan_released"));
+	assert.deepEqual(retry(), { admitted: true }, "and only then does the retry start");
+	// An ordinary orphan is asked as before, with no option.
+	asked.length = 0;
+	answer = null;
+	const t2 = b.enter("o");
+	b.gate({ id: "o", ticket: t2, size, name: "pi-job-o" });
+	b.orphan("o", { name: "pi-job-o", venue: null, ticket: t2 });
+	await b.sweep();
+	assert.deepEqual(asked, [["pi-job-o"]]);
+	assert.equal(Object.hasOwn(logs.findLast((l) => l.event === "host_budget_orphan").fields, "killedClient"), false);
+});
+
+test("issue #1104: the sweep never asks to remove a killed client's container while a live entry carries its name", async () => {
+	const asked = [];
+	const { b } = budgetWith({ gone: async (name, venue, ...rest) => (asked.push([name, ...rest]), true) });
+	await b.ready;
+	const size = { memMiB: 512, cpuCenti: 25 };
+	// Two pickups carrying one name (the gate refuses a name only once an orphan carries it), then the first one's client
+	// is killed: its orphan now shares a name with a live entry, whose container the runtime's answer would be.
+	const ta = b.enter("a");
+	assert.deepEqual(b.gate({ id: "a", ticket: ta, size, name: "pi-job-n" }), { admitted: true });
+	const tl = b.enter("live");
+	assert.deepEqual(b.gate({ id: "live", ticket: tl, size, name: "pi-job-n" }), { admitted: true });
+	b.orphan("a", { name: "pi-job-n", venue: null, ticket: ta, killedClient: true });
+	await b.sweep();
+	assert.deepEqual(asked, [], "never asked, so never removed: it may be the live job's container");
+	assert.equal(b.entries().length, 2, "and the orphan's room stays held");
+	assert.equal(b.release("live", { ticket: tl }), true);
+	await b.sweep();
+	assert.deepEqual(asked, [["pi-job-n", { force: true }]], "asked once the live entry is gone");
+	assert.equal(b.entries().length, 0);
+});
