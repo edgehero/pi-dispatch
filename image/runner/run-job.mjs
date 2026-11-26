@@ -1025,6 +1025,8 @@ async function main() {
 		// Null for every prompt job, so their decision tree is byte-identical to before run.command.
 		command: cfg.command ? { failed: commandFailed } : null,
 		isRetryable,
+		// Issue #1106: what the observer measured for the terminal message, the evidence `providerFailure` below reads too.
+		measured: failureObserver.measured(terminal),
 		rejected,
 		// Armed AND ended on the tool's own result: a call batched with a tool that kept the loop going did not park.
 		approval: approval !== null,

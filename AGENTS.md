@@ -73,8 +73,11 @@ Two consequences worth internalising before you design anything:
   `overrides`; `.github/scripts/pi-pin-check.mjs` holds those, the lockfile and every hand-written copy of the
   pin to the runner's. A copy of a pi file's logic is pinned by that file's content hash, not by pi's version.
 - **No secrets or PII in logs.** Log key *names*, never values, and never payload text. The run record is
-  PII-free by construction: it holds no attacker-chosen string, but for one named residual: code in the runner's process can forge
-  four kinds of fact on `loaded`, each within a narrow shape: an extension tool's name, `pi`, each count and an append-source hash (`INT-RUN-HISTORY-FILE-CONTRACT`).
+  PII-free by construction: it holds no attacker-chosen string, but for two named residuals: code in the runner's process can forge
+  four kinds of fact on `loaded`, each within a narrow shape: an extension tool's name, `pi`, each count and an append-source hash; and
+  `providerMessage` holds a provider's own error text beside a provider error, its secrets taken out and cut to 500 characters, kept
+  out of every comment and every model (`INT-RUN-HISTORY-FILE-CONTRACT`). The same text is the one provider text in the worker log, its
+  `provider_error` line.
 - **Fail loudly, or fail open and say which.** A silent no-op is the worst outcome available here. If a
   feature cannot do what it was asked, it refuses with a reason an operator can act on. Where it fails open,
   the reason is named in the record.

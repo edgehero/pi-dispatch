@@ -598,6 +598,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		let selectedEffective = null;
 		let randomSelection = null;
 		let providerFailureRan = null;
+		// Issue #1106: the provider's own message beside a provider error this attempt's runner reported, as runContainer
+		// redacted and bounded it, for the record's `providerMessage`. Null before any container.
+		let providerMessageRan = null;
 		let modelRolesRan = null;
 		const carryLiveSkip = (target) => {
 			if (target === null || typeof target !== "object") return;
@@ -611,6 +614,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				if (selectedEffective?.modelSelectionInfo) target.modelSelectionInfo = selectedEffective.modelSelectionInfo;
 				if (randomSelection) job[MODEL_SELECTION_FINISH] = { attempt: randomSelection.attempt, revision: randomSelection.revision };
 				if (providerFailureRan) target.providerFailure = providerFailureRan;
+				if (providerMessageRan) target.providerMessage = providerMessageRan;
 				if (modelRolesRan) target.modelRoles = modelRolesRan;
 				// Every attempt replaces the same record. Carry intervention fallback and uncertainty from the
 				// prior attempt, or a later cold start would erase the only proof of an earlier resumed answer.
@@ -2300,6 +2304,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						// Only signed, matching terminal metadata can permit a later cross-model replay. The pessimistic
 						// marker written before spawn survives crashes and tools that terminate the runner.
 						if (r?.exitAuth === "verified" && r?.exitLineCode === r?.code && r?.aborted !== true) modelRolesRan = r.modelRoles ?? null;
+						// Issue #1106: what the provider said when it refused the credential or failed the call (a used-up quota or
+						// budget among them), off the same verified, code-matched line, for the record and this log line. The words
+						// stay out of every comment, which keep their fixed sentences.
+						if (r?.exitAuth === "verified" && r?.exitLineCode === r?.code && r?.aborted !== true && typeof r.providerMessage === "string" && r.providerMessage !== "") {
+							providerMessageRan = r.providerMessage;
+							deps.log?.("provider_error", { jobId: job.id, provider: effectiveJob.provider, model: effectiveJob.model, reason: r.code === 2 ? "provider-auth-refused" : "error", message: r.providerMessage });
+						}
 						if (r?.exitAuth === "verified" && r?.exitLineCode === r?.code && r?.code === 1 && r?.aborted !== true) {
 							providerFailureRan = r.providerFailure ?? null;
 							try {

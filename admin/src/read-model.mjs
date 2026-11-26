@@ -9364,8 +9364,11 @@ export function modelRunRecord(record, { list = false } = {}) {
   const hasFailover = Object.hasOwn(record, "modelWhy") || Object.hasOwn(record, "providerFailure");
   const freeReason = Object.hasOwn(record, "reason") && record.reason !== null && recordReason(record) === null;
   const hasCredential = Object.hasOwn(record, "mainCredential");
-  if (!hasSecretFiles && !hasBundle && !hasLoaded && !hasOpenshell && !hasProfile && !freeReason && !hasFailover && !hasRoles && !hasCredential) return record;
-  const { secretFiles: _secretFiles, modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, loaded: _loaded, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, mainCredential: _credential, ...rest } = record;
+  // Issue #1106: the provider's own message beside a provider error is text a provider wrote, so it stays in the
+  // operator's record and worker log, and a model reads the reason and the closed `providerFailure` instead.
+  const hasProviderMessage = Object.hasOwn(record, "providerMessage");
+  if (!hasSecretFiles && !hasBundle && !hasLoaded && !hasOpenshell && !hasProfile && !freeReason && !hasFailover && !hasRoles && !hasCredential && !hasProviderMessage) return record;
+  const { secretFiles: _secretFiles, modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, loaded: _loaded, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, mainCredential: _credential, providerMessage: _providerMessage, ...rest } = record;
   const out = { ...rest };
   if (hasSecretFiles) {
     const files = recordedSecretFiles(record.secretFiles);

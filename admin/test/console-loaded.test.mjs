@@ -531,3 +531,15 @@ test("issue #998: dispatch_runs gives the credential source as its word alone, b
   assert.deepEqual(modelRunRecord({ ...plain, mainCredential: { source: "pi-login" } }).mainCredential, { source: "pi-login" });
   assert.equal(Object.hasOwn(modelRunRecord({ ...plain, mainCredential: { source: "vault", variable: "X" } }), "mainCredential"), false);
 });
+
+test("issue #1106: dispatch_runs never hands a model the provider's message, by id or as a list; the closed evidence stays", () => {
+  const said = '403: {"message":"Workspace monthly budget of $50.00 exceeded.","code":403}';
+  const failed = { jobId: "gh-quota", outcome: "failed", reason: "container-infra-exit", providerFailure: { kind: "quota-exhausted" }, providerMessage: said };
+  for (const read of [modelRunRecord(failed), modelRunRecord(failed, { list: true }), runForAgent(failed)]) {
+    assert.equal(Object.hasOwn(read, "providerMessage"), false);
+    assert.deepEqual(read.providerFailure, { kind: "quota-exhausted" });
+    assert.equal(JSON.stringify(read).includes("Workspace"), false);
+  }
+  // A record whose only field this read reshapes is the message is reshaped for it alone.
+  assert.deepEqual(modelRunRecord({ jobId: "gh-refused", outcome: "policy", reason: "provider-auth-refused", providerMessage: said }), { jobId: "gh-refused", outcome: "policy", reason: "provider-auth-refused" });
+});

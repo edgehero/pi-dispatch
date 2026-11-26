@@ -444,6 +444,22 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: a provider's spending limit is a used-up quota (#1106)
+
+A job image from this release ends OpenRouter's 403 for a used-up workspace budget or a key past its limit as the
+infrastructure exit with signed `quota-exhausted` evidence, where it ended as `provider-auth-refused`, so the model
+cools down and a random pool or a fallback list passes it over. A 402 on an api whose status the runner observes
+already ended as the infrastructure exit, without that evidence; it now carries it too, so only the 403 changes its
+reason. A worker from this release keeps what the provider said beside a provider error in the run record and its
+log. Both halves are needed for both: the job image gives the quota and the cooldown, the worker gives the message.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Run record `reason` | Same words. An OpenRouter budget or key-limit refusal is now `container-infra-exit` with `providerFailure.kind` `quota-exhausted` (retried while attempts are left, then the quota comment) where it was `provider-auth-refused`. Older records keep what they say. |
+| Run record `providerMessage` | New, additive: the provider's own message beside `provider-auth-refused` or a provider's error (`container-infra-exit`), off the signed exit line, with every secret value the attempt held taken out and cut to 500 characters, a conditional key before `v`. `v` stays 1 and every reader ignores it. The console's pages do not show it, and a console from this release leaves it out of what its tools hand a model; an older console's `dispatch_runs` hands it to the model whole, until the console is upgraded with the worker. No migration or older-state detector is needed. |
+| Valkey `dispatch:model-cooldown:<digest>` | Same key and shape: a spending limit now writes the six-hour quota cooldown any used-up quota writes. |
+| Mixed versions | A newer job image with an older worker: the refusal is `quota-exhausted`, the model cools down and the pool passes it over (an older worker reads that evidence as it reads any used-up quota), but the record keeps no message. An older job image with a newer worker: the refusal is still `provider-auth-refused` with no cooldown, but the record and the worker log keep the provider's message, which names the budget. Upgrade both. |
+
 ### Unreleased: a job whose `docker run` never returns ends at its limit (#1104)
 
 A worker from this release kills its own `docker run` 10 seconds after a limit's stop on a runtime that does not answer,

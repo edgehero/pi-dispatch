@@ -1,16 +1,36 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { join } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { jobTree, runRealJob } from "./helpers/real-job.mjs";
 import { createJobModelRuntime, loadPiAuthStorage } from "../src/model-runtime.mjs";
-import { captureTerminal, decideExit } from "../src/outcome.mjs";
+import { captureTerminal, classifyStopReason, decideExit, loadRetryPredicate } from "../src/outcome.mjs";
 import { jobSettings } from "../src/config.mjs";
-import { createPolicyGuard, createUsageMeter, installProcessUsageMeter } from "../src/usage-meter.mjs";
-import { classifyProviderFailure, createToolStartLatch, installProviderFailureObserver, MAX_RESET_MS, providerReplaySafe, resetFromHeaders } from "../src/provider-failure.mjs";
+import { createPolicyGuard, createUsageMeter, installProcessUsageMeter, resolvePiAiCompat } from "../src/usage-meter.mjs";
+import { classifyProviderFailure, createToolStartLatch, installProviderFailureObserver, MAX_RESET_MS, providerReplaySafe, providerSpendLimit, resetFromHeaders } from "../src/provider-failure.mjs";
 
 const NOW = Date.parse("2026-01-01T00:00:00Z");
 const error = (errorMessage) => ({ role: "assistant", stopReason: "error", errorMessage });
+
+// Issue #1106: OpenRouter's answer to a call on a workspace whose monthly budget is used up, measured 2026-11-26 (POST
+// /api/v1/chat/completions, HTTP 403), verbatim. It holds no key. pi-ai's openai-completions prints the `error` object
+// after the status (utils/error-body.js `formatProviderError`), which the loopback test below pins.
+const OPENROUTER_BUDGET_403 = '{"error":{"message":"Workspace monthly budget of $50.00 exceeded. Contact your org admin. $50.07 of $50.00 used; resets 2026-12-01T00:00:00.000Z.","code":403,"metadata":{"limit_source":"openrouter_workspace_budget","remedy_hint":"Wait for the budget interval to reset (see metadata.resets_at), or ask your org admin to raise the workspace budget.","scope":"workspace","limit_usd":50,"spend_usd":50.068100718,"resets_at":"2026-12-01T00:00:00.000Z"}}}';
+const piText = (status, body) => `${status}: ${JSON.stringify(JSON.parse(body).error)}`;
+const BUDGET = piText(403, OPENROUTER_BUDGET_403);
+const OPENROUTER_CREDITS_402 = JSON.stringify({ error: { message: "Insufficient credits. Add more using https://openrouter.ai/settings/credits", code: 402 } });
+const OPENAI_INVALID_KEY_401 = JSON.stringify({ error: { message: "Incorrect API key provided: dummy-key.", type: "invalid_request_error", param: null, code: "invalid_api_key" } });
+const OPENAI_NOT_ALLOWED_403 = JSON.stringify({ error: { message: "You are not allowed to sample from this model", type: "invalid_request_error", param: null, code: null } });
+// The same refusal from OpenRouter's anthropic-messages endpoint (POST /api/v1/messages, HTTP 403, streaming or not),
+// measured 2026-11-26, verbatim: the sentence one level deeper, under Anthropic's `permission_error` type. The Anthropic
+// SDK prints the status, a space and the whole body, and pi-ai passes that on.
+const OPENROUTER_MESSAGES_403 = '{"type":"error","error":{"type":"permission_error","message":"Workspace monthly budget of $50.00 exceeded. Contact your org admin. $50.07 of $50.00 used; resets 2026-12-01T00:00:00.000Z.","error_type":"permission_denied"},"request_id":"gen-1795721338-o5OTYqK8NDZVSU77SvJl","metadata":{"limit_source":"openrouter_workspace_budget","remedy_hint":"Wait for the budget interval to reset (see metadata.resets_at), or ask your org admin to raise the workspace budget.","scope":"workspace","limit_usd":50,"spend_usd":50.068100718,"resets_at":"2026-12-01T00:00:00.000Z"}}';
+const sdkText = (status, body) => `${status} ${body}`;
+// Anthropic's own refusal of a key that may not use a model, under the same type: a credential refusal, which stays one.
+const ANTHROPIC_PERMISSION_403 = JSON.stringify({ type: "error", error: { type: "permission_error", message: "Your API key does not have permission to use the specified resource." } });
+const OPENROUTER_UPSTREAM_403 = JSON.stringify({ error: { message: "Provider returned error", code: 403, metadata: { raw: "upstream connect error or disconnect/reset before headers" } } });
 
 test("provider classifications are closed; successful, parameter, auth and unknown failures do not switch", () => {
 	for (const [message, measured, expected] of [
@@ -256,6 +276,140 @@ test("pinned SDK prompt resolves on 429 yet terminal events retain reset evidenc
 	} finally { session?.dispose(); installed.uninstall(); observer.uninstall(); }
 });
 
+test("issue #1106: a provider's spending limit is one predicate's answer, and the credential rule and the failover evidence both ask it", () => {
+	const keyLimit = '403: {"message":"Key limit exceeded (total limit). Manage it using https://openrouter.ai/settings/keys","code":403}';
+	for (const [text, measured, expected, why] of [
+		[BUDGET, { status: 403 }, true, "the measured workspace budget"],
+		[BUDGET, null, true, "no measurement: the 403 that begins pi's message, as the credential rule reads it"],
+		[keyLimit, { status: 403 }, true, "OpenRouter's per-key limit"],
+		[piText(402, OPENROUTER_CREDITS_402), { status: 402 }, true, "a measured 402 whatever its body"],
+		[piText(402, OPENROUTER_CREDITS_402), null, false, "a 402 only when measured"],
+		[BUDGET, { status: 500 }, false, "a measured status other than 402 or 403"],
+		[BUDGET, { connection: true }, false, "no HTTP answer"],
+		['403: {"message":"Workspace monthly budget of $50.00 exceeded.","code":"invalid_api_key"}', { status: 403 }, false, "an explicit credential wording wins"],
+		[piText(403, OPENROUTER_UPSTREAM_403), { status: 403 }, false, "OpenRouter's upstream 403"],
+		[piText(403, OPENAI_NOT_ALLOWED_403), { status: 403 }, false, "a permission refusal"],
+		['403: {"message":"Forbidden","metadata":{"raw":"Workspace monthly budget of $50.00 exceeded."}}', { status: 403 }, false, "the wording in another field"],
+		['403: {"message":"Note: Workspace monthly budget of $50.00 exceeded."}', { status: 403 }, false, "the wording not at the start"],
+		[sdkText(403, OPENROUTER_MESSAGES_403), { status: 403 }, true, "the measured budget through anthropic-messages: `error.message`"],
+		[sdkText(403, OPENROUTER_MESSAGES_403), null, true, "the same with no measurement"],
+		['403 {"message":"Workspace monthly budget of $50.00 exceeded."}', { status: 403 }, true, "either form, either place"],
+		[sdkText(403, ANTHROPIC_PERMISSION_403), { status: 403 }, false, "Anthropic's own permission_error: the wording decides, never the type"],
+		['403 {"error":{"error":{"message":"Workspace monthly budget of $50.00 exceeded."}}}', { status: 403 }, false, "nested deeper than measured"],
+		['403 {"error":"Workspace monthly budget of $50.00 exceeded."}', { status: 403 }, false, "an `error` that is a string, not an object"],
+		["403: Workspace monthly budget of $50.00 exceeded.", { status: 403 }, false, "no JSON body"],
+	]) assert.equal(providerSpendLimit(error(text), measured), expected, why);
+	// The failover evidence: a used-up quota, read before the 401/403 rule; a measured reset rides along as for any quota.
+	assert.deepEqual(classifyProviderFailure(error(BUDGET), { status: 403 }), { kind: "quota-exhausted" });
+	assert.deepEqual(classifyProviderFailure(error(BUDGET), { status: 403, resetAt: NOW + 5000 }), { kind: "quota-exhausted", resetAt: NOW + 5000 });
+	assert.deepEqual(classifyProviderFailure(error(piText(402, OPENROUTER_CREDITS_402)), { status: 402 }), { kind: "quota-exhausted" });
+	assert.equal(classifyProviderFailure(error(piText(401, OPENAI_INVALID_KEY_401)), { status: 401 }), null);
+	assert.equal(classifyProviderFailure(error(piText(403, OPENAI_NOT_ALLOWED_403)), { status: 403 }), null);
+	// The outcome: the infrastructure exit with the provider's message, never a credential refusal, under pi's own verdict
+	// that the error is permanent; a refused credential is unchanged.
+	const permanent = () => false;
+	assert.deepEqual(classifyStopReason(error(BUDGET), permanent, { status: 403 }), { code: 1, reason: "error", message: BUDGET });
+	assert.deepEqual(decideExit({ terminal: error(BUDGET), isRetryable: permanent, measured: { status: 403 } }), { code: 1, reason: "error", message: BUDGET });
+	assert.equal(classifyStopReason(error(keyLimit), permanent, { status: 403 }).reason, "error");
+	assert.equal(classifyStopReason(error(piText(401, OPENAI_INVALID_KEY_401)), permanent, { status: 401 }).reason, "provider-auth-refused");
+	assert.equal(classifyStopReason(error(piText(403, OPENAI_NOT_ALLOWED_403)), permanent, { status: 403 }).reason, "provider-auth-refused");
+	assert.equal(classifyStopReason(error(sdkText(403, OPENROUTER_MESSAGES_403)), permanent, { status: 403 }).reason, "error");
+	assert.deepEqual(classifyProviderFailure(error(sdkText(403, OPENROUTER_MESSAGES_403)), { status: 403 }), { kind: "quota-exhausted" });
+	assert.equal(classifyStopReason(error(sdkText(403, ANTHROPIC_PERMISSION_403)), permanent, { status: 403 }).reason, "provider-auth-refused");
+	assert.equal(classifyProviderFailure(error(sdkText(403, ANTHROPIC_PERMISSION_403)), { status: 403 }), null);
+});
+
+test("issue #1106: the measured budget 403 through pi's real openai-completions and anthropic-messages on loopback is a used-up quota, and a refused key is still a refusal", { skip: !pi }, async () => {
+	let answer = { status: 500, body: "{}" };
+	let calls = 0;
+	const server = createServer((req, res) => {
+		req.resume();
+		req.on("end", () => {
+			calls += 1;
+			res.writeHead(answer.status, { "content-type": "application/json" });
+			res.end(answer.body);
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const root = tempDir("pi-spend-limit-");
+	const modelsPath = join(root, "models.json");
+	// OpenRouter's own catalog entry, its baseUrl pointed at the loopback server.
+	writeFileSync(modelsPath, JSON.stringify({ providers: { openrouter: { baseUrl: `http://127.0.0.1:${server.address().port}/api/v1` } } }));
+	const isRetryable = await loadRetryPredicate({ candidates: resolvePiAiCompat() });
+	assert.equal(typeof isRetryable, "function");
+	try {
+		const AuthStorage = await loadPiAuthStorage();
+		const runtime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, AuthStorage, agentDir: root, modelsPath, readFile: () => "{}" });
+		await runtime.setRuntimeApiKey("openrouter", "sk-or-v1-test-not-a-key");
+		// The model the issue's jobs drew, on openai-completions, and one of OpenRouter's anthropic-messages models.
+		const completions = runtime.getModel("openrouter", "deepseek/deepseek-v4.1-flash-1017");
+		const messages = runtime.getModel("openrouter", "anthropic/claude-opus-5.5");
+		assert.deepEqual([completions?.api, messages?.api], ["openai-completions", "anthropic-messages"]);
+		for (const [model, status, body, text, want, failure] of [
+			[completions, 403, OPENROUTER_BUDGET_403, piText, { code: 1, reason: "error" }, { kind: "quota-exhausted" }],
+			[completions, 402, OPENROUTER_CREDITS_402, piText, { code: 1, reason: "error" }, { kind: "quota-exhausted" }],
+			[completions, 401, OPENAI_INVALID_KEY_401, piText, { code: 2, reason: "provider-auth-refused" }, null],
+			[completions, 403, OPENROUTER_UPSTREAM_403, piText, { code: 1, reason: "error" }, null],
+			[messages, 403, OPENROUTER_MESSAGES_403, sdkText, { code: 1, reason: "error" }, { kind: "quota-exhausted" }],
+			[messages, 403, ANTHROPIC_PERMISSION_403, sdkText, { code: 2, reason: "provider-auth-refused" }, null],
+		]) {
+			answer = { status, body };
+			const before = calls;
+			const settingsManager = pi.SettingsManager.inMemory(jobSettings({ maxRetries: 0, baseDelayMs: 1 }));
+			const resourceLoader = new pi.DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+			await resourceLoader.reload();
+			const sessionManager = pi.SessionManager.inMemory(root);
+			const observer = installProviderFailureObserver({ ModelRuntime: pi.ModelRuntime, rootSessionId: sessionManager.getSessionId() });
+			let session;
+			try {
+				({ session } = await pi.createAgentSession({ cwd: root, agentDir: root, modelRuntime: runtime, model, settingsManager, sessionManager, resourceLoader, tools: [] }));
+				let terminal;
+				session.subscribe((event) => { terminal = captureTerminal(terminal, event); });
+				await session.prompt("test");
+				assert.equal(calls, before + 1, `${status}: one call reached the loopback provider`);
+				assert.equal(terminal?.errorMessage, text(status, body), `${model.api} ${status}: pi's message, as each adapter forms it`);
+				assert.deepEqual(observer.measured(terminal), { status }, `${status}: what the observer measured`);
+				const outcome = decideExit({ terminal, isRetryable, measured: observer.measured(terminal) });
+				assert.deepEqual({ code: outcome.code, reason: outcome.reason }, want, `${status} ${body}`);
+				assert.deepEqual(observer.failure(terminal), failure, `${status} ${body}`);
+			} finally {
+				session?.dispose();
+				observer.uninstall();
+			}
+		}
+	} finally {
+		await new Promise((resolve) => server.close(resolve));
+	}
+});
+
+for (const [model, body, said] of [["deepseek/deepseek-v4.1-flash-1017", OPENROUTER_BUDGET_403, BUDGET], ["anthropic/claude-opus-5.5", OPENROUTER_MESSAGES_403, sdkText(403, OPENROUTER_MESSAGES_403)]]) {
+	test(`issue #1106: the real run-job.mjs ends the measured budget 403 on openrouter/${model} as exit 1 with quota-exhausted evidence and the provider's message`, { skip: !pi }, async () => {
+		let calls = 0;
+		const server = createServer((req, res) => {
+			req.resume();
+			req.on("end", () => {
+				calls += 1;
+				res.writeHead(403, { "content-type": "application/json" });
+				res.end(body);
+			});
+		});
+		await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+		try {
+			const base = `http://127.0.0.1:${server.address().port}/api/v1`;
+			const root = jobTree({ base });
+			writeFileSync(join(root, "opt", "pi-global", "models.json"), `${JSON.stringify({ providers: { openrouter: { baseUrl: base } } })}\n`);
+			const { code, exit, stderr } = await runRealJob(root, { PI_PROVIDER: "openrouter", PI_MODEL: model, OPENROUTER_API_KEY: "sk-or-v1-test-not-a-key" });
+			assert.equal(calls, 1, "one refused call, then the job ends");
+			assert.equal(code, 1, `${JSON.stringify(exit)}\n${stderr}`);
+			assert.deepEqual([exit.code, exit.reason], [1, "error"], "the infrastructure exit, not provider-auth-refused");
+			assert.deepEqual(exit.providerFailure, { kind: "quota-exhausted" });
+			assert.equal(exit.message, said, "the provider's message rides the line for the worker");
+			assert.deepEqual([exit.toolsStarted, exit.replaySafe], [false, true]);
+		} finally {
+			await new Promise((resolve) => server.close(resolve));
+		}
+	});
+}
 
 test("the image failover capability is backed by an offline signed normal-entrypoint conformance run", () => {
 	const dockerfile = readFileSync(new URL("../../Dockerfile", import.meta.url), "utf8");
