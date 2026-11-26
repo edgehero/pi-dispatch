@@ -349,6 +349,15 @@ test("the host budget's reads: every page, the size labels, gone and unstarted p
 	assert.equal(await b.containerGone("pi-job-new"), true, "unstarted: deleted, then gone");
 	assert.ok(fake.state.calls.some((c) => c[2] === "delete" && c[3] === fresh));
 	assert.equal(await b.containerGone("someone-else"), null, "outside the namespace: not this worker's to answer");
+	// Issue #1104: a killed client's sandbox (`force`, the third argument, as the registry hands it on) is deleted in a
+	// phase that still runs, and is then gone; asked through the registry, as the host budget's sweep asks it.
+	const { makeBackendRegistry } = await import("../src/backend-registry.mjs");
+	const viaRegistry = makeBackendRegistry({ bundles: [b], defaultName: b.name });
+	assert.equal(await viaRegistry.containerGone("pi-job-run", { backend: b.name }), false, "without force a running sandbox keeps its hold");
+	assert.ok(!fake.state.calls.some((c) => c[2] === "delete" && c[3] === run));
+	assert.equal(await viaRegistry.containerGone("pi-job-run", { backend: b.name }, { force: true }), true);
+	assert.ok(fake.state.calls.some((c) => c[2] === "delete" && c[3] === run), "the running sandbox is deleted by its exact name");
+	assert.equal(await bundle({ ...fake, exec: async () => Promise.reject(new Error("down")) }).containerGone("pi-job-run", null, { force: true }), null, "and nothing is given back without an answer");
 	assert.equal(await bundle({ ...fake, exec: async () => Promise.reject(new Error("down")) }).containerGone("pi-job-run"), null);
 	await assert.rejects(bundle({ ...fake, exec: async () => Promise.reject(new Error("down")) }).listJobContainers(), "an unanswered listing throws");
 	const reaping = fakeOpenshell({ sandboxes });

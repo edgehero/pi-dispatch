@@ -387,6 +387,196 @@ test("stop_did_not_take: the job's hold becomes an ORPHAN that keeps its room un
 	assert.equal(b.entries().length, 0, "given back once the runtime says it is gone");
 });
 
+/** Issue #1104: a processor whose container's CLI client the attempt had to kill after a time limit's abort. */
+function killedClientProcessor({ b, exit = { code: 137, aborted: true, clientKilled: true, started: false }, reason = "idle", seen = { logs: [], records: [], runs: 0 }, extraDeps = {}, extra = {}, redis = fakeRedis(), holdMs = 0 }) {
+	let ac = null;
+	const processor = mod.makeProcessor({
+		cancelJob: () => true,
+		stopContainer: () => {},
+		redis,
+		getSettings: SETTINGS,
+		projects: () => SHOP,
+		jobSizeEnv: { PI_JOB_MEMORY: "20g", PI_JOB_CPUS: "2" },
+		...(b ? { hostBudget: b } : {}),
+		abortGraceMs: 60_000,
+		now: () => NOW,
+		recordRun: (r) => seen.records.push(r),
+		timeoutMs: 100000,
+		deps: {
+			mintToken: async () => "tok",
+			isDefaultBranchProtected: async () => true,
+			prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j" }),
+			runContainer: async () => {
+				seen.runs += 1;
+				ac.abort(reason);
+				// The client-kill window, in which the operator-cancel poll may still tick.
+				if (holdMs > 0) await new Promise((resolve) => setTimeout(resolve, holdMs));
+				return exit;
+			},
+			cleanup: async () => {},
+			comment: async () => {},
+			log: (event, fields) => seen.logs.push({ event, fields }),
+			...extraDeps,
+		},
+		...extra,
+	});
+	return { seen, run: (job) => processor(job, "tok", (ac = new AbortController()).signal) };
+}
+
+test("issue #1104: a killed client's never-started attempt is retried, its hold becomes a killed client's orphan, and its retry waits until the sweep removed the container", { skip }, async () => {
+	let gone = null;
+	const asked = [];
+	const { b } = await budgetOf({ gone: async (name, venue, ...rest) => (asked.push([name, ...rest]), gone) });
+	const h = killedClientProcessor({ b });
+	const first = ghJob("k");
+	await assert.rejects(() => h.run(first.job), (e) => e.name === "InfraRetry" && e.reason === "container-never-started");
+	assert.ok(!h.seen.logs.some((l) => l.event === "stop_did_not_take"), "the attempt ended inside the grace, by its own kill");
+	const [entry] = b.entries();
+	assert.deepEqual([entry.id, entry.orphan.name, entry.orphan.killedClient], ["k", "pi-job-k", true]);
+	assert.equal(h.seen.records.at(-1).error.reason, "container-never-started");
+	// The retry: the same job, deferred while the old container may still be started by a runtime that answers again.
+	const retry = ghJob("k");
+	await assert.rejects(() => h.run(retry.job), (e) => e.name === "DelayedError");
+	assert.equal(h.seen.runs, 1, "no second container");
+	assert.ok(h.seen.logs.some((l) => l.event === "host_budget_deferred" && l.fields.why === "running-here"), JSON.stringify(h.seen.logs.map((l) => l.event)));
+	await b.sweep();
+	assert.deepEqual(asked, [["pi-job-k", { force: true }]]);
+	assert.equal(b.entries().length, 1, "an unanswered runtime keeps it");
+	gone = true;
+	await b.sweep();
+	assert.equal(b.entries().length, 0);
+	// Now the retry runs (its container closes on its own this time).
+	const h2 = killedClientProcessor({ b, exit: { code: 0, aborted: false, turns: 1 } });
+	const again = await h2.run(ghJob("k").job);
+	assert.equal(again.outcome, "completed");
+	assert.equal(h2.seen.runs, 1);
+});
+
+test("issue #1104: a local job's killed client holds its folder as a killed client's orphan, and no job on that folder starts until the sweep removed it", { skip }, async () => {
+	let gone = null;
+	const { b } = await budgetOf({ gone: async () => gone });
+	const extraDeps = { localWorkspaceIdentity: () => ({ key: "ws:1:2", folder: "/srv/shop" }), localContainerGone: async () => assert.fail("never asked: the runtime that did not answer the stop is not asked again") };
+	const h = killedClientProcessor({ b, reason: "max-minutes", extraDeps });
+	await assert.rejects(() => h.run(localJob("l1").job), (e) => e.reason === "container-never-started");
+	assert.equal(b.entries()[0].orphan.killedClient, true);
+	await assert.rejects(() => h.run(localJob("l1").job), (e) => e.name === "DelayedError");
+	await assert.rejects(() => h.run(localJob("l2").job), (e) => e.name === "DelayedError");
+	assert.deepEqual(h.seen.logs.filter((l) => l.event === "host_budget_deferred").map((l) => [l.fields.jobId, l.fields.why]), [["l1", "workspace-orphan"], ["l2", "workspace-orphan"]]);
+	assert.equal(h.seen.runs, 1);
+	gone = true;
+	await b.sweep();
+	assert.deepEqual(b.entries(), []);
+});
+
+test("issue #1104: with no host budget nothing would remove the container before a retry, so a killed client's stop is the policy result it always was", { skip }, async () => {
+	const h = killedClientProcessor({ b: null });
+	const result = await h.run(ghJob("n").job);
+	assert.deepEqual([result.outcome, result.reason], ["policy", "idle"]);
+	// And a killed client whose container wrote something, or an operator's cancel, stays the stop it was with a budget
+	// too.
+	for (const [id, exit, reason] of [["w", { code: 137, aborted: true, clientKilled: true, started: true }, "idle"], ["c", { code: 137, aborted: true, clientKilled: true, started: false }, "operator-cancel"]]) {
+		const { b } = await budgetOf();
+		const stopped = killedClientProcessor({ b, exit, reason });
+		assert.deepEqual([(await stopped.run(ghJob(id).job)).reason], [reason]);
+		assert.deepEqual(b.entries().map((e) => [e.id, e.orphan?.killedClient]), [[id, true]], `${id}: still an orphan the sweep removes, since its client was killed`);
+	}
+});
+
+test("issue #1104: on a fleet, a killed client's attempt on the SHARED queue is the stop it was, since another host could start its retry at once; on this host's own queue it is never-started", { skip }, async () => {
+	// Another host's budget does not hold this host's orphan, so a retry there would not wait for the removal.
+	const shared = await budgetOf();
+	const onShared = killedClientProcessor({ b: shared.b, extra: { multiHost: true } });
+	const stopped = await onShared.run(ghJob("f1").job);
+	assert.deepEqual([stopped.outcome, stopped.reason], ["policy", "idle"], "recorded as the stop, never refunded or retried");
+	assert.equal(shared.b.entries()[0].orphan.killedClient, true, "its container is still removed by this host's sweep");
+	// The same job on this host's own queue: no other host drains it, so its next attempt waits here.
+	const own = await budgetOf();
+	const onOwn = killedClientProcessor({ b: own.b, extra: { multiHost: true } });
+	await assert.rejects(() => onOwn.run(ghJob("f2", "acme/web", HOST_QUEUE).job), (e) => e.reason === "container-never-started");
+	// And a local job on the shared queue of a fleet is the stop it was too: the queue decides, not the kind.
+	const local = await budgetOf();
+	const onLocal = killedClientProcessor({ b: local.b, extra: { multiHost: true }, extraDeps: { localWorkspaceIdentity: () => ({ key: "ws:9:9", folder: "/srv/shop" }) } });
+	assert.deepEqual([(await onLocal.run(localJob("f3").job)).reason], ["idle"]);
+});
+
+/** A Valkey that answers the cancel keys it holds, and records the writes the poll makes. */
+function cancelRedis(held = {}) {
+	const redis = fakeRedis();
+	redis.writes = [];
+	redis.get = async (key) => held[key] ?? null;
+	redis.set = async (...args) => (redis.writes.push(["set", ...args]), "OK");
+	redis.del = async (...keys) => {
+		redis.writes.push(["del", ...keys]);
+		for (const key of keys) delete held[key];
+		return 1;
+	};
+	return redis;
+}
+
+test("issue #1104: a cancel the poll acknowledges after a time limit's stop, or one waiting unread, keeps the stop's result: never refunded, never retried", { skip }, async () => {
+	// The poll ticks inside the client-kill window, after the idle stop already aborted the signal: it hands the cancel on
+	// and writes its ack, while the signal keeps the idle reason.
+	const { b } = await budgetOf();
+	const acked = cancelRedis({ "cancel:req:c1": "operator-cancel" });
+	const late = killedClientProcessor({ b, redis: acked, holdMs: 120, extra: { cancelPollMs: 20 } });
+	const result = await late.run(ghJob("c1").job);
+	assert.deepEqual([result.outcome, result.reason], ["policy", "idle"], "recorded as the stop, as before this issue");
+	assert.ok(acked.writes.some(([op, key]) => op === "set" && key === "cancel:ack:c1"), "the cancel was acknowledged");
+	assert.ok(acked.writes.some(([op, key]) => op === "del" && key === "cancel:req:c1"), "and its request consumed, so only the poll's own memory says so");
+	// A request the poll never read (its interval longer than the window) is seen before the stop is classified, and left
+	// for its requester, as every request that lands while the outcome is decided is.
+	const waiting = await budgetOf();
+	const unread = cancelRedis({ "cancel:agent:req:c2": "agent-cancel" });
+	const pending = killedClientProcessor({ b: waiting.b, redis: unread, extra: { cancelPollMs: 60_000 } });
+	const kept = await pending.run(ghJob("c2").job);
+	assert.deepEqual([kept.outcome, kept.reason], ["policy", "idle"]);
+	assert.deepEqual(unread.writes, [], "neither acknowledged nor consumed here");
+	// With no request at all the same attempt is never-started.
+	const quiet = await budgetOf();
+	const none = killedClientProcessor({ b: quiet.b, redis: cancelRedis(), extra: { cancelPollMs: 20 }, holdMs: 60 });
+	await assert.rejects(() => none.run(ghJob("c3").job), (e) => e.reason === "container-never-started");
+});
+
+test("issue #1104: the read for a waiting cancel is bounded: a Valkey that stops answering, or answers with an error, leaves the stop's result and holds nothing", { skip }, async () => {
+	// Connected but silent on the cancel keys: the job is recorded within the bound, as the stop it was.
+	const silent = await budgetOf();
+	const hanging = cancelRedis();
+	hanging.get = () => new Promise(() => {});
+	const h = killedClientProcessor({ b: silent.b, redis: hanging, extra: { cancelPollMs: 60_000, cancelStopBoundMs: 50 } });
+	const outcome = await Promise.race([h.run(ghJob("v1").job), new Promise((resolve) => setTimeout(() => resolve("still waiting"), 3000))]);
+	assert.notEqual(outcome, "still waiting", "the record is not held by a read that never answers");
+	assert.deepEqual([outcome.outcome, outcome.reason], ["policy", "idle"], "a read that ran past its bound counts as a request");
+	// A read that fails counts as a request too.
+	const failing = await budgetOf();
+	const broken = cancelRedis();
+	broken.get = async () => {
+		throw new Error("connection reset");
+	};
+	const f = killedClientProcessor({ b: failing.b, redis: broken, extra: { cancelPollMs: 60_000 } });
+	assert.deepEqual([(await f.run(ghJob("v2").job)).reason], ["idle"]);
+});
+
+test("issue #1104: a killed client classified while the worker shuts down keeps the stop's result: the orphan that would guard a later attempt dies with the process", { skip }, async () => {
+	// A shutdown that lands after the time limit's stop leaves the signal's reason `idle`; the mark is read when the
+	// killed client is classified.
+	const { b } = await budgetOf();
+	let reads = 0;
+	const h = killedClientProcessor({ b, extra: { shuttingDown: () => ((reads += 1), true) } });
+	const result = await h.run(ghJob("s1").job);
+	assert.equal(reads, 1);
+	assert.deepEqual([result.outcome, result.reason], ["policy", "idle"], "recorded as the stop, neither refunded nor retried");
+	// A seam that throws reads as shutting down.
+	const other = await budgetOf();
+	const t = killedClientProcessor({ b: other.b, extra: { shuttingDown: () => { throw new Error("seam"); } } });
+	assert.deepEqual([(await t.run(ghJob("s2").job)).reason], ["idle"]);
+	// createWorker's `stop` marks the shutdown before it aborts any job, and every processor reads that mark.
+	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
+	const stopAt = src.indexOf("const stop = () => stopping ??= (async () => {");
+	const markAt = src.indexOf("shutdownRequested = true;", stopAt);
+	assert.ok(stopAt > 0 && markAt > stopAt && markAt < src.indexOf('w.cancelAllJobs?.("shutdown")', stopAt), "the mark comes before the abort");
+	assert.match(src, /shuttingDown: \(\) => shutdownRequested,/);
+});
+
 test("BY SHAPE: every hold is given back through the ONE releaseAllHolds, and no other path releases one", () => {
 	const src = readFileSync(new URL("../src/index.mjs", import.meta.url), "utf8");
 	const start = src.indexOf("export function makeProcessor(");

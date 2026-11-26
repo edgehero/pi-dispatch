@@ -444,6 +444,21 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: a job whose `docker run` never returns ends at its limit (#1104)
+
+A worker from this release kills its own `docker run` 10 seconds after a limit's stop on a runtime that does not answer,
+bounds that stop at 10 seconds, records a container that never wrote a line as `container-never-started` (refunded,
+and retried only when the job has attempts left) under the conditions
+[job limits](job-limits.md#when-the-runtime-does-not-answer) names, and removes the leftover container through its
+runtime once the runtime answers, before anything else runs on that container's name or folder. The worker alone: the
+job image, the receiver and the console are unchanged.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Run record `reason` `container-never-started` | Same word, same meaning, one more case: a time limit's stop of a container that never wrote a line, on a runtime that did not answer. Such a record names no `mainCredential`, as for every container that never started. `v` stays 1, and every reader reads it as before. |
+| Host budget (process memory) | An orphan may carry `killedClient`, which makes the sweep remove its container whatever its state. The ledger is not stored: a restart starts it again from the boot listing, as before. |
+| Mixed versions | Nothing to order. An older worker keeps waiting on such a `docker run` as before; only workers from this release end it. |
+
 ### 5.4.3
 
 #### A pi child on a subscription holds an admission of its own (#1098)

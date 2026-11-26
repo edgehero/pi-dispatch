@@ -460,7 +460,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 	let budget = { memMiB: null, cpuCenti: null };
 	let detail = null;
 	let unknownSaid = "";
-	/** jobId (or `container:<name>` for a seeded survivor) -> { id, project, memMiB, cpuCenti, at, ticket, name, workspaceKey?, orphan: null | { name, venue, since } } */
+	/** jobId (or `container:<name>` for a seeded survivor) -> { id, project, memMiB, cpuCenti, at, ticket, name, workspaceKey?, orphan: null | { name, venue, since, killedClient? } } */
 	const ledger = new Map();
 	/** jobId -> { id, project, memMiB, cpuCenti, firstAt, lastAt, checkedAt, suspended, state } */
 	const waiters = new Map();
@@ -611,6 +611,14 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 	 * Gives back an orphan's hold once the runtime says its container is gone. NEVER asks about a name a live (admitted,
 	 * not orphaned) entry carries: the runtime's answer about that name is the live job's container, and asking
 	 * removes one not yet started. The gate keeps that from arising; this is the sweep not relying on it.
+	 *
+	 * The orphan of a KILLED CLIENT (issue #1104, `killedClient`) is asked with `{ force: true }`: its job has ended and
+	 * nothing is attached to its container, so the venue removes it in whatever state the runtime lists it once the
+	 * runtime answers, and only then is the hold given back. That job's next attempt carries the same id and container
+	 * name, so the gate defers it (`running-here`, or `workspace-orphan` for a folder) until this has happened, as it
+	 * defers every other job on that folder, and a container the runtime started late never runs beside them. On this host
+	 * only: the ledger is this process's memory, which is why index.mjs asks for a never-started retry only of a job no
+	 * other host can take.
 	 */
 	const sweep = async () => {
 		for (const entry of [...ledger.values()]) {
@@ -618,7 +626,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 			if (typeof entry.orphan.name === "string" && [...ledger.values()].some((e) => !e.orphan && e.name === entry.orphan.name)) continue;
 			let gone = null;
 			try {
-				gone = await containerGone(entry.orphan.name, entry.orphan.venue);
+				gone = entry.orphan.killedClient === true ? await containerGone(entry.orphan.name, entry.orphan.venue, { force: true }) : await containerGone(entry.orphan.name, entry.orphan.venue);
 			} catch {
 				gone = null;
 			}
@@ -721,12 +729,15 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 			ledger.delete(id);
 			return true;
 		},
-		/** The job's container may outlive it (its stop did not take): the hold stays until `sweep` sees the container gone. */
-		orphan(id, { name = null, venue = null, ticket = null } = {}) {
+		/**
+		 * The job's container may outlive it (its stop did not take): the hold stays until `sweep` sees the container gone.
+		 * `killedClient` (issue #1104): the job's CLI client had to be killed, so `sweep` removes its container (see there).
+		 */
+		orphan(id, { name = null, venue = null, ticket = null, killedClient = false } = {}) {
 			const entry = ledger.get(id);
 			if (!entry || entry.orphan || entry.ticket !== ticket) return false;
-			ledger.set(id, { ...entry, orphan: { name, venue, since: now() } });
-			log("host_budget_orphan", { jobId: id, memMiB: entry.memMiB, cpuCenti: entry.cpuCenti });
+			ledger.set(id, { ...entry, orphan: { name, venue, since: now(), ...(killedClient === true ? { killedClient: true } : {}) } });
+			log("host_budget_orphan", { jobId: id, memMiB: entry.memMiB, cpuCenti: entry.cpuCenti, ...(killedClient === true ? { killedClient: true } : {}) });
 			return true;
 		},
 		verify,

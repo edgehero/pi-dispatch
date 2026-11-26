@@ -18,7 +18,7 @@ const bundle = (name, calls = []) => ({
 	containerName: (id) => `${name}-${id}`,
 	// The host budget's two venue questions (issue #681), required like the rest.
 	listJobContainers: async () => (calls.push([name, "listJobContainers"]), []),
-	containerGone: async (n) => (calls.push([name, "containerGone", n]), true),
+	containerGone: async (n, ...options) => (calls.push([name, "containerGone", n, ...options]), true),
 });
 
 test("every per-job function resolves the SAME way, so none can be forgotten", () => {
@@ -389,7 +389,13 @@ test("the host budget's two venue questions are REQUIRED members and dispatched 
 	const reg = makeBackendRegistry({ bundles: [bundle("local", calls), bundle("far", calls)], defaultName: "local" });
 	assert.equal(await reg.containerGone("pi-job-a", { backend: "far" }), true);
 	assert.equal(await reg.containerGone("pi-job-b", {}), true, "a venue naming none is the default's");
-	assert.deepEqual(calls, [["far", "containerGone", "pi-job-a"], ["local", "containerGone", "pi-job-b"]]);
+	// Issue #1104: one signature on every side, `(name, venue, options)`, so the sweep's `{ force: true }` reaches the
+	// bundle as its third argument, where every venue's `containerGone` reads it; every other question carries `{}`.
+	assert.deepEqual(calls, [["far", "containerGone", "pi-job-a", { backend: "far" }, {}], ["local", "containerGone", "pi-job-b", {}, {}]]);
+	calls.length = 0;
+	assert.equal(await reg.containerGone("pi-job-k", { backend: "far" }, { force: true }), true);
+	assert.equal(await reg.containerGone("pi-job-l", undefined, { force: true }), true);
+	assert.deepEqual(calls, [["far", "containerGone", "pi-job-k", { backend: "far" }, { force: true }], ["local", "containerGone", "pi-job-l", null, { force: true }]]);
 	// A venue no bundle answers for is unknown, never a throw: the caller is the budget's sweep, and null keeps the hold.
 	assert.equal(await reg.containerGone("pi-job-c", { backend: "ghost" }), null);
 	const listers = reg.listers();

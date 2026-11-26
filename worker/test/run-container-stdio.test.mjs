@@ -217,3 +217,27 @@ test("a demux that throws after completing a record in that chunk: only what it 
 	})({ job: JOB, prepared: { workspace: `${jobDir}/workspace`, jobDir }, name: NAME, signal: new AbortController().signal, jobId: "j-1", exitAuth: true, transcriptStderr: true });
 	assert.equal(output.join(""), "ok\ntail\nlater\n");
 });
+
+test("issue #1104: a killed client's container started when a record verified under its key came back, though it wrote no stdout and no counters", { skip }, async () => {
+	for (const [records, watched, want] of [[true, true, true], [false, true, false], [true, false, true], [false, false, null]]) {
+		const ac = new AbortController();
+		const killed = [];
+		const child = () => {
+			const c = new EventEmitter();
+			c.stdout = new EventEmitter();
+			c.stderr = new EventEmitter();
+			c.kill = (sig) => (killed.push(sig), setImmediate(() => c.emit("close", null, sig)), true);
+			// The runner reads its key, signs its baseline record on stderr, then the runtime stops answering.
+			c.stdin = { on() {}, end: (text) => queueMicrotask(() => records && c.stderr.emit("data", Buffer.from(transcriptRecord(String(text).trim(), NAME, 1, "b", 0), "latin1"))) };
+			return c;
+		};
+		const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, layout: "sandbox", transcript: "stdio", openLiveTranscript: () => ({ start() {}, finish: async () => {}, setBaseline() {}, push() {}, skip() {}, reset() {} }), mintExitKey: () => KEY, buildArgs: () => ["sandbox", "exec"], memoryLimitOf: () => null, spawnFn: child, onOutput: () => {}, clientKillMs: 20 });
+		const jobDir = tempDir("pi-stdio-kill-");
+		const done = run({ job: JOB, prepared: { workspace: `${jobDir}/workspace`, jobDir, live: { hostDir: `${jobDir}/session` } }, name: NAME, signal: ac.signal, jobId: "j-1", exitAuth: true, transcriptStderr: true, ...(watched ? { activityWatch: { idleMs: 15 * 60_000, stallMs: null, keepWallClock: false }, onActivityArmed() {}, requestStop() {}, noteActivity() {} } : {}) });
+		await new Promise((resolve) => setImmediate(resolve));
+		ac.abort("idle");
+		const ran = await done;
+		assert.deepEqual(killed, ["SIGKILL"]);
+		assert.equal(ran.started, want, `records ${records}, watched ${watched}`);
+	}
+});

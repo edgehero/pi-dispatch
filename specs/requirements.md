@@ -551,7 +551,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   coarse control with pi's max-turns as the fine one; **pi has no fine one**, so this and the turn budget
   are both required and neither substitutes for the other.
 - **Traces to**: `REQ-RUNNER-TURN-BUDGET`
-- **Acceptance**: Given a job that hangs, the container is stopped at 30 minutes and the slot is freed.
+- **Acceptance**: Given a job that hangs, the container is stopped at 30 minutes and the slot is freed. **AMENDED
+  2026-11-26 (#1104)**: also when the runtime answers neither the stop nor the `docker run` that started the container:
+  the worker kills its own CLI child 10 s after the abort (`RUN_CLIENT_KILL_MS`), which ends the attempt inside the
+  worker, and under `REQ-JOB-ACTIVITY-LIMITS`'s conditions ("A runtime that does not answer the stop") records a
+  container that never wrote a line as `container-never-started`. Acceptance: `worker/test/cron.integration.test.mjs` (a
+  real Worker, the real processor and a fake CLI that never answers), and the order of the bounds, the kill's whole
+  close path before the abort grace and the grace 5 s before the worker's shutdown bound
+  (`worker/test/wiring.test.mjs`).
 - **Open**: 30 minutes is inherited unmeasured. Honest v1 default, not an evidenced threshold.
 
 ## REQ-JOB-ACTIVITY-LIMITS
@@ -593,6 +600,28 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   Acceptance: `cost-warning.integration.test.mjs` (the real runner, told 500 of 600 seconds had passed, warns after its
   first tool turn), `worker/test/wiring.test.mjs` (the reader the processor hands on, on its own clock),
   `run-container-activity.test.mjs` and `env-allowlist.test.mjs` (the two variables, both or neither).
+- **A runtime that does not answer the stop** (issue #1104): a limit's stop goes to the runtime, and a runtime that
+  stopped answering (a wedged daemon) answers neither it nor the `docker run` starting the container, which once lived
+  28 hours, renewing credentials into a container that never started while the jobs behind its folder waited. Now: the
+  stop is bounded (10 s, `STOP_TIMEOUT_MS`), and 10 s after the abort the worker kills its own CLI child
+  (`RUN_CLIENT_KILL_MS`), which ends the attempt in the worker (renewals, backstop, relay and live publisher stop at its
+  close) and gives back its scope, endpoint and queue slots; its host budget room stays held, as an orphan marked as a
+  killed client, until the venue has removed the container, by its exact name in any state, the first time the runtime
+  answers (the sweep asks through the registry, so every venue). The attempt is `container-never-started`, refunded,
+  only when ALL hold: the client had to be killed; the activity watch was armed and the container wrote nothing (no
+  stdout byte, no verified record, no activity reading: an image honouring the watch writes its first line before its
+  first model call); a time limit stopped it (`job-timeout-30m`, `max-minutes`, `idle`, `stalled`); no person asked for
+  the job to end as well (no cancel the poll handed on after that stop, none waiting unread, read within the poll's own
+  1 s bound, a read that fails or runs past it counting as a request); the worker was not shutting down when it
+  classified the stop (a shutdown after the stop leaves the time limit's reason, and the orphan dies with the process);
+  the worker holds a host budget; and no other host can pick the job up again (it is on this host's own queue, or the
+  worker declares no fleet), since the orphan lives in this host's memory alone. Such an attempt is retried while the
+  job has attempts left (a forge job, a queued local run), and the retry, carrying the same name, waits until the
+  removal; a scheduled cron tick has no attempts, so it fails there, refunded, and the trigger's next tick waits
+  `workspace-orphan` until the same removal. Every other stop is recorded as before, neither refunded nor retried: an
+  operator's or agent's cancel (also one acknowledged after a time limit's stop), a shutdown (also one after a time
+  limit's stop), `credential-expired`, an unwatched container, one that wrote anything, a job on a fleet's shared queue,
+  and any stop on a wiring without a host budget.
 - **Traces to**: `REQ-JOB-TIMEOUT-30M` (which it replaces once the worker half lands), `REQ-RUNNER-TURN-BUDGET`,
   `DES-JOB-ACTIVITY-WATCH`, `INT-JOB-ACTIVITY-FILE`
 - **Acceptance**: given a job whose tool sleeps in silence, it is stopped as `idle` at the idle limit though the tool never
@@ -605,7 +634,18 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   a ceiling, it cancels as `max-minutes` (`worker/test/wiring.test.mjs`); given a runner whose counters stop changing,
   the backstop stops the run at the idle limit plus its grace (`run-container-activity.test.mjs`). The real runner and
   worker backstop composed with defaults keep CPU, network and tool-output activity alive without steps for twelve
-  hours, then stop when it becomes idle (`worker/test/job-limits.test.mjs`).
+  hours, then stop when it becomes idle (`worker/test/job-limits.test.mjs`). Given a runtime that answers neither the
+  stop nor the run (issue #1104): the CLI child is killed at its bound and its renewals and backstop stop with it, and
+  its evidence decides `started` (`run-container-activity.test.mjs`, `run-container-stdio.test.mjs`); the stop is killed
+  at its own bound (`backend-local.test.mjs`); the sweep's `force` reaches the local, podman and OpenShell bundles
+  through the registry and removes a container listed running (`backend-local.test.mjs`, `backend-podman.test.mjs`,
+  `backend-openshell.test.mjs`); only the never-started case is refunded, every other reason, evidence and wiring
+  keeping its result (`processor-dollars.test.mjs`); a fleet's shared queue and a cancel acknowledged or waiting after
+  the stop keep the stop's result, and the next attempt waits until the sweep removed the container
+  (`host-budget.test.mjs`, `host-budget-gate.test.mjs`); the bounds keep their order (`wiring.test.mjs`); and a real
+  Worker on a fake CLI that never answers ends the cron tick as `container-never-started`, frees its folder slot, holds
+  the next tick `workspace-orphan`, leaves no process of the fake behind and removes the container, listed running,
+  through the registry once the runtime answers (`cron.integration.test.mjs`).
 
 ## REQ-OPERATOR-JOB-CANCEL
 
@@ -10109,6 +10149,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-26 (#1104) | **`REQ-JOB-ACTIVITY-LIMITS` AMENDED**: NEW clause "A runtime that does not answer the stop": the stop bounded at 10 s, the CLI child killed 10 s after the abort, which ends the attempt in the worker; the attempt `container-never-started`, refunded, only when its client was killed, its watched container wrote nothing, a time limit stopped it, no cancel was acknowledged or waiting (that read bounded), the worker was not shutting down, the worker holds a host budget and no other host can take the job again; retried while attempts are left, a scheduled tick failing there with its next tick held `workspace-orphan` until the venue removed the container through the registry; every other stop recorded as before. The Acceptance gains the tests. **`REQ-JOB-TIMEOUT-30M` AMENDED**, the Acceptance: the slot is freed also when the runtime answers neither the stop nor the run, and the bounds' order is pinned. UNCHANGED, checked: `REQ-OPERATOR-JOB-CANCEL` (a cancel, also one acknowledged or waiting after a time limit's stop, is recorded as before and never refunded or retried, and so is a stop classified during a shutdown; its killed client's container is removed by the sweep like any other), `REQ-HOST-BUDGET` (the orphan rule; the killed client's forced removal is `DES-HOST-BUDGET`'s), `CONST-RETRY-INFRA-ONLY` (the never-started infrastructure class, refunded; a time limit's stop of a container that ran stays policy). **Code evidence**: worker/src/run-container.mjs -> RUN_CLIENT_KILL_MS, TEARDOWN_STEP_AFTER_KILL_MS, boundedSpawn, makeRunContainer; worker/src/backend-local.mjs -> STOP_TIMEOUT_MS, makeStopContainer, makeContainerGone; worker/src/backend-registry.mjs -> makeBackendRegistry; worker/src/processor.mjs -> isNeverStartedExit, NEVER_STARTED_STOP_REASONS, runAttempt; worker/src/index.mjs -> ABORT_GRACE_MS, makeProcessor; worker/src/host-budget.mjs -> makeHostBudget. |
 | 2026-11-25 (#1098) | **`REQ-SUBSCRIPTION-AUTHENTICATION` AMENDED**, the Execution clause, the billed-calls bullet and the Acceptance: a separate pi process the job starts dispatches on the subscription through an admission of its own, run by the runner's child meter (entries and adapter content verified, the adapter loaded after the meter, any other registration of the provider refused, sealed at session start), its calls notional as the runner's own and judged by the allowance, never charged to the cap; refused before any call without it; a library process holds none; the acceptance names the real child through the preload. **`REQ-TOKEN-ACCOUNTING-AND-CAPS` AMENDED**, clause (d)'s acceptance: a child with an admission of its own has its call on a notional entry counted as notional by the runner. UNCHANGED, checked: `REQ-MODEL-POLICY` (an off-list model is refused in a child and stops the job, as before), `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`. **Code evidence**: image/runner/src/usage-meter.mjs -> startChildMeter, ledgerSettled, ledgerNotional, foldChildLedgers, spentFile, createUsageMeter; image/runner/src/child-route.mjs -> subscriptionAdapterRoots, injectChildMeter; image/runner/src/child-meter.ts; image/runner/src/child-watch.mjs -> createChildWatch. |
 | 2026-11-25 (#946) | **`REQ-SUBSCRIPTION-AUTHENTICATION` AMENDED**, the Execution clause and the Acceptance: the job's `subagent` tool works on a subscription, its role child running inside the runner as a session on the admitted root runtime (pi's built-in tools and the job's skills, no extension tools, no nested `subagent`, judged and counted as the job's own), one it cannot run so refused by name before it starts as `subscription-child-unsupported` with the parent going on; separate pi CLI and Node child processes, a staged package's own included, still refuse, now without "in this initial release"; a subscription job with a role map on an image without `subscriptionRoles` refused before spend (`job-image-subscription-roles-unsupported`); the acceptance names the in-process proof on the pinned pi beside the separate process that still refuses. **`REQ-MODEL-POLICY` AMENDED**, its Model roles bullet: on a subscription the subagent's child runs inside the runner. UNCHANGED, checked: `REQ-PER-TRIGGER-TOOL-EXCLUSIONS` (an in-process child loses what the trigger removes, as a CLI child does), `REQ-TOKEN-ACCOUNTING-AND-CAPS` (the child's calls are one more session on the process meter). **Code evidence**: image/runner/src/model-roles.mjs -> createRoleSubagents; image/runner/src/role-child-session.mjs -> createRoleChildSessions; image/runner/src/loader.mjs -> buildRoleChildResourceLoader; worker/src/image-preflight.mjs -> CAPABILITY_GATES; worker/src/run-history.mjs -> MODEL_ROLE_REFUSAL_REASONS. |
 | 2026-11-25 (#942) | **`REQ-FORGE-JOB-ARTIFACTS` AMENDED**, a dated bullet: one console address works for the whole fleet, the files staying on the host that kept them under its retention, read from that host over its artifacts channel with this host's store first, no file passing through Valkey whole and no key holding its bytes, and `elsewhere` kept for a host that cannot be asked now, saying why. **`REQ-CONSOLE-SECURITY` AMENDED**, a dated bullet and the #920 clause of the Statement: another host's file holds every guarantee of this host's, plus headers from the validated manifest alone and its bytes held to that manifest's size and sha256 before the answer completes; `host` one live worker name, never this host's; fixed refusal sentences; reads unaudited, nothing kept on the console's disk. **Code evidence**: admin/src/console/artifact-api.mjs -> getArtifact, HOST_ARTIFACT_REFUSALS; admin/src/read-model.mjs -> artifacts, hostArtifactFile; admin/src/console/panels/run.mjs -> artifactsBody; admin/test/console-artifacts.test.mjs. |

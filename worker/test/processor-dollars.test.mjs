@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { configError } from "../src/config.mjs";
-import { InfraRetry, isNeverStartedExit, runJob } from "../src/processor.mjs";
+import { ABORT_RECORD_REASONS, InfraRetry, NEVER_STARTED_STOP_REASONS, isNeverStartedExit, runJob, TERMINAL_COMMENTS } from "../src/processor.mjs";
 import { buildRecord } from "../src/run-history.mjs";
 import { scopeKeyPrefix } from "../src/scoped-limits.mjs";
 import { DOCKER_NEVER_STARTED_EXITS } from "../src/backends.mjs";
@@ -197,6 +197,63 @@ test("isNeverStartedExit: the one answer, false for a detached or aborted contai
 	for (const code of [0, 1, 2]) assert.equal(isNeverStartedExit({ code }, [0, 1, 2]), false, String(code));
 	assert.equal(isNeverStartedExit({ code: 99 }, nev), false);
 	assert.equal(isNeverStartedExit({ code: 125 }, null), false);
+});
+
+test("issue #1104: isNeverStartedExit gives the one answer for a stop: a killed client, a watched container that wrote nothing, a time limit, and a wiring that removes the container", () => {
+	const nev = [125, 126, 127];
+	const stop = { code: 137, aborted: true, clientKilled: true, started: false, safeguarded: true };
+	assert.deepEqual([...NEVER_STARTED_STOP_REASONS], ["job-timeout-30m", "max-minutes", "idle", "stalled"]);
+	for (const abortReason of NEVER_STARTED_STOP_REASONS) assert.equal(isNeverStartedExit({ ...stop, abortReason }, nev), true, abortReason);
+	for (const abortReason of ["operator-cancel", "agent-cancel", "shutdown", "credential-expired", null, undefined, "something-new"]) assert.equal(isNeverStartedExit({ ...stop, abortReason }, nev), false, String(abortReason));
+	assert.equal(isNeverStartedExit({ ...stop, abortReason: "idle", clientKilled: false }, nev), false, "the client was not killed");
+	assert.equal(isNeverStartedExit({ ...stop, abortReason: "idle", started: true }, nev), false, "it wrote something");
+	assert.equal(isNeverStartedExit({ ...stop, abortReason: "idle", started: null }, nev), false, "nothing watched it");
+	assert.equal(isNeverStartedExit({ ...stop, abortReason: "idle", safeguarded: false }, nev), false, "no removal before the retry");
+	assert.equal(isNeverStartedExit({ ...stop, abortReason: "idle", cancelRequested: true }, nev), false, "a person asked for the job to end as well");
+	assert.equal(isNeverStartedExit({ ...stop, abortReason: "idle", workerShuttingDown: true }, nev), false, "the worker was shutting down");
+	assert.equal(isNeverStartedExit({ ...stop, abortReason: "idle", detached: true }, nev), false);
+	assert.equal(isNeverStartedExit({ ...stop, abortReason: "idle", aborted: false, code: 0 }, nev), false, "the rule is the abort's alone");
+});
+
+test("issue #1104: every reason x started x killed x safeguard: only the never-started case is refunded and retried as never-started, every other stop is the policy result it was, settled at the floor", async () => {
+	const reasons = [...NEVER_STARTED_STOP_REASONS, "operator-cancel", "agent-cancel", "shutdown", "credential-expired", undefined];
+	const credential = { source: "env", variable: "ANTHROPIC_API_KEY" };
+	for (const abortReason of reasons) {
+		for (const started of [false, true, null]) {
+			for (const killed of [true, false]) {
+				for (const safeguard of [true, false]) {
+					const name = `${abortReason}/started:${started}/killed:${killed}/safeguard:${safeguard}`;
+					const exit = { code: 137, aborted: true, abortReason, tokens: null, mainCredentialSource: credential, ...(killed ? { clientKilled: true, started } : {}) };
+					const { deps: d, calls, redis, logs } = deps({ runContainer: async () => exit, killedClientSafeguard: safeguard });
+					const neverStarted = killed && started === false && safeguard && NEVER_STARTED_STOP_REASONS.includes(abortReason);
+					if (neverStarted) {
+						let err;
+						await assert.rejects(runJob(job, d), (e) => (err = e) instanceof InfraRetry, name);
+						assert.equal(err.reason, "container-never-started", name);
+						assert.deepEqual(err.dollars, { reservedMicros: 2 * USD, settledMicros: 0, basis: "refunded", modelBasis: null }, `${name}: refunded whole`);
+						assert.equal(err.budgetReserved, false, name);
+						assert.equal(redis.store.get(DAY), 0, `${name}: dollars back`);
+						assert.equal(redis.store.get("budget:2026-10-07"), 0, `${name}: job-count slot back`);
+						assert.ok(!logs.some((l) => l[0] === "dollar_settled"), `${name}: never also settled`);
+						assert.ok(!calls.some((c) => c[0] === "comment"), `${name}: no comment on a retry`);
+						assert.equal(err.mainCredential, undefined, `${name}: a container that never started names no credential`);
+						const record = buildRecord({ job: { id: "j", data: {} }, error: err });
+						assert.equal(record.reason, "container-never-started", name);
+					} else {
+						const r = await runJob(job, d);
+						const reason = Object.hasOwn(ABORT_RECORD_REASONS, abortReason ?? "") ? ABORT_RECORD_REASONS[abortReason] : "worker-abort";
+						assert.equal(r.outcome, "policy", name);
+						assert.equal(r.reason, reason, name);
+						assert.deepEqual(r.dollars, { reservedMicros: 2 * USD, settledMicros: 2 * USD, basis: "floor", modelBasis: null }, `${name}: settled at the floor`);
+						assert.equal(redis.ops.filter((o) => o[0] === "decrby").length, 0, `${name}: never also refunded`);
+						assert.equal(redis.store.get("budget:2026-10-07"), 1, `${name}: the job-count slot stays spent`);
+						assert.deepEqual(calls.filter((c) => c[0] === "comment").map((c) => c[1]), [TERMINAL_COMMENTS[reason]], name);
+						assert.deepEqual(r.mainCredential, credential, name);
+					}
+				}
+			}
+		}
+	}
 });
 
 test("a spawn fault (runContainer throws never-started) and a config refusal from runContainer both refund the dollars in full", async () => {

@@ -67,6 +67,34 @@ which only happens when the runner is stuck too badly to stop its own job.
 ceiling's length and what was left of it, for the warning at 70% ([warnings before the limits](#warnings-before-the-limits)),
 but only the timer stops the job.
 
+### When the runtime does not answer
+
+A limit stops a job by asking its runtime to stop the container (`docker stop -t 5`). A runtime that stopped answering
+(a wedged Docker daemon, a paused VM) answers neither that nor the `docker run` that was starting the container, which
+then never returns. The worker does not wait on it:
+
+- 10 seconds after the stop, the worker kills its own `docker run` command and logs `run_client_killed`. That ends the
+  job inside the worker: its credential renewals, its activity checks and its live transcript stop, and the job is
+  recorded and leaves the queue's active jobs. The stop itself is given 10 seconds too, and then killed.
+- The run is recorded as `container-never-started`, with nothing charged, when all of these hold: the job image watches
+  the job's activity (`idleWatch`, which writes its first line before its first call to a model), the container wrote
+  nothing, a time limit stopped it (not a cancel or a shutdown), nobody asked to cancel the job meanwhile, the worker
+  was not shutting down, and the worker has a host budget and counts itself the only host that can pick the job up
+  again: the job is on this host's own queue, or the worker declares no fleet (no `PI_WORKER_NAME`). Several workers
+  draining the shared queue with no `PI_WORKER_NAME` are an undeclared fleet, which `pi-dispatch doctor` already warns
+  about ("host routing is OFF here"); each of them counts itself the only host, so give every worker its name.
+- A job with attempts left then runs again: a forge job, or a folder run started with `pi-dispatch run <folder>`. A
+  scheduled cron run has none, and neither has a trigger run started by hand (`pi-dispatch run --trigger`, or the
+  console's run of a trigger), which takes the schedule's options: it ends there, and the trigger's next run waits as
+  below. Any other such stop is recorded as the limit that stopped it, as always.
+- The container may still be started once the runtime answers again, so the worker keeps its room on the host (its
+  memory, its CPU and one job slot) as an orphan (`host_budget_orphan` with `killedClient`). The first time the runtime
+  answers, the worker removes the container by its exact name, whatever its state, through the job's own runtime. Until
+  then the job's next attempt and every other job on that folder wait (`running-here` or `workspace-orphan`).
+
+What to do: restart the runtime (or its VM). The worker removes the leftover container within a minute of the runtime
+answering, and the waiting jobs run. Nothing needs to be cleaned up by hand.
+
 ## When the 30-minute limit still applies
 
 A job keeps a fixed 30-minute limit when nothing else can bound it, and its run record says why (`limits.basis` is

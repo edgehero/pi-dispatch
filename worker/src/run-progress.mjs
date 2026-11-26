@@ -70,7 +70,7 @@ const WRITE_INTERVAL_MS = 1_000;
 /** Each Valkey call's bound, as the stream's. */
 const OP_TIMEOUT_MS = 1_000;
 /** The whole of the sink's `finish`: the final write (one bound) and the commenter's final edit, run side by side. */
-const SINK_FINISH_TIMEOUT_MS = 5_000;
+export const SINK_FINISH_TIMEOUT_MS = 5_000;
 /** The commenter's own bound on its final edit. */
 const COMMENT_FINAL_TIMEOUT_MS = 4_000;
 /** How long the sink's `finish` waits for a status comment post still in flight, inside `SINK_FINISH_TIMEOUT_MS`. */

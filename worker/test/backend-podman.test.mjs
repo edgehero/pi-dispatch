@@ -1389,3 +1389,18 @@ test("the bundle answers the host budget's two questions through podman, with th
 	assert.equal(bundle({ listJobContainers: own }).listJobContainers, own);
 	assert.throws(() => bundle({ containerGone: "yes" }), /containerGone must be a function/);
 });
+
+test("issue #1104: the sweep's force reaches the podman bundle through the registry, so a killed client's container listed running is removed", async () => {
+	const { makeBackendRegistry } = await import("../src/backend-registry.mjs");
+	const calls = [];
+	const exec = async (bin, args) => {
+		calls.push([bin, ...args].join(" "));
+		return { stdout: args[0] === "ps" ? "pi-job-a\trunning\n" : "" };
+	};
+	const b = bundle({ exec });
+	const registry = makeBackendRegistry({ bundles: [b], defaultName: b.name });
+	assert.equal(await registry.containerGone("pi-job-a", { backend: b.name }), false, "without force a running container keeps its hold");
+	assert.ok(!calls.some((c) => c.startsWith("podman rm")));
+	assert.equal(await registry.containerGone("pi-job-a", { backend: b.name }, { force: true }), true);
+	assert.equal(calls.at(-1), "podman rm -f pi-job-a", "removed by its exact name, through podman");
+});
