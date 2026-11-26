@@ -444,7 +444,9 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
-### Unreleased: a provider's spending limit is a used-up quota (#1106)
+### 5.4.4
+
+#### A provider's spending limit is a used-up quota (#1106)
 
 A job image from this release ends OpenRouter's 403 for a used-up workspace budget or a key past its limit as the
 infrastructure exit with signed `quota-exhausted` evidence, where it ended as `provider-auth-refused`, so the model
@@ -460,9 +462,9 @@ log. Both halves are needed for both: the job image gives the quota and the cool
 | Valkey `dispatch:model-cooldown:<digest>` | Same key and shape: a spending limit now writes the six-hour quota cooldown any used-up quota writes. |
 | Mixed versions | A newer job image with an older worker: the refusal is `quota-exhausted`, the model cools down and the pool passes it over (an older worker reads that evidence as it reads any used-up quota), but the record keeps no message. An older job image with a newer worker: the refusal is still `provider-auth-refused` with no cooldown, but the record and the worker log keep the provider's message, which names the budget. Upgrade both. |
 
-### Unreleased: a job whose `docker run` never returns ends at its limit (#1104)
+#### A job whose `docker run` never returns ends at its limit (#1104)
 
-A worker from this release kills its own `docker run` 10 seconds after a limit's stop on a runtime that does not answer,
+A worker from this release kills its own `docker run` 10 seconds after any stop on a runtime that does not answer,
 bounds that stop at 10 seconds, records a container that never wrote a line as `container-never-started` (refunded,
 and retried only when the job has attempts left) under the conditions
 [job limits](job-limits.md#when-the-runtime-does-not-answer) names, and removes the leftover container through its
