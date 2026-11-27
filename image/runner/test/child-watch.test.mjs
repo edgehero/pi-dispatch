@@ -24,7 +24,7 @@ function ledger({ state = "running", metered = true, calls = 1, each = 100, prov
 	// `marked` (issue #1098): the row's cost marked notional, as a child holding its own subscription admission writes it.
 	const rows = calls === 0 ? [] : [row(provider, model, { calls, input: calls * each, total: calls * each, cost: calls * cost, notional: marked ? calls * cost : 0 })];
 	return {
-		v: 4,
+		v: 5,
 		state,
 		metered,
 		totals: { input: calls * each, output: 0, total: calls * each, cost: calls * cost, calls: calls + unresolved, unresolved, unpriced: 0, sessions: calls === 0 ? 0 : 1 },

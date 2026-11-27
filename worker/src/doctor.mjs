@@ -3942,7 +3942,7 @@ export async function collectChecks(shellVars, seams) {
 				}
 				// Issue #571: a model that costs money but asks for no usage in the stream. pi records each of its calls as
 				// zeros, so the meter counts it `costUnreported` and every job on it settles at the floor (`≥` in the cost
-				// views). Judged on the same reader's result: the overlay's own models, and the builtin models a provider-level
+				// views), except a call on a subscription with no paid extra usage, which bills nothing (issue #1058). Judged on the same reader's result: the overlay's own models, and the builtin models a provider-level
 				// compat or a modelOverrides entry turns off, priced from the worker's catalog (none when it cannot load).
 				const usageCatalog = await (seams.modelCatalog ?? defaultModelCatalog)();
 				const unreported = unreportedUsageModels(overlayModels, { builtinModel: usageCatalog?.builtinModel, builtinChatModels: usageCatalog?.builtinChatModels });
@@ -3953,7 +3953,7 @@ export async function collectChecks(shellVars, seams) {
 					checks.push({
 						ok: false,
 						warn: true,
-						label: `Overlay models.json sets compat.supportsUsageInStreaming to false on ${named}${more} with a nonzero cost table, so those calls report no usage: each counts as costUnreported, and every job that calls one settles at the floor`,
+						label: `Overlay models.json sets compat.supportsUsageInStreaming to false on ${named}${more} with a nonzero cost table, so those calls report no usage: each counts as costUnreported, and every job that calls one settles at the floor unless the call ran on a subscription with no paid extra usage`,
 						fix: "remove supportsUsageInStreaming: false if the server sends usage when asked (stream_options.include_usage), or set the model's cost to zeros if it is free: docs/costs.md, \"A call that reports no usage\"",
 					});
 				}

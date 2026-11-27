@@ -447,7 +447,7 @@ test("issue #1055's turnsWarned and timeWarned survive the rebuild last, after c
 
 test("costUnreported (issue #571) survives the rebuild after the child keys and before the policy counters, on a line with or without a cap", () => {
 	const at = TOKEN_KEYS.indexOf("unmeteredChildren");
-	assert.deepEqual(TOKEN_KEYS.slice(at + 1, at + 4), ["costUnreported", "costNotional", "costCapMicros"], "the meter writes them last (costNotional, issue #1008, only with subscription entries), the guard's fields follow");
+	assert.deepEqual(TOKEN_KEYS.slice(at + 1, at + 6), ["costUnreported", "costNotional", "unpricedNotional", "costUnreportedNotional", "costCapMicros"], "the meter writes them last (costNotional, issue #1008, and its two counts, issue #1058, only with subscription entries), the guard's fields follow");
 	const uncapped = { input: 1, output: 2, total: 3, cost: 0, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 1, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costUnreported: 1 };
 	const out = parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(uncapped)}}`);
 	assert.equal(JSON.stringify(out), JSON.stringify(uncapped), "byte-identical round trip on an uncapped line");

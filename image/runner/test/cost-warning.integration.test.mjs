@@ -153,7 +153,7 @@ test("the warning's measure leaves out what calls hold in flight: settled at 50%
 test("the warning's measure counts what the job's pi child processes settled: 37% of its own and 37% in a child's ledger warn", { skip }, async () => {
 	// The tool writes a child's ledger as a pi child does (whole, by rename, in the runner's ledger directory: 150,000 spent)
 	// and waits past the parent's next fold, so the root's turn ends with 150,003 of its own and 150,000 of a child's settled.
-	const ledger = JSON.stringify({ v: 4, state: "running", metered: true, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: [], spentMicros: 150_000, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0, waiting: 0 });
+	const ledger = JSON.stringify({ v: 5, state: "running", metered: true, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: [], spentMicros: 150_000, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0, waiting: 0 });
 	const server = await scriptedServer((_body, root) => (root === 1 ? { toolCall: "spend", promptTokens: 150_000 } : { content: "done" }));
 	try {
 		const root = jobTree({ base: server.base, cost: 1 });
@@ -177,7 +177,7 @@ test("a pi child's cost refusal that stops the job is the job's: the exit line's
 	// The tool writes a child's ledger that says its cost guard refused one call (as a role task's child writes it) and waits
 	// past the parent's next fold, which stops the job on it. The parent's own guard refused nothing.
 	const numbers = { spentMicros: 20_000, inflightMicros: 0, externalMicros: 380_000, boundMicros: 50_000 };
-	const ledger = JSON.stringify({ v: 4, state: "running", metered: true, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: [], spentMicros: 20_000, inflightMicros: 0, costRefused: 1, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0, waiting: 0, refusedWhy: "over-cap", costRefusal: numbers });
+	const ledger = JSON.stringify({ v: 5, state: "running", metered: true, totals: { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 }, rows: [], spentMicros: 20_000, inflightMicros: 0, costRefused: 1, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0, waiting: 0, refusedWhy: "over-cap", costRefusal: numbers });
 	const server = await scriptedServer((_body, root) => (root === 1 ? { toolCall: "refuse" } : { content: "done" }));
 	try {
 		const root = jobTree({ base: server.base, cost: 1 });

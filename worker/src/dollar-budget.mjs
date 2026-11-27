@@ -279,8 +279,36 @@ export function meteredMicros(costUsd) {
  * missing usage block with zeros, so the metered cost holds about $0 for them); the runner's meter writes it on every
  * line. Absent means floor here too, so a worker from issue #571 running an older image settles every capped job at
  * the floor: upgrade the image before the worker.
+ *
+ * `unpriced` and `costUnreported` are read by their BILLED part (issue #1058, `billedFloorCount`): a call on a
+ * subscription with no paid extra usage bills nothing, so its unknown cost leaves the billed cost whole.
  */
 export const FLOOR_COUNTERS = Object.freeze(["unresolved", "unpriced", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "costUnreported", "unmeteredChildren"]);
+
+/**
+ * The floor counters that may count notional calls, each with the exit-line key that says how many of them were notional
+ * (issue #1058): the runner's meter writes `unpricedNotional` and `costUnreportedNotional` beside `costNotional`, only
+ * for a job with subscription entries, each a part of its total.
+ */
+export const NOTIONAL_FLOOR_PARTS = Object.freeze({ unpriced: "unpricedNotional", costUnreported: "costUnreportedNotional" });
+
+/**
+ * A floor counter's BILLED part (issue #1058): the count less its notional part (`NOTIONAL_FLOOR_PARTS`), so a notional
+ * call whose price is unknown does not floor a billed dollar window. `notionalRead` is the caller's word that the line is
+ * trusted, metered and carries a `costNotional` read as valid (`notionalMicros`); otherwise, and for every other counter,
+ * the count is returned as it is.
+ *   - an absent notional part is 0: an image from before issue #1058 keeps today's floor;
+ *   - a part that is not a safe integer at or above 0, or is above a count that is one, gives null (the caller floors).
+ * A count that is not a number is returned as it is, so the caller's present-and-0 rule decides it.
+ */
+export function billedFloorCount(tokens, key, notionalRead) {
+	const count = tokens?.[key];
+	const part = Object.hasOwn(NOTIONAL_FLOOR_PARTS, key) ? NOTIONAL_FLOOR_PARTS[key] : null;
+	if (part === null || notionalRead !== true || !Object.hasOwn(tokens, part)) return count;
+	const notional = tokens[part];
+	if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(notional) || notional < 0 || notional > count) return null;
+	return count - notional;
+}
 
 /**
  * The NOTIONAL part of a run's metered cost (issue #1008), `tokens.costNotional` as whole micro-dollars ROUNDED DOWN
@@ -330,6 +358,13 @@ export function notionalMicros(tokens, meteredCostMicros) {
  * window. That billed cost is also the floor's known part. A line with no `costNotional` is all billed (an older image,
  * the safe overcharge); a `costNotional` that is malformed or above the cost settles at the floor on the whole cost. An
  * untrusted line's `costNotional` is never read, so a forged one cannot lower a charge: its floor is the whole cost.
+ *
+ * BILLED COUNTERS (issue #1058). On that same line, `unpriced` and `costUnreported` must be 0 by their billed part
+ * (`billedFloorCount`): the count less `unpricedNotional` or `costUnreportedNotional`, read only beside a `costNotional`
+ * this function read as valid. A line without the part counts every such call as billed (an older image keeps the
+ * floor), and a part that is not a count, or is above its total, settles at the floor. The other six counters count every
+ * call, as before: `unresolved` and `unmeteredChildren` cannot be classed, and the cost guard's four never count a
+ * notional call (it takes no ticket).
  */
 export function dollarSettlement({ tokens, usage, reservedMicros, trusted = false }) {
 	assertMicros(reservedMicros, "reservedMicros", { positive: false });
@@ -341,7 +376,8 @@ export function dollarSettlement({ tokens, usage, reservedMicros, trusted = fals
 	if (tokens === null || typeof tokens !== "object" || tokens.metered !== true) return floor;
 	if (notional === null) return floor;
 	if (typeof tokens.costCapMicros !== "number" || tokens.costCapMicros > reservedMicros) return floor;
-	for (const key of FLOOR_COUNTERS) if (tokens[key] !== 0) return floor;
+	const notionalRead = Object.hasOwn(tokens, "costNotional");
+	for (const key of FLOOR_COUNTERS) if (billedFloorCount(tokens, key, notionalRead) !== 0) return floor;
 	if (reported === null) return floor;
 	if (usage === null || usage === undefined) {
 		// No ledger: complete only for a run that made no provider call at all.

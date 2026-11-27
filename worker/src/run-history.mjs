@@ -971,6 +971,12 @@ function rebuildResources(r) {
  * dollar settlement takes it off the charge (`notionalMicros`), so on this list for the same reason: dropped, the
  * whole cost would be charged, the safe side but not the true one.
  *
+ * Then `unpricedNotional` and `costUnreportedNotional` (issue #1058), which the meter writes right after `costNotional`,
+ * with it and only with it: how many of the `unpriced` and of the `costUnreported` calls were on those subscription
+ * providers, each part of its total. The dollar settlement reads those two floor counters by their billed part
+ * (`billedFloorCount`), so on this list for the same reason: dropped, every such call would floor the job's dollar
+ * windows, the safe side but not the true one. A worker before them drops both.
+ *
  * Then the seven policy counters of issues #501 and #502, in the order the runner emits them after
  * it: `costCapMicros` (the job's cap), `costRefused` (calls the cost guard stopped),
  * `boundExceeded` (calls that cost more than their bound), `longContext` (calls priced past a long-context
@@ -1000,7 +1006,7 @@ function rebuildResources(r) {
  * the runner's numbers, and a sibling block would need a parser of its own. No settlement reads them, and they are no
  * floor counters. A worker before them drops both.
  */
-export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "childTotal", "childProcesses", "unmeteredChildren", "costUnreported", "costNotional", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused", "allowanceMicros", "costChargedMicros", "costLiftedMicros", "costWaited", "costWarned", "turnsWarned", "timeWarned"]);
+export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "metered", "rootTotal", "otherTotal", "looseTotal", "sessions", "calls", "unresolved", "unpriced", "childTotal", "childProcesses", "unmeteredChildren", "costUnreported", "costNotional", "unpricedNotional", "costUnreportedNotional", "costCapMicros", "costRefused", "boundExceeded", "longContext", "costUnjudged", "costUnanswered", "modelRefused", "allowanceMicros", "costChargedMicros", "costLiftedMicros", "costWaited", "costWarned", "turnsWarned", "timeWarned"]);
 
 /**
  * Rebuild the billed totals from a closed key list rather than passing the container's object through.
@@ -1014,7 +1020,7 @@ export const TOKEN_KEYS = Object.freeze(["input", "output", "total", "cost", "me
  * did not, and the asymmetry was an oversight rather than a decision.
  *
  * A key the runner omitted stays OMITTED rather than becoming null: the fallback shape legitimately
- * carries only five of the thirty-one (six with issue #1055's `turnsWarned`), and a null there would read as
+ * carries only five of the thirty-three (six with issue #1055's `turnsWarned`), and a null there would read as
  * "measured zero" for a number nobody measured. `typeof === "number"` rather than `Number.isFinite`, deliberately, so this narrows WHICH
  * KEYS survive and never which objects are admitted -- the admission gate above is unchanged.
  */

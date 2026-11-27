@@ -4685,7 +4685,7 @@ test("doctor: an overlay model that costs money and asks for no streaming usage 
 	writeFileSync(join(overlay, "models.json"), JSON.stringify({ providers: { lan: { baseUrl: "http://gpu.lan:8000/v1", api: "openai-completions", apiKey: "$LAN_KEY", models: [{ id: "qwen", cost: priced, compat: { supportsUsageInStreaming: false } }] } } }));
 	const { out, text } = capture();
 	await runDoctor(ghEnv({ PI_EGRESS: "0", PI_GLOBAL_PI_DIR: overlay }), { ...ghDeps(out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), fileExists: existsSync });
-	assert.match(text(), /⚠ Overlay models\.json sets compat\.supportsUsageInStreaming to false on "lan"\/"qwen" with a nonzero cost table, so those calls report no usage: each counts as costUnreported, and every job that calls one settles at the floor\n {4}→ remove supportsUsageInStreaming: false/);
+	assert.match(text(), /⚠ Overlay models\.json sets compat\.supportsUsageInStreaming to false on "lan"\/"qwen" with a nonzero cost table, so those calls report no usage: each counts as costUnreported, and every job that calls one settles at the floor unless the call ran on a subscription with no paid extra usage\n {4}→ remove supportsUsageInStreaming: false/);
 	writeFileSync(join(overlay, "models.json"), JSON.stringify({ providers: { lan: { baseUrl: "http://gpu.lan:8000/v1", api: "openai-completions", apiKey: "$LAN_KEY", models: [{ id: "qwen", compat: { supportsUsageInStreaming: false } }] } } }));
 	const quiet = capture();
 	await runDoctor(ghEnv({ PI_EGRESS: "0", PI_GLOBAL_PI_DIR: overlay }), { ...ghDeps(quiet.out, { ...green, "gh auth status": { code: 0, output: ghStatusOutput } }), fileExists: existsSync });

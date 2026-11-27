@@ -270,6 +270,10 @@ function foldRow(into, row) {
  * dollar windows to the billed part, `cost - costNotional`. The snapshot carries `costNotional` only when the set is
  * given, so every other exit line is byte-identical. It is the very set the cost guard admits without a charge, never a
  * second reading of the entries: a call counted here and charged there would be subtracted from a cost the cap bounded.
+ * With the set the snapshot also carries `unpricedNotional` and `costUnreportedNotional` (issue #1058): how many of the
+ * `unpriced` and of the `costUnreported` calls were on those providers. Each is part of its total, never beside it, so
+ * the worker can floor the dollar windows only on the BILLED calls whose cost is unknown: an unknown price on a call
+ * that bills nothing leaves the billed cost whole.
  */
 export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModels = null, rootSessionId, onStop, onChange = null, notionalProviders = null } = {}) {
 	if (maxTokens !== null && maxTokens !== undefined && (!Number.isInteger(maxTokens) || maxTokens < 1)) {
@@ -322,6 +326,11 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		// at or above 0 (a rejected result included). `costNotional` lacks their price, so notionalMicros() reads as
 		// unbounded once there is one, and the subscription allowance fails closed rather than judge a total it knows is short.
 		notionalUnread: 0,
+		// Issue #1058: the part of `unpriced` and of `unreported` on notional providers (notionalProviders in the header):
+		// calls that bill nothing, so an unknown cost there does not make the billed cost a floor. Counted in the same step
+		// as their totals, so each is part of its total, never beside it.
+		unpricedNotional: 0,
+		unreportedNotional: 0,
 		// The first stop's reason (a STOP_MESSAGES key), or null. Set once by stop(), never overwritten.
 		stopReason: null,
 		// The pre-#501 flag, kept as a read-only view: true exactly when the stop was the token cap.
@@ -365,6 +374,11 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 	// mark as let through by its own subscription admission (rows() below). Kept apart from the rows themselves, so the
 	// exit line's `usage` rows, which the worker reads by a closed key list, never carry it.
 	const notionalByKey = new Map();
+	// Issue #1058: each named row's notional unpriced and notional broken-usage calls, by the row's key, for a CHILD's
+	// ledger rows (rows() below), apart from the rows for notionalByKey's reason. Only a named row's: the model-less
+	// bucket names no provider, so the parent could never class it notional.
+	const unpricedNotionalByKey = new Map();
+	const unreportedNotionalByKey = new Map();
 	// Where a call lands when its ctx names no model: kept OFF the map, so a provider literally named
 	// "other" can never merge into it. Same honesty rule as `unpriced` above -- a model-less call is
 	// COUNTED here, never guessed onto whichever model a heuristic liked.
@@ -414,6 +428,11 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		if (notionalProviders !== null && notionalProviders.has(ctx.provider)) {
 			if (priced) state.costNotional += price;
 			if (!priced || given < 0) state.notionalUnread += 1;
+			// Issue #1058: the same call `unpriced` counted above, so this stays a part of it.
+			if (!priced) {
+				state.unpricedNotional += 1;
+				countByKey(unpricedNotionalByKey, ctx);
+			}
 		}
 
 		const id = typeof ctx.sessionId === "string" ? ctx.sessionId : "";
@@ -474,7 +493,25 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 	function judgeUsage(message, ctx) {
 		if (ctx.model === undefined || !pricedModel(ctx.model)) return;
 		if (typeof ctx.forwarded === "function" && ctx.forwarded()) return;
-		if (unreportedUsage(message, ctx.model?.api)) state.unreported += 1;
+		if (!unreportedUsage(message, ctx.model?.api)) return;
+		state.unreported += 1;
+		// Issue #1058: a broken-usage call on a notional provider (record's own test, on the same ctx), part of `unreported`.
+		if (notionalProviders !== null && notionalProviders.has(ctx.provider)) {
+			state.unreportedNotional += 1;
+			countByKey(unreportedNotionalByKey, ctx);
+		}
+	}
+
+	/**
+	 * Issue #1058: one more call in `counts` for the named row record() lands `ctx` on (both ids, as there). A call with
+	 * no pair lands in the bucket, which carries no such count, so it is not counted here.
+	 */
+	function countByKey(counts, ctx) {
+		const provider = typeof ctx.provider === "string" && ctx.provider.length > 0 ? ctx.provider : null;
+		const modelId = typeof ctx.modelId === "string" && ctx.modelId.length > 0 ? ctx.modelId : null;
+		if (provider === null || modelId === null) return;
+		const key = `${provider}\u0000${modelId}`;
+		counts.set(key, (counts.get(key) ?? 0) + 1);
 	}
 
 	/**
@@ -591,6 +628,17 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 	/** The exit-line shape. `metered: true` marks totals that came from here, not from the session bus. */
 	function snapshot() {
 		const child = children ?? { input: 0, output: 0, total: 0, cost: 0, calls: 0, unresolved: 0, unpriced: 0, sessions: 0 };
+		const unpriced = state.unpriced + child.unpriced;
+		const costUnreported = state.unreported + (children?.unreported ?? 0);
+		// Issue #1008: only for a job with subscription entries. Issue #1098: a pi child holds a subscription admission of its
+		// own, so the children's rows on this job's notional providers are notional here too (childNotional). Issue #1058:
+		// the notional parts of `unpriced` and `costUnreported`, the children's by the same rule, each held to its total
+		// (the children's counts are high-water marks taken apart from the totals', so the bound is written, not assumed).
+		const notional = notionalProviders === null ? {} : {
+			costNotional: state.costNotional + childNotional(),
+			unpricedNotional: Math.min(unpriced, state.unpricedNotional + childCount("unpricedNotional")),
+			costUnreportedNotional: Math.min(costUnreported, state.unreportedNotional + childCount("unreportedNotional")),
+		};
 		return {
 			input: state.input + child.input,
 			output: state.output + child.output,
@@ -604,13 +652,11 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 			sessions: state.sessionIds.size + child.sessions,
 			calls: state.calls + child.calls,
 			unresolved: state.unresolved + child.unresolved,
-			unpriced: state.unpriced + child.unpriced,
+			unpriced,
 			...(children === null ? {} : { childTotal: children.total, childProcesses: children.processes, unmeteredChildren: children.unmetered }),
 			// Issue #571: on every metered line, the children's included (their ledgers carry it).
-			costUnreported: state.unreported + (children?.unreported ?? 0),
-			// Issue #1008: only for a job with subscription entries. Issue #1098: a pi child holds a subscription admission of
-			// its own, so the children's rows on this job's notional providers are notional here too (childNotional).
-			...(notionalProviders === null ? {} : { costNotional: state.costNotional + childNotional() }),
+			costUnreported,
+			...notional,
 		};
 	}
 
@@ -635,6 +681,15 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 	function childNotional() {
 		if (notionalProviders === null || children === null) return 0;
 		return children.notional ?? 0;
+	}
+
+	/**
+	 * Issue #1058: the children's notional unpriced (`unpricedNotional`) or broken-usage (`unreportedNotional`) calls, as
+	 * the last fold counted them (foldChildLedgers, rows on this job's notional set), childNotional's rules otherwise.
+	 */
+	function childCount(key) {
+		if (notionalProviders === null || children === null) return 0;
+		return children[key] ?? 0;
 	}
 
 	/**
@@ -680,6 +735,9 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 			unreported: high("unreported", fold?.costUnreported ?? 0),
 			// Issue #1098: the children's notional cost the fold counted (marked rows on the job's own notional set).
 			notional: high("notional", fold?.notionalCost ?? 0),
+			// Issue #1058: the children's notional unpriced and broken-usage calls the fold counted, by the same rule.
+			unpricedNotional: high("unpricedNotional", fold?.unpricedNotional ?? 0),
+			unreportedNotional: high("unreportedNotional", fold?.costUnreportedNotional ?? 0),
 			rows: [...rows.values()],
 		};
 		if (cap !== null && combinedTotal() > cap) stop(TOKEN_BUDGET, combinedTotal());
@@ -701,10 +759,16 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		// above 0: a mark lands only on a provider of the child's own admitted set, so on at most the model list's 16 models,
 		// and the rows of every other call keep the size they had.
 		const mark = (value) => (value > 0 ? { notional: value } : {});
+		// Issue #1058: a named row's notional unpriced and broken-usage calls, each written only when above 0; a row folded
+		// into the bucket drops them (the bucket names no provider, so its calls are billed to the parent).
+		const counts = (key) => ({
+			...((unpricedNotionalByKey.get(key) ?? 0) > 0 ? { unpricedNotional: unpricedNotionalByKey.get(key) } : {}),
+			...((unreportedNotionalByKey.get(key) ?? 0) > 0 ? { costUnreportedNotional: unreportedNotionalByKey.get(key) } : {}),
+		});
 		let bucketNotional = notionalByKey.get("") ?? 0;
 		for (const [key, row] of byModel) {
 			const recordable = recordableId(row.provider) && recordableId(row.model);
-			if (recordable && kept.length < CHILD_LEDGER_ROWS - 1) kept.push({ ...row, ...mark(notionalByKey.get(key) ?? 0) });
+			if (recordable && kept.length < CHILD_LEDGER_ROWS - 1) kept.push({ ...row, ...mark(notionalByKey.get(key) ?? 0), ...counts(key) });
 			else {
 				foldRow(bucket, row);
 				bucketNotional += notionalByKey.get(key) ?? 0;
@@ -3900,12 +3964,12 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 //     claim (`CLAIM.<gen>`, issue #985) and the temporary file of an atomic write (it must not end in `.json`).
 //   - Written whole, by rename, as compact JSON of at most CHILD_LEDGER_MAX_BYTES (64 KiB).
 //   - Every field is required, in every state:
-//       { "v": 3,
+//       { "v": 5,
 //         "state": "starting" | "running" | "done",
 //         "metered": true | false,
 //         "totals": { "input", "output", "total", "cost", "calls", "unresolved", "unpriced", "sessions" },
 //         "rows": [ { "provider", "model", "calls", "input", "output", "cacheRead", "cacheWrite", "cacheWrite1h",
-//                     "reasoning", "total", "cost", "unpriced" } ],
+//                     "reasoning", "total", "cost", "unpriced", "providerBilled" } ],
 //         "spentMicros", "inflightMicros", "costRefused", "modelRefused",
 //         "boundExceeded", "costUnanswered", "costUnreported", "longContext", "costUnjudged", "waiting",
 //         "waited", "liftedMicros", "refusedWhy", "costRefusal" }
@@ -3924,6 +3988,13 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 //     what its cost guard charged above pi's own price, both from its guard's charges()) are additive and optional the
 //     same way, for the parent's exit line only (costWaited, costLiftedMicros): a file without them, or with anything but
 //     a count, is read whole and counts them 0. No rule decides by them, so a floor of them misleads nothing.
+//     A row may also carry, each only when above 0 and only on a row the child's own subscription admission let calls
+//     through on (never the model-less row): `notional` (issue #1098, version 4), the part of its cost those calls
+//     priced, at most the row's `cost`; and `unpricedNotional` and `costUnreportedNotional` (issue #1058, version 5),
+//     how many of those calls were unpriced (at most the row's `unpriced`) or had broken usage (at most its priced calls,
+//     `calls - unpriced`, and all rows' together at most the file's `costUnreported`). The parent counts them only on a
+//     provider of its own verified set (ledgerNotional, ledgerNotionalCounts). A value past its bound, or one that is not
+//     a count, or a count on the model-less row, is malformed (the file counts as unmetered), as any bad field is.
 //     `refusedWhy` and `costRefusal` (issue #985) are the child's cost guard's FIRST refusal: its rule (a COST_REFUSALS
 //     member) and, when it had them, its four numbers (COST_REFUSAL_NUMBERS, whole micro-dollars), written only once the
 //     guard refused. Optional the same way: a rule outside the set is absent, numbers that are not four whole ones are
@@ -3961,11 +4032,17 @@ export const CHILD_LEDGER_MAX_BYTES = 64 * 1024;
 /** The most rows a ledger may carry. More is malformed. */
 export const CHILD_LEDGER_MAX_ROWS = 256;
 /**
- * The most rows a child meter WRITES (rows()): under half the read cap, so a ledger of worst-case rows (two 64-character
- * ids, every number at its longest) stays under CHILD_LEDGER_MAX_BYTES with 8 KiB to spare. child-ledger.test.mjs
- * builds that ledger through childLedger() and checks.
+ * The most rows a child meter WRITES (rows()): under half the read cap, so a ledger stays under CHILD_LEDGER_MAX_BYTES.
+ * 100 since issue #1058, 120 before. Measured by child-ledger.test.mjs on rows of two 64-character ids and every number
+ * at its longest, every top-level field too. A row the child's own subscription admission let calls through on carries
+ * up to three marks more (`notional`, `unpricedNotional`, `costUnreportedNotional`), and only rows of its admitted models
+ * do: at most the model list's 16 (the worker's MAX_ALLOWED_MODELS). With 16 rows marked, 100 rows are 54,459 bytes,
+ * 11,077 under the cap, more than the 8 KiB of room this cap is meant to leave; 120 rows were 64,819, 717 under. With
+ * every row marked (a child whose spawner widened its own list past 16 models), 100 rows are 63,951 bytes and are still
+ * read; 120 rows were 76,571, which the fold would refuse and count as an unmetered child. The cost: a child that calls more than 99 models folds the rest into its model-less row, where their calls
+ * are billed, and a cost on that row floors the job's model windows (more than 119 before).
  */
-export const CHILD_LEDGER_ROWS = 120;
+export const CHILD_LEDGER_ROWS = 100;
 /**
  * The most ledger names one fold reads. A job runs at most `--pids-limit=512` processes at once, so 512 ledgers is
  * every child a busy job can have alive; a name past it counts as unmetered without being opened. It bounds the tick's
@@ -3976,10 +4053,11 @@ export const CHILD_LEDGER_STATES = Object.freeze(["starting", "running", "done"]
 /**
  * The ledger format's version. 2 since the four floor counters (issue #500 part E's review), 3 since `costUnreported` (issue
  * #571), 4 since each row's `notional` (issue #1098): the part of its cost the child's own subscription admission let
- * through, which the parent counts notional only on a provider of its own verified set. Parent and child are always
- * one image, so no job holds two versions.
+ * through, which the parent counts notional only on a provider of its own verified set. 5 since each row's
+ * `unpricedNotional` and `costUnreportedNotional` (issue #1058): how many of those calls were unpriced or had broken
+ * usage, which the parent counts by the same rule. Parent and child are always one image, so no job holds two versions.
  */
-export const CHILD_LEDGER_VERSION = 4;
+export const CHILD_LEDGER_VERSION = 5;
 /**
  * A COPY of the worker's id rule (worker/src/model-ref.mjs MODEL_REF_PATTERN, which run-history.mjs imports as
  * USAGE_ID_PATTERN), because the image does not carry the worker. A copy is held to its source by a test that reads
@@ -4004,6 +4082,8 @@ const LEDGER_GUARD_COUNTS = Object.freeze(["spentMicros", "inflightMicros", "cos
 export const CHILD_FLOOR_COUNTERS = Object.freeze(["boundExceeded", "costUnanswered", "costUnreported", "longContext", "costUnjudged"]);
 const ROW_AMOUNTS = Object.freeze(["input", "output", "cacheRead", "cacheWrite", "cacheWrite1h", "reasoning", "total", "cost"]);
 const ROW_COUNTS = Object.freeze(["calls", "unpriced", "providerBilled"]);
+/** A row's optional notional marks (issues #1098 and #1058), absent for 0. They only grow in a live child, as its counts do. */
+const ROW_MARKS = Object.freeze(["notional", "unpricedNotional", "costUnreportedNotional"]);
 /** What only ever grows in a live child: everything but `unresolved` and `inflightMicros`. */
 const MONOTONE_TOTALS = Object.freeze(["input", "output", "total", "cost", "calls", "unpriced", "sessions"]);
 const MONOTONE_GUARD = Object.freeze(["spentMicros", "costRefused", "modelRefused", ...CHILD_FLOOR_COUNTERS]);
@@ -4055,6 +4135,7 @@ export function parseChildLedger(text) {
 	}
 	if (!Array.isArray(raw.rows) || raw.rows.length > CHILD_LEDGER_MAX_ROWS) return null;
 	const sum = { ...emptyRow() };
+	let unreportedNotional = 0;
 	for (const given of raw.rows) {
 		if (!isPlain(given)) return null;
 		const { provider, model } = given;
@@ -4074,17 +4155,28 @@ export function parseChildLedger(text) {
 		// meter wrote). Absent is no mark: the row is charged in full.
 		if (given.notional !== undefined && (!amount(given.notional) || (given.notional > given.cost && !agrees(given.notional, given.cost)))) return null;
 		row.notional = given.notional === undefined ? 0 : Math.min(given.notional, given.cost);
+		// Issue #1058: the row's notional unpriced and broken-usage calls, absent for 0, each at most what the row can
+		// carry (a broken-usage call is a priced one), and never on the model-less row, which the meter never marks.
+		// Absent is none: those calls are billed, and their unknown cost floors the parent's dollar windows.
+		for (const [field, most] of [["unpricedNotional", row.unpriced], ["costUnreportedNotional", row.calls - row.unpriced]]) {
+			if (given[field] !== undefined && (modelless || !whole(given[field]) || given[field] > most)) return null;
+			row[field] = given[field] ?? 0;
+		}
+		unreportedNotional += row.costUnreportedNotional;
 		foldRow(sum, row);
 		const key = rowKey(row);
 		const into = ledger.rows.get(key);
 		if (into) {
 			foldRow(into, row);
 			into.notional += row.notional;
+			into.unpricedNotional += row.unpricedNotional;
+			into.costUnreportedNotional += row.costUnreportedNotional;
 		} else ledger.rows.set(key, row);
 	}
 	// The rows partition the totals (the meter's own invariant): a file whose rows say less than its totals, or more,
-	// is not a ledger the meter wrote.
+	// is not a ledger the meter wrote. Issue #1058: the rows' notional broken-usage calls are part of `costUnreported`.
 	if (sum.calls !== totals.calls - totals.unresolved || sum.unpriced !== totals.unpriced) return null;
+	if (unreportedNotional > ledger.costUnreported) return null;
 	if (!LEDGER_AMOUNTS.every((key) => agrees(sum[key], totals[key]))) return null;
 	// `waiting` (issue #985): how many calls wait in the child. Additive, so no version: anything but a safe integer at
 	// or above zero, or its absence (a child from before it), is null, unknown, which the fold counts as waiting
@@ -4106,7 +4198,7 @@ function reached(high, next) {
 	if (!MONOTONE_GUARD.every((key) => next[key] >= high[key])) return false;
 	for (const [key, row] of high.rows) {
 		const now = next.rows.get(key);
-		if (!now || ![...ROW_AMOUNTS, ...ROW_COUNTS, "notional"].every((field) => (now[field] ?? 0) >= (row[field] ?? 0))) return false;
+		if (!now || ![...ROW_AMOUNTS, ...ROW_COUNTS, ...ROW_MARKS].every((field) => (now[field] ?? 0) >= (row[field] ?? 0))) return false;
 	}
 	return true;
 }
@@ -4190,13 +4282,15 @@ const DEFAULT_LEDGER_FS = { readdirSync, lstatSync, openSync, fstatSync, readSyn
  *     that is counted in `flooded`, unmetered and unread. `flooded` is a high-water mark of how many such names one
  *     listing held.
  * Returns `{ processes, unmetered, flooded, totals, rows, spentMicros, inflightMicros, costRefused, modelRefused,
- * boundExceeded, costUnanswered, costUnreported, longContext, costUnjudged, settledMicros, chargeMicros,
- * liveInflightMicros, liveWaiting, waited, liftedMicros, refusal, missing, files, retired }`:
+ * boundExceeded, costUnanswered, costUnreported, longContext, costUnjudged, settledMicros, chargeMicros, notionalCost,
+ * unpricedNotional, costUnreportedNotional, liveInflightMicros, liveWaiting, waited, liftedMicros, refusal, missing,
+ * files, retired }`:
  * `processes` the ledger files ever seen (flooded and retired ones included), `unmetered` those counted unmetered
  * (flooded ones included), `totals` and the counters summed over every file's mark and the retired aggregate, `rows`
  * merged by pair (the model-less row last, ids null), `settledMicros` the sum of each ledger's ledgerSettled() and
- * `chargeMicros` of its ledgerCharge(), `liveInflightMicros` of each tracked file's ledgerInflight() (issue #985: the
- * part of `chargeMicros` a settle can still free) and `liveWaiting` of its ledgerWaiting(), `missing` true when the directory could not be listed, `files` the per-file
+ * `chargeMicros` of its ledgerCharge(), `notionalCost` of its ledgerNotional() (issue #1098), `unpricedNotional` and
+ * `costUnreportedNotional` of its ledgerNotionalCounts() (issue #1058), `liveInflightMicros` of each tracked file's
+ * ledgerInflight() (issue #985: the part of `chargeMicros` a settle can still free) and `liveWaiting` of its ledgerWaiting(), `missing` true when the directory could not be listed, `files` the per-file
  * state for the next call (a Map by name of `{ pid, state, unmetered, why, high, sig }`, `why` one of `malformed`,
  * `unmetered`, `shrank`, `vanished`), which the detector reads for a file's pid and state, and `retired` the
  * aggregate (`{ count, names, pids, high, charge, settled }`). `refusal` is the first child cost refusal a fold read,
@@ -4206,7 +4300,7 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 	const files = new Map(prev?.files ?? []);
 	const retired = prev?.retired
 		? { ...prev.retired, names: new Set(prev.retired.names), pids: new Set(prev.retired.pids), high: cloneLedger(prev.retired.high) }
-		: { count: 0, names: new Set(), pids: new Set(), high: emptyLedger(), charge: 0, settled: 0, notional: 0 };
+		: { count: 0, names: new Set(), pids: new Set(), high: emptyLedger(), charge: 0, settled: 0, notional: 0, unpricedNotional: 0, costUnreportedNotional: 0 };
 	let names = [];
 	let missing = false;
 	try {
@@ -4269,6 +4363,9 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 			retired.charge = saturatingAdd(retired.charge, ledgerCharge(entry.high, notional));
 			retired.settled = saturatingAdd(retired.settled, ledgerSettled(entry.high, notional));
 			retired.notional = (retired.notional ?? 0) + ledgerNotional(entry.high, notional);
+			const counted = ledgerNotionalCounts(entry.high, notional);
+			retired.unpricedNotional = saturatingAdd(retired.unpricedNotional ?? 0, counted.unpricedNotional);
+			retired.costUnreportedNotional = saturatingAdd(retired.costUnreportedNotional ?? 0, counted.costUnreportedNotional);
 		}
 	}
 	const flooded = Math.max(prev?.flooded ?? 0, beyond);
@@ -4279,6 +4376,10 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 	let settledMicros = retired.settled;
 	// Issue #1098: the children's notional cost, in dollars, the part of `totals.cost` ledgerNotional counts.
 	let notionalCost = retired.notional ?? 0;
+	// Issue #1058: the children's notional unpriced and broken-usage calls, the parts of `totals.unpriced` and of
+	// `costUnreported` ledgerNotionalCounts counts.
+	let unpricedNotional = retired.unpricedNotional ?? 0;
+	let costUnreportedNotional = retired.costUnreportedNotional ?? 0;
 	let liveInflightMicros = 0;
 	let liveWaiting = 0;
 	for (const entry of files.values()) {
@@ -4287,6 +4388,9 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 		chargeMicros = saturatingAdd(chargeMicros, ledgerCharge(entry.high, notional));
 		settledMicros = saturatingAdd(settledMicros, ledgerSettled(entry.high, notional));
 		notionalCost += ledgerNotional(entry.high, notional);
+		const counted = ledgerNotionalCounts(entry.high, notional);
+		unpricedNotional = saturatingAdd(unpricedNotional, counted.unpricedNotional);
+		costUnreportedNotional = saturatingAdd(costUnreportedNotional, counted.costUnreportedNotional);
 		liveInflightMicros = saturatingAdd(liveInflightMicros, ledgerInflight(entry));
 		liveWaiting = saturatingAdd(liveWaiting, ledgerWaiting(entry));
 	}
@@ -4296,7 +4400,7 @@ export function foldChildLedgers({ dir, fs = DEFAULT_LEDGER_FS, prev = null, ret
 	merged.delete("");
 	const rows = [...merged.values(), ...(modelless ? [modelless] : [])];
 	const counters = Object.fromEntries(LEDGER_GUARD_COUNTS.map((key) => [key, sum[key]]));
-	return { processes: files.size + flooded + retired.count, unmetered, flooded, totals: sum.totals, rows, ...counters, settledMicros, chargeMicros, notionalCost, liveInflightMicros, liveWaiting, waited: sum.waited, liftedMicros: sum.liftedMicros, refusal, missing, files, retired };
+	return { processes: files.size + flooded + retired.count, unmetered, flooded, totals: sum.totals, rows, ...counters, settledMicros, chargeMicros, notionalCost, unpricedNotional, costUnreportedNotional, liveInflightMicros, liveWaiting, waited: sum.waited, liftedMicros: sum.liftedMicros, refusal, missing, files, retired };
 }
 
 /** A copy of a ledger mark, its rows copied too. */
@@ -4314,7 +4418,7 @@ function addLedger(into, from) {
 		const there = into.rows.get(key);
 		if (there) {
 			foldRow(there, row);
-			there.notional = (there.notional ?? 0) + (row.notional ?? 0);
+			for (const mark of ROW_MARKS) there[mark] = (there[mark] ?? 0) + (row[mark] ?? 0);
 		} else into.rows.set(key, { ...row });
 	}
 }
@@ -4353,6 +4457,25 @@ export function ledgerNotional(high, notional = null) {
 	// runner's own verified set (a mark on a provider the runner does not hold notional is a billed call).
 	for (const row of high.rows.values()) if (typeof row?.provider === "string" && notional.has(row.provider) && amount(row.cost) && amount(row.notional)) sum += Math.min(row.notional, row.cost);
 	return sum;
+}
+
+/**
+ * Issue #1058: how many of a ledger mark's unpriced and broken-usage calls were notional, `{ unpricedNotional,
+ * costUnreportedNotional }`, by ledgerNotional's rule: rows the child marked (CHILD_LEDGER_VERSION 5) whose provider is in
+ * the job's `notional` set, the model-less row never; both 0 with none. Each row's count at most what the row carries
+ * (`unpriced`, and its priced calls), and each sum at most the mark's own total (`totals.unpriced`, `costUnreported`),
+ * so a notional part is never more than the count it is part of, whatever the mark holds.
+ */
+export function ledgerNotionalCounts(high, notional = null) {
+	const counts = { unpricedNotional: 0, costUnreportedNotional: 0 };
+	if (!(notional instanceof Set) || notional.size === 0 || !(high?.rows instanceof Map)) return counts;
+	for (const row of high.rows.values()) {
+		if (typeof row?.provider !== "string" || !notional.has(row.provider) || !whole(row.calls) || !whole(row.unpriced)) continue;
+		if (whole(row.unpricedNotional)) counts.unpricedNotional += Math.min(row.unpricedNotional, row.unpriced);
+		if (whole(row.costUnreportedNotional)) counts.costUnreportedNotional += Math.min(row.costUnreportedNotional, Math.max(0, row.calls - row.unpriced));
+	}
+	const most = (value) => (whole(value) ? value : 0);
+	return { unpricedNotional: Math.min(counts.unpricedNotional, most(high?.totals?.unpriced)), costUnreportedNotional: Math.min(counts.costUnreportedNotional, most(high?.costUnreported)) };
 }
 
 /**

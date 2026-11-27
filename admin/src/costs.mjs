@@ -245,16 +245,44 @@ function attributionRows(record) {
  * `boundExceeded` is NOT here. It says a call cost more than its pre-call bound, which is the worker's settlement concern
  * (the reservation did not bound the run, so `dollarSettlement` floors it); the metered cost itself is pi's full price,
  * so this fold's dollar is not short.
+ *
+ * `unpriced` and `costUnreported` are read by their BILLED part (issue #1058, `notionalFloorPart`), the worker's rule:
+ * a call on a subscription with no paid extra usage bills nothing, so its unknown cost leaves the billed dollar exact.
  */
 const FLOOR_KEYS = Object.freeze(["unresolved", "unpriced", "unmeteredChildren"]);
 const GUARD_FLOOR_KEYS = Object.freeze(["costUnreported", "longContext", "costUnjudged", "costUnanswered"]);
+/** The floor keys that may count notional calls, and the key of that part (dollar-budget.mjs `NOTIONAL_FLOOR_PARTS`). */
+const NOTIONAL_FLOOR_PARTS = Object.freeze({ unpriced: "unpricedNotional", costUnreported: "costUnreportedNotional" });
+
+/**
+ * How many of a floor counter's calls were notional (issue #1058, dollar-budget.mjs `billedFloorCount`, restated as
+ * `recordNotionalMicros` restates the split): `tokens[NOTIONAL_FLOOR_PARTS[key]]`, read only beside a `costNotional`
+ * the worker reads as valid (`recordNotionalMicros`). 0 when it is not read: absent (an image from before the key, so
+ * every such call is billed), no valid `costNotional` beside it, or a key with no notional part. null when it is read
+ * and is not a safe integer at or above 0, or the count it is part of is not one, or it is above that count: the worker
+ * settles such a line at the floor.
+ */
+export function notionalFloorPart(tokens, key) {
+  const part = Object.hasOwn(NOTIONAL_FLOOR_PARTS, key) ? NOTIONAL_FLOOR_PARTS[key] : null;
+  if (part === null || tokens === null || typeof tokens !== "object" || !Object.hasOwn(tokens, part) || recordNotionalMicros({ tokens }) === null) return 0;
+  const count = tokens[key];
+  const notional = tokens[part];
+  if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(notional) || notional < 0 || notional > count) return null;
+  return notional;
+}
 
 /** Whether a run's exit-line counters make its dollar a floor (FLOOR_KEYS and GUARD_FLOOR_KEYS above). */
 function floorCounted(tokens) {
   const short = (value) => !(Number.isSafeInteger(value) && value >= 0) || value > 0;
-  if (FLOOR_KEYS.some((key) => tokens[key] !== undefined && short(tokens[key]))) return true;
+  // Issue #1058: the billed part. A notional part that cannot be read is a floor, as the worker settles it; with none,
+  // the value is judged as it is (a part above 0 was read beside a count that is one).
+  const billed = (key) => {
+    const notional = notionalFloorPart(tokens, key);
+    return notional === null ? NaN : notional === 0 ? tokens[key] : tokens[key] - notional;
+  };
+  if (FLOOR_KEYS.some((key) => tokens[key] !== undefined && short(billed(key)))) return true;
   const guarded = tokens.costCapMicros !== undefined;
-  return GUARD_FLOOR_KEYS.some((key) => (tokens[key] === undefined ? guarded : short(tokens[key])));
+  return GUARD_FLOOR_KEYS.some((key) => (tokens[key] === undefined ? guarded : short(billed(key))));
 }
 
 /**

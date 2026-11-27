@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { COST_CLASSES, COSTS_WINDOWS, PROJECT_KEY_RE, costsSinceMs, matchesGlob, classifyRow, foldCosts, whatIfFlow, repoOfTarget, foldTriggerCosts, projectKeyOf, recordInProject, recordInRepo, repoKeyOf, meteredRunMicros, recordNotionalMicros, recordNotionalProviders } from "../src/costs.mjs";
+import { COST_CLASSES, COSTS_WINDOWS, PROJECT_KEY_RE, costsSinceMs, matchesGlob, classifyRow, foldCosts, whatIfFlow, repoOfTarget, foldTriggerCosts, projectKeyOf, recordInProject, recordInRepo, repoKeyOf, meteredRunMicros, notionalFloorPart, recordNotionalMicros, recordNotionalProviders } from "../src/costs.mjs";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { runCost } from "../src/console/panels/common.mjs";
 import { parseSubscriptions } from "@edgehero/pi-dispatch/subscriptions";
@@ -383,6 +383,38 @@ test("floor: a present counter that is not a whole number at least 0 is a floor,
     assert.equal(floorOf({ [key]: 0 }), false, `${key}: 0`);
   }
   assert.equal(floorOf({ costUnreported: -0 }), false, "-0 is 0, as the worker's !== 0 reads it");
+});
+
+test("floor: unpriced and costUnreported floor by their billed part, read beside a valid costNotional, the worker's rule (issue #1058)", () => {
+  const run = (extra) => rec({ jobId: "b-1", tokens: { ...tok(0.5), costNotional: 0.25, ...extra }, notionalProviders: ["openai-codex"], usage: usage([row("anthropic", "claude-sonnet-4", { cost: 0.25 }), row("openai-codex", "gpt-6.1-sol", { cost: 0.25, unpriced: 1 })]) });
+  const floorOf = (extra) => fold([run(extra)]).provenance.total.floor;
+  assert.equal(floorOf({ unpriced: 1, unpricedNotional: 1, costUnreported: 1, costUnreportedNotional: 1 }), false, "every unknown cost on a subscription: the billed dollar is exact");
+  assert.equal(floorOf({ unpriced: 2, unpricedNotional: 1 }), true, "a billed unpriced call");
+  assert.equal(floorOf({ costUnreported: 2, costUnreportedNotional: 1 }), true, "a billed broken-usage call");
+  assert.equal(floorOf({ unpriced: 1 }), true, "an image from before the keys: every such call billed");
+  assert.equal(floorOf({ unpriced: 1, unpricedNotional: 2 }), true, "a part above its count");
+  for (const bad of [0.5, -1, "1", null]) assert.equal(floorOf({ unpriced: 1, unpricedNotional: bad }), true, `unpricedNotional ${String(bad)}`);
+  assert.equal(floorOf({ unpriced: 1, unpricedNotional: 1, costNotional: undefined }), true, "no costNotional beside it: not read");
+  assert.equal(floorOf({ unpriced: 1, unpricedNotional: 1, costNotional: 0.75 }), true, "a costNotional above the cost: not read, as the worker floors it");
+  assert.equal(floorOf({ unresolved: 1, unresolvedNotional: 1 }), true, "no other key has a notional part");
+  assert.equal(floorOf({ costCapMicros: 2_000_000, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0, costUnreported: 1, costUnreportedNotional: 1, unpriced: 0 }), false, "a capped record too");
+  assert.equal(floorOf({ unpriced: null, unpricedNotional: 0 }), true, "a count that is not one stays a floor with a part of 0");
+  // A count that is not a whole number at least 0 beside a valid part and a valid costNotional: a floor, as the worker's
+  // settlement reads it, never the part taken off a value that only coerces to a number ("1" - 1 is 0).
+  for (const bad of ["1", true, [1], 1.5, -1]) {
+    assert.equal(floorOf({ unpriced: bad, unpricedNotional: 1 }), true, `unpriced ${JSON.stringify(bad)}`);
+    assert.equal(floorOf({ costUnreported: bad, costUnreportedNotional: 1 }), true, `costUnreported ${JSON.stringify(bad)}`);
+  }
+  // The reading itself, which the run page shows: the part, 0 when it is not read, null when it cannot be.
+  const line = { cost: 0.5, costNotional: 0.25, unpriced: 3, costUnreported: 1 };
+  assert.equal(notionalFloorPart({ ...line, unpricedNotional: 2 }, "unpriced"), 2);
+  assert.equal(notionalFloorPart({ ...line, unpricedNotional: 4 }, "unpriced"), null, "above its count");
+  assert.equal(notionalFloorPart({ ...line, costUnreportedNotional: 1.5 }, "costUnreported"), null, "not a count");
+  assert.equal(notionalFloorPart({ ...line, unpriced: "3", unpricedNotional: 1 }, "unpriced"), null, "a count that is not one");
+  assert.equal(notionalFloorPart(line, "unpriced"), 0, "absent");
+  assert.equal(notionalFloorPart({ ...line, costNotional: undefined, unpricedNotional: 2 }, "unpriced"), 0, "no costNotional beside it");
+  assert.equal(notionalFloorPart({ ...line, unresolved: 1, unresolvedNotional: 1 }, "unresolved"), 0, "no other key has a part");
+  assert.equal(notionalFloorPart(null, "unpriced"), 0);
 });
 
 // ---- daily buckets ----

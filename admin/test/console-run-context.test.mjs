@@ -182,6 +182,26 @@ test("issue #1008: a mixed run's cost panel shows billed and notional apart and 
   assert.match(models, /\$59\.75 notional<\/td>/); assert.match(models, /\$0\.33<\/td>/);
 });
 
+test("issue #1058: the run page says how many unpriced and unreported calls were billed and how many on a subscription; a record without the parts renders its counts as before", () => {
+  const usage = { v: 1, truncated: 0, models: [{ provider: "anthropic", model: "claude-opus-5-5", calls: 2, input: 1, output: 1, cost: 0.25 }, { provider: "openai-codex", model: "gpt-6.1-sol", calls: 3, input: 1, output: 1, cost: 3, unpriced: 2 }] };
+  const tokens = { input: 2, output: 2, total: 4, cost: 3.25, metered: true, calls: 5, unpriced: 3, costUnreported: 1, costNotional: 3, unpricedNotional: 2, costUnreportedNotional: 1 };
+  // "Cost unreported" is the cost card's row and "Unpriced calls" the Model usage card's, which held it before.
+  const panel = (t) => { const v = view({ run: { record: record({ outcome: "completed", reason: null, tokens: t, usage, notionalProviders: ["openai-codex"] }) } }); return `${runCostPanel(v)}${runModels(v)}`; };
+  const out = panel(tokens);
+  assert.match(out, /<dt>Unpriced calls<\/dt><dd>1 billed, 2 on a subscription \(not billed\)<\/dd>/);
+  assert.match(out, /<dt>Cost unreported<\/dt><dd>0 billed, 1 on a subscription \(not billed\)<\/dd>/);
+  // An older image's record, a part that is not read (no costNotional) and one past its count: the counts alone.
+  for (const t of [{ ...tokens, unpricedNotional: undefined, costUnreportedNotional: undefined }, { ...tokens, costNotional: undefined }, { ...tokens, unpricedNotional: 4, costUnreportedNotional: "1" }]) {
+    const plain = panel(t);
+    assert.match(plain, /<dt>Unpriced calls<\/dt><dd>3<\/dd>/);
+    assert.match(plain, /<dt>Cost unreported<\/dt><dd>1<\/dd>/);
+  }
+  const zero = panel({ ...tokens, unpriced: 0, unpricedNotional: 0, costUnreported: 0, costUnreportedNotional: 0 });
+  assert.match(zero, /<dt>Cost unreported<\/dt><dd>0<\/dd>/);
+  assert.match(zero, /<dt>Unpriced calls<\/dt><dd>0<\/dd>/);
+  assert.equal((out.match(/<dt>Unpriced calls<\/dt>/g) ?? []).length, 1, "one row of it on the page");
+});
+
 test("issue #1008: a run that reserved nothing names the cap it ran under; one with no ledger reads billed and notional the same way in every row; the notional word needs costNotional", () => {
   const subOnly = { input: 1, output: 1, total: 2, cost: 7.5, metered: true, calls: 9, costNotional: 7.5, costCapMicros: 150_000_000, costChargedMicros: 0, costRefused: 1 };
   const refusal = { spentMicros: 0, inflightMicros: 0, externalMicros: 0, boundMicros: 151_000_000 };
