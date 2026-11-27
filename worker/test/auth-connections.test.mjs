@@ -37,6 +37,22 @@ test("auth policy rejects unknown version, cross-provider binding, relative root
 	assert.equal(parseAuthConnections(policy).connections[0].adapter, "openai-chatgpt");
 });
 
+test("a ChatGPT connection declares purchased credits with extraUsageCreditMicros, and its check and status rows name them (issue #1057)", async () => {
+	const credited = { ...policy, connections: [{ ...policy.connections[0], extraUsageCreditMicros: 400_000 }] };
+	assert.equal(parseAuthConnections(credited).connections[0].extraUsageCreditMicros, 400_000);
+	assert.equal(Object.hasOwn(parseAuthConnections(policy).connections[0], "extraUsageCreditMicros"), false, "unset stays absent");
+	// The same bounds as a Claude row's: a positive safe integer of micro-dollars, nothing else.
+	for (const credit of [0, -1, 1.5, "400000", Number.MAX_SAFE_INTEGER + 1, null]) assert.throws(() => parseAuthConnections({ ...policy, connections: [{ ...policy.connections[0], extraUsageCreditMicros: credit }] }), /auth-policy-invalid/, String(credit));
+	for (const [given, credit] of [[credited, 400_000], [policy, null]]) {
+		const service = createAuthService({ policy: given, storeDir: join(tempDir("auth-chatgpt-credit-"), "private"), host: "host-a", now, adapters: { "openai-chatgpt": { async login() { return fresh(); } } } });
+		await service.login("chatgpt");
+		const checked = await service.check("openai", { readOnly: true });
+		assert.equal(checked.ok, true);
+		assert.equal(checked.extraUsageCreditMicros, credit, "the worker's check reads the credit off this row");
+		assert.equal((await service.status())[0].extraUsageCreditMicros, credit, "and doctor's status rows");
+	}
+});
+
 test("unmanaged providers stay unmanaged; selected disconnected provider never falls through to ambient keys", async () => {
 	const { service } = setup();
 	assert.deepEqual(await service.prepareSnapshot("anthropic", { deadlineAt: instant + 1000 }), { ok: true, managed: false, snapshot: null });

@@ -182,6 +182,26 @@ test("enabled or unknown extra usage never authorizes paid credits by default", 
 	assert.equal((await store.admit(identity())).ok, false);
 });
 
+test("issue #1057: a ChatGPT connection's purchased credits are admitted with their cap, and never pass an exhausted window", async () => {
+	const chatgpt = identity({ connectionId: "chatgpt-one", bucket: "openai:subscription" });
+	// The runtime's ask for a ChatGPT row with a credit (subscription-runtime.mjs `check`): no Claude extra-usage gate.
+	const paid = { modelRef: "openai/gpt-5.5", allowExtraUsage: true, maxCreditMicros: 400_000, requireExtraUsageKnownDisabled: false };
+	const { store } = fixture();
+	assert.deepEqual(await store.admit(chatgpt, paid).then(({ ok, reason, creditCapMicros }) => ({ ok, reason, creditCapMicros })), { ok: true, reason: "subscription-unknown", creditCapMicros: 400_000 });
+	await store.record(chatgpt, normalizeOpenAIQuota({ rateLimits: { primary: { usedPercent: 30, windowDurationMins: 300 }, secondary: { usedPercent: 10, windowDurationMins: 10_080 } } }, { observedAt: NOW }));
+	assert.deepEqual(await store.admit(chatgpt, paid).then(({ ok, reason, creditCapMicros }) => ({ ok, reason, creditCapMicros })), { ok: true, reason: "subscription-available", creditCapMicros: 400_000 });
+	// Exhausted by the provider's refusal, and by a usage reading: ChatGPT publishes no extra-usage state, so the credit
+	// never reads as enabled and the job waits for the reset, as one without a credit does.
+	const resetAt = NOW + 3_600_000;
+	for (const exhaust of [normalizeSubscriptionQuotaError({ provider: "openai", code: "usage_limit_reached", status: 429, window: "five-hour", resetAt }, { observedAt: NOW }), normalizeOpenAIQuota({ rateLimits: { primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: resetAt / 1000 } } }, { observedAt: NOW })]) {
+		const { store: fresh } = fixture();
+		await fresh.record(chatgpt, exhaust);
+		const held = await fresh.admit(chatgpt, paid);
+		assert.deepEqual([held.ok, held.reason, held.until, held.status.extraUsage.enabled], [false, "subscription-quota", resetAt, null], exhaust.source);
+		assert.equal(Object.hasOwn(held, "creditCapMicros"), false);
+	}
+});
+
 test("one person's trial is previewed without consumption and atomically belongs to one durable attempt", async () => {
 	const { store, redis } = fixture();
 	await store.record(identity(), failure());

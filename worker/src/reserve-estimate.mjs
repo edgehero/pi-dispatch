@@ -55,10 +55,13 @@ export function zeroRatedFor(job, { modelEndpoints = null, builtinModel = () => 
  * extra usage is known to be off) spends nothing per call, so its list price is not money. One WITH paid extra usage
  * may bill any call and nothing says which, so its calls are money: they stay under the cost cap and in the dollar
  * windows (`auth-credit-cap-required` still holds its cap to the credit). Anything but a positive safe integer of
- * micro-dollars reads as "none", the auth policy's own rule. A ChatGPT connection has no modelled overage, so it is
- * notional (an account with purchased credits is a residual), and Claude extra usage turned on at the provider during
- * a running job, with no credit edit, is billed past the quota with no dollar bound (the other residual). The one rule behind the worker's `notional: true` marker on a job's snapshot (subscription-runtime.mjs
- * `prepare`) and the pickup's skip of a notional candidate's model window (`notionalProvidersOf`).
+ * micro-dollars reads as "none", the auth policy's own rule. The field reads the same on every adapter: Claude paid
+ * extra usage, or ChatGPT purchased credits (issue #1057), so a ChatGPT connection without it is notional and one with
+ * it counts every call (its admission still waits on an exhausted window: ChatGPT publishes no extra-usage state).
+ * The one residual: Claude extra usage turned on at the provider during a running job, with no credit edit, is billed
+ * past the quota with no dollar bound. The one rule behind the worker's `notional: true` marker on a job's snapshot
+ * (subscription-runtime.mjs `prepare`) and the pickup's skip of a notional candidate's model window
+ * (`notionalProvidersOf`).
  */
 export function notionalConnection(row) {
 	return row !== null && typeof row === "object" && !(Number.isSafeInteger(row.extraUsageCreditMicros) && row.extraUsageCreditMicros > 0);
