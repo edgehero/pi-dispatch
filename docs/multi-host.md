@@ -327,7 +327,10 @@ Who sets the quota depends on the container runtime:
   start it, the worker removes it before the next try and waits longer between tries, up to ten minutes, so a slow
   daemon never collects them. A doctor the worker stops at its two-minute limit leaves its one helper, and the worker
   removes it right away; one a doctor stopped some other way left, the next `pi-dispatch doctor` on this host removes
-  once that process is gone, and says so.
+  once that process is gone, and says so. A doctor whose own read did not end cleanly runs one more `docker rm -f` of
+  its helper at the end of its run, and warns with the command when the helper is still there (issue #1113). The
+  worker removes any of these left in `created` for ten minutes at its ten-minute check, on any daemon, for as long as
+  it runs.
 - **Docker on a Linux host with systemd, and rootful Podman**: only root can set it. Run this once, as root, with your
   budget in place of 3 CPUs (it survives reboots); `pi-dispatch doctor` prints the exact command with your budget:
 

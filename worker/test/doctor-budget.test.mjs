@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SIZE_LABEL_PS_ARGS, budgetLedgerChecks, doctorHostBudget, fleetBudgetChecks, hostBudgetChecks, parseSizeLabels, projectSizes } from "../src/doctor.mjs";
+import { SIZE_LABEL_PS_ARGS, VM_MEMORY_WARN_PERCENT, budgetLedgerChecks, doctorHostBudget, fleetBudgetChecks, hostBudgetChecks, parseSizeLabels, projectSizes, vmMemoryChecks } from "../src/doctor.mjs";
 import { parseScopedLimits } from "../src/scoped-limits.mjs";
 
 // Doctor's host budget lines (issue #596, phase 2, DES-HOST-BUDGET): computed by the worker's own functions from the
@@ -136,4 +136,33 @@ test("the ledger against the labels: equal is a green line, a difference and an 
 	// each unlabelled container is NAMED (five at most, then a count), and a half-labelled one is unlabelled.
 	const seven = Array.from({ length: 7 }, (_, i) => ({ name: `pi-job-u${i}`, memMiB: i === 0 ? 1024 : null, cpuCenti: null }));
 	assert.match(labels(budgetLedgerChecks({ usedMemMiB: "0", usedCpuCenti: "0" }, seven))[1], /^warn: 7 running job containers carry no size label \(pi-job-u0, pi-job-u1, pi-job-u2, pi-job-u3, pi-job-u4 and 2 more\), so the ledger cannot be checked against them /);
+});
+
+test("issue #1113: the local daemon's VM with 75% or more of this host's memory warns, on darwin and win32 only, with both sizes, the percentage and the setting to lower", () => {
+	assert.equal(VM_MEMORY_WARN_PERCENT, 75);
+	const MiB = 1048576;
+	// Issue #1022's host: OrbStack's memory_mib 49152 on a host of 64g is exactly 75%.
+	const host = 65536 * MiB;
+	const local = (memTotalMiB) => ({ local: true, memTotalMiB });
+	assert.deepEqual(vmMemoryChecks({ ...local(49152), platform: "darwin", hostMemoryBytes: host }), [
+		{
+			ok: false,
+			warn: true,
+			label: "local: the Docker daemon's VM has 48g of memory, 75% of this host's 64g, so the host is left a quarter or less: a host short of memory swaps, which slows the daemon (container creates of 30 s and more) and every job with it",
+			fix: "lower the VM's memory limit below 48g, so the host keeps more than a quarter of its memory: OrbStack's memory_mib, or the memory limit in the runtime's settings; then re-run doctor",
+		},
+	]);
+	// The boundary, exact: 74.9% says nothing, 75% warns (a host of 100000 MiB).
+	const round = 100000 * MiB;
+	assert.deepEqual(vmMemoryChecks({ ...local(74900), platform: "darwin", hostMemoryBytes: round }), []);
+	assert.deepEqual(vmMemoryChecks({ ...local(74999), platform: "darwin", hostMemoryBytes: round }), []);
+	const [at] = vmMemoryChecks({ ...local(75000), platform: "win32", hostMemoryBytes: round });
+	assert.match(at.label, /^local: the Docker daemon's VM has 75000m of memory, 75% of this host's 100000m, /);
+	assert.match(at.fix, /^lower the VM's memory limit below 75000m, /);
+	assert.match(vmMemoryChecks({ ...local(90450), platform: "darwin", hostMemoryBytes: round })[0].label, /, 90\.4% of this host's/);
+	// No line on Linux (a daemon there is no VM), for a remote daemon, or when either size is unknown.
+	for (const platform of ["linux", "freebsd", "aix"]) assert.deepEqual(vmMemoryChecks({ ...local(65536), platform, hostMemoryBytes: host }), [], String(platform));
+	for (const daemon of [{ local: false, memTotalMiB: 65536 }, { local: null, memTotalMiB: 65536 }, { memTotalMiB: 65536 }, local(null), local(undefined), local(0), local(1.5)]) assert.deepEqual(vmMemoryChecks({ ...daemon, platform: "darwin", hostMemoryBytes: host }), [], JSON.stringify(daemon));
+	for (const hostMemoryBytes of [null, undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 2, "68719476736"]) assert.deepEqual(vmMemoryChecks({ ...local(65536), platform: "darwin", hostMemoryBytes }), [], String(hostMemoryBytes));
+	assert.deepEqual(vmMemoryChecks({ platform: "darwin" }), [], "no daemon, no host memory");
 });

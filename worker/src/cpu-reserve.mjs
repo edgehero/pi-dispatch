@@ -46,13 +46,17 @@
  * timeout removes it at once (`rm -f`, bounded), and while it is dirty `rm -f` runs before the next helper
  * (`guardHelperRun`). A create that lands after that rm holds the name, and the next helper's create then fails at once
  * (exit 125, no container) until an rm gets through: at most one leftover per name, across restarts, on a remote
- * daemon, whatever either clock says.
+ * daemon, whatever either clock says. A doctor runs one step and has no next helper, so when its step did not end
+ * cleanly it runs one more rm at the end of its run and says what is still there (doctor.mjs `finishDoctorCpuReserve`,
+ * issue #1113).
  * Rejected: random names plus a sweep of old labelled helpers (an age needs a clock shared with the daemon, and the
  * helper also runs on a remote cgroupfs daemon); `--cidfile` (blind to the same late create, plus a temp file);
  * `docker create` then `start -a` (twice the calls, on the daemon that is already slow). A timed-out step also
- * ends its attempt, and the next one waits longer (`makeCpuReserve`). The unnamed helpers an older worker left, and
- * the last helper of a worker since renamed, are removed by exact fingerprint (`removeLegacyHelpers`), pass after pass
- * until one has seen them all and left none young and none its `rm` refused (issue #1021).
+ * ends its attempt, and the next one waits longer (`makeCpuReserve`). The unnamed helpers an older worker left, the
+ * last helper of a worker since renamed, and a doctor's helper left `created` (a doctor killed at its bound, or one whose
+ * late create landed after every rm it ran) are removed by exact fingerprint once ten minutes old
+ * (`removeLegacyHelpers`), by a pass after every read that holds, at the ten-minute recheck, for the life of the
+ * process (issue #1113): a doctor can leave one at any time, so no pass is the last.
  *
  * NO AGGREGATE `memory.max`. Measured: a parent memory limit makes the KERNEL choose the victim by size, and it killed
  * the innocent 300 MiB job while the one that grew lived (Q6). Admission by the ledger stays the memory bound; an
@@ -457,7 +461,8 @@ export function isLegacyHelper(c, opts) {
  * command names `/p/cpu.max` and that are either unlabelled, or labelled `pi.dispatch.helper=cpu-reserve` under a
  * helper name (`HELPER_NAME_RE`) other than `ownName`, this worker's own, which its guard owns (`guardHelperRun`). That
  * takes a doctor helper stuck in `created` for ten minutes too (a killed doctor's, under its pid since issue #1040, or
- * under doctor's one shared name before it), which is harmless: doctor's own bound is 15 s. Each chunk of
+ * under doctor's one shared name before it, or one whose late create landed after every rm its doctor ran, issue
+ * #1113), which is harmless: doctor's own bound is 15 s. Each chunk of
  * `LEGACY_HELPER_CHUNK` is inspected, every image met is inspected once for its own labels, and only an exact
  * fingerprint (`legacyHelperVerdict`) old enough is removed, with a plain `rm`: never `-f`, so one that started
  * meanwhile is refused. Every call is bounded. `--filter volume=` is not used to narrow the listing: how it matches a
@@ -562,13 +567,13 @@ export async function removeLegacyHelpers({ run, bin = "docker", now = () => Dat
  * After the worker killed its doctor child at the bound (issue #1040): one bounded `rm -f` of the one helper name that
  * child could have read under, `helperName(workerName, { doctor: true, pid })` with the child's own pid, on whichever
  * daemon `run` reaches. A killed doctor leaves at most that container, and a later doctor removes it only on a daemon
- * this host owns; on any other it would wait for the worker's leftover pass, which runs only after a start until it has
- * left nothing to come back for, so one per killed run would pile up until the next start. The worker knows the pid and
- * that the process is dead, which no later reader can know on a daemon of another machine. `-f`, because that process
+ * this host owns; on any other it would wait for the worker's leftover pass at a later ten-minute recheck, once ten
+ * minutes old. This rm takes it at once: the worker knows the pid and that the process is dead, which no later reader
+ * can know on a daemon of another machine. `-f`, because that process
  * is gone and so is any read it had in flight; a name that is not there exits 0 (Docker 28.0.4, measured) and is no
- * failure. Answers null, or the failure's token (`stepFailure`), never stderr. Residual: a create the daemon lands
- * after this rm (the CLI was killed between the two) stays for the next doctor or the next start's pass, as the
- * guard's own late create does.
+ * failure. Answers null, or the failure's token (`stepFailure`), never stderr. A create the daemon lands after this rm
+ * (the CLI was killed between the two), or an rm that timed out, leaves it for the next doctor or the leftover pass at
+ * a later recheck (issue #1113), as the guard's own late create does.
  */
 export async function removeKilledDoctorHelper({ run, workerName = "", pid, bin = "docker", timeoutMs = RESERVE_STEP_TIMEOUT_MS }) {
 	const name = helperName(workerName, { doctor: true, pid });
@@ -595,12 +600,14 @@ export async function removeKilledDoctorHelper({ run, workerName = "", pid, bin 
  * timed out, from a minute to `RESERVE_RECHECK_MS` (60, 120, 240, 480, then 600 s). Only a timeout backs off: an
  * attempt that fails without one goes back to `RESERVE_RETRY_MS`, because the runtime answered and an operator's fix is
  * then seen within a minute, and a read that holds goes to the recheck. A helper venue's steps run through
- * `guardHelperRun` under `name`, and after a read that holds this process removes what an older worker, or this worker
- * under an earlier name, left there (`removeLegacyHelpers`, logged `cpu_reserve_leftovers_removed`), after each read
- * that holds until one pass has seen everything and left nothing young and nothing its `rm` refused (issue #1021).
+ * `guardHelperRun` under `name`, and after EVERY read that holds this process removes what an older worker, this worker
+ * under an earlier name, or a doctor left there (`removeLegacyHelpers`, logged `cpu_reserve_leftovers_removed`). Issue
+ * #1113: it used to stop for the life of the process after its first pass that left nothing (issue #1021's rule), so a
+ * doctor helper left after that stayed until the worker restarted.
  * Residual: that pass's age guard compares this host's clock with the daemon's `Created`, so on a remote daemon whose
- * clock is behind a helper looks older than it is (a plain `rm` of one still being started costs its worker that one
- * step), and ahead, younger (it waits for a later pass).
+ * clock is behind a helper looks older than it is (a plain `rm` of one still being started costs the process that
+ * started it, another worker or a doctor, that one step), and ahead, younger (it waits for a later pass). Since issue
+ * #1113 the pass runs at every recheck, so this can happen at any of them, not only until a first clean pass.
  *
  * States (`status`): `held` (the quota read back is the one wanted), `unset` / `differs` (read back, not as wanted:
  * on `system-systemd` the operator's command is the fix), `unreadable`, `unmanaged` (no method here, `why`),
@@ -626,11 +633,9 @@ export function failOpenSaid(state) {
 export function makeCpuReserve({ run, image, name, now = () => Date.now(), log = () => {} }) {
 	const states = new Map();
 	const said = new Map();
-	// Per helper venue: its guarded runner (the name starts dirty), and the older leftovers: whether a pass over them
-	// left nothing to come back for, and which of a pass's conditions (`venue|failed`, `venue|cut`, `venue|kept`) a line
-	// already said.
+	// Per helper venue: its guarded runner (the name starts dirty), and which of a leftover pass's conditions
+	// (`venue|failed`, `venue|cut`, `venue|kept`) a line already said.
 	const helperRuns = new Map();
-	const leftoversDone = new Set();
 	const leftoversSaid = new Set();
 	let running = false;
 
@@ -649,11 +654,14 @@ export function makeCpuReserve({ run, image, name, now = () => Date.now(), log =
 		return helperRuns.get(venue);
 	};
 
-	// Issue #1021: a pass that finished used to end the matter even when it had skipped young fingerprints or had its rm
-	// refused, so those stayed until the next restart, unsaid. Now a venue is done only after a pass that is complete
-	// with nothing young and nothing failed; until then each read that holds (the recheck, ten minutes) runs another. A
-	// host where an older worker still runs beside this one keeps making young ones, which is one bounded listing per
-	// recheck against a daemon that just answered a read: accepted.
+	// Issue #1113: a pass runs after EVERY read that holds (the recheck, ten minutes), for the life of the process. Issue
+	// #1021 ended the passes after the first one that was complete with nothing young and nothing failed, but a doctor
+	// can leave a helper `created` at any time (killed at its bound, or its late create landing after every rm it ran on
+	// a slow daemon), and such a one then stayed until the worker restarted. A host with nothing that looks like a helper
+	// pays one bounded listing per recheck, against a daemon that just answered a read: no inspect, no rm, no line. A
+	// `created` container whose command names `/p/cpu.max` and that is no fingerprint now costs one container inspect and
+	// one image inspect at every recheck, where it was inspected once and the passes then ended: the cost issue #1021
+	// already accepted for a host with an older worker beside this one.
 	// The line carries the pass's own counts. A pass that removed something is always said (it changed the daemon); a
 	// pass that had its rm refused, was cut short, or left something young or no fingerprint (a fingerprint that misses
 	// on a venue nobody measured, which would otherwise leave every leftover in place without a word) is said the first
@@ -662,9 +670,8 @@ export function makeCpuReserve({ run, image, name, now = () => Date.now(), log =
 	// and `kept` is only ever judged against labels that were read.
 	const leftovers = async (plan) => {
 		const { venue } = plan;
-		if (plan.method !== "helper" || leftoversDone.has(venue)) return;
+		if (plan.method !== "helper") return;
 		const pass = await removeLegacyHelpers({ run, bin: venue === "podman" ? "podman" : "docker", now, ownName: name });
-		if (pass.complete && pass.young === 0 && pass.failed === 0) leftoversDone.add(venue);
 		const met = [pass.failed > 0 && "failed", !pass.complete && "cut", pass.young + pass.kept > 0 && "kept"].filter(Boolean).map((c) => `${venue}|${c}`);
 		const news = pass.removed > 0 || met.some((k) => !leftoversSaid.has(k));
 		for (const k of met) leftoversSaid.add(k);
