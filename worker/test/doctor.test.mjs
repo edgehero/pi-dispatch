@@ -6967,6 +6967,67 @@ test("issue #1040: browser setup's read-only doctor on Docker's cgroupfs driver 
 	assert.ok(checks.some((c) => c.warn === true && c.label === "local: the quota of pidispatch.slice was not read by browser setup, which starts no helper container" && c.fix === "run pi-dispatch doctor in the deployment terminal to read it"));
 });
 
+test("issue #1113: when its CPU-reserve read did not end cleanly, doctor runs one more rm -f of its own helper at the END of its run, after every other docker call, and a helper still there is a warning in the output and the record", async () => {
+	const facts = { ...JSON.parse(ROOTFUL_INFO), NCPU: 4, MemTotal: 8_323_072_000, CgroupDriver: "cgroupfs", CgroupVersion: "2" };
+	const name = "pi-dispatch-cpu-reserve-doctor-96fb257c-4242";
+	const run = async ({ stillThere, json = false }) => {
+		let created = false;
+		const plan = {
+			...infoPlan(JSON.stringify(facts)),
+			// The sweep's prefix listing finds nothing; the listing of this run's own name finds its helper once created.
+			"docker ps -a --filter name=pi-dispatch-cpu-reserve-doctor-": (_cmd, args) => ({ code: 0, output: args.includes(`name=${name}`) && created && stillThere ? `${name}\tcreated\n` : "" }),
+			"docker rm": 0,
+			// The read's helper did not end cleanly (any exit but 0), and its container is on the daemon.
+			"docker run --rm --name pi-dispatch-cpu-reserve-doctor-": () => ((created = true), { code: 1, output: "" }),
+			...green,
+		};
+		const calls = [];
+		const lines = capture();
+		const stdout = capture();
+		const code = await runDoctor(imgEnv({ PI_WORKER_NAME: "box-1" }), { ...imgDeps(json ? stdout.out : lines.out, plan, calls), json, writeErr: lines.out, pid: 4242, isAlive: (p) => p === 4242 });
+		return { code, text: lines.text(), record: json ? JSON.parse(stdout.text()) : null, docker: calls.filter((x) => x.cmd === "docker").map((x) => x.args.join(" ")) };
+	};
+	const warning = `⚠ local: this doctor run's CPU-reserve helper ${name} is still on the daemon (created) after one more rm -f at the end of the run; the next doctor run removes it, and so does the worker's ten-minute check once it is ten minutes old\n    → remove it now: docker rm -f ${name}\n`;
+	const held = await run({ stillThere: true });
+	assert.equal(held.code, 0, "a warning, never a failure");
+	assert.deepEqual(held.docker.slice(-2), [`rm -f ${name}`, `ps -a --filter name=${name} --format {{.Names}}\t{{.State}}`], "the last two docker calls of the run");
+	assert.equal(held.docker.filter((c) => c === `rm -f ${name}`).length, 2, "before the read, and once more at the end (an exit is no timeout, so the guard ran no rm after it)");
+	assert.ok(held.text.includes(warning), held.text);
+	assert.ok(held.text.indexOf(warning) < held.text.lastIndexOf("\ndoctor: "), "before the closing line");
+	const published = await run({ stillThere: true, json: true });
+	const left = published.record.checks.filter((c) => (c.label ?? "").startsWith("local: this doctor run's CPU-reserve helper"));
+	assert.deepEqual(left.map((c) => [c.level, /^sizing\.\d+$/.test(c.id)]), [["warn", true]], "published in the sizing section, as a warning");
+	// Gone after that rm: the same calls, and nothing said.
+	const gone = await run({ stillThere: false });
+	assert.deepEqual(gone.docker.slice(-2), held.docker.slice(-2));
+	assert.ok(!gone.text.includes("this doctor run's CPU-reserve helper"));
+});
+
+test("issue #1113: on darwin doctor warns of a local Docker VM with 75% of this host's memory, from the daemon's own MemTotal, right after the host budget lines and filed under sizing; not for a remote daemon, not on linux", async () => {
+	const MiB = 1048576;
+	// Issue #1022's host: OrbStack's memory_mib 49152, on a host of 64g.
+	const facts = { ...JSON.parse(ROOTFUL_INFO), NCPU: 18, MemTotal: 49152 * MiB, CgroupDriver: "cgroupfs", CgroupVersion: "2" };
+	const collectAll = async (platform, extra = {}) => {
+		const plan = { ...infoPlan(JSON.stringify(facts)), "docker ps -a --filter name=pi-dispatch-cpu-reserve-doctor-": { code: 0, output: "" }, "docker rm": 0, "docker run --rm --name pi-dispatch-cpu-reserve-doctor-": { code: 0, output: "1700000 100000\n" }, ...green, ...extra };
+		return collectChecks(imgEnv(), collectSeams(plan, { platform, home: tempDir("pi-vm-memory-home-"), totalMemory: () => 65536 * MiB, pid: 4242, isAlive: () => true }));
+	};
+	const collect = async (platform, extra) => (await collectAll(platform, extra)).filter((c) => /VM has/.test(c.label ?? ""));
+	const all = await collectAll("darwin");
+	const at = all.findIndex((c) => /VM has/.test(c.label ?? ""));
+	const line = all[at];
+	assert.match(all[at - 1].label, /^(PI_CONCURRENCY \(\d+\) binds first|The host budget binds first|PI_CONCURRENCY \(\d+\) is the only bound)/, "the line before it is the host budget's last");
+	// And the published record files it under sizing.
+	const stdout = capture();
+	const plan = { ...infoPlan(JSON.stringify(facts)), "docker ps -a --filter name=pi-dispatch-cpu-reserve-doctor-": { code: 0, output: "" }, "docker rm": 0, "docker run --rm --name pi-dispatch-cpu-reserve-doctor-": { code: 0, output: "1700000 100000\n" }, ...green };
+	await runDoctor(imgEnv(), { ...imgDeps(stdout.out, plan), json: true, writeErr: () => {}, platform: "darwin", home: tempDir("pi-vm-memory-home-"), totalMemory: () => 65536 * MiB, pid: 4242, isAlive: () => true });
+	const filed = JSON.parse(stdout.text()).checks.filter((c) => /VM has/.test(c.label ?? ""));
+	assert.deepEqual(filed.map((c) => [c.level, /^sizing\.\d+$/.test(c.id)]), [["warn", true]]);
+	assert.deepEqual([line.ok, line.warn], [false, true]);
+	assert.equal(line.label, "local: the Docker daemon's VM has 48g of memory, 75% of this host's 64g, so the host is left a quarter or less: a host short of memory swaps, which slows the daemon (container creates of 30 s and more) and every job with it");
+	assert.deepEqual(await collect("darwin", { "docker context inspect": { code: 0, output: '"remote"|"tcp://10.1.2.3:2375"\\n' } }), [], "a daemon not shown to be on this host");
+	assert.deepEqual(await collect("linux"), []);
+});
+
 test("doctor without --live is byte-identical and spawns no probe; a truthy non-boolean `live` runs nothing either", async () => {
 	const env = liveEnv();
 	const texts = [];

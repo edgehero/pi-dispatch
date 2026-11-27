@@ -859,7 +859,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     restart (measured: five matching leftovers, all young, one complete pass, nothing removed), and it said nothing when
     it removed nothing. Now a venue is done only after a complete pass with nothing young and nothing refused, each
     read that holds runs another until then (where an older worker still runs beside this one, that is one listing
-    per re-check, accepted), and `cpu_reserve_leftovers_removed` carries the pass's `listed`, `young` and `kept` beside
+    per re-check, accepted; SUPERSEDED by issue #1113, below: no venue is ever done), and
+    `cpu_reserve_leftovers_removed` carries the pass's `listed`, `young` and `kept` beside
     `removed` and `failed`: said for every pass that removed something, and once each for a pass cut short, a refusal
     and a pass that kept something, so a fingerprint that misses on an unmeasured venue is said and no line repeats
     every re-check. The same pass also takes a `created` helper labelled `pi.dispatch.helper=cpu-reserve` under a
@@ -905,7 +906,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     stopped, `rm -f` otherwise), and says what it removed or could not remove; on any daemon the worker's leftover pass
     takes it once it has sat `created` ten minutes, as it takes doctor's one shared name, which no release carried. On a
     daemon this host does not own nothing is listed (the pid test is about this process table), and the worker's pass
-    runs only until a venue is done, so one helper per killed run would pile up there until the worker's next start: the
+    ran only until a venue was done (until issue #1113, below), so one helper per killed run would pile up there until
+    the worker's next start: the
     worker, which knows its doctor child's pid and that the child is dead, runs one bounded `rm -f` of that child's name
     after killing it at the 120 s bound, on any daemon, wherever its `local` venue is in use and its own read of that
     venue does not already say another method (AMENDED 2026-11-23, #1049: its own reserve's helper state alone missed
@@ -913,8 +915,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     rm failed. Not after a child its shutdown killed: the worker must not
     wait on a daemon while it stops, and the next start's pass takes that helper once it is ten minutes old. Residual:
     what the worker's rm does not take on a daemon this host does not own (a create landing after it, a doctor killed
-    outside the worker or by its shutdown) goes with the leftover pass while it runs, or waits for the next start, at
-    most one per such run. Residual: the canary sweep's caveats in "a daemon this host owns" hold for this sweep too:
+    outside the worker or by its shutdown) goes with the leftover pass at a later re-check (issue #1113, below), at most
+    one per such run. Residual: the canary sweep's caveats in "a daemon this host owns" hold for this sweep too:
     a doctor in a container with the daemon's socket mounted reads the daemon as owned while it sees another process
     table, and so does this host's doctor on a daemon it owns that another host also reaches, so it can remove a live
     doctor's helper, whose read is then unreadable for that run, never a false verdict. Browser
@@ -922,6 +924,45 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     Residual: two hosts' doctors with one pid and one worker name on one shared daemon would share a name, as every
     doctor did. Rejected: keeping the plain `rm` (it still removes another doctor's `created` helper), and a random
     suffix (no later doctor could tell a dead doctor's helper from a live one's, where a pid can be asked).
+    **AMENDED (issue #1113, 2026-11-28)**: on a daemon that took over two minutes per `rm` and 30 to 130 s per create
+    (issue #1022, a host swapping under an OrbStack VM with most of its memory), the guard's `rm -f` after doctor's
+    timed-out read timed out too, the create the CLI was killed in landed after it, doctor exited, and its helper stayed
+    `created` until the daemon restarted; and a worker that had finished its passes never looked again. Three changes.
+    (1) DOCTOR REMOVES ITS OWN: `doctorCpuReserve` returns the guard's state with the helper's name, and when the step
+    did not end cleanly (the state dirty), `finishDoctorCpuReserve` runs one more bounded `rm -f` of that name and one
+    bounded listing of it (the sweep's `ps -a --filter name=`, judged by exact name) at the END of the run, in
+    `runDoctor` after every other check, the `--live` read-backs and a `--fix` re-collect included, and before the
+    published record, which carries its line. At the end because that is the last moment the run owns the name, so a
+    late create has had the whole run to land, and the wait is spent only on a daemon already slow; the listing is the
+    fact whatever the rm answered (`docker ps` answered in 0.05 s on that daemon). A name still listed, or a listing
+    that failed, is one warning per venue, printed at the end of the output (after the `--live` read-backs, just
+    before the closing line) and filed under `sizing` in the published record, naming the helper, who removes it later
+    (the next doctor on a daemon this host owns, the worker's pass on any) and the `rm -f` that removes it now; a name
+    gone says nothing, since the reserve line already said the read did not end cleanly. A clean step costs no call,
+    and browser setup's read-only run, which runs no helper, none either. (2) THE WORKER KEEPS SWEEPING: the leftover
+    pass runs after every read that holds, at the ten-minute re-check, for the life of the process, with no venue ever
+    done: a doctor can leave a helper at any time, so no pass is the last. The fingerprint, the ten-minute age guard
+    and the line's rule are unchanged, so a host with nothing that looks like a helper pays one bounded listing per
+    re-check against a daemon that just answered, with no inspect, no rm and no line; a `created` container whose
+    command names `/p/cpu.max` and that is no fingerprint costs one container inspect and one image inspect at every
+    re-check, where it was inspected once and the passes then ended: the cost issue #1021 already accepted beside an
+    older worker. The age guard's clock residual (#1021, above) can now happen at any re-check, not only until a first
+    clean pass: on a remote daemon whose clock is ten minutes or more behind, a plain `rm` can take another live
+    process's helper still `created`, costing that process one step. The
+    killed-doctor `rm -f` (`removeKilledDoctorHelper`) is unchanged; what it does not take, the pass takes later. (3)
+    DOCTOR WARNS OF A VM MEMORY CAP NEAR THE HOST'S: right after the host budget lines (filed under `sizing` in the
+    published record), `vmMemoryChecks` warns when the local Docker venue's daemon (Docker Desktop, OrbStack, or a
+    Podman machine serving the Docker API on this host) is on this host, this platform runs every daemon in a VM
+    (darwin, win32), and the daemon's `MemTotal` (the VM's memory there) is at or above 75% of `os.totalmem()`,
+    compared in integers so 75% warns and 74.9% does not. The podman venue is not read: off Linux doctor never asks
+    `podman info`. It gives both sizes and the percentage, says a host short of memory
+    swaps and slows the daemon, and sends the operator to lower the VM's limit below three quarters, naming OrbStack's
+    `memory_mib` (the one setting issue #1022 names) and otherwise the runtime's settings. Not on Linux, not for a
+    remote daemon, not when either size is unknown. A warning, never a failure: jobs still run, slowly. Rejected: an
+    end-of-run sweep of every doctor helper (a live doctor's would be taken, which the pid naming exists to prevent);
+    a longer bound on the guard's own rm (every slow step would hold doctor that much longer, and the late create
+    can land after any bound); a threshold from the reserve settings (`PI_HOST_RESERVE_MEMORY` sizes the jobs inside
+    the VM, not what the host keeps outside it).
   - **Fleet and doctor**: the registry row publishes the budget, what runs, what the holds keep and whether the boot
     listing is read; no job decision reads it. Doctor shows the budget and which of it and `PI_CONCURRENCY` binds
     first, says that a job's `cpus` count as reserved CPU, warns for project sizes and minimums a host cannot hold,
@@ -19646,9 +19687,9 @@ file is the last problem, after every one the card orders. No golden draws it: t
     before its own read), which the worker removes itself right after the kill with one bounded `rm -f` of that name
     (`afterKill`, on any daemon wherever its `local` venue is in use and not read as another method, not after a
     shutdown kill), and otherwise the next doctor's CPU-reserve step once that pid is dead, on a daemon this host
-    owns, or the worker's leftover pass on any daemon once it has sat `created` ten minutes, while that pass still
-    runs (`DES-HOST-BUDGET`); its pid-named canary network and probes, which the
-    next doctor's canary sweep removes by name once that pid is dead (on a daemon this host owns, with the egress policy
+    owns, or the worker's leftover pass on any daemon once it has sat `created` ten minutes, at a ten-minute
+    re-check (AMENDED 2026-11-28, #1113: the pass no longer stops, `DES-HOST-BUDGET`); its pid-named canary network
+    and probes, which the next doctor's canary sweep removes by name once that pid is dead (on a daemon this host owns, with the egress policy
     armed and, since issue #1021, off; the podman venue's canary runs only under `--live`, which the worker never
     passes); and its in-image gh
     probe, which the next doctor's gh probe step removes right before its own probe, wherever that probe may run (the
@@ -21239,6 +21280,7 @@ still checked inside its draft job: its load reads only the reference's syntax.
 
 | Date | Change |
 |---|---|
+| 2026-11-28 (#1113) | **`DES-HOST-BUDGET` AMENDED**, a dated paragraph in the aggregate CPU reserve's bullet, and three sentences of its #1021 and #1040 paragraphs marked SUPERSEDED or reworded in place: (1) doctor keeps its helper guard's state and, when its step did not end cleanly, runs one more bounded `rm -f` of its own name and one bounded listing at the END of the run (`runDoctor`, after every other check and the `--live` read-backs, before the published record), warning with who removes it later and the command when the name is still listed or the listing failed; nothing on a clean step or in browser setup; why at the end; (2) the worker's leftover pass runs after every read that holds, at the ten-minute re-check, for the life of the process (no venue is ever done), fingerprint, age guard and said-once logging unchanged, a quiet host paying one listing per re-check; (3) a warning right after the host budget lines when the local Docker venue's daemon (Docker Desktop, OrbStack, or a Podman machine serving the Docker API on this host) has 75% or more of `os.totalmem()` on darwin or win32, naming OrbStack's `memory_mib` or the runtime's settings, the podman venue not read (off Linux doctor never asks `podman info`); where each warning prints (the helper's at the end of the output, after the `--live` read-backs) and that both are filed under `sizing`; what a quiet host and a `created` look-alike cost per re-check; the age guard's clock residual at any re-check; three REJECTED options. **`DES-DOCTOR-RESULTS-PUBLISHED` AMENDED**, its worker's-run bullet: a killed doctor's helper goes with the worker's pass at a ten-minute re-check, which no longer stops. **Code evidence**: worker/src/doctor.mjs -> doctorCpuReserve, finishDoctorCpuReserve, runDoctor, collectChecks, vmMemoryChecks, VM_MEMORY_WARN_PERCENT; worker/src/cpu-reserve.mjs -> makeCpuReserve (leftovers), removeLegacyHelpers, removeKilledDoctorHelper (comments). |
 | 2026-11-28 (#1057) | **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` AMENDED**, its **Boundaries** bullet: the credit reads the same on either adapter, Claude paid extra usage or ChatGPT purchased credits, so a ChatGPT connection with it is not marked notional and counts every call under a job cap held to the credit (`auth-credit-cap-required`); its admission still waits on an exhausted window, since ChatGPT publishes no extra-usage state (`normalizeOpenAIQuota` and a provider refusal leave it unknown); doctor's fact line for each ChatGPT connection its host owns without a credit (`notionalChatgptChecks`, from the read-only status rows); REJECTED a ChatGPT-only field and a warning; the ChatGPT residual removed, the Claude one kept. UNCHANGED, checked: `DES-DOLLAR-RESERVE-AND-SETTLE` (its **Notional calls** paragraph names no adapter). **Code evidence**: worker/src/doctor.mjs -> notionalChatgptChecks, collectChecks; worker/src/reserve-estimate.mjs -> notionalConnection (its comment); worker/src/subscription-quota.mjs -> admit, normalizeOpenAIQuota (unchanged). |
 | 2026-11-28 (#1058) | **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**: item 12 gains a fourth step, **Billed counters**: the meter counts the unpriced and broken-usage calls on its notional set apart (`unpricedNotional`, `costUnreportedNotional`, each part of its total, children's by the runner's own set), and the settlement reads `unpriced` and `costUnreported` by their billed part, read only beside a valid `costNotional` on a trusted metered line, absent as 0 (an older image keeps the floor), a part that is not a count or is above its total the floor; the other six counters unchanged; the rejected alternative (leaving notional calls out of the counters) and why. The known limitation of item 12 is CLOSED. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED**: the child meter writes at most 100 rows (120 before), with the measured sizes (16 marked rows: 54,459 bytes at 100, 64,819 at 120; every row marked: 63,951 at 100, 76,571 at 120) and the cost (a child that calls more than 99 models folds the rest into its model-less row, billed), and the child's subscription admission bullet says the rows carry the two counts (ledger version 5), counted by the parent by the same two-part rule, a malformed count making the file unmetered; the cost views bullet says `unpriced` and `costUnreported` are judged by their billed part. **Code evidence**: image/runner/src/usage-meter.mjs -> createUsageMeter, parseChildLedger, foldChildLedgers, ledgerNotionalCounts, CHILD_LEDGER_ROWS; worker/src/dollar-budget.mjs -> billedFloorCount, dollarSettlement; admin/src/costs.mjs -> notionalFloorPart, floorCounted. |
 | 2026-11-27 (#1102) | Issue #1102, a test-harness change with no product behaviour change. The worker's start-wiring harness booted on the real GitHub sign-in whenever a test injected no `makeAuth`: each such boot ran `gh auth token` and sent `GET /user` to api.github.com, with the machine's own token wherever `gh` is logged in, and every test passed because none depends on that sign-in. `runStart` now defaults `makeAuth` to a fake that fails as an unreachable GitHub does (untagged, so transient), and the file imports a helper that refuses any connection off the machine and fails the file on one. A sweep of every suite under the same refusal found two more: doctor's canary-script test fetched an `.invalid` name (now a loopback port nothing listens on), and the runner's env-proxy control child, spawned with an env allowlist, went direct to one (it now loads the refusal itself, and the test pins the refusal's code). **The oracle is a log, not the suite's verdict**, on issue #351's pairing doctrine: a test that tolerates a refused connect passes anyway, so `contract-tests` runs the suite under `.github/scripts/offline-tests.mjs`, which refuses every TCP connect whose host NAME is not a literal loopback address or `localhost` (arguments read by net's own `normalizeArgs` rule), before any lookup, and appends one line per refusal to `OFFLINE_TESTS_LOG`, naming the test file (a child's from `OFFLINE_TESTS_FILE`, which its spawner hands on); it makes the log, empty, as it loads, and the next step fails the job on any line or on a missing log, after a red suite too. It hands itself on to every Node child, one spawned with an environment of its own included (the `envPairs` of every async spawn, the environment of each sync one), and puts back in the child the `NODE_OPTIONS` its spawner chose, so a test that reads its child's value (mcp.test.mjs) still sees what it set; a test that refuses on purpose names `OFFLINE_TESTS_LOG` as "". What it cannot see is on the record: a worker thread (no `--import` runs there, measured on Node 22.19), a child that is not Node, UDP and bare DNS queries, and a custom `lookup` on a connect named `localhost`. **`DES-TRANSIENT-VERSUS-DETERMINATE-IS-ONE-RULE` UNCHANGED, checked**: the fake's untagged failure takes the boot's existing re-resolver, which asks the same fake again. **Code evidence**: `.github/scripts/offline-tests.mjs` -> `loopback`, `refusals`, `withSelf`, `handedOn`; `image/runner/test/fixtures/offline-fetch.mjs` (the same argument reading); `worker/test/helpers/offline.mjs`; `worker/test/start-wiring.test.mjs` -> `runStart`; `worker/test/offline-tests.test.mjs`; `.github/workflows/pi-upgrade-check.yml` -> `contract-tests` |

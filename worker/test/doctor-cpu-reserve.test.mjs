@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cpuReserveChecks, doctorCpuReserve } from "../src/doctor.mjs";
+import { cpuReserveChecks, doctorCpuReserve, finishDoctorCpuReserve } from "../src/doctor.mjs";
 import { cgroupParentVerdict } from "../src/live-probes.mjs";
 import { helperArgs, helperName } from "../src/cpu-reserve.mjs";
 
@@ -242,6 +242,92 @@ test("issue #1040: on a daemon this host owns doctor first removes the helpers o
 	const bounds = [];
 	await doctorCpuReserve({ ...opts, endpointLocal: true, run: async (bin, args, { timeoutMs }) => (bounds.push(timeoutMs), { code: 0, stdout: args[0] === "run" ? "1300000 100000\n" : "" }) });
 	assert.ok(bounds.length === 3 && bounds.every((t) => t === 15_000), JSON.stringify(bounds));
+});
+
+/**
+ * Issue #1113: issue #1022's daemon for doctor's helper. The helper's create is killed at its bound, the guard's rm -f
+ * right after it times out, and the create lands after that rm, so the name is held `created` when the step ends.
+ * `finalRm(held)` answers the rm at the end of the run and `listing(held, args)` the listing after it; the sweep's own
+ * listing (a prefix filter) answers what is held. Every call is recorded with its bound.
+ */
+function lateCreateDaemon(name, { finalRm = (held) => (held.delete(name), { code: 0, stdout: "" }), listing = (held) => ({ code: 0, stdout: [...held].map(([n, st]) => `${n}\t${st}\n`).join("") }) } = {}) {
+	const held = new Map();
+	const calls = [];
+	let rms = 0;
+	const run = async (bin, args, { timeoutMs }) => {
+		calls.push(`${bin} ${args.join(" ")} @${timeoutMs}`);
+		if (args[0] === "run") return { code: null, stdout: "", error: { timedOut: true } };
+		if (args[0] === "rm") {
+			rms += 1;
+			if (rms === 1) return { code: 0, stdout: "" };
+			if (rms === 2) {
+				held.set(name, "created");
+				return { code: null, stdout: "", error: { timedOut: true } };
+			}
+			return finalRm(held);
+		}
+		if (args[0] === "ps") return args.includes(`name=${name}`) ? listing(held, args) : { code: 0, stdout: "" };
+		return { code: 0, stdout: "" };
+	};
+	return { run, calls, held };
+}
+
+test("issue #1113: a doctor whose read did not end cleanly runs one more rm -f of its own name at the end of its run, then one listing; gone says nothing, still there warns with who removes it and the command", async () => {
+	const name = helperName("box-1", { doctor: true, pid: 4242 });
+	const opts = { daemon: CGROUPFS, image: "pi-job:pinned", imagePresent: true, platform: "darwin", workerName: "box-1", pid: 4242, isAlive: () => false };
+	const list = `ps -a --filter name=${name} --format {{.Names}}\t{{.State}}`;
+	// The late create landed: the step ends with the name held and the guard dirty.
+	const d = lateCreateDaemon(name);
+	const reads = await doctorCpuReserve({ ...opts, endpointLocal: false, run: d.run });
+	assert.deepEqual(reads[0].read, { ok: false, reason: "timeout" });
+	assert.equal(d.held.get(name), "created", "the premise: the guard's own rm timed out and the create landed after it");
+	assert.equal(reads[0].helper.state.dirty, true);
+	const before = d.calls.length;
+	assert.deepEqual(await finishDoctorCpuReserve(reads, { run: d.run }), [], "removed: nothing to say");
+	assert.deepEqual(d.calls.slice(before), [`docker rm -f ${name} @15000`, `docker ${list} @15000`], "one rm -f of its own name, one listing, both bounded");
+	assert.equal(d.held.size, 0);
+	// A slow rm (it times out again): the listing finds the name, and the warning says so, per who can remove it later.
+	for (const [endpointLocal, later] of [
+		[false, "the worker's ten-minute check removes it once it is ten minutes old"],
+		[true, "the next doctor run removes it, and so does the worker's ten-minute check once it is ten minutes old"],
+	]) {
+		const slow = lateCreateDaemon(name, { finalRm: () => ({ code: null, stdout: "", error: { timedOut: true } }) });
+		const left = await finishDoctorCpuReserve(await doctorCpuReserve({ ...opts, endpointLocal, run: slow.run }), { run: slow.run });
+		assert.deepEqual(left, [{ ok: false, warn: true, label: `local: this doctor run's CPU-reserve helper ${name} is still on the daemon (created) after one more rm -f at the end of the run; ${later}`, fix: `remove it now: docker rm -f ${name}` }]);
+		assert.deepEqual(slow.calls.slice(-2), [`docker rm -f ${name} @15000`, `docker ${list} @15000`]);
+	}
+	// A listing that fails, by an exit or a timeout, cannot say the name is gone: the warning says it may be there.
+	for (const [answer, reason] of [[{ code: 1, stdout: "" }, "exit-1"], [{ code: null, stdout: "", error: { timedOut: true } }, "timeout"]]) {
+		const blind = lateCreateDaemon(name, { listing: () => answer });
+		const [said] = await finishDoctorCpuReserve(await doctorCpuReserve({ ...opts, endpointLocal: false, run: blind.run }), { run: blind.run });
+		assert.equal(said.label, `local: this doctor run's CPU-reserve helper ${name} may still be on the daemon: the listing after one more rm -f at the end of the run failed (${reason}); the worker's ten-minute check removes it once it is ten minutes old`);
+		assert.deepEqual([said.ok, said.warn, said.fix], [false, true, `remove it now: docker rm -f ${name}`]);
+	}
+	// The name filter is a substring match: another pid's helper whose name begins with this one is not this one.
+	const lookalike = lateCreateDaemon(name, { listing: () => ({ code: 0, stdout: `${name}0\tcreated\nnot a row\n` }) });
+	assert.deepEqual(await finishDoctorCpuReserve(await doctorCpuReserve({ ...opts, endpointLocal: false, run: lookalike.run }), { run: lookalike.run }), []);
+});
+
+test("issue #1113: a read that ended cleanly, browser setup's read-only run, and a venue whose helper never ran cost nothing at the end of the run", async () => {
+	const opts = { daemon: CGROUPFS, image: "pi-job:pinned", platform: "darwin", workerName: "box-1", pid: 4242, isAlive: () => false, endpointLocal: false };
+	const calls = [];
+	const run = async (bin, args) => (calls.push(args.join(" ")), { code: 0, stdout: args[0] === "run" ? "1300000 100000\n" : "" });
+	const clean = await doctorCpuReserve({ ...opts, imagePresent: true, run });
+	assert.deepEqual(clean[0].read, { ok: true, cpuCenti: 1300 });
+	assert.equal(clean[0].helper.state.dirty, false);
+	const before = calls.length;
+	assert.deepEqual(await finishDoctorCpuReserve(clean, { run }), []);
+	assert.equal(calls.length, before, "no extra call after a clean step");
+	// Dirty, but browser setup's run starts and removes nothing (and its read never ran a helper either).
+	const dirty = [{ plan: plan("local", "helper"), read: { ok: false, reason: "timeout" }, helper: { name: helperName("box-1", { doctor: true, pid: 4242 }), bin: "docker", state: { dirty: true }, endpointLocal: true } }];
+	assert.deepEqual(await finishDoctorCpuReserve(dirty, { run, readOnly: true }), []);
+	const readOnly = await doctorCpuReserve({ ...opts, imagePresent: true, run, readOnly: true });
+	assert.equal(Object.hasOwn(readOnly[0], "helper"), false);
+	// No job image, a systemctl venue, or nothing read at all: no helper, nothing to do.
+	const absent = await doctorCpuReserve({ ...opts, imagePresent: false, run });
+	const systemd = await doctorCpuReserve({ daemon: { answered: true, facts: { cgroupDriver: "systemd", cgroupVersion: "v2" } }, endpointLocal: true, run: async () => ({ code: 0, stdout: "3s" }), platform: "linux" });
+	for (const reads of [absent, systemd, [], null, undefined]) assert.deepEqual(await finishDoctorCpuReserve(reads, { run }), []);
+	assert.equal(calls.length, before);
 });
 
 // ---------------------------------------------------------------------------------------------------------------------

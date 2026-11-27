@@ -192,6 +192,17 @@ PI_HOST_RESERVE_CPUS=0.5
 **On Docker Desktop the budget is the VM's,** not your computer's. To give jobs more, raise the memory and CPUs of
 the VM in Docker Desktop's settings (Resources), then restart the worker so it reads the new size at once.
 
+**Leave your computer headroom outside the VM.** On macOS and Windows every container runtime (Docker Desktop,
+OrbStack, Podman machine) runs its daemon in a VM, and the VM's memory limit is memory your computer may have to give
+it. A limit close to the computer's own memory leaves too little for macOS or Windows, their file cache and your other
+programs: the computer swaps, and a swapping computer makes the daemon slow. On one such host (issue #1022, OrbStack
+with `memory_mib` at 48 GiB) creating a container took 30 to 130 seconds, CPU-reserve reads timed out and helpers were
+left behind; after the VM was restarted with its memory back, the same `docker run` took a quarter of a second. Keep
+the VM's memory limit below three quarters of the computer's memory: `pi-dispatch doctor` warns, right after its host
+budget lines, when the daemon of the local Docker venue (Docker Desktop, OrbStack, or a Podman machine that serves the
+Docker API on this computer) runs in a VM with 75% of it or more, with both sizes and the setting to lower (OrbStack's
+`memory_mib`, or the memory limit in the runtime's settings). On Linux the daemon is no VM, and nothing is said.
+
 **`PI_CONCURRENCY` is the third dimension.** The budget counts it beside memory and CPU, and whichever is reached
 first applies. Doctor says which one binds on this machine. On a small machine the budget may run fewer jobs than
 `PI_CONCURRENCY` allows: a 4 CPU machine has a CPU budget of 3, which holds one default job of 2 CPUs at a time.
@@ -284,6 +295,14 @@ proxy and Valkey get a fair share of the CPU, not a reserve.
 On Docker Desktop and Docker's `cgroupfs` driver the helper is a container of the job image, so the job image must be
 present: without it doctor says "the quota of pidispatch.slice was not readable (job-image-absent)", and the worker
 cannot write the quota either. Pull or build the job image, then restart the worker.
+
+**On a slow daemon a helper can be left in `created`** (issue #1113): the helper's start is cut off at 15 seconds, and
+when even the removal after it takes longer, the daemon can still create the container afterwards. Doctor then runs
+one more `docker rm -f` of its own helper at the end of its run, and when the helper is still there it warns "this
+doctor run's CPU-reserve helper ... is still on the daemon" with the command that removes it now. That warning prints
+at the end of doctor's output, after any `--live` lines; its published results file it under sizing. Otherwise the next
+doctor removes it (on a daemon on this machine), and the worker removes a helper left in `created` for ten minutes at
+its next ten-minute check that the daemon answers in time, for as long as it runs.
 
 **With `PI_HOST_CPU_BUDGET=off`** the worker clears the quota only where it sets it itself (rootless Podman, Docker
 Desktop and Docker's `cgroupfs` driver). A quota set with `sudo` stays, and keeps all jobs together under it, until

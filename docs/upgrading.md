@@ -319,19 +319,23 @@ it is removed before the next try, and the worker waits longer between tries whi
 worker kills at its two-minute limit leaves at most its one helper, under its process id, and the worker removes it
 right away. One left some other way (a doctor you stopped, or one stopped with the worker) is removed by the next
 doctor once that process is gone, where the daemon runs on this host; on a daemon on another machine the worker's pass
-below removes it, at the latest after the worker's next start. The digits come from `PI_WORKER_NAME`, so two workers
-on one daemon (which is [not supported](multi-host.md#7-one-worker-per-docker-daemon-still-holds)) must declare
-distinct names; otherwise they share one helper name, and each can remove the other's helper while it runs.
+below removes it once it is ten minutes old. A doctor whose own read did not end cleanly runs one more `docker rm -f`
+of its helper at the end of its run, and warns with the command when it is still there (issue #1113). The digits come
+from `PI_WORKER_NAME`, so two workers on one daemon (which is
+[not supported](multi-host.md#7-one-worker-per-docker-daemon-still-holds)) must declare distinct names; otherwise they
+share one helper name, and each can remove the other's helper while it runs.
 
 Its worker also removes the older helpers itself, after it reads the quota back as set, and again after each later
-read (every ten minutes) until a pass has read every leftover it listed and left none it could still remove: a pass a
-slow daemon cut short or that could not read a leftover's image, a leftover younger than ten minutes and one the `rm`
-refused all wait for a later read. Containers that do not match the old helper stay, and a pass that kept only those
-ends the passes too. It takes only containers that never started, are at least ten minutes old and match the old
-helper exactly (its command, its one mount of `pidispatch.slice`, its flags, and no label beyond its image's), with a
-plain `docker rm`, which never removes a running container. The same pass removes the last helper a worker left under
-its old name after you changed its `PI_WORKER_NAME`, and a killed doctor's (the same match, plus exactly the helper
-label), never the running worker's own. It logs `cpu_reserve_leftovers_removed` with what that pass listed, removed,
+read that holds (every ten minutes), for as long as it runs: a pass a slow daemon cut short or that could not read a
+leftover's image, a leftover younger than ten minutes and one the `rm` refused all wait for a later read. Up to 5.4.4
+the passes stopped after the first one that left nothing behind, so a helper a doctor left after that stayed until
+the worker restarted (issue #1113). A host with nothing that looks like a helper now pays one listing every ten
+minutes; a `created` container whose command names `/p/cpu.max` but that does not match costs one container inspect
+and one image inspect at each of them, where it was inspected once. Containers that do not match the old helper stay. It takes only containers that never started, are at least ten minutes old and
+match the old helper exactly (its command, its one mount of `pidispatch.slice`, its flags, and no label beyond its
+image's), with a plain `docker rm`, which never removes a running container. The same pass removes the last helper a
+worker left under its old name after you changed its `PI_WORKER_NAME`, and a killed doctor's (the same match, plus
+exactly the helper label), never the running worker's own. It logs `cpu_reserve_leftovers_removed` with what that pass listed, removed,
 could not remove, left for being too young and kept for not matching: for every pass that removed something, and once
 each for a pass that was cut short, could not remove one, or kept some.
 
@@ -443,6 +447,24 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 ## What each release changed in stored state
 
 Release numbers come from the git tags.
+
+### Unreleased: doctor removes its own CPU-reserve helper, the worker keeps sweeping, and a VM memory warning (#1113)
+
+On a daemon slow enough that removing a container takes minutes (issue #1022), the CPU-reserve helper of a doctor
+run could stay in `created` until the daemon restarted. A doctor from this release whose read did not end cleanly runs
+one more `docker rm -f` of its own helper at the end of its run and warns, with the command, when the helper is still
+there: the warning prints at the end of its output, after any `--live` lines, and its published results file it under
+sizing. A worker from this release removes CPU-reserve helpers left in `created` for ten minutes at every ten-minute
+check, for as long as it runs, where it stopped after its first pass that left nothing. And on macOS and Windows
+doctor warns, right after its host budget lines, when the daemon of the local Docker venue (Docker Desktop, OrbStack,
+or a Podman machine serving the Docker API on this computer) runs in a VM with 75% or more of the computer's memory. The worker alone: the job image, the
+receiver and the console are unchanged.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Containers on the daemon | Fewer left behind: a doctor's helper is removed at the end of its run, or later by the worker. Nothing to move; a helper an older doctor left goes at the worker's next ten-minute check once it is ten minutes old. |
+| Worker log | `cpu_reserve_leftovers_removed` keeps its fields and its rule (every pass that removed something, and once each for a pass that was cut short, could not remove one, or kept some). A quiet host logs nothing new. |
+| Mixed versions | Nothing to order. An older worker stops sweeping after its first clean pass, as before; an older doctor leaves its helper as before. |
 
 ### Unreleased: ChatGPT purchased credits are declared with `extraUsageCreditMicros` (#1057)
 

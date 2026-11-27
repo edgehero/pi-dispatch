@@ -55,7 +55,7 @@ import { createHash } from "node:crypto";
 import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { CONSOLE_HOSTNAME } from "./console-probe.mjs";
-import { homedir, networkInterfaces, release as osRelease, tmpdir, userInfo } from "node:os";
+import { homedir, networkInterfaces, release as osRelease, tmpdir, totalmem, userInfo } from "node:os";
 import { BlockList, isIPv4, isIPv6 } from "node:net";
 import * as nodeFs from "node:fs";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, VALKEY_SHARED_KEY, judgeNetnsKeeper, judgeValkeyListeners, netnsKeeperRemedy, pinnedValkeyUrl, podmanNeedsNetnsKeeper, proxyFolderProblem, probeTcpAddress, proxyConfCopyPath, readSubuidRanges, proxyRestartAdvice, readLinger, readValkeyKeys, valkeySharedOn, valkeyTarget } from "./podman-stack.mjs";
@@ -118,7 +118,7 @@ import { SIZING_RECORD_MAX_BYTES, readSizingRecords } from "./size-records.mjs";
 import { CAPACITY_WINDOWS, computeCapacity } from "./capacity.mjs";
 import { JOBS_ONLY, durationText, milliText, notSharedWhy, percentText, shareText } from "./capacity-cli.mjs";
 import { HOST_SET, UNREAD_HOSTS_MAX, hostErrorsShown, hostKey } from "./host-registry.mjs";
-import { CGROUP_PARENT, DOCTOR_HELPER_NAME_RE, DOCTOR_HELPER_PREFIX, HELPER_LABEL_KEY, RESERVE_STEP_TIMEOUT_MS, cgroupParentFor, guardHelperRun, helperName as cpuReserveHelperName, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
+import { CGROUP_PARENT, DOCTOR_HELPER_NAME_RE, DOCTOR_HELPER_PREFIX, HELPER_LABEL_KEY, RESERVE_STEP_TIMEOUT_MS, cgroupParentFor, guardHelperRun, helperName as cpuReserveHelperName, operatorQuotaCommand, readQuota, reservePlan, stepFailure, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
 import { watchSecretsMissing } from "./watch-contract.mjs";
@@ -384,6 +384,9 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// Issue #458 (PR #463 round 2): the clock the keeper's age is judged on, epoch ms. Its own name, not `now`: `--live`
 		// pairs `now` with `delay`, and a clock that does not advance without its `delay` would never reach a deadline.
 		wallClock = Date.now,
+		// Issue #1113: this host's memory in bytes, which the VM memory line compares the daemon's with. A seam so a test
+		// decides it, as it decides the platform; the real one is `os.totalmem()`.
+		totalMemory = totalmem,
 		// Issue #596, phase 3: the run records the size suggestions read, `(nowMs) => records`. A seam so a test decides
 		// the runs; absent, the logs directory's records of the window are read (`readSizingRecords`).
 		readRunRecords,
@@ -491,7 +494,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), ...(secretSpawn ? { secretSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readModelCooldowns ? { readModelCooldowns } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(readSubscriptionQuota ? { readSubscriptionQuota } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, flowFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), ...(envUntrusted ? { envUntrusted: true } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), ...(secretSpawn ? { secretSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readModelCooldowns ? { readModelCooldowns } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(readSubscriptionQuota ? { readSubscriptionQuota } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, flowFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, totalMemory, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), ...(envUntrusted ? { envUntrusted: true } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -549,6 +552,18 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		const displays = await displayChecks(env, liveSeams, facts);
 		liveRendered.push(...displays);
 		if (render(displays, out)) failed = true;
+	}
+
+	// Issue #1113: this run's own CPU-reserve helper, when its read did not end cleanly: one more `rm -f` and a listing,
+	// here because this is the last moment the run owns the name, after every other check (the `--live` read-backs
+	// included), so a create the daemon landed late has had the whole run to land. Before the record, which carries it.
+	const helperLeft = await finishDoctorCpuReserve(seams.cpuReserveHelpers?.reads, { run: seams.cpuReserveHelpers?.run, readOnly: seams.setupReadOnly === true });
+	if (helperLeft.length > 0) {
+		if (render(helperLeft, out)) failed = true;
+		checks = [...checks, ...helperLeft];
+		// Published in the section whose reserve line it follows up, as the fleet's re-said budget lines are.
+		const sectionOf = seams.checkSection;
+		seams.checkSection = (c) => (helperLeft.includes(c) ? "sizing" : (sectionOf?.(c) ?? null));
 	}
 
 	// Issue #712: what was judged, published for the console and the panel, after every check is in (the `--fix`
@@ -2637,6 +2652,12 @@ export async function collectChecks(shellVars, seams) {
 	const budgetChecksAt = checks.length;
 	const budgetChecksHere = hostBudgetChecks(budgetView, budgetChecksArgs);
 	checks.push(...budgetChecksHere);
+	// Issue #1113: the local venue's daemon in a VM that may take most of this host's memory, which makes the host swap
+	// and the daemon slow. Printed right after the host budget lines. The local venue only: off Linux, where every daemon
+	// is in a VM, doctor never reads the podman venue (`podman info` is asked on Linux alone).
+	if (localUsed && daemon?.answered === true) {
+		checks.push(...vmMemoryChecks({ local: endpoint?.local === true, memTotalMiB: daemon.facts?.memTotalMiB, platform: seams.jobUserIdentity?.platform ?? seams.platform ?? process.platform, hostMemoryBytes: typeof seams.totalMemory === "function" ? seams.totalMemory() : totalmem() }));
+	}
 	// Issue #596, phase 3: one line per project with its size and what its recent runs suggest, capped at what this host
 	// offers. The records are read only when there is a project to suggest for, and not at all when the scoped-limits
 	// file does not load: every size read without it would be the default, not the project's, and a project that has a
@@ -2665,13 +2686,17 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 	// Issue #596, phase 2: the aggregate CPU reserve per venue, read (never written) the way the worker reads it.
+	// Issue #1113: kept on the seams for the end of the run (`finishDoctorCpuReserve`), replaced on every collection, so
+	// a `--fix` re-collect's helper is the one judged there.
+	seams.cpuReserveHelpers = null;
 	if (!budgetView.error) {
+		const reserveRun = (bin, args, { timeoutMs }) => dockerRunVia(spawn, timeoutMs, { bin })(args);
 		const reserveReads = await doctorCpuReserve({
 			daemon: localUsed ? (daemon ?? null) : undefined,
 			podman: podman?.observed?.read ?? undefined,
 			endpointLocal: endpoint?.local === true,
 			platform: seams.jobUserIdentity?.platform ?? seams.platform ?? process.platform,
-			run: (bin, args, { timeoutMs }) => dockerRunVia(spawn, timeoutMs, { bin })(args),
+			run: reserveRun,
 			image: jobImage,
 			imagePresent: imageCode === 0,
 			workerName: declaredWorkerName ?? "",
@@ -2679,6 +2704,7 @@ export async function collectChecks(shellVars, seams) {
 			isAlive: seams.isAlive ?? defaultIsAlive,
 			readOnly: seams.setupReadOnly === true,
 		});
+		seams.cpuReserveHelpers = { reads: reserveReads, run: reserveRun };
 		checks.push(...cpuReserveChecks(reserveReads, budgetView.cpuCenti));
 	}
 	section("job-user");
@@ -10608,12 +10634,18 @@ export function doctorHostBudget(env, { daemon = undefined, podman = undefined, 
  * daemon this host owns, the step also first removes those of dead pids (`sweepStaleDoctorHelpers`), which takes what a
  * doctor run by hand, or a create landing after the worker's rm, left; on any other, `isAlive` would answer about the
  * wrong process table, so nothing is listed, and the worker's leftover pass takes such a one (a `created` helper ten
- * minutes old, by fingerprint, `HELPER_NAME_RE`, while that pass still runs after the worker's start).
+ * minutes old, by fingerprint, `HELPER_NAME_RE`, at the worker's ten-minute recheck, issue #1113).
+ *
+ * A doctor that lives to its end removes its own (issue #1113): on a daemon that takes minutes per `rm`, the guard's rm
+ * after a timeout times out too, the late create lands, and the helper stayed `created` with nothing to remove it on a
+ * daemon this host does not own. So the guard's state is returned, and `finishDoctorCpuReserve` runs one more `rm -f`
+ * at the end of the run when the step did not end cleanly.
  *
  * `readOnly` is browser setup's run (issue #774), which publishes what it inspected and starts or sweeps no container:
  * neither the sweep nor the helper read runs there, and the helper venue's read answers `setup-read-only`; a `systemctl`
  * read still runs, since it starts nothing. Returns per venue `{ plan, read, cgroupManager }`, plus `swept` where the
- * sweep ran.
+ * sweep ran and `helper` where the helper read ran (`{ name, bin, state, endpointLocal }`, `state` the guard's, for
+ * `finishDoctorCpuReserve` at the end of the run, issue #1113).
  */
 export async function doctorCpuReserve({ daemon = undefined, podman = undefined, endpointLocal = false, platform = process.platform, run, image, imagePresent = false, workerName = "", pid = process.pid, isAlive = defaultIsAlive, readOnly = false }) {
 	const venues = [];
@@ -10624,15 +10656,20 @@ export async function doctorCpuReserve({ daemon = undefined, podman = undefined,
 		const plan = reservePlan({ ...v, platform });
 		const bin = plan.venue === "podman" ? "podman" : "docker";
 		let read = null;
+		let helper = null;
 		// Before the image check: a killed doctor's helper is left whether or not the job image is still here.
 		const swept = plan.parent && plan.method === "helper" && v.endpointLocal === true && !readOnly ? await sweepStaleDoctorHelpers({ run: (args) => run(bin, args, { timeoutMs: RESERVE_STEP_TIMEOUT_MS }), bin, pid, isAlive }) : null;
 		if (plan.parent && plan.method === "helper" && readOnly) read = { ok: false, reason: "setup-read-only" };
 		else if (plan.parent && plan.method === "helper" && !imagePresent) read = { ok: false, reason: "job-image-absent" };
 		else if (plan.parent && plan.method === "helper") {
 			const name = cpuReserveHelperName(workerName, { doctor: true, pid });
-			read = await readQuota(plan, { run: guardHelperRun({ run, name }), image, name });
+			// Issue #1113: the guard's state is kept past the step, so the end of the run knows whether it ended cleanly
+			// (`finishDoctorCpuReserve`).
+			const state = { dirty: true };
+			read = await readQuota(plan, { run: guardHelperRun({ run, name, state }), image, name });
+			helper = { name, bin, state, endpointLocal: v.endpointLocal === true };
 		} else if (plan.parent && plan.method) read = await readQuota(plan, { run, image });
-		out.push({ plan, read, cgroupManager: v.facts?.cgroupDriver ?? v.facts?.cgroupManager ?? null, ...(swept === null ? {} : { swept }) });
+		out.push({ plan, read, cgroupManager: v.facts?.cgroupDriver ?? v.facts?.cgroupManager ?? null, ...(swept === null ? {} : { swept }), ...(helper === null ? {} : { helper }) });
 	}
 	return out;
 }
@@ -10655,6 +10692,50 @@ export async function doctorCpuReserve({ daemon = undefined, podman = undefined,
 async function sweepStaleDoctorHelpers({ run, bin, pid, isAlive }) {
 	const swept = await sweepStaleProbeContainers({ run, bin, pid, isAlive, prefixes: [DOCTOR_HELPER_PREFIX], ours: (n, owner) => DOCTOR_HELPER_NAME_RE.exec(n)?.[1] === owner });
 	return { unlisted: swept.unlisted, removed: [...swept.removed.values()].flat(), stuck: [...swept.stuck.values()].flat() };
+}
+
+/**
+ * Issue #1113: this doctor run's own CPU-reserve helper, at the END of the run (`runDoctor`, after every other check,
+ * the `--live` read-backs included). `reads` is `doctorCpuReserve`'s answer; a venue whose `helper.state` is dirty (its
+ * step did not end cleanly: a timeout, an rm before it that timed out, any exit but 0) gets one more bounded `rm -f` of
+ * its own name, then one bounded listing (`probeListArgs`, the sweep's) that the name is gone. A step that ended
+ * cleanly costs nothing here, and browser setup's read-only run (`readOnly`) starts and removes nothing.
+ *
+ * WHY AT THE END. The guard already runs `rm -f` right after a timeout, and on a daemon that takes minutes per `rm`
+ * (issue #1022: over 2 minutes per `rm`, creates of 30 to 130 s) that rm times out too, and the create the CLI was
+ * killed in lands after it. The end of the run is the latest moment this process still owns the name, so the late
+ * create has had every other check's time to land, and any extra wait is spent only on a daemon already slow. The
+ * listing is the fact, whatever the rm answered: `docker ps` answered in 0.05 s on that same daemon.
+ *
+ * A name still listed, or a listing that failed, is one ⚠ per venue naming the helper, who removes it later (the next
+ * doctor run, on a daemon this host owns, since this pid is then dead; the worker's leftover pass at its ten-minute
+ * recheck, on any daemon, once the helper is ten minutes old) and the command that removes it now. In the terminal it
+ * prints at the end of the output, after the `--live` read-backs and just before the closing line; the published
+ * record files it under `sizing`, beside the reserve line it follows up. A name gone says
+ * nothing: the reserve line above already said the read did not end cleanly. `run(bin, args, { timeoutMs })` resolves
+ * `{ code, stdout, error }`.
+ */
+export async function finishDoctorCpuReserve(reads, { run, readOnly = false, timeoutMs = RESERVE_STEP_TIMEOUT_MS } = {}) {
+	if (readOnly || typeof run !== "function") return [];
+	const checks = [];
+	for (const { plan, helper } of Array.isArray(reads) ? reads : []) {
+		if (helper?.state?.dirty !== true) continue;
+		const { name, bin } = helper;
+		const settle = (args) =>
+			Promise.resolve()
+				.then(() => run(bin, args, { timeoutMs }))
+				.catch((error) => ({ code: null, stdout: "", error }));
+		await settle(["rm", "-f", name]);
+		const listed = await settle(probeListArgs([name]));
+		// The listing's name filter is a substring match on both runtimes, so only an exact name counts.
+		const held = listed?.code === 0 ? String(listed.stdout ?? "").split("\n").map((raw) => raw.trim().split("\t")).find(([n]) => n === name) : undefined;
+		if (listed?.code === 0 && held === undefined) continue;
+		const v = plan.venue;
+		const later = helper.endpointLocal ? "the next doctor run removes it, and so does the worker's ten-minute check once it is ten minutes old" : "the worker's ten-minute check removes it once it is ten minutes old";
+		const what = listed?.code === 0 ? `is still on the daemon (${/^[a-z]+$/.test(held[1] ?? "") ? held[1] : "state unknown"}) after one more rm -f at the end of the run` : `may still be on the daemon: the listing after one more rm -f at the end of the run failed (${stepFailure(listed, bin) ?? "no-answer"})`;
+		checks.push({ ok: false, warn: true, label: `${v}: this doctor run's CPU-reserve helper ${name} ${what}; ${later}`, fix: `remove it now: ${bin} rm -f ${name}` });
+	}
+	return checks;
 }
 
 /**
@@ -10845,6 +10926,43 @@ export function hostBudgetChecks(view, { concurrency = 3, limits = [], env = {},
 		checks.push({ ok: false, warn: true, label: `the projects' minJobs together (${formatMemory(minMem)}, ${formatCpus(minCpu)} CPUs) are more than this host's budget (${budgetMemShown(memMiB)}, ${budgetCpuShown(cpuCenti)} CPUs), so this host cannot keep every minimum at once: the oldest waiting jobs are served first`, fix: "lower some projects' minJobs in scoped-limits.json, or raise this host's budget" });
 	}
 	return checks;
+}
+
+/** The share of this host's memory at or above which a VM's memory is too close to it (issue #1113), in percent. */
+export const VM_MEMORY_WARN_PERCENT = 75;
+
+/**
+ * Issue #1113: a WARNING, printed right after the host budget lines (and published under `sizing`), when the local
+ * venue's daemon runs in a VM that may take most of this host's memory: Docker Desktop, OrbStack, or a Podman machine
+ * that serves the Docker API on this host. Only where every daemon runs in a VM (darwin and win32) and only for a
+ * daemon on this host (`local`: the docker endpoint observed here), since a remote daemon's memory is another
+ * machine's. The podman venue is not read: off Linux doctor never asks `podman info`. `memTotalMiB` is the daemon's
+ * own `MemTotal` (`daemon-facts.mjs`), which in a VM is the VM's memory; `hostMemoryBytes` is this host's
+ * (`os.totalmem()`). At or above `VM_MEMORY_WARN_PERCENT` the host keeps a quarter or less for itself, its own
+ * processes and its file cache, and under that pressure it swaps: on issue #1022's host (OrbStack, `memory_mib`
+ * 49152) macOS had about 120 MB free and 3.6 of 5 GB swap in use, container creates took 30 to 130 s, and a restart
+ * of the VM that gave the memory back made the same `docker run` take 0.24 s. No line on Linux, for a remote daemon,
+ * or when either size is unknown. The only runtime setting named is the one issue #1022 names; any other runtime is
+ * sent to its settings.
+ */
+export function vmMemoryChecks({ local = false, memTotalMiB = null, platform = process.platform, hostMemoryBytes = null } = {}) {
+	if (platform !== "darwin" && platform !== "win32") return [];
+	const hostMiB = Number.isSafeInteger(hostMemoryBytes) && hostMemoryBytes > 0 ? Math.floor(hostMemoryBytes / 1048576) : null;
+	if (hostMiB === null || hostMiB === 0) return [];
+	if (local !== true || !Number.isSafeInteger(memTotalMiB) || memTotalMiB <= 0) return [];
+	// In integers, so the boundary is exact: 75% is a warning, 74.9% is not.
+	if (memTotalMiB * 100 < hostMiB * VM_MEMORY_WARN_PERCENT) return [];
+	const tenths = Math.floor((memTotalMiB * 1000) / hostMiB);
+	const pct = tenths % 10 === 0 ? `${tenths / 10}%` : `${Math.floor(tenths / 10)}.${tenths % 10}%`;
+	const below = Math.ceil((hostMiB * VM_MEMORY_WARN_PERCENT) / 100);
+	return [
+		{
+			ok: false,
+			warn: true,
+			label: `local: the Docker daemon's VM has ${formatMemory(memTotalMiB)} of memory, ${pct} of this host's ${formatMemory(hostMiB)}, so the host is left a quarter or less: a host short of memory swaps, which slows the daemon (container creates of 30 s and more) and every job with it`,
+			fix: `lower the VM's memory limit below ${formatMemory(below)}, so the host keeps more than a quarter of its memory: OrbStack's memory_mib, or the memory limit in the runtime's settings; then re-run doctor`,
+		},
+	];
 }
 
 /** The most the capacity read may take in doctor, all of it: a full mirror reads in well under a second. */

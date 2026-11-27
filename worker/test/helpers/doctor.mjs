@@ -50,11 +50,15 @@ export const NO_DOLLAR_KEYS = async () => false;
 export const NO_COOLDOWNS = async () => [];
 export const NO_PUBLISH = async () => {};
 const NO_VALKEY = { probeValkey: VALKEY_ANSWERS, readHosts: NO_HOSTS, dollarKeysExist: NO_DOLLAR_KEYS, readModelCooldowns: NO_COOLDOWNS, readAppliedSplit: NO_SPLIT };
+// Issue #1113: the VM memory line compares the daemon's memory with this host's, `os.totalmem()` without the seam, which
+// is the DEVELOPER'S machine: a test that injects a darwin platform and a daemon's memory would warn on one machine and
+// not on another. Here it defaults to unknown, which says nothing; a test that wants the line passes its own.
+export const NO_HOST_MEMORY = () => null;
 
 export function runDoctor(shellVars, deps = {}) {
-	return realRunDoctor(shellVars, { ...NO_VALKEY, publishDoctor: NO_PUBLISH, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...QUIET, ...deps });
+	return realRunDoctor(shellVars, { ...NO_VALKEY, totalMemory: NO_HOST_MEMORY, publishDoctor: NO_PUBLISH, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...QUIET, ...deps });
 }
 
 export function collectChecks(shellVars, seams = {}) {
-	return realCollectChecks(shellVars, { ...NO_VALKEY, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...QUIET, ...seams });
+	return realCollectChecks(shellVars, { ...NO_VALKEY, totalMemory: NO_HOST_MEMORY, readRunRecords: NO_RECORDS, readCapacity: NO_CAPACITY, consoleProbe: NO_CONSOLE, ...QUIET, ...seams });
 }
