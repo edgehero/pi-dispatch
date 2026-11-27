@@ -857,8 +857,10 @@ test("PI_SESSION_FILE is emitted only when the job has a transcript, and never a
 		assert.equal(buildContainerEnv({ ...args, sessionFile }).PI_SESSION_FILE, undefined, `sessionFile ${JSON.stringify(sessionFile)} must not become a value`);
 	}
 	const { buildDockerRunArgs } = await import("../src/docker-run.mjs");
+	const { envNamesOf } = await import("./helpers/container-env.mjs");
+	// By name, bare or with a value (issue #1114): a test for "PI_SESSION_FILE=" alone would pass on a bare -e too.
 	assert.equal(
-		buildDockerRunArgs({ image: "i", name: "n", workspace: "/w", env: buildContainerEnv({ ...args, sessionFile: null }) }).includes("PI_SESSION_FILE="),
+		envNamesOf(buildDockerRunArgs({ image: "i", name: "n", workspace: "/w", env: buildContainerEnv({ ...args, sessionFile: null }) })).includes("PI_SESSION_FILE"),
 		false,
 		"and no -e reaches the argv at all",
 	);

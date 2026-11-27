@@ -370,6 +370,12 @@ passing, on the record — issue #80.)
   payload names a size, the argv is the same as for one that names none; given any of those flags in
   `dockerExtra`, the builder refuses the argv; and given a live probe, it reads back `memory.swap.max` 0 and the
   ceiling it was given.
+  **AMENDED 2026-11-28 (#1114): every "byte-identical to one built before" clause in this entry compares argvs token
+  for token apart from a job's env tokens.** On `local` and `podman` a credential is now a bare `-e NAME` whose value
+  the runtime client reads from the environment the worker spawns it with (worker/src/docker-run.mjs -> jobEnvArgs),
+  so a job argv built today differs from one built before that issue there and nowhere else; the mounts, the flags and
+  the container's environment each clause protects are unchanged, and a sandbox's and a live probe's argv, which carry
+  no credential, are unchanged token for token.
 
 ## CONST-EGRESS-POLICY-IN-THE-ARGV
 
@@ -449,14 +455,20 @@ passing, on the record — issue #80.)
   provider key and the minted token from `/proc/<pid>/cmdline` for the container's lifetime. What the clause
   means, and now says, is the CONTAINER's argv: nothing inside the job ever sees a credential on a command
   line it can read from its own process table. The host-side exposure is real, pre-existing, and disclosed
-  in `SECURITY.md` rather than denied here.
+  in `SECURITY.md` rather than denied here. **AMENDED 2026-11-28 (#1114): the host-side half is closed on `local`
+  and `podman` too.** A credential is a bare `-e NAME` on the worker's `docker run` and `podman run` argv, its value in
+  the environment the worker spawns that client with, so `/proc/<pid>/cmdline` reads names; the egress flags this
+  entry is about stay values on the argv, as written. What remains is `OQ-028`'s named residuals (the client's own
+  `/proc/<pid>/environ`, readable by the worker's uid and root, and a name the client guard keeps inline, which the
+  job's log line and doctor name).
 
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`,
   `CONST-TOKEN-SCOPED-PER-JOB`, `REQ-EGRESS-ALLOWLIST`, `INT-EGRESS-POLICY-CONTRACT`,
   `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-SANDBOX-CONTRACT`, `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`,
   `OQ-011`, `OQ-026`, `CONST-VENUE-EGRESS-LAYER`
 - **Acceptance**: Given `PI_EGRESS=0`, a job's docker argv and container env are **byte-identical** to ones
-  built before this entry existed and the preflight spawns nothing. Given any other accepted value, **every**
+  built before this entry existed (the job argv's env tokens apart, where a credential is a bare `-e NAME` since issue
+  #1114) and the preflight spawns nothing. Given any other accepted value, **every**
   job's argv carries `--network=pi-job-<jobId>-net`, and no trigger field, runtime-settings key or
   model-callable tool can produce a job argv that omits it or names a different one. Given a policy whose
   proxy is absent or stopped, the job returns `outcome: "policy"` with `budgetReserved: false`, `docker run`
@@ -517,7 +529,9 @@ passing, on the record — issue #80.)
   **What the layer gains, which is why it is worth the new class.** On a layer venue the provider key and the forge
   token **never enter the agent's container**: the environment holds placeholders, and the supervisor swaps them for
   the real values only on connections to the endpoints the job's policy names. That removes, on that venue, the
-  exposure `OQ-028` records and `CONST-TOKEN-SCOPED-PER-JOB` calls the acknowledged exception: an injected agent that
+  exposure `OQ-028` records and `CONST-TOKEN-SCOPED-PER-JOB` calls the acknowledged exception (**AMENDED 2026-11-28
+  (#1114)**: `OQ-028`'s host-argv half is closed on `local` and `podman` as well, by a bare `-e NAME`; what only a layer
+  removes is the other half, the real values in the agent's environment): an injected agent that
   exfiltrates its environment exfiltrates placeholders, and the provider key, which cannot be scoped, is no longer
   readable by the thing most likely to leak it. Egress rules become **per binary** rather than per hostname, which the
   squid allowlist cannot express because it sees a CONNECT and a host name and nothing of the process behind it. And
@@ -1476,7 +1490,11 @@ passing, on the record — issue #80.)
   env-injected, or held by a venue's own layer with a placeholder in the environment (`CONST-VENUE-EGRESS-LAYER`,
   issue #680, none yet), or, for a running job's renewal (issue #888), dropped in a folder the worker alone writes,
   mounted read-only outside `/job` and `/workspace` and removed with the run (`INT-CREDENTIAL-DROP`), and never
-  written to `/workspace`, `.git/config`, the CONTAINER's argv, or logs; no acceptance clause
+  written to `/workspace`, `.git/config`, the CONTAINER's argv, or logs, nor (**AMENDED 2026-11-28, #1114**) to the
+  docker or podman client's argv on the host: the minted token's names are upper case and none the client guard keeps
+  inline, so it is always a bare `-e NAME` there, its value in that client's spawn environment, also beside an
+  operator's case twin (a run secret or forwarded `github_token`), which stays inline and is named by the job's
+  `secret_env_on_argv` line and by doctor; no acceptance clause
   mandates a specific expiry duration. (b) **Operator obligation** — a single-owner deployment must
   supply a repo-scoped, minimally-permissioned, short-expiry fine-grained PAT (or use the App); a broad
   or long-lived classic PAT is non-conformant. Multi-tenant deployments must use the App. A GitLab
@@ -1584,6 +1602,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-11-28 (#1114) | AMENDED: `CONST-EGRESS-POLICY-IN-THE-ARGV`, its "On argv" paragraph: the host-side half is closed on `local` and `podman`, a credential being a bare `-e NAME` whose value the runtime client reads from the environment the worker spawns it with, so `/proc/<pid>/cmdline` reads names; the egress flags stay values; what remains is `OQ-028`'s named residuals; and its `PI_EGRESS=0` byte-identity reads apart from the job argv's env tokens. AMENDED: `CONST-ISOLATION-CONTAINER-PER-JOB`, its Acceptance: every "byte-identical to one built before" clause compares argvs token for token apart from a job's env tokens; the mounts, the flags and the container's environment are unchanged, and a sandbox's and a live probe's argv are unchanged token for token. AMENDED: `CONST-TOKEN-SCOPED-PER-JOB`, its Acceptance (a): the minted token is never on the docker or podman client's argv either, its names being upper case and none the client guard keeps inline, so it is bare beside an operator's case twin too. AMENDED: `CONST-VENUE-EGRESS-LAYER`, one parenthesis: `OQ-028`'s host-argv half is closed on `local` and `podman` too, and what only a layer removes is the real values in the agent's environment. UNCHANGED, checked: `CONST-RETRY-INFRA-ONLY` (the pre-spawn refusal is a plain throw on the path a refused argv already takes, nothing spawns), `CONST-BUDGET-BEFORE-TOKENS` (no spend path moves). **Code evidence**: worker/src/docker-run.mjs -> jobEnvArgs, jobClientEnv, assertJobEnvArgv, CLIENT_ENV_GUARD; worker/src/run-container.mjs -> makeRunContainer (clientEnv); worker/src/backend-podman.mjs -> makePodmanBackend; worker/src/backend-openshell.mjs -> makeOpenshellBackend |
 | 2026-11-26 (#1106) | `CONST-RETRY-INFRA-ONLY` statement UNCHANGED, checked; its note AMENDED: a provider's spending limit is not a refused credential, so the measured case, OpenRouter's 403 for a used-up workspace budget or a key past its limit, which matches the credential shapes and which pi-ai calls permanent, now exits 1 with signed `quota-exhausted` evidence instead of 2 as `provider-auth-refused`; only a measured 402 or a 403 whose message begins with a measured wording is read so, and an explicit credential wording always keeps the credential rule. UNCHANGED, checked: the other notes (the host rule, the credential list and its admission rule, the explicit refusal of the request). **Code evidence**: image/runner/src/provider-failure.mjs -> providerSpendLimit; image/runner/src/outcome.mjs -> providerAuthRefused, classifyStopReason. |
 | 2026-11-24 (#950) | `CONST-RETRY-INFRA-ONLY` statement UNCHANGED, checked; its note AMENDED: a provider's explicit refusal of the request is a determinate refusal, so it exits 2 as `provider-stop-refusal` instead of the infrastructure exit the queue paid to retry. It is read only from a field the adapter sets or the subscription adapter's one fixed prefix, only for the shape proved against the pinned artifacts (Anthropic's own `refusal`, provider `anthropic`), and every other content stop, a gateway's included, stays retryable. UNCHANGED, checked: `CONST-PI-VERSION-PINNED` (each shape is pinned by a test that drives the pinned pi-ai or the pinned adapter tarballs), `CONST-BUDGET-BEFORE-TOKENS` (the stop happens after the spend it names, and nothing before the spend moved), `CONST-MERGE-NEVER-AUTOMATIC`. |
 | 2026-11-22 (#1008, allowance) | AMENDED: `CONST-BUDGET-BEFORE-TOKENS`, its Why: what bounds a notional subscription call now names the trigger's optional list-price allowance, `run.maxSubscriptionUsd`, beside the account's quota and the job's turn and time limits. It is judged against the settled list price of the job's notional calls between calls, with nothing held for a call in flight, so a job may end above it by the calls already running; it never judges a billed call, which the cap still bounds before each call. AMENDED: `CONST-TOKEN-SCOPED-PER-JOB`, the subscription paragraph: the same allowance among what bounds a notional call, which still has no conservative dollar bound. The ordering of the gates is UNCHANGED, checked: an image that cannot apply an allowance refuses before any call (`cost-cap-unenforceable`), and a job with one on an image that does not declare it is refused before any spend (`job-image-subscription-allowance-unsupported`). UNCHANGED, checked: `CONST-RETRY-INFRA-ONLY` (the new stop is exit 2, never retried), `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-PI-VERSION-PINNED`. **Code evidence**: image/runner/src/usage-meter.mjs -> createAllowanceGuard, createPolicyGuard, assertPoliciesEnforceable; worker/src/image-preflight.mjs -> CAPABILITY_GATES; worker/src/index.mjs -> effectiveJobOf. |

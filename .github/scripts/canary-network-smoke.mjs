@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { CANARY_PROXY_IMAGE, canaryProxyPolicy } from "../../worker/src/canary-runtime.mjs";
-import { buildDockerRunArgs } from "../../worker/src/docker-run.mjs";
+import { buildDockerRunArgs, jobClientEnv } from "../../worker/src/docker-run.mjs";
 
 const exec = promisify(execFile);
 const image = process.argv[2];
@@ -15,7 +15,9 @@ assert.ok(image, "usage: node .github/scripts/canary-network-smoke.mjs <job-imag
 const root = mkdtempSync(join(tmpdir(), "pi-canary-smoke-"));
 const name = `pi-dispatch-canary-smoke-${randomUUID().slice(0, 12)}`;
 const proxy = `${name}-proxy`, outer = `${name}-out`, inner = `${name}-in`;
-const docker = (args) => exec("docker", args, { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 });
+// `env` only for the job's run (issue #1114): its non-structural variables are bare `-e NAME`, read from the CLI's own
+// environment, which `jobClientEnv` builds from the same env map the argv was.
+const docker = (args, env) => exec("docker", args, { timeout: 60_000, maxBuffer: 2 * 1024 * 1024, ...(env ? { env } : {}) });
 const probe = `
 const assert = require('node:assert/strict');
 const net = require('node:net');
@@ -51,9 +53,10 @@ try {
 	await docker(["network", "create", "--internal", inner]);
 	await docker(["run", "--pull=never", "--rm", "-d", "--name", proxy, "--network", outer, "--user", "proxy", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--entrypoint", "/usr/sbin/squid", "--mount", `type=bind,source=${join(root, "squid.conf")},target=/etc/squid/squid.conf,readonly`, CANARY_PROXY_IMAGE, "-f", "/etc/squid/squid.conf", "-NYC"]);
 	await docker(["network", "connect", inner, proxy]);
-	const args = buildDockerRunArgs({ image, name, network: inner, jobDir: join(root, "job"), workspace: join(root, "workspace"), env: { PROBE_PROXY: proxy }, extraFlags: ["--entrypoint", "node"] });
+	const env = { PROBE_PROXY: proxy };
+	const args = buildDockerRunArgs({ image, name, network: inner, jobDir: join(root, "job"), workspace: join(root, "workspace"), env, extraFlags: ["--entrypoint", "node"] });
 	assert.ok(args.includes("--entrypoint") && args[args.indexOf("--entrypoint") + 1] === "node");
-	const result = await docker([...args, "--eval", probe]);
+	const result = await docker([...args, "--eval", probe], jobClientEnv(env));
 	process.stdout.write(result.stdout);
 } catch (error) { failed = true; process.stderr.write(`${error.stderr ?? error.message}\n`); const logs = await docker(["logs", proxy]).catch(() => null); if (logs) process.stderr.write(`${logs.stdout}${logs.stderr}`); }
 finally {

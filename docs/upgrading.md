@@ -448,6 +448,33 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: job credentials leave the docker and podman command line (#1114)
+
+A worker from this release starts each job's `docker run` (or `podman run`) with every credential as a bare `-e NAME`
+and its value in that command's own environment, so the host's process list (`ps`, `/proc/<pid>/cmdline`) shows the
+names and no value for as long as the job runs. The provider key, the minted forge token, run secrets, forwarded
+variables and secret bundle values all move, and so does every other variable no list marks as carrying no secret (a
+secret file's path variable and the package canary's path among them); the model, the job id, the session and package
+paths and the egress proxy stay `-e NAME=VALUE`.
+The container gets exactly the environment it got before. The worker alone: the job image, the receiver and the
+console are unchanged, and nothing stored changes. Restart every worker: one that is still running keeps putting the
+values on its command line until it restarts.
+
+A credential named like a variable the docker or podman command reads itself (`HOME`, `PATH`, a proxy variable,
+anything starting `DOCKER_`, `CONTAINER_`, `SSH_`, `XDG_` or `LD_`, the full list is `CLIENT_ENV_GUARD` in
+`worker/src/docker-run.mjs`) stays on the command line, and so does one that differs only by case from another
+variable of the job: a run secret or forwarded `github_token` beside the minted `GITHUB_TOKEN` stays `-e NAME=VALUE`,
+while the upper-case name, the minted token's, still goes bare. `pi-dispatch doctor` names the ones `PI_FORWARD_ENV`
+and the triggers file configure (a twin with the name it differs from), and a job logs any it kept as
+`secret_env_on_argv`, by name. Rename one to take it off. If the `docker` or `podman` on the worker's `PATH` is a
+wrapper that starts the real one with a cleared environment (`sudo` without keeping the environment, `env -i`), the
+bare names are absent from the container: point the worker at the real command.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Run record, queue, files | Nothing. |
+| Mixed versions | Nothing to order. Each worker starts its own jobs; one not yet restarted keeps the values on its command line. |
+
 ### Unreleased: doctor removes its own CPU-reserve helper, the worker keeps sweeping, and a VM memory warning (#1113)
 
 On a daemon slow enough that removing a container takes minutes (issue #1022), the CPU-reserve helper of a doctor

@@ -179,9 +179,9 @@ export function runResolver(spawnFn, path, reference, { timeoutMs, hostEnv, sign
 			// Exit 0 printing nothing is the silent-no-op class: a vault CLI that says nothing and succeeds
 			// would otherwise bind an empty variable and let the job run as though it were configured.
 			if (value === "") return finish({ value: null, failure: "policy", detail: "empty", code, stderrBytes });
-			// `-e NAME=VALUE` is an execve argv element and truncates at a NUL, silently handing the container
-			// a shortened credential. Interior NEWLINES are fine and must stay fine: it is an argv, not a
-			// shell string, and a PEM has them.
+			// The value is an execve environment entry (the client's, under a bare `-e NAME`, issue #1114) or argv
+			// element (`-e NAME=VALUE`), and both truncate at a NUL, silently handing the container a shortened
+			// credential. Interior NEWLINES are fine and must stay fine: neither is a shell string, and a PEM has them.
 			if (/\u0000/.test(value)) return finish({ value: null, failure: "policy", detail: "nul", code, stderrBytes });
 			finish({ value, failure: null, detail: null, code, stderrBytes });
 		});

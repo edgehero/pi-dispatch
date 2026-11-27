@@ -452,7 +452,9 @@ a GitLab project token or a Forgejo token does not expire that way, and its copy
 the token does.
 
 The forge token is not the only secret there. Each job's create request also carries the provider API key
-every value its `run.secretsProfile` names and every `PI_FORWARD_ENV` value, as `-e NAME=VALUE`, and those do not expire at all. The
+every value its `run.secretsProfile` names and every `PI_FORWARD_ENV` value, and those do not expire at all. (Since
+issue #1114 they are a bare `-e NAME` on the `docker run` command line, their values in that command's own
+environment, so the host's process list shows names only; the create request still carries the values.) The
 provider key can spend money. Preferring the App path does not close that. Set a spend limit on the
 provider key, rotate any key or secret you suspect, and treat the log folder as a secret store.
 

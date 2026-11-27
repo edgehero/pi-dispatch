@@ -63,6 +63,8 @@ function harness({ transcript = "stdio", layout = "sandbox", opener = true, chil
 		...(openLiveTranscript ? { openLiveTranscript } : {}),
 		mintExitKey: () => KEY,
 		buildArgs: (opts) => ((seen.env = opts.env), ["sandbox", "exec"]),
+		// The copying venue's exec, as openshell spawns it: no client env, its argv carries no `-e` (issue #1114).
+		clientEnv: null,
 		memoryLimitOf: () => null,
 		spawnFn: child,
 		onOutput: (chunk) => seen.output.push(Buffer.from(chunk).toString("latin1")),
@@ -180,6 +182,8 @@ test("a demux that throws is ended and not asked again: what it held, then the c
 		openLiveTranscript: () => ({ start() {}, finish: async () => {}, push() {}, progressSummary: () => null }),
 		mintExitKey: () => KEY,
 		buildArgs: () => ["sandbox", "exec"],
+		// The copying venue's exec, as openshell spawns it: no client env, its argv carries no `-e` (issue #1114).
+		clientEnv: null,
 		memoryLimitOf: () => null,
 		makeDemux,
 		spawnFn: stdioChild({ stderr: () => ["\x1epi", "x one\n", "two\n"] }),
@@ -210,6 +214,8 @@ test("a demux that throws after completing a record in that chunk: only what it 
 		openLiveTranscript: () => ({ start() {}, finish: async () => {}, push() {}, progressSummary: () => null }),
 		mintExitKey: () => KEY,
 		buildArgs: () => ["sandbox", "exec"],
+		// The copying venue's exec, as openshell spawns it: no client env, its argv carries no `-e` (issue #1114).
+		clientEnv: null,
 		memoryLimitOf: () => null,
 		makeDemux,
 		spawnFn: stdioChild({ stderr: () => ["ok\n\x1epidt 2 l 3 RECORD-BYTES\ntail\n", "later\n"] }),
@@ -231,7 +237,7 @@ test("issue #1104: a killed client's container started when a record verified un
 			c.stdin = { on() {}, end: (text) => queueMicrotask(() => records && c.stderr.emit("data", Buffer.from(transcriptRecord(String(text).trim(), NAME, 1, "b", 0), "latin1"))) };
 			return c;
 		};
-		const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, layout: "sandbox", transcript: "stdio", openLiveTranscript: () => ({ start() {}, finish: async () => {}, setBaseline() {}, push() {}, skip() {}, reset() {} }), mintExitKey: () => KEY, buildArgs: () => ["sandbox", "exec"], memoryLimitOf: () => null, spawnFn: child, onOutput: () => {}, clientKillMs: 20 });
+		const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, layout: "sandbox", transcript: "stdio", openLiveTranscript: () => ({ start() {}, finish: async () => {}, setBaseline() {}, push() {}, skip() {}, reset() {} }), mintExitKey: () => KEY, buildArgs: () => ["sandbox", "exec"], clientEnv: null, memoryLimitOf: () => null, spawnFn: child, onOutput: () => {}, clientKillMs: 20 });
 		const jobDir = tempDir("pi-stdio-kill-");
 		const done = run({ job: JOB, prepared: { workspace: `${jobDir}/workspace`, jobDir, live: { hostDir: `${jobDir}/session` } }, name: NAME, signal: ac.signal, jobId: "j-1", exitAuth: true, transcriptStderr: true, ...(watched ? { activityWatch: { idleMs: 15 * 60_000, stallMs: null, keepWallClock: false }, onActivityArmed() {}, requestStop() {}, noteActivity() {} } : {}) });
 		await new Promise((resolve) => setImmediate(resolve));

@@ -9,6 +9,7 @@ import { CONTAINER_INBOX_DIR } from "../src/container-spec.mjs";
 import { makeLiveTranscriptOpener } from "../src/live-transcript.mjs";
 import { steerTargetKey } from "../src/steer-inbox.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { containerEnvOf } from "./helpers/container-env.mjs";
 
 // Issue #646: the inbox mount and the arming of a steer job in runContainer.
 
@@ -62,10 +63,11 @@ function staged() {
 	return { jobDir, prepared: { workspace: join(jobDir, "ws"), jobDir, live: { hostDir: join(jobDir, "session") } } };
 }
 
-/** A runtime child that records its argv, checks the inbox while it "runs", and exits `code`. */
+/** A runtime child that records its argv and spawn options, checks the inbox while it "runs", and exits `code`. */
 function child(rec, { code = 0, during = () => {} } = {}) {
-	return (cmd, args) => {
+	return (cmd, args, opts) => {
 		rec.args = args;
+		rec.opts = opts;
 		const c = new EventEmitter();
 		c.stdout = new EventEmitter();
 		c.stderr = new EventEmitter();
@@ -103,7 +105,9 @@ function relays({ deliverMs = 0 } = {}) {
 
 const sinkSaying = (fields) => () => ({ write() {}, close: async () => ({ turns: 1, tokens: null, session: null, usage: null, context: null, exitReason: null, exitAuth: "verified", ...fields }) });
 const opener = () => makeLiveTranscriptOpener({ redis: null, transcripts: false, progress: false, steer: true, pollMs: 3_600_000 });
-const envOf = (args) => args.flatMap((a, i) => (args[i - 1] === "-e" ? [a] : []));
+// Issue #1114: `NAME=VALUE` per variable the container gets, from the argv and the spawn's env alike, so a bare name reads
+// as present only where the client was given its value.
+const envOf = (rec) => Object.entries(containerEnvOf(rec.args, rec.opts)).map(([k, v]) => `${k}=${v}`);
 
 test("ARMED: binds, a key and the wiring give PI_STEER=1, the read-only /inbox mount, a 0700 inbox beside the job dir, and the relay for the run", { skip }, async () => {
 	const { jobDir, prepared } = staged();
@@ -120,7 +124,7 @@ test("ARMED: binds, a key and the wiring give PI_STEER=1, the read-only /inbox m
 		exitAuth: true,
 		binds: true,
 	});
-	assert.ok(envOf(rec.args).includes("PI_STEER=1"));
+	assert.ok(envOf(rec).includes("PI_STEER=1"));
 	assert.ok(mountsOf(rec.args).includes(`${inboxDir}:/inbox:ro`));
 	assert.equal(inboxDuring, 0o700, "made 0700 before the container ran");
 	assert.equal(existsSync(inboxDir), false, "removed once the run is over");
@@ -160,7 +164,7 @@ test("the arming matrix: a copying venue, no exit key, or no wiring each run the
 		const result = await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, openLiveTranscript: opener(), openInboxRelay: r.open, openJobLog: sinkSaying({ steer: { delivered: 9, pending: 9 } }), log: (e, f) => logs.push([e, f]), spawnFn: child(rec), ...(c.factory ?? {}) })({ job: STEER_JOB, prepared, name: "pi-job-m", signal: new AbortController().signal, jobId: "m", ...c.call });
 		assert.equal(result.steerSkipped, c.name, JSON.stringify(c.call));
 		assert.equal(result.steer, undefined, "no counts from a runner that was not armed");
-		assert.ok(!envOf(rec.args).includes("PI_STEER=1"), "never PI_STEER: the runner would refuse it without the channel");
+		assert.ok(!envOf(rec).includes("PI_STEER=1"), "never PI_STEER: the runner would refuse it without the channel");
 		assert.ok(!mountsOf(rec.args).some((m) => m.includes(":/inbox")));
 		assert.equal(existsSync(`${jobDir}.inbox`), false, "no inbox made");
 		assert.equal(r.opened.length, 0, "no relay opened, so the run never takes a message");
@@ -214,7 +218,7 @@ test("an inbox that cannot be made is a named skip, and the job runs unarmed", {
 		throw Object.assign(new Error("nope"), { code: "EACCES" });
 	} }, spawnFn: child(rec) })({ job: STEER_JOB, prepared, name: "pi-job-i", signal: new AbortController().signal, jobId: "i", exitAuth: true, binds: true });
 	assert.equal(result.steerSkipped, "no-inbox");
-	assert.ok(!envOf(rec.args).includes("PI_STEER=1"));
+	assert.ok(!envOf(rec).includes("PI_STEER=1"));
 });
 
 test("the registry hands `binds` to a steer job's runContainer only, from the bundle's own declaration", async () => {
@@ -250,7 +254,7 @@ test("RC05 + RC06: the ack is over the CONTAINER NAME (PI_JOB_ID), not the job i
 	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, openLiveTranscript: opener(), openInboxRelay: r.open, openJobLog: sinkSaying({}), mintExitKey: () => KEY, spawnFn: child(rec, {
 		during: () => appendFileSync(file, ackJson(IDA, inboxAck(KEY, "pi-job-run7", IDA)) + ackJson(IDB, inboxAck(KEY, "run7", IDB))),
 	}) })({ job: STEER_JOB, prepared, name: "pi-job-run7", signal: new AbortController().signal, jobId: "run7", exitAuth: true, binds: true });
-	assert.ok(envOf(rec.args).includes("PI_JOB_ID=pi-job-run7"), "the runner MACs over this string");
+	assert.ok(envOf(rec).includes("PI_JOB_ID=pi-job-run7"), "the runner MACs over this string");
 	assert.deepEqual(r.delivered, [IDA], "a MAC over the job id does not verify");
 	assert.ok(r.order.indexOf("delivered:aa") < r.order.indexOf("stop"), "the slow mark finished before the relay stopped");
 });

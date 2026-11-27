@@ -4,6 +4,8 @@ import { test } from "node:test";
 import { ASSERTED, BACKENDS, ENFORCED, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_SERVICE_LOCAL, effectiveWord } from "../src/backends.mjs";
 import { CONTAINER_HOME } from "../src/container-spec.mjs";
 import { makeContainerActivity } from "../src/container-activity.mjs";
+import { jobClientEnv } from "../src/docker-run.mjs";
+import { containerEnvOf } from "./helpers/container-env.mjs";
 
 // backend-podman builds on run-container, which imports env-allowlist -> @earendil-works/pi-ai, so this skips below the
 // node floor and runs in CI (PI_DISPATCH_REQUIRE_WORKER_TESTS=1 makes a skip a hard failure), as run-container's own
@@ -888,6 +890,25 @@ test("every spawn the podman bundle makes is `podman`, and the run is keep-id as
 	for (const call of fake.calls) assert.equal(call[0], "podman", call.join(" "));
 	assert.ok(fake.calls.some((c) => c[1] === "stop" && c.includes("pi-job-j1")), "the stop goes to podman");
 	assert.ok(fake.calls.some((c) => c[1] === "network" && c[2] === "create"), "the job network is podman's");
+});
+
+test("issue #1114: the podman bundle hands its run the client env local's has, so a credential is a bare -e NAME whose value only the podman client holds", { skip }, async () => {
+	let built = null;
+	bundle({ spawnFn: fakePodman().spawnFn, makeRunContainer: (options) => ((built = options), async () => ({ code: 0 })) });
+	assert.equal(built.clientEnv, jobClientEnv, "the same function local's run defaults to");
+	const fake = fakePodman({ runExit: 0 });
+	let run = null;
+	const spawnFn = (cmd, args, opts) => {
+		if (args[0] === "run") run = { cmd, args, opts };
+		return fake.spawnFn(cmd, args, opts);
+	};
+	const result = await bundle({ spawnFn }).runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j1", signal: new AbortController().signal, user: "1234:1234", home: CONTAINER_HOME, relabel: true });
+	assert.equal(result.code, 0);
+	assert.equal(run.cmd, "podman");
+	const key = Object.keys(containerEnvOf(run.args, run.opts)).find((k) => k.endsWith("_API_KEY"));
+	assert.ok(key, "the provider credential reaches the container");
+	assert.equal(run.args[run.args.indexOf(key) - 1], "-e", "as a bare name");
+	assert.ok(!run.args.some((a) => a.includes(run.opts.env[key])), "its value is on no argv token");
 });
 
 test("a podman run is counted where local's are: the bundle hands the worker's count to its run function (issue #1023)", { skip }, async () => {

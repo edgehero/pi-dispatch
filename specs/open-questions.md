@@ -1581,8 +1581,9 @@ adversarial passes did.
 
 ## OQ-028 — Every container env value is in the HOST's argv
 
-- **Status**: **ACCEPTED RISK** — pre-existing, and named here because `REQ-TRIGGER-SECRETS` makes it matter
-  more.
+- **Status**: **CLOSED 2026-11-28 on Docker and Podman (issue #1114), with the residuals the last bullet names**;
+  closed on `openshell` and `openshell-bind` since #684 and #704 part 3. Until then an ACCEPTED RISK, pre-existing,
+  and named here because `REQ-TRIGGER-SECRETS` made it matter more.
 - **Position**: `buildDockerRunArgs` passes each variable as `-e NAME=VALUE`, so under a default `hidepid`
   any local user can read the provider key, the minted forge token and now a resolved vault value from
   `/proc/<pid>/cmdline` for the container's lifetime.
@@ -1596,8 +1597,14 @@ adversarial passes did.
 - **What bounds it meanwhile**: the worker host is trusted by construction (`SECURITY.md`'s "Who this is
   for"), and `CONST-TOKEN-SCOPED-PER-JOB`'s Acceptance now scopes its "never written to argv" clause to the
   CONTAINER's argv rather than claiming what is not true of the host's.
-- **What would close it**: `OQ-011`'s secrets-injecting proxy, which would take the provider key out of the
-  container entirely and could take resolved secrets with it.
+- **What would REOPEN it** (the `OQ-014` precedent: a closed row's close condition is replaced by its reopen
+  conditions; it read "`OQ-011`'s secrets-injecting proxy, which would take the provider key out of the container
+  entirely and could take resolved secrets with it", which still describes the agent-side half): a credential value
+  on a docker or podman client's argv under a name the rule sends bare, which the builder's tests and the pre-spawn
+  check exist to stop; a CLI release that acts on a variable outside `CLIENT_ENV_GUARD` that a credential could be
+  named, so a job's value would steer the client; a docker or podman CLI that stops filling a bare `-e NAME` from
+  its own environment (the variable would then be absent from the container, loud rather than leaked); or a venue
+  that builds a `docker run` or `podman run` argv without the client env.
 - **AMENDED 2026-10-18 (issue #680): that proxy is now admitted for a venue that declares its own layer
   (`CONST-VENUE-EGRESS-LAYER`), so this row closes THERE once #684 ships, and nowhere else.** On the planned
   `openshell` venue the worker builds no `docker run` argv, and the policy layer of #684 hands the job only
@@ -1655,6 +1662,36 @@ adversarial passes did.
   remains: the file on the worker host for the job's lifetime, in the worker's own 0700 job directory, readable by the
   worker's uid (which holds every value anyway) and root, the exposure the job directory's other inputs already have.
   **Status: ACCEPTED RISK for Docker and Podman, UNCHANGED; CLOSED for `openshell` and `openshell-bind`.**
+- **CLOSED 2026-11-28 (issue #1114) on Docker and Podman.** The form this row never weighed (it rejected `--env-file`
+  and stdin) closes it: a bare `-e NAME`, whose value the docker CLI and `podman run` read from their own environment,
+  which the repository already relied on for `VALKEY_PASSWORD` (worker/src/valkey-auth.mjs -> valkeyDockerRunArgs).
+  One function decides each entry of the closed map (worker/src/docker-run.mjs -> jobEnvArgs): a name stays `-e
+  NAME=VALUE` when it carries no secret (`isNonSecretEnvKey`, the redactor's list), is an egress variable, `TERM` or
+  `TMOUT`, has the empty value, is one the client acts on itself (`CLIENT_ENV_GUARD`, matched without regard to case:
+  `HOME`, `PATH`, the proxy family, `DOCKER_*`, `CONTAINER_*`, `CONTAINERS_*`, `SSH_*`, `LD_*` and the rest), is not a
+  name a shell can spell, or differs from another key of the map only by case and is not that group's upper-case
+  spelling; every other name is bare. Every name the worker writes itself (the minted token's, the provider
+  credential's) is upper case, so it is bare even beside an operator's twin of it. The run's client is spawned with
+  this process's environment, minus every key whose upper-case form is a bare name's, plus the job's value for each
+  bare name (`jobClientEnv`), so the closed map holds: no host value fills a bare name, on any platform. Before the
+  spawn `assertJobEnvArgv` reads every token but the last (the image) and holds its env flags to that answer exactly,
+  in order, with each bare name's value the job's in the client's environment: a credential's value on the argv, a
+  credential dropped from it, an entry the map does not hold, a wrong value, a fused `-eNAME` and a dangling `-e` are
+  refused and nothing spawns. It checks env flags only. openshell's exec carries no bare name and spawns as before.
+  **What remains, named**: (1) the client's and its children's `/proc/<pid>/environ` for the job's lifetime, readable
+  by the worker's own uid and root, which already read the worker's; (2) Docker Desktop's backend log, which writes
+  the container create request, environment included (measured for doctor's gh probe, worker/src/doctor.mjs,
+  2026-10-02); (3) `docker inspect` and `podman inspect`, which show a container's environment to whoever reaches the
+  daemon or the rootless account; (4) an operator's credential the rule keeps inline stays on the argv: one whose name
+  the guard holds, one no shell can spell, or one that differs only by case from another name of the job and is not
+  the upper-case spelling (a run secret or forwarded `github_token` beside the minted `GITHUB_TOKEN`, which itself
+  stays bare), each said by name in the job's `secret_env_on_argv` log line and in doctor's argv line for the names
+  this deployment configures (a bundle's names exist only when a job resolves it); (5) a forwarded proxy URL with
+  `PI_EGRESS=0`, which stays a value because the client reads the proxy variables itself. A remote Podman service is
+  refused by the venue (`podman-remote`), so the remote residual is only the one `credentialTransit` already names: a
+  redirect landing between the per-job endpoint read and the spawn, where the values ride the create request to
+  another machine as they always did. **Status: CLOSED for Docker and Podman, with residuals (1) to (5); CLOSED for
+  `openshell` and `openshell-bind`.**
 - **Raised by**: issue #225.
 
 ## OQ-029 — A held job's WAKE has no authorizing actor, and the moment picks the commit
@@ -2433,7 +2470,7 @@ adversarial passes did.
   Linux from `/sys/kernel/security/lsm`; on a non-Linux host (Docker Desktop's VM, whose LinuxKit kernel has no Landlock
   at all, measured) it cannot be read from the worker's side and the create fails closed. Until #684 the job's
   environment, its provider key and forge token included, is passed as the exec's `--env`: visible on this host's argv
-  as `-e` is on docker's (`OQ-028`) and handed to the gateway and the supervisor, which is why the venue is not
+  as `-e` was on docker's until issue #1114 (`OQ-028`) and handed to the gateway and the supervisor, which is why the venue is not
   blessable before the providers ship.
 - **Measured in #684 part 1** (2026-10-19): the "binary-path pinning drifts silently" residual is SMALLER than stated
   and its control weaker: OpenShell matches a rule's binaries against the connecting process or any ancestor, and every
@@ -2945,3 +2982,4 @@ adversarial passes did.
 | 2026-11-23 (#1023) | **`OQ-007` AMENDED**, one clause, status stays RESOLVED: the sandbox sweep's pass line `sandbox_reaper_pass` gains three readings, `waitedForStartsMs` on a pass that waited for one of the worker's job containers to start, `askedAgain` (a count) on a pass that asked a run's runtime again after a wait before its removal, and `busy: true` on a pass that met a job starting or running (`DES-RETENTION-SWEEPS-ON-A-TIMER`, `INT-SANDBOX-CONTRACT`). No new event name: they ride the pass's own line, which stays the pass's evidence and is neither a fault nor a per-entry verdict. **Code evidence**: worker/src/sandbox-store.mjs -> `makeSandboxReaper` (`finish`); worker/test/sandbox-store.test.mjs (the line's three fields, and no new field on a pass that met no job). |
 | 2026-11-24 | Issue #969. **`OQ-023` RESOLVED**: the refusal net posts the reason catalog's sentence for a forge refusal before spend whose attempt posted nothing, so the prepare stage's six refusals (and the pickup's selection and subscription refusals, silent the same way) now tell the item why. The dedup the row asked for is the spend refusals' own, one comment per delivery; no store was added. **`OQ-034` UNCHANGED, checked**: the hook's conventions are untouched, and the net pages nobody. |
 | 2026-11-28 (#1113) | **`OQ-007` AMENDED**, one bullet, status stays RESOLVED: the CPU-reserve leftover pass runs after every read that holds, at the reserve's ten-minute re-check, for the life of the process, where it stopped after its first complete pass with nothing young and nothing refused; `cpu_reserve_leftovers_removed` keeps its fields and its said-once rule, so a re-check where nothing looks like a helper costs one bounded listing and says nothing, and a `created` look-alike that is no fingerprint costs one container inspect and one image inspect per re-check while it stays; still no timer of its own. **Code evidence**: worker/src/cpu-reserve.mjs -> makeCpuReserve (leftovers), removeLegacyHelpers. |
+| 2026-11-28 (#1114) | **`OQ-028` CLOSED on Docker and Podman**, by the `OQ-014` ratification convention: the date is in its Status and its close condition becomes **What would REOPEN it** (a credential value on the argv under a name sent bare, a CLI acting on a variable outside the client guard, a CLI that stops filling a bare name, a venue that builds the argv without the client env). A credential is a bare `-e NAME` whose value the runtime client reads from the environment the worker spawns it with, built from this process's environment minus every key a bare name folds to, plus the job's values; a name the client acts on, an egress variable, `TERM`, `TMOUT`, an empty value, a name no shell spells and a case twin other than its group's upper-case spelling stay inline, so the worker's own credential names (upper case) are always bare. Residuals named: the client's `/proc/<pid>/environ` (the worker's uid and root), Docker Desktop's backend log, `docker inspect` and `podman inspect`, an operator's name the rule keeps inline (the guard's, one no shell spells, a case twin such as `github_token`; logged by name and said by doctor), a forwarded proxy URL with `PI_EGRESS=0`; a remote Podman service is refused, so the remote residual is `credentialTransit`'s window between observation and spawn. **`OQ-047` CORRECTED**, one clause of its #683 measurement: the exec's `--env` was visible as `-e` was on docker's until issue #1114. UNCHANGED, checked: `OQ-011` (the agent still holds the real values on `local` and `podman`; only a layer moves them). **Code evidence**: worker/src/docker-run.mjs -> jobEnvArgs, jobClientEnv, assertJobEnvArgv, CLIENT_ENV_GUARD; worker/src/run-container.mjs -> makeRunContainer (clientEnv, the pre-spawn check, `secret_env_on_argv`); worker/src/doctor.mjs -> argvCredentialChecks. |

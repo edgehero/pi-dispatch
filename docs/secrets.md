@@ -1049,10 +1049,16 @@ lists that the bundle lacks is not refused.
    of what a project may hold moves to whoever can write the manager (or the file): give that the care you give
    `triggers.json`.
 3. **Fork reviews are off by default**, and `forkReviews: true` turns them on for the whole bundle.
-4. **More values in the host argv.** On `local` and `podman` every variable goes into `docker run` / `podman
-   run` as `-e NAME=VALUE`, so a bundle widens `OQ-028` by its count: a process on the host that can read
-   another's command line sees them while the container starts. On an OpenShell venue none is on a command line: the
-   ones `endpoints` names are placeholders, and the rest travel in a file in the job's directory.
+4. **More values in the runtime client's environment.** On `local` and `podman` every variable goes into `docker
+   run` / `podman run` as a bare `-e NAME` (since issue #1114), its value in the environment the worker starts that
+   command with, so the host's process list shows the names and no value. A process running as the worker's own
+   account, or root, can still read that command's environment while the job runs, and Docker Desktop logs the
+   create request (`docs/backends.md`). A variable named like one the client reads itself (`HOME`, `PATH`, a proxy
+   variable, anything starting `DOCKER_`, `CONTAINER_`, `SSH_` or `XDG_`), or one that differs only by case from
+   another variable of the job, stays `-e NAME=VALUE` on the command line, and the job logs its name as
+   `secret_env_on_argv`; rename it in the manager to take it off. On an OpenShell venue
+   none is on a command line: the ones `endpoints` names are placeholders, and the rest travel in a file in the
+   job's directory.
 5. **A project with folders.** A local job's `/workspace` is your own folder, so a value the agent writes to a
    `.env` there lands in your real repository. `doctor` warns per bundle whose project holds a folder.
 6. **Declare the profile on every host that takes the project's jobs.** A bundle profile is a path on one

@@ -946,11 +946,18 @@ Stated openly rather than discovered later:
   `bundle.variables` does, after the fact. That is the trade the feature makes on purpose (`DES-PROJECT-SECRET-BUNDLES`).
   A prompt injection in one issue can reach every variable of the bundle. Keep bundles small and per project, keep
   `forkReviews` off, and keep a credential only one trigger needs in that trigger's `run.secrets`. On `local` and
-  `podman` every bundle variable is one more `-e NAME=VALUE` in the argv the next sentences describe (`OQ-028`).
-  Two further exposures are worth stating plainly. Every environment value reaches the container as
-  `-e NAME=VALUE` in the worker's own `docker run` argv, sent to whichever daemon the docker CLI resolves, so under a default `hidepid` any local user can
-  read it from `/proc/<pid>/cmdline` for the container's lifetime; that is already true of the provider key
-  and the forge token, and a vault-managed value arriving there is new in kind rather than in mechanism.
+  `podman` every bundle variable is one more variable in the runtime client's environment the next sentences
+  describe (`OQ-028`). Two further exposures are worth stating plainly. Every environment value reaches the container
+  through the worker's own `docker run` (or `podman run`), sent to whichever daemon the docker CLI resolves. Since
+  issue #1114 a credential is a bare `-e NAME` on that client's argv, its value in the environment the worker spawns
+  the client with, so `/proc/<pid>/cmdline` shows the name and no value; structural values (the model, the job id,
+  the session and package paths, the egress proxy) stay `-e NAME=VALUE`. What is left: the client's own `/proc/<pid>/environ`, readable by the
+  worker's account and root (which can already read the worker's); Docker Desktop's backend log and `docker inspect`
+  (below); a forwarded proxy variable with `PI_EGRESS=0`; and a credential named like a variable the client reads
+  itself (`HOME`, `PATH`, a proxy variable, anything starting `DOCKER_`, `CONTAINER_`, `SSH_`, `XDG_`, `LD_` and the
+  rest of `CLIENT_ENV_GUARD` in `worker/src/docker-run.mjs`), or one that differs only by case from another variable
+  of the job (a `github_token` beside the minted `GITHUB_TOKEN`, which itself stays bare), which stays on the argv:
+  the job logs its name as `secret_env_on_argv` and `doctor` names the ones you configured, so rename it to take it off.
   (Not on the `openshell` venue, issue #684: there every secret value goes into the job's OpenShell provider and the
   agent holds a placeholder, so neither the sandbox nor any argv carries it; see the venue's row under Trust
   boundaries.)
@@ -1474,8 +1481,9 @@ Stated openly rather than discovered later:
   beside it). Every job's forge token rests there. pi-dispatch cannot stop that and does not scrub it. A
   minted App installation token expires in about an hour, so its copy is dead soon after; a long-lived PAT,
   a `gh` login, a GitLab or a Forgejo token stays usable there for as long as the token does. The provider
-  API key, every `run.secretsProfile` value, every project secret bundle value and every `PI_FORWARD_ENV` value a job carries rest there too, as the same `-e NAME=VALUE`
-  the paragraph on secret profiles describes, and those have no expiry at all; the provider key can spend
+  API key, every `run.secretsProfile` value, every project secret bundle value and every `PI_FORWARD_ENV` value a job carries rest there too, in the same create request
+  the paragraph on secret profiles describes (a bare `-e NAME` since issue #1114 keeps a value off the argv, not out of
+  that request), and those have no expiry at all; the provider key can spend
   money. The App path does not close that. Set a spend limit on the provider key, rotate any key or secret
   you suspect, and treat that folder as a secret store. Outside jobs, the same log gets the Valkey password
   (`pi-dispatch up`, and the `docker run` doctor's Valkey fix shows, pass `-e VALKEY_PASSWORD`; the compose

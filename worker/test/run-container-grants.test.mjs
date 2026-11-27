@@ -5,6 +5,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { grantText } from "../src/endpoint-grants.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { containerEnvOf } from "./helpers/container-env.mjs";
 
 // Issue #918 (DES-PRIVATE-ENDPOINT-GRANTS): the grant at the container's start. run-container imports env-allowlist ->
 // @earendil-works/pi-ai, so this skips below the node floor and runs in CI, as run-container.test.mjs does.
@@ -138,15 +139,21 @@ test("the granted job's env names each endpoint's host and port, and nothing els
 	const dir = tempDir("pi-grants-run-");
 	const fs = cidFs();
 	let runArgs = null;
+	let runOpts = null;
 	const rec = docker({ fs, dir });
-	const spawnFn = (cmd, args) => {
-		if (args[0] === "run") runArgs = args;
-		return rec.spawnFn(cmd, args);
+	const spawnFn = (cmd, args, opts) => {
+		if (args[0] === "run") {
+			runArgs = args;
+			runOpts = opts;
+		}
+		return rec.spawnFn(cmd, args, opts);
 	};
 	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn, fs, egress: true, grantsDir: dir, detachedCheck: instantCheck() });
 	await run({ job: JOB, prepared: { ...PREPARED }, name: NAME, signal: new AbortController().signal, privateEndpoints: [BENCH] });
-	const env = runArgs.flatMap((a, i, all) => (a === "-e" ? [all[i + 1]] : [])).filter((e) => e.startsWith("PI_DISPATCH_ENDPOINT_"));
-	assert.deepEqual(env.sort(), ["PI_DISPATCH_ENDPOINT_BENCH_DEVICE_HOST=10.0.5.20", "PI_DISPATCH_ENDPOINT_BENCH_DEVICE_PORT=22"]);
+	const env = Object.entries(containerEnvOf(runArgs, runOpts)).filter(([k]) => k.startsWith("PI_DISPATCH_ENDPOINT_"));
+	assert.deepEqual(env.sort(), [["PI_DISPATCH_ENDPOINT_BENCH_DEVICE_HOST", "10.0.5.20"], ["PI_DISPATCH_ENDPOINT_BENCH_DEVICE_PORT", "22"]]);
+	// Structural, so on the argv with their values (issue #1114 moves only credentials).
+	assert.ok(runArgs.includes("PI_DISPATCH_ENDPOINT_BENCH_DEVICE_HOST=10.0.5.20"));
 });
 
 test("a job granted nothing still has a stale grant in its subnet cleared before it runs: the guarantee, not only granted jobs' (#918 review)", { skip }, async () => {

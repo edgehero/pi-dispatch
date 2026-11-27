@@ -1290,6 +1290,9 @@ export function makeOpenshellBackend(opts = {}) {
 		bin: "openshell",
 		// The sandbox's own name; PI_JOB_ID in the env stays the container name, which the exit line and its MAC carry.
 		buildArgs: (built) => openshellExecArgs({ name: sandboxNameOf(built.name), env: built.env, gateway, mode, secretFileNames: built.secretFileNames ?? [] }),
+		// Issue #1114: no client env. The exec carries no bare name (only `isNonSecretEnvKey` names, as values) and the
+		// secrets ride the provider, so its spawn keeps exactly the options it had, with no `env`.
+		clientEnv: null,
 		// Issue #704 part 3: a bundle's plain variables reach the runner by file (`BUNDLE_ENV_FILE`), never the exec.
 		bundleEnvFile: true,
 		secretFilesBackend: binding ? "openshell-bind" : "openshell",

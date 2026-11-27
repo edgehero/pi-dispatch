@@ -4,6 +4,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { containerEnvOf } from "./helpers/container-env.mjs";
 
 // run-container imports env-allowlist -> @earendil-works/pi-ai, so this skips below the node floor and runs in CI
 // (PI_DISPATCH_REQUIRE_WORKER_TESTS=1 makes a skip a hard failure), run-container.test.mjs's rule.
@@ -21,10 +22,11 @@ const HOST = { ANTHROPIC_API_KEY: "sk-real" };
 const JOB = { kind: "local", provider: "anthropic", model: "m", maxTurns: 5 };
 const MIN = 60_000;
 
-/** A `docker` child the test ends by hand (`close(code)`), recording the argv. */
+/** A `docker` child the test ends by hand (`close(code)`), recording the argv and the spawn's options. */
 function heldSpawn(recorder) {
-	return (cmd, args) => {
+	return (cmd, args, opts) => {
 		recorder.args = args;
+		recorder.opts = opts;
 		const child = new EventEmitter();
 		child.stdout = new EventEmitter();
 		child.stderr = new EventEmitter();
@@ -33,7 +35,8 @@ function heldSpawn(recorder) {
 	};
 }
 
-const envOf = (args) => Object.fromEntries(args.flatMap((arg, i, all) => (arg === "-e" ? [all[i + 1].split(/=(.*)/s).slice(0, 2)] : [])));
+// Issue #1114: through the argv AND the spawn's env, so a bare name the client was given and one it was not read apart.
+const envOf = (recorder) => containerEnvOf(recorder.args, recorder.opts);
 
 /** A run with the watch asked for, on a binding venue, with a fake clock and a timer the test ticks. */
 function watchedRun({ activityWatch = { idleMs: 15 * MIN, stallMs: 240 * MIN, keepWallClock: false }, stageLive, credentialRefresh = null, subscriptionAuth = [], makeCredentialDirectory, stageRun, openLiveTranscript = null, job = JOB, checkpoint = null, recover = false } = {}) {
@@ -77,7 +80,7 @@ function watchedRun({ activityWatch = { idleMs: 15 * MIN, stallMs: 240 * MIN, ke
 test("a watched run on a binding venue stages the transcript, hands the runner its limits and the wall clock over to the watch", { skip }, async () => {
 	const { h, recorder, done } = watchedRun();
 	await new Promise((resolve) => setImmediate(resolve));
-	const env = envOf(recorder.args);
+	const env = envOf(recorder);
 	assert.equal(env.PI_JOB_IDLE_MS, String(15 * MIN));
 	assert.equal(env.PI_JOB_STALL_MS, String(240 * MIN));
 	assert.equal(env.PI_SESSION_FILE, "/session/current.jsonl", "the counters' directory is mounted");
@@ -113,8 +116,8 @@ test("the backstop reads the counters beside the session file and stops a run wh
 test("a run that must keep its wall clock is watched but never hands it over", { skip }, async () => {
 	const { h, recorder, done } = watchedRun({ activityWatch: { idleMs: 15 * MIN, stallMs: null, keepWallClock: true } });
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(envOf(recorder.args).PI_JOB_IDLE_MS, String(15 * MIN), "the runner still stops it when idle");
-	assert.equal(envOf(recorder.args).PI_JOB_STALL_MS, undefined);
+	assert.equal(envOf(recorder).PI_JOB_IDLE_MS, String(15 * MIN), "the runner still stops it when idle");
+	assert.equal(envOf(recorder).PI_JOB_STALL_MS, undefined);
 	assert.equal(h.armed, 0);
 	recorder.close(0);
 	await done;
@@ -125,7 +128,7 @@ test("with no channel for the counters the runner is asked for nothing and the r
 		throw new Error("no room");
 	} });
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(envOf(recorder.args).PI_JOB_IDLE_MS, undefined);
+	assert.equal(envOf(recorder).PI_JOB_IDLE_MS, undefined);
 	assert.equal(h.armed, 0, "the job keeps the wall clock");
 	assert.ok(h.logs.some((l) => l.event === "idle_watch_unavailable" && l.reason === "no-transcript"));
 	recorder.close(0);
@@ -140,7 +143,7 @@ test("without the watch asked for, the run is exactly as before: no variable, no
 	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: heldSpawn(recorder) });
 	const done = run({ job: JOB, prepared: { workspace: "/host/w", jobDir: "/host/jobs/j9" }, name: "pi-job-act-9", onActivityArmed: () => (armed += 1), noteActivity: (f) => noted.push(f) });
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(envOf(recorder.args).PI_JOB_IDLE_MS, undefined);
+	assert.equal(envOf(recorder).PI_JOB_IDLE_MS, undefined);
 	recorder.close(0);
 	await done;
 	assert.equal(armed, 0);
@@ -153,7 +156,7 @@ test("issue #888, part 3: an expiring credential with a renewal armed is mounted
 	await new Promise((resolve) => setImmediate(resolve));
 	const folder = `${jobDir}.credentials`;
 	assert.ok(recorder.args.includes(`${folder}:/run/pi-dispatch/credentials:ro`), recorder.args.join(" "));
-	assert.equal(envOf(recorder.args).PI_CREDENTIAL_REFRESH, "1");
+	assert.equal(envOf(recorder).PI_CREDENTIAL_REFRESH, "1");
 	assert.equal(h.armed, 1, "renewed credentials no longer need the 30-minute bound");
 	recorder.close(0);
 	await done;
@@ -164,7 +167,7 @@ test("issue #888, part 3: an expiring credential with a renewal armed is mounted
 test("issue #888, part 3: an expiring credential with no renewal keeps the wall clock, and the record says why", { skip }, async () => {
 	const { h, recorder, done } = watchedRun({ activityWatch: { idleMs: 15 * MIN, stallMs: null, keepWallClock: true, why: "subscription" } });
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(envOf(recorder.args).PI_CREDENTIAL_REFRESH, undefined);
+	assert.equal(envOf(recorder).PI_CREDENTIAL_REFRESH, undefined);
 	assert.equal(h.armed, 0);
 	assert.ok(h.noted.some((n) => n.basis === "wall-clock" && n.why === "subscription"), JSON.stringify(h.noted));
 	recorder.close(0);
@@ -254,14 +257,14 @@ test("issue #1055: the job's ceiling and what is left of it are read when the en
 	let reads = 0;
 	const { recorder, done } = timedRun({ limitMs: 60 * MIN, left: () => ((reads += 1), 42 * MIN + 0.75) });
 	await new Promise((resolve) => setImmediate(resolve));
-	const env = envOf(recorder.args);
+	const env = envOf(recorder);
 	assert.deepEqual([env.PI_JOB_MAX_MS, env.PI_JOB_LEFT_MS, reads], [String(60 * MIN), String(42 * MIN), 1], "floored, read once");
 	recorder.close(0);
 	await done;
 	for (const [timeLimit, why] of [[undefined, "no ceiling"], [null, "none handed"], [{ limitMs: 60 * MIN, left: () => { throw new Error("clock"); } }, "a reader that throws"], [{ limitMs: 60 * MIN, left: () => Number.NaN }, "not a number"], [{ limitMs: 60 * MIN, left: () => 0 }, "nothing left"]]) {
 		const quiet = timedRun(timeLimit);
 		await new Promise((resolve) => setImmediate(resolve));
-		const quietEnv = envOf(quiet.recorder.args);
+		const quietEnv = envOf(quiet.recorder);
 		assert.deepEqual([quietEnv.PI_JOB_MAX_MS, quietEnv.PI_JOB_LEFT_MS], [undefined, undefined], why);
 		quiet.recorder.close(0);
 		await quiet.done;

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { containerEnvOf } from "./helpers/container-env.mjs";
 import { makeRunContainer } from "../src/run-container.mjs";
 import { makeLogSink } from "../src/run-history.mjs";
 import { SECRET_FILES_DIR_SUFFIX, SECRET_FILES_SUBDIR } from "../src/secret-files.mjs";
@@ -28,13 +29,16 @@ test("a real staged secret is 0600 outside the workspace, paths alone enter argv
 	const path = join(root, SECRET_FILES_SUBDIR, "DEVICE_SSH_KEY");
 	const logsDir = tempDir("secret-file-logs-");
 	const output = [];
-	const run = makeRunContainer({ image: "image:pinned", hostEnv: { ANTHROPIC_API_KEY: "provider-test-value" }, onOutput: (c) => output.push(Buffer.from(c)), openJobLog: makeLogSink({ logsDir, enabled: true }), spawnFn: (_bin, args) => {
+	const run = makeRunContainer({ image: "image:pinned", hostEnv: { ANTHROPIC_API_KEY: "provider-test-value" }, onOutput: (c) => output.push(Buffer.from(c)), openJobLog: makeLogSink({ logsDir, enabled: true }), spawnFn: (_bin, args, opts) => {
 		assert.equal(readFileSync(path, "utf8"), VALUE);
 		assert.equal(statSync(path).mode & 0o777, 0o600);
 		assert.equal(statSync(path).uid, process.geteuid());
 		assert.ok(args.includes(`${join(root, SECRET_FILES_SUBDIR)}:/run/secrets:ro`));
-		assert.ok(args.includes("DEVICE_SSH_KEY=/run/secrets/DEVICE_SSH_KEY"));
+		// Issue #1114: the path variable's name is not a structural one, so it travels bare like any other; its value is
+		// still the path, and the file's contents are in neither the argv nor the client's environment.
+		assert.equal(containerEnvOf(args, opts).DEVICE_SSH_KEY, "/run/secrets/DEVICE_SSH_KEY");
 		assert.ok(!args.join(" ").includes(VALUE));
+		assert.ok(!Object.values(containerEnvOf(args, opts)).some((v) => v.includes(VALUE.slice(0, 40))));
 		return child((c) => {
 			c.stdout.emit("data", Buffer.from(VALUE.slice(0, 40)));
 			c.stderr.emit("data", Buffer.from("unrelated diagnostic\n"));
@@ -89,13 +93,26 @@ test("log opening, output collection and venue teardown failures cannot retain s
 
 test("an ungranted job creates no directory, mount or file-path environment", async () => {
 	const prepared = fixture();
-	const run = makeRunContainer({ image: "image:pinned", hostEnv: { ANTHROPIC_API_KEY: "provider-test-value" }, onOutput() {}, spawnFn: (_bin, args) => {
+	const run = makeRunContainer({ image: "image:pinned", hostEnv: { ANTHROPIC_API_KEY: "provider-test-value" }, onOutput() {}, spawnFn: (_bin, args, opts) => {
 		assert.ok(!args.join(" ").includes("/run/secrets"));
 		assert.ok(!args.join(" ").includes("PI_SECRET_FILES"));
+		assert.ok(!Object.values(containerEnvOf(args, opts)).some((v) => v.includes("/run/secrets")), "nor through the client's environment");
 		return child((c) => c.emit("close", 0));
 	} });
 	await run({ job: JOB, prepared, name: "ungranted", signal: new AbortController().signal });
 	assert.equal(existsSync(`${prepared.jobDir}${SECRET_FILES_DIR_SUFFIX}`), false);
+});
+
+test("issue #1114: a file secret's path variable is never named as a credential kept on the argv, whatever its name", async () => {
+	// SSH_KEY_FILE is a name the client guard holds, so it stays `-e NAME=VALUE`; its value is the file's path, never the
+	// secret, so the job's log line leaves it out, as the redactor and doctor do.
+	const prepared = fixture();
+	const logs = [];
+	let argv = null;
+	const run = makeRunContainer({ image: "image:pinned", hostEnv: { ANTHROPIC_API_KEY: "provider-test-value" }, onOutput() {}, log: (event, fields) => logs.push([event, fields]), spawnFn: (_bin, args) => ((argv = args), child((c) => c.emit("close", 0))) });
+	await run({ job: JOB, prepared, secretFiles: { SSH_KEY_FILE: VALUE }, secrets: { SSH_DEPLOY_KEY: "sk-test-guarded-secret" }, name: "file-secret-log", signal: new AbortController().signal });
+	assert.ok(argv.includes("SSH_KEY_FILE=/run/secrets/SSH_KEY_FILE"), "the path variable is inline");
+	assert.deepEqual(logs.filter(([event]) => event === "secret_env_on_argv").map(([, f]) => f.names), [["SSH_DEPLOY_KEY"]], "a guarded run secret is named, the path variable is not");
 });
 
 test("OpenShell files are input-only transfers and structural paths, never provider placeholders", () => {

@@ -217,6 +217,24 @@ test("a policy read back different from the one written never starts the job, an
 	assert.ok(logs.some(([e]) => e === "openshell_policy_mismatch"));
 });
 
+test("issue #1114: the openshell bundle passes no client env, so its exec spawns with exactly the options it had and no env at all", { skip }, async () => {
+	let built = null;
+	const seam = (options) => ((built = options), async () => ({ code: 0 }));
+	for (const mode of ["copy", "bind"]) {
+		bundle(fakeOpenshell(), { mode, makeRunContainer: seam });
+		assert.equal(built.clientEnv, null, `${mode}: no bare name on the exec, so nothing for a client env to hold`);
+	}
+	// A run through the bundle's real run function: the exec's spawn options are the stdio alone.
+	const fake = fakeOpenshell();
+	const opened = [];
+	const spawnFn = (cmd, args, opts) => (args.includes("exec") && opened.push(opts), fake.spawnFn(cmd, args, opts));
+	const dirs = jobDirs();
+	const result = await bundle({ ...fake, spawnFn }).runContainer({ job: JOB, prepared: { jobDir: dirs.jobDir, workspace: dirs.workspace, live: dirs.live }, name: "pi-job-j1", signal: new AbortController().signal });
+	assert.equal(result.code, 0);
+	assert.equal(opened.length, 1);
+	assert.deepEqual(Object.keys(opened[0]), ["stdio"]);
+});
+
 test("an openshell run is counted where local's are, from before the sandbox is created to the end of its delete (issue #1023)", { skip }, async () => {
 	// The sandbox retention sweep waits for a starting job container and takes small passes beside a running one. Here
 	// the start is the sandbox's create, policy read-back and upload, all before the exec.
