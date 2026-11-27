@@ -410,11 +410,16 @@ jobs:
       #   - scheduler jobs bypass maxStalledCount (stall carve-out)  -> specs/constitution.md:203-216
       # Exercised by worker/test/cron.integration.test.mjs (VALKEY_TEST_URL + PI_DISPATCH_REQUIRE_WORKER_TESTS gate it live).
       - name: Contract tests -- guardrails, -nc, exit codes, env allowlist, queue, receiver enqueue, cron (all required)
+        id: suite
         env:
           PI_DISPATCH_REQUIRE_LOADER_TESTS: "1"
           PI_DISPATCH_REQUIRE_WORKER_TESTS: "1"
           PI_DISPATCH_REQUIRE_RECEIVER_TESTS: "1"
           VALKEY_TEST_URL: "redis://127.0.0.1:6379"
+          # Issue #1102: every connection a test opens off this machine is refused and written to this log, which the
+          # next step reads. Outside $TMPDIR, so the count below never sees it.
+          NODE_OPTIONS: "--import file://${{ github.workspace }}/.github/scripts/offline-tests.mjs"
+          OFFLINE_TESTS_LOG: "${{ runner.temp }}/offline-tests.jsonl"
         run: |
           # Issue #351's ORACLE, and the reason the grep guard one step up is not enough: that one sees
           # a call shape, this one measures the defect. A test file that makes a temp directory and never
@@ -438,6 +443,7 @@ jobs:
           export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/suite-tmpdir"
           rm -rf "$TMPDIR"
           mkdir -p "$TMPDIR"
+          rm -f "$OFFLINE_TESTS_LOG"
           npm test
           # Two fixed-name caches are made by TOOLING rather than by any test: `node-compile-cache` is
           # Node's own, and `jiti` is the transpiler pi's node_modules brings in for the admin tests.
@@ -451,6 +457,40 @@ jobs:
             echo "::error::The suite left $left entries in its own TMPDIR. Every test directory must come from the workspace helper (import { tempDir } from \"./helpers/temp-dir.mjs\"), which removes them in an after() hook. See issue #351."
             exit 1
           fi
+
+      # Issue #1102. This job's name says offline, and until this step nothing made it so: the worker's start-wiring
+      # tests booted on the real GitHub sign-in, which sends `gh`'s token to api.github.com wherever `gh` is logged in,
+      # and all of them passed with that connection refused. A test that tolerates a refused connect passes anyway, so
+      # the suite's verdict cannot catch one; the LOG the preload writes is the oracle, as the TMPDIR count is issue
+      # #351's. Any line fails the job, and so does a MISSING log: the preload makes it, empty, as it loads, so no file
+      # means a later NODE_OPTIONS dropped the preload and nothing was refused or counted.
+      #
+      # AFTER A RED SUITE TOO, unlike the count: a connection refused in a run that did not finish is still a test that
+      # reached out, and one push then reports both. Not when the suite step never ran.
+      #
+      # ONLY THIS RUN IS WATCHED, on the count's own ground: every run is the same suite, so a test that reaches out
+      # does so here. The 399-day run keeps its clock preload alone. The preload hands itself on to every Node child,
+      # one with an environment of its own included; it cannot see a worker thread, a child that is not Node (`gh`,
+      # `git`, `curl`), or UDP and bare DNS queries. .github/scripts/offline-tests.mjs says why for each.
+      # Quoted, for the browser step's reason below: unquoted, YAML reads " #1102)" as a comment.
+      - name: "No test opened a connection to another machine (issue #1102)"
+        if: (success() || failure()) && steps.suite.outcome != 'skipped'
+        env:
+          OFFLINE_TESTS_LOG: "${{ runner.temp }}/offline-tests.jsonl"
+        run: |
+          if [ ! -f "$OFFLINE_TESTS_LOG" ]; then
+            echo "::error::The offline log OFFLINE_TESTS_LOG names is missing, so .github/scripts/offline-tests.mjs never loaded in the suite: no connection was refused or counted. Check that the suite step's NODE_OPTIONS still imports it. See issue #1102."
+            exit 1
+          fi
+          if [ -s "$OFFLINE_TESTS_LOG" ]; then
+            echo "connections refused, by host, port and test file:"
+            sed -E 's/,"stack":.*//' "$OFFLINE_TESTS_LOG" | sort | uniq -c | sort -rn | head -20
+            echo "the first one, with the stack that names its caller:"
+            head -n 1 "$OFFLINE_TESTS_LOG" | cut -c 1-4000
+            echo "::error::The suite opened $(grep -c '' "$OFFLINE_TESTS_LOG") connections to other machines, each refused. Inject the fake the code under test already accepts (a stub fetch, a loopback server, a factory option) instead. To see every caller, run the file from the repository root with NODE_OPTIONS=\"--import \$PWD/.github/scripts/offline-tests.mjs\" and OFFLINE_TESTS_LOG set to a file. See issue #1102."
+            exit 1
+          fi
+          echo "no test opened a connection to another machine"
 
       # The suite above can report success while silently losing tests, which is the failure issue #266
       # was: `fail 0`, exit 0, and three tests missing from the output entirely. This compares what

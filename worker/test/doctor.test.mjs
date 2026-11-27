@@ -7173,9 +7173,15 @@ test("a job image whose runner predates issue #427 is named once, and neither di
 	assert.ok(calls.some((c) => c.args.slice(0, 2).join(" ") === "network rm"), "and the canary network is still removed");
 });
 
-test("the canary script's exits are real: 4 only for a missing module, 3 for a blocked request, 5 for any load that fails", () => {
+test("the canary script's exits are real: 4 only for a missing module, 3 for a blocked request, 5 for any load that fails", async () => {
 	const dir = tempDir("pi-canary-script-");
-	const run = (modulePath) => spawnSync(process.execPath, ["-e", egressCanaryScript("http://pi-dispatch-427.invalid/").replace(JSON.stringify(EGRESS_CANARY_RUNNER_MODULE), JSON.stringify(modulePath))], { encoding: "utf8", timeout: 30_000 });
+	// The blocked request is refused on this machine (issue #1102): a loopback port nothing listens on answers at once,
+	// where an `.invalid` name was a lookup handed to the resolver.
+	const closed = createServer();
+	await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
+	const { port } = closed.address();
+	await new Promise((resolve) => closed.close(resolve));
+	const run = (modulePath) => spawnSync(process.execPath, ["-e", egressCanaryScript(`http://127.0.0.1:${port}/`).replace(JSON.stringify(EGRESS_CANARY_RUNNER_MODULE), JSON.stringify(modulePath))], { encoding: "utf8", timeout: 30_000 });
 	assert.equal(run(join(dir, "absent.mjs")).status, EGRESS_CANARY_STALE_RUNNER);
 	writeFileSync(join(dir, "ok.mjs"), "export async function loadPiThenRestore() { return true; }\n");
 	const blocked = run(join(dir, "ok.mjs"));

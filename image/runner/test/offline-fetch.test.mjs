@@ -35,6 +35,8 @@ const outcome = (start) => new Promise((resolve) => {
 });
 const viaRequest = (mod, url) => outcome((done) => mod.get(url, (res) => { res.resume(); done(null); }).on("error", done));
 const viaSocket = (...args) => outcome((done) => { const socket = net.connect(...args); socket.once("connect", () => { socket.destroy(); done(null); }); socket.once("error", done); });
+// Socket.prototype.connect called directly, whose arguments the preload reads by net's own rule (issue #1102).
+const viaRawSocket = (...args) => outcome((done) => { const socket = new net.Socket(); socket.connect(...args); socket.once("connect", () => { socket.destroy(); done(null); }); socket.once("error", done); });
 // undici reports a refused socket as "fetch failed", with the refusal as its cause.
 const viaFetch = (impl, url) => outcome((done) => impl(url).then(() => done(null), (error) => done(error?.cause ?? error)));
 const undici = createRequire(import.meta.url)(${JSON.stringify(UNDICI)});
@@ -52,10 +54,14 @@ const results = {
 	netByName: await viaSocket({ host: "example.invalid", port: 443 }),
 	netByAddress: await viaSocket(443, "192.0.2.1"),
 	netLooksLoopback: await viaSocket({ host: "127.example.invalid", port: 443 }),
+	rawHexPort: await viaRawSocket("0x1bb", "example.invalid"),
+	rawSpacedPort: await viaRawSocket(" 443", "192.0.2.1"),
 };
 // Every lookup up to here, before the loopback control (which looks its own address up).
 const before = [...lookups];
 results.loopback = await viaRequest(http, local);
+// A port and a callback: no host, so localhost, which net dials.
+results.loopbackPortCallback = await outcome((done) => { const socket = new net.Socket(); socket.connect(server.address().port, () => { socket.destroy(); done(null); }); socket.once("error", done); });
 server.close();
 process.stdout.write(JSON.stringify({ results, lookups: before }));
 `;
@@ -67,8 +73,9 @@ test("the offline preload refuses every way out to a host that is not loopback, 
 	const run = spawnSync(process.execPath, [`--import=${PRELOAD}`, script], { encoding: "utf8", timeout: 50_000, env: { PATH: process.env.PATH, OFFLINE_FETCH_LOG: join(dir, "log.jsonl"), NODE_OPTIONS: process.env.NODE_OPTIONS ?? "" } });
 	assert.equal(run.status, 0, run.stderr);
 	const { results, lookups } = JSON.parse(run.stdout);
-	for (const way of ["http", "httpName", "https", "undiciFetch", "netByName", "netByAddress", "netLooksLoopback"]) assert.match(results[way], /^offline: an outbound connection was refused$/, `${way}: ${results[way]}`);
+	for (const way of ["http", "httpName", "https", "undiciFetch", "netByName", "netByAddress", "netLooksLoopback", "rawHexPort", "rawSpacedPort"]) assert.match(results[way], /^offline: an outbound connection was refused$/, `${way}: ${results[way]}`);
 	assert.match(results.fetch, /^offline: no such route$/, "fetch is pinned to the fake, which answers no other route");
 	assert.deepEqual(lookups, [], "refused before any name was looked up");
 	assert.equal(results.loopback, "connected", "a loopback server is still reached");
+	assert.equal(results.loopbackPortCallback, "connected", "a port and a callback mean localhost, not a host to refuse");
 });
