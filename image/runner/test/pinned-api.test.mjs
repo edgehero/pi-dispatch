@@ -1968,6 +1968,44 @@ test("issue #985: each priced api module awaits the hook once, and its single se
 	assert.match(codex, /const compressedBody = compressRequestBodyZstd\(bodyJson\);[\s\S]*?const sseBody = compressedBody \?\? bodyJson;/, "codex's SSE body is no longer the hook's result, compressed or not");
 });
 
+test("issues #1067 and #1059: what the final-payload check reads where pi writes it: google's signal and continuation switch in the body's config, mistral's camelCase cap", { skip }, async () => {
+	// The cost guard copies the final body (cloneBody): google's two apis put the call's AbortSignal in it, which the copy
+	// keeps by reference, there and nowhere else, so @google/genai still listens on the caller's signal, and write
+	// `automaticContinuation: false`, without which the SDK makes more requests for one checked call, so the guard refuses
+	// a body that lacks it. A bump that moves the signal or drops the switch fails here, not as every Google call refused
+	// under a cap.
+	for (const name of ["google-generative-ai.js", "google-vertex.js"]) {
+		const source = nestedPiAi("api", name);
+		const build = piFunction(source, "buildParams");
+		assert.equal(source.match(/automaticContinuation: false,/g)?.length, 1, `${name}: automaticContinuation is no longer written false once`);
+		assert.match(build, /const config = \{[^;]*\n\s*automaticContinuation: false,\n\s*\};/, `${name}: automaticContinuation: false is no longer in the body's config`);
+		assert.match(build, /if \(options\.signal\) \{\s*if \(options\.signal\.aborted\) \{\s*throw new Error\("Request aborted"\);\s*\}\s*config\.abortSignal = options\.signal;\s*\}/, `${name}: the call's signal is no longer config.abortSignal`);
+		assert.match(build, /const params = \{\s*model: model\.id,\s*contents,\s*config,\s*\};\s*return params;/, `${name}: that config is no longer the body's`);
+	}
+	// The @google/genai file pi-ai loads: both modules import it as ESM, so it is the package's export for node, import.
+	for (const name of ["google-generative-ai.js", "google-vertex.js"]) assert.match(nestedPiAi("api", name), /^import \{ GoogleGenAI, [^}]*\} from "@google\/genai";$/m, `${name} no longer imports @google/genai as a module`);
+	const { findPackageJSON } = await import("node:module");
+	const genaiPackage = findPackageJSON("@google/genai", resolvePiAiCompat()[0].url);
+	const genai = readFileSync(join(dirname(genaiPackage), JSON.parse(readFileSync(genaiPackage, "utf8")).exports["."].node.import), "utf8");
+	// Missing (or null) means on.
+	assert.match(genai, /function shouldEnableAutomaticContinuation\(config, defaultEnabled = true\) \{\s*if \(!config\) \{\s*return defaultEnabled;\s*\}\s*if \(config\.automaticContinuation === undefined \|\|\s*config\.automaticContinuation === null\) \{\s*return defaultEnabled;\s*\}\s*return Boolean\(config\.automaticContinuation\);\s*\}/, "@google/genai's automatic continuation is no longer on unless the body says otherwise");
+	// The kept signal is never sent: the streamed request's body is built from model, contents and named config fields
+	// only, and `config.abortSignal` goes beside it as the request's signal. So nothing the signal carries, a toJSON on
+	// its prototype included, reaches the wire.
+	for (const [to, httpOptions, abortSignal] of [["Vertex", "_a", "_b"], ["Mldev", "_c", "_d"]]) {
+		assert.match(genai, new RegExp(`const body = generateContentParametersTo${to}\\(this\\.apiClient, params\\);\\s*path = formatMap\\('\\{model\\}:streamGenerateContent\\?alt=sse', body\\['_url'\\]\\);[^]*?body: JSON\\.stringify\\(body\\),\\s*httpMethod: 'POST',\\s*httpOptions: \\(${httpOptions} = params\\.config\\) === null \\|\\| ${httpOptions} === void 0 \\? void 0 : ${httpOptions}\\.httpOptions,\\s*abortSignal: \\(${abortSignal} = params\\.config\\) === null \\|\\| ${abortSignal} === void 0 \\? void 0 : ${abortSignal}\\.abortSignal,`), `the ${to} stream request no longer sends a body built apart from config.abortSignal`);
+		const parameters = piFunction(genai, `generateContentParametersTo${to}`);
+		assert.deepEqual(parameters.match(/getValueByPath\(fromObject, \[[^\]]*\]\)/g), ["getValueByPath(fromObject, ['model'])", "getValueByPath(fromObject, ['contents'])", "getValueByPath(fromObject, ['config'])"], `generateContentParametersTo${to} reads more than model, contents and config`);
+		assert.match(parameters, new RegExp(`setValueByPath\\(toObject, \\['generationConfig'\\], generateContentConfigTo${to}\\(apiClient, fromConfig, toObject\\)\\);`), `generateContentParametersTo${to} no longer converts config field by field`);
+		assert.doesNotMatch(piFunction(genai, `generateContentConfigTo${to}`), /abortSignal|Object\.|\.\.\.|for \(/, `generateContentConfigTo${to} no longer copies named fields only`);
+	}
+	// Issue #1059: mistral-conversations writes its cap at the top level, camelCase; toMistralWirePayload (hashed in the
+	// test above) renames it to max_tokens, replacing one already there, which is why the check reads it in place of it.
+	const mistral = piFunction(nestedPiAi("api", "mistral-conversations.js"), "buildChatPayload");
+	assert.match(mistral, /if \(options\?\.maxTokens !== undefined\)\s*payload\.maxTokens = options\.maxTokens;/, "mistral no longer writes its cap as top-level maxTokens");
+	assert.doesNotMatch(mistral, /payload\.max_tokens\b/, "mistral now writes max_tokens itself");
+});
+
 test("issue #985: a deferred call's placeholder on pi's own AssistantMessageEventStream: push and end resolve result() as makeDeferredStream relies on", { skip }, async () => {
 	// The placeholder is a stream from the factory the hard stop uses (createAssistantMessageEventStream). It copies the
 	// retried call's events with push() and ends with end(result): push() of a terminal event resolves result() with
