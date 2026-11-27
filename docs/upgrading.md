@@ -444,6 +444,23 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: an unknown cost on a subscription call no longer holds the billed dollar windows (#1058)
+
+A job that mixed an API key with a subscription connection without paid extra usage settled every dollar window at its
+whole hold when one subscription call came back with no price or with broken usage, although that call bills nothing.
+A job image from this release counts those calls apart, and a worker from this release settles such a job to its
+billed cost; one billed call whose cost is unknown still settles at the floor. A console from this release reads the
+same rule for `≥` and shows the split on the run page. It takes the job image, the worker and the console.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Run record `tokens.unpricedNotional`, `tokens.costUnreportedNotional` | New, additive: right after `tokens.costNotional`, only on a job with subscription entries, how many of the `unpriced` and `costUnreported` calls were on a subscription without paid extra usage, each part of its count. `v` stays 1, and an older reader ignores them. No migration or older-state detector is needed. |
+| Run record `dollars` | Same keys. Such a mixed job now records `basis` `metered` at its billed cost where it recorded `floor` at its whole hold. Older records keep what they say. |
+| Child ledgers (in the job, never kept) | Version 5: each row may count its subscription calls that were unpriced or had broken usage. A child writes at most 100 rows (120 before). A runner and its children are always one image, so no job holds two versions. |
+| Mixed versions | Either one older keeps today's floor, in both directions: an older image writes no counts, so a newer worker floors such a job as before; an older worker drops the counts and floors it as before. An older console's cost views show such a run's dollar as `≥`, and its run page shows the counts without the split; a newer console reads a record without the counts as before. Upgrade the image, the worker and the console together. |
+
+See [cost analytics](costs.md#a-subscription-call-whose-cost-is-unknown).
+
 ### Unreleased: a Google model under a cost cap makes its calls again (#1067, #1059)
 
 A job image from this release sends a Google call (google-generative-ai, google-vertex) under a cost cap. The cap's

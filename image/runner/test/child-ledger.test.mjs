@@ -21,7 +21,7 @@ import {
 	spentFile,
 	USAGE_ID_PATTERN,
 } from "../src/usage-meter.mjs";
-import { MODEL_REF_PATTERN } from "../../../worker/src/model-ref.mjs";
+import { MAX_ALLOWED_MODELS, MODEL_REF_PATTERN } from "../../../worker/src/model-ref.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
@@ -41,7 +41,7 @@ const row = (provider, model, fields = {}) => ({ provider, model, calls: 0, inpu
 function ledger({ calls = 1, each = 10, cost = 0.5, unresolved = 0, state = "running", metered = true, extra = {} } = {}) {
 	const rows = calls === 0 ? [] : [row("anthropic", "claude-x", { calls, input: calls * each, total: calls * each, cost: calls * cost })];
 	return {
-		v: 4,
+		v: 5,
 		state,
 		metered,
 		totals: { input: calls * each, output: 0, total: calls * each, cost: calls * cost, calls: calls + unresolved, unresolved, unpriced: 0, sessions: 1 },
@@ -151,7 +151,8 @@ test("parseChildLedger refuses the whole file for any one bad part", () => {
 		"v 1 (before the floor counters)": json({ ...good, v: 1 }),
 		"v 2 (before costUnreported, issue #571)": json({ ...good, v: 2 }),
 		"v 3 (before each row's notional mark, issue #1098)": json({ ...good, v: 3 }),
-		"v 5": json({ ...good, v: 5 }),
+		"v 4 (before each row's notional counts, issue #1058)": json({ ...good, v: 4 }),
+		"v 6": json({ ...good, v: 6 }),
 		"a notional mark above its row's cost": json({ ...good, rows: good.rows.map((r) => ({ ...r, notional: r.cost * 2 })) }),
 		"a notional mark as a string": json({ ...good, rows: good.rows.map((r) => ({ ...r, notional: "0.1" })) }),
 		"a floor counter missing": json({ ...good, costUnanswered: undefined }),
@@ -306,7 +307,7 @@ test("a child meter's own ledger round-trips through the fold, and the parent's 
 	child.observe({ result: () => new Promise(() => {}) }, { sessionId: "c", provider: "anthropic", modelId: "claude-x" });
 	await new Promise((resolve) => setImmediate(resolve));
 	const { metered, rootTotal, otherTotal, looseTotal, ...totals } = child.snapshot();
-	const text = json({ v: 4, state: "running", metered, totals, rows: child.rows(), spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0 });
+	const text = json({ v: 5, state: "running", metered, totals, rows: child.rows(), spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0 });
 	const result = fold(fakeFs({ [NAME_A]: text }));
 	assert.equal(result.unmetered, 0, "the meter's own snapshot and rows() make a ledger the fold accepts");
 	const parent = createUsageMeter({ maxTokens: null, rootSessionId: "p" });
@@ -319,13 +320,16 @@ test("a child meter's own ledger round-trips through the fold, and the parent's 
 	assert.equal(parent.usageSnapshot().models.reduce((sum, r) => sum + r.total, 0), snap.total);
 });
 
-test("a child writing CHILD_LEDGER_ROWS worst-case rows stays under the 64 KiB read cap", () => {
+test("a child writing CHILD_LEDGER_ROWS worst-case rows stays under the 64 KiB read cap, with every row marked and with the 16 a model list allows (#1058)", () => {
 	const id = (prefix, i) => `${prefix}${String(i).padStart(3, "0")}`.padEnd(64, "x");
 	const longest = 1.2345678901234567e300;
-	const rows = Array.from({ length: CHILD_LEDGER_ROWS }, (_, i) => ({
+	const most = Number.MAX_SAFE_INTEGER;
+	// `marked` rows carry the three notional marks (issues #1098 and #1058), each at its longest; a child marks only rows
+	// of its admitted models, at most the model list's MAX_ALLOWED_MODELS.
+	const row = (i, marked) => ({
 		provider: id("p", i),
 		model: id("m", i),
-		calls: Number.MAX_SAFE_INTEGER,
+		calls: most,
 		input: longest,
 		output: longest,
 		cacheRead: longest,
@@ -334,12 +338,21 @@ test("a child writing CHILD_LEDGER_ROWS worst-case rows stays under the 64 KiB r
 		reasoning: longest,
 		total: longest,
 		cost: longest,
-		unpriced: Number.MAX_SAFE_INTEGER,
-		// Issue #1098: the notional mark, at its longest too.
-		notional: longest,
-	}));
-	const text = json({ v: 4, state: "running", metered: true, totals: { input: longest, output: longest, total: longest, cost: longest, calls: Number.MAX_SAFE_INTEGER, unresolved: Number.MAX_SAFE_INTEGER, unpriced: Number.MAX_SAFE_INTEGER, sessions: Number.MAX_SAFE_INTEGER }, rows, spentMicros: Number.MAX_SAFE_INTEGER, inflightMicros: Number.MAX_SAFE_INTEGER, costRefused: Number.MAX_SAFE_INTEGER, modelRefused: Number.MAX_SAFE_INTEGER, boundExceeded: Number.MAX_SAFE_INTEGER, costUnanswered: Number.MAX_SAFE_INTEGER, costUnreported: Number.MAX_SAFE_INTEGER, longContext: Number.MAX_SAFE_INTEGER, costUnjudged: Number.MAX_SAFE_INTEGER });
-	assert.ok(Buffer.byteLength(text) <= CHILD_LEDGER_MAX_BYTES, `${Buffer.byteLength(text)} bytes`);
+		unpriced: most,
+		providerBilled: most,
+		...(marked ? { notional: longest, unpricedNotional: most, costUnreportedNotional: most } : {}),
+	});
+	// Every top-level field too, issue #985's optional ones at their longest (the longest refusal rule, four numbers).
+	const bytes = (rows, marked) => Buffer.byteLength(json({ v: 5, state: "running", metered: true, totals: { input: longest, output: longest, total: longest, cost: longest, calls: most, unresolved: most, unpriced: most, sessions: most }, rows: Array.from({ length: rows }, (_, i) => row(i, i < marked)), spentMicros: most, inflightMicros: most, costRefused: most, modelRefused: most, boundExceeded: most, costUnanswered: most, costUnreported: most, longContext: most, costUnjudged: most, waiting: most, waited: most, liftedMicros: most, refusedWhy: "final-payload", costRefusal: { spentMicros: most, inflightMicros: most, externalMicros: most, boundMicros: most } }));
+	assert.equal(MAX_ALLOWED_MODELS, 16);
+	// The figures CHILD_LEDGER_ROWS's comment and the specs state.
+	assert.equal(bytes(CHILD_LEDGER_ROWS, CHILD_LEDGER_ROWS), 63_951, "every row marked: still read");
+	assert.ok(bytes(CHILD_LEDGER_ROWS, CHILD_LEDGER_ROWS) <= CHILD_LEDGER_MAX_BYTES);
+	assert.equal(bytes(CHILD_LEDGER_ROWS, MAX_ALLOWED_MODELS), 54_459, "the rows a model list allows marked");
+	assert.ok(bytes(CHILD_LEDGER_ROWS, MAX_ALLOWED_MODELS) <= CHILD_LEDGER_MAX_BYTES - 8192, "with 8 KiB to spare");
+	// What 120 rows came to: the room it left, and past the cap with every row marked.
+	assert.deepEqual([bytes(120, MAX_ALLOWED_MODELS), bytes(120, 120)], [64_819, 76_571]);
+	assert.ok(bytes(120, 120) > CHILD_LEDGER_MAX_BYTES);
 	assert.ok(CHILD_LEDGER_ROWS <= CHILD_LEDGER_MAX_ROWS);
 });
 
@@ -362,7 +375,7 @@ function forged({ rows, calls, unresolved = 0 }) {
 	const t = { input: 0, output: 0, total: 0, cost: 0 };
 	for (const r of rows) for (const k of Object.keys(t)) t[k] += r[k];
 	const settled = rows.reduce((sum, r) => sum + r.calls, 0);
-	return { v: 4, state: "running", metered: true, totals: { ...t, calls: calls ?? settled + unresolved, unresolved, unpriced: 0, sessions: 1 }, rows, spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0 };
+	return { v: 5, state: "running", metered: true, totals: { ...t, calls: calls ?? settled + unresolved, unresolved, unpriced: 0, sessions: 1 }, rows, spentMicros: 0, inflightMicros: 0, costRefused: 0, modelRefused: 0, boundExceeded: 0, costUnanswered: 0, costUnreported: 0, longContext: 0, costUnjudged: 0 };
 }
 const FORGED_A = "900.aaaaaaaaaaaaaaaa.json";
 const FORGED_B = "901.bbbbbbbbbbbbbbbb.json";

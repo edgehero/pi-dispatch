@@ -11,7 +11,7 @@ import { fixButton, loadedFoot, loadedList, stateLine, wordsHtml } from "./loade
  * the PATHS rule) are stated once, in `../panels.mjs`'s header.
  */
 import { providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
-import { recordNotionalMicros, recordNotionalProviders, refusedBeforeSpend } from "../../costs.mjs";
+import { notionalFloorPart, recordNotionalMicros, recordNotionalProviders, refusedBeforeSpend } from "../../costs.mjs";
 import { FORK_THINKING_LEVELS } from "../../run-fork.mjs";
 import { forkArchiveFact } from "@edgehero/pi-dispatch/fork-job";
 import { modelIdProblem } from "@edgehero/pi-dispatch/model-ref";
@@ -915,6 +915,20 @@ export function notionalRows(r) {
   ];
 }
 
+/**
+ * A floor counter's cell, the cost card's "Cost unreported" and the Model usage card's "Unpriced calls" (issue #1058):
+ * the count, and when the record says some of those calls were on a subscription with no paid extra usage
+ * (`notionalFloorPart`, the cost fold's reading), how many were billed and how many were not. Only the billed ones keep
+ * the dollar windows at the whole hold. The count as it is otherwise, so a record without the part renders as it did.
+ * Numbers and fixed words only.
+ */
+export function floorCountText(t, key) {
+  const value = t?.[key];
+  const notional = notionalFloorPart(t, key);
+  if (notional === null || notional === 0) return value;
+  return `${count(value - notional)} billed, ${count(notional)} on a subscription (not billed)`;
+}
+
 /** Dollar windows have no soft hold; these are settlement facts, never a promise to spend again. */
 export function settlementText(basis) {
   return ({ metered: "settled from the reported model cost", floor: "the window keeps the whole hold because the full cost was not known", refunded: "the hold was released before the run spent", unreserved: "no dollar hold was reserved" })[basis] ?? "no settlement explanation was recorded";
@@ -941,7 +955,7 @@ export const runCostPanel = withRun("Tokens and dollars", (r, view) => {
     ["Released at the end", d && Number.isFinite(d.reservedMicros) && Number.isFinite(d.settledMicros) ? usdText(Math.max(0, d.reservedMicros - d.settledMicros)) : null],
     ["Token split", t && (t.rootTotal != null || t.otherTotal != null || t.childTotal != null) ? `${count(t.rootTotal ?? 0)} this run, ${count(t.otherTotal ?? 0)} other sessions, ${count(t.childTotal ?? 0)} subprocesses` : null],
     ["Unmetered children", t?.unmeteredChildren],
-    ["Cost unreported", t?.costUnreported],
+    ["Cost unreported", floorCountText(t, "costUnreported")],
     ["Model window", d?.modelBasis ? settlementText(d.modelBasis) : null],
   ])}`;
 });
@@ -1163,7 +1177,7 @@ export function runModels(view) {
   const models = Array.isArray(u.models) ? u.models.filter((m) => m !== null && typeof m === "object" && !Array.isArray(m)) : [];
   // Issue #1008: a row of a provider the record names notional is its list price, not billed, and says so.
   const notional = recordNotionalProviders(r);
-  return titled("Model usage", html`${table("Model usage", ["Provider", "Model", "Calls", "Input", "Output", "Cost"], models.map((m) => html`<tr><td>${m.provider}</td><td>${m.model}</td><td>${count(m.calls)}</td><td>${count(m.input)}</td><td>${count(m.output)}</td><td>${usdText(Number.isFinite(m.cost) ? Math.round(m.cost * 1e6) : null)}${notional?.has(m.provider) ? " notional" : ""}</td></tr>`), "No per-model usage was recorded.")}${facts([["Credential", credential], ["Cache reads", models.reduce((n, m) => n + (m.cacheRead ?? 0), 0)], ["Cache writes", models.reduce((n, m) => n + (m.cacheWrite ?? 0) + (m.cacheWrite1h ?? 0), 0)], ["Unpriced calls", r.tokens?.unpriced], ["No model resolved", r.tokens?.unresolved]])}<p>Priced by pi-ai ${u.piAi ?? "unknown"} at stream time.</p>`);
+  return titled("Model usage", html`${table("Model usage", ["Provider", "Model", "Calls", "Input", "Output", "Cost"], models.map((m) => html`<tr><td>${m.provider}</td><td>${m.model}</td><td>${count(m.calls)}</td><td>${count(m.input)}</td><td>${count(m.output)}</td><td>${usdText(Number.isFinite(m.cost) ? Math.round(m.cost * 1e6) : null)}${notional?.has(m.provider) ? " notional" : ""}</td></tr>`), "No per-model usage was recorded.")}${facts([["Credential", credential], ["Cache reads", models.reduce((n, m) => n + (m.cacheRead ?? 0), 0)], ["Cache writes", models.reduce((n, m) => n + (m.cacheWrite ?? 0) + (m.cacheWrite1h ?? 0), 0)], ["Unpriced calls", floorCountText(r.tokens, "unpriced")], ["No model resolved", r.tokens?.unresolved]])}<p>Priced by pi-ai ${u.piAi ?? "unknown"} at stream time.</p>`);
 }
 
 export function runTail(view) {

@@ -629,7 +629,7 @@ Evidence convention as in `constitution.md`.
   scanned once, so a long line in small chunks costs linear time. The code is still never inferred from provider
   prose: a message that holds the sentence, or even the code, is no evidence. pi-ai's two retryable ChatGPT outages,
   `subscription_sharing_usage_unavailable` and `subscription_sharing_user_unavailable`, are not quota codes. The
-  longest code makes the worst-case line 8,215 characters (the issue #800 paragraph below). The test fixtures are
+  longest code makes the worst-case line 8,277 characters (the issue #800 paragraph below). The test fixtures are
   synthetic shapes verified against the pinned pi 1.5.2 (`image/runner/test/fixtures/chatgpt-usage-limit.mjs`). Exit
   codes, signing and supervisor precedence are UNCHANGED, checked.
 
@@ -913,10 +913,11 @@ refactor apart.
 
   **The whole line has a limit of its own (issue #800): `EXIT_LINE_MAX_BYTES`, 7680 bytes for the whole write**, its
   two newlines and its signature included. Every field above can ride one line, and measured at the pin that line is
-  8,215 characters before the writer fits it, `costNotional` and `allowanceMicros` (issue #1008) included at their
-  widest, 17 characters and 13 digits, and issue #1055's `turnsWarned` and `timeWarned` at the width of every other
-  counter (through the writer, its message held to the 256-byte head, 6,765, and 7,258 with the supervisor's line); a
-  supervisor's line after the unfitted one (493 at a 44-character job id) makes 8,708, past
+  8,277 characters before the writer fits it, `costNotional` and `allowanceMicros` (issue #1008) included at their
+  widest, 17 characters and 13 digits, and issue #1055's `turnsWarned` and `timeWarned` and issue #1058's
+  `unpricedNotional` and `costUnreportedNotional` at the width of every other counter (through the writer, its message
+  held to the 256-byte head, 6,827, and 7,320 with the supervisor's line); a supervisor's line after the unfitted one
+  (493 at a 44-character job id) makes 8,770, past
   the 8,192-character tail, so
   the MAC of a genuine line could already be lost and with it every field, the dollars settling at the floor. 7680
   is 8192 less those 493 less 19 to spare. A job id past 63 characters takes its excess off the limit
@@ -1423,6 +1424,15 @@ refactor apart.
   list), which the cost guard admitted with no bound or charge, and since issue #1098 the price of the children's
   ledger rows on those same providers that the child marked as let through by its own admission (each row's
   `notional`, ledger version 4; the runner judges them by its own set). 0 when no entry is marked. Never above `cost`. The worker's closed key list admits it.
+  **`unpricedNotional` and `costUnreportedNotional` (issue #1058)** are written by the METER right after `costNotional`,
+  with it and only with it, so every other exit line is byte-identical to before: how many of the `unpriced` calls and
+  of the `costUnreported` calls were on a provider the runner holds notional (the set `costNotional` is priced on), the
+  children's included by the same rule (each ledger row's counts of the same name, ledger version 5, counted only on a
+  provider of the runner's own verified set). Safe integers, each a part of its total, never above it. Such a call bills
+  nothing, so the dollar settlement floors on the BILLED part of the two counters, the count less its notional part
+  (`DES-DOLLAR-RESERVE-AND-SETTLE`); the other floor counters are unchanged (the cost guard's four never count a notional
+  call, since it takes no ticket, and `unresolved` and `unmeteredChildren` cannot be classed). The worker's closed key
+  list admits both; a worker before them drops them and floors on the whole count, as before.
   **`allowanceMicros` (issue #1008)** is written by the subscription allowance's guard right after `modelRefused`
   (before issue #985's four charge keys), and ONLY when the job carries an allowance (`PI_SUBSCRIPTION_ALLOWANCE_MICROS`): the allowance in integer micro-dollars,
   what the `costNotional` beside it was held to. With no allowance the exit line is byte-identical to before. The
@@ -1439,8 +1449,15 @@ refactor apart.
   and so does the meter's `costUnreported`, guard or no guard, so a child's partial count floors the settlement as the
   parent's would. A child ledger is version 3 since `costUnreported` (issue #571), and version 4 since each row's `notional` (issue #1098):
   the part of its cost the child's own subscription admission let through, absent for 0, never above the row's cost,
-  which the runner counts notional only on a provider of its own verified set; one of an older version counts as an
-  unmetered child (runner and children are always one image). Every exit line of a metered run carries the
+  which the runner counts notional only on a provider of its own verified set; version 5 since each row's
+  `unpricedNotional` and `costUnreportedNotional` (issue #1058): how many of those admitted calls were unpriced (at most
+  the row's `unpriced`) or had broken usage (at most the row's priced calls, and all rows' together at most the file's
+  `costUnreported`), absent for 0 and never on the model-less row, counted by the same rule into the line's two keys of
+  that name; a value past its bound or not a count makes the file malformed. A child writes at most 100 rows (120 before
+  issue #1058): with every field at its longest, 100 rows with the 16 a model list allows marked are 54,459 bytes (120
+  were 64,819) and 100 rows all marked are 63,951 (120 were 76,571, past the 64 KiB a fold reads), and a child that calls
+  more than 99 models folds the rest into its model-less row, billed; one of an older version
+  counts as an unmetered child (runner and children are always one image). Every exit line of a metered run carries the
   children's final fold, the SIGTERM line and the outer catch's included. The worker's closed key list admits the three
   (part F), and `unmeteredChildren` is a floor counter of the dollar settlement (`DES-DOLLAR-RESERVE-AND-SETTLE`); a
   worker from before part F drops them, and the `total` it keeps already includes the children. The fallback line carries `metered: false` and the four
@@ -7286,6 +7303,7 @@ validator rather than a second copy of it.
                    "childTotal": <int>, "childProcesses": <int>, "unmeteredChildren": <int>,  // issue #500: pi child processes; on every metered line from part E
                    "costUnreported": <int>,                                                    // issue #571: on every metered line, capped or not
                    "costNotional": <number>,                                                   // issue #1008: the notional part of cost, only for a job with subscription entries
+                   "unpricedNotional": <int>, "costUnreportedNotional": <int>,                  // issue #1058: the notional parts of unpriced and costUnreported, only with costNotional
                    "costCapMicros": <int>, "costRefused": <int>, "boundExceeded": <int>,         // issue #501: written only when a cost cap was set
                    "longContext": <int>, "costUnjudged": <int>, "costUnanswered": <int>,         // issue #501: written only when a cost cap was set
                    "modelRefused": <int>,                                                      // issue #502: written only when a model list was set
@@ -7834,7 +7852,11 @@ validator rather than a second copy of it.
     may be above 0, since a refused call is never sent), which settles at `0`. An ABSENT counter counts as
     non-zero: a runner that did not write it did not measure it. Since issue #1008 the windows are charged the BILLED
     cost, `ceil(tokens.cost x 1e6) - floor(tokens.costNotional x 1e6)`: absent is 0 (all billed), and a value that is
-    not a number at or above 0, or is above `tokens.cost`, makes the settlement the floor on the whole cost;
+    not a number at or above 0, or is above `tokens.cost`, makes the settlement the floor on the whole cost. Since issue
+    #1058 `unpriced` and `costUnreported` are read by their BILLED part, the count less `tokens.unpricedNotional` or
+    `tokens.costUnreportedNotional`, read only on that trusted metered line beside a `costNotional` read as valid: an
+    absent part is 0 (an older image keeps the floor), and a part that is not a safe integer at or above 0, or is above
+    its count, makes the settlement the floor; the other six counters count every call;
   - `floor`: the cost is not fully known. That is: an exit line that is not trusted (above); no exit line
     (`tokens: null`); the fallback meter; a counter
     that is non-zero or absent; a cap wider than the reservation; calls with no ledger; a Valkey fault that
@@ -8556,6 +8578,12 @@ validator rather than a second copy of it.
   with subscription entries: the part of `cost` priced on subscription calls with no paid extra usage, which bill
   nothing and which the cost cap did not count. The dollar settlement takes it off the charge (`dollars`, `metered`
   below); a record without it (an older image, or a job with no subscription) is all billed.
+  **`unpricedNotional` and `costUnreportedNotional` (issue #1058)** ride right after `costNotional`, written with it and
+  only with it: how many of the `unpriced` and of the `costUnreported` calls were on those subscription providers, each
+  part of its count (`INT-RUNNER-EXIT-CODE-PROTOCOL` has the rule). The dollar settlement and the cost views floor on
+  the BILLED part of the two counters, the count less its part (`dollars`, `metered` below); a record without them (an
+  older image or worker) counts every such call as billed. The run page shows the split in its "Unpriced calls" (Model
+  usage) and "Cost unreported" (Tokens and dollars) rows.
   **The child keys (issue #500 part F)** ride between `unpriced` and the cost guard's counters, on the same closed
   key list, the runner's emission order: `childTotal` (the billed tokens of the job's pi child processes, already
   inside `total`, so `rootTotal + otherTotal + looseTotal + childTotal` is `total`), `childProcesses` (child ledger
@@ -11161,7 +11189,8 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   `compat`, composed as pi does), or a builtin chat model of that provider that a provider-level `compat` or a
   `modelOverrides` entry turns off, priced from the worker's catalog with the override's cost applied; only on the
   `openai-completions` api, the one that reads the flag. Every call on such a model reports no usage and counts
-  `costUnreported`, so every job that calls one settles at the floor. No declaration is no line and no container, and doctor's output is unchanged.
+  `costUnreported`, so every job that calls one settles at the floor, unless the call ran on a subscription with no paid
+  extra usage (issue #1058: its unknown cost bills nothing). No declaration is no line and no container, and doctor's output is unchanged.
 - **Acceptance**: Given a file with `version: 2`, a loopback or `localhost` host, port 3128 or the queue's port, a
   duplicate id, one host and port under two ids, `slots` of 0 or 65, or an unknown key, when parsed, then the
   whole file is refused naming the endpoint. Given a model whose own baseUrl names another host than its
@@ -16348,6 +16377,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-28 (#1058) | **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: NEW tokens keys `unpricedNotional` and `costUnreportedNotional`, written by the meter right after `costNotional`, with it and only with it (every other exit line byte-identical): how many of the `unpriced` and `costUnreported` calls were on a provider the runner holds notional, each part of its total, the children's included by the runner's own set; the settlement floors on the billed part of the two counters. The child ledger AMENDED: version 5, each row's optional `unpricedNotional` (at most the row's `unpriced`) and `costUnreportedNotional` (at most its priced calls, all rows together at most the file's `costUnreported`), never on the model-less row, a value past its bound or not a count making the file malformed; a child writes at most 100 rows, 120 before: measured with every field at its longest, 100 rows with the 16 a model list allows marked are 54,459 bytes, 11,077 under the 64 KiB a fold reads (120 left 717), and 100 rows all marked are 63,951 and still read (120 were 76,571); a child that calls more than 99 models folds the rest into its model-less row, billed. The measured worst-case line moves with the two keys: 8,277 characters before the writer fits it, 8,770 with a supervisor's line, 6,827 and 7,320 through the writer (the `subscriptionCode` paragraph's figure with it); `EXIT_LINE_MAX_BYTES` and the message room UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the two keys after `costNotional` on the closed key list, rebuilt as numbers, shown on the run page as "Unpriced calls" and "Cost unreported" (billed and on a subscription); the `metered` settlement reads `unpriced` and `costUnreported` by their billed part, the part read only on a trusted metered line beside a `costNotional` read as valid, absent as 0, and a part that is not a count or is above its count the floor; `buildRecord`, the record's version and the record fixtures UNCHANGED, checked (tokens pass through as parsed). **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: doctor's `compat.supportsUsageInStreaming` warning says a job settles at the floor unless the call ran on a subscription with no paid extra usage. **Code evidence**: image/runner/src/usage-meter.mjs -> createUsageMeter, parseChildLedger, foldChildLedgers, ledgerNotionalCounts, CHILD_LEDGER_VERSION, CHILD_LEDGER_ROWS; worker/src/dollar-budget.mjs -> billedFloorCount, NOTIONAL_FLOOR_PARTS, dollarSettlement; worker/src/run-history.mjs -> TOKEN_KEYS; admin/src/costs.mjs -> notionalFloorPart; admin/src/console/panels/run.mjs -> floorCountText, runCostPanel; worker/src/doctor.mjs -> collectChecks (the overlay usage line). |
 | 2026-11-26 (#1106) | **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: NEW bullet "A provider's spending limit (#1106)": one predicate, `providerSpendLimit(terminal, measured)`, asked by both the credential row and the failover classification on the same evidence; true for a measured 402, or a 403 whose parsed body (pi-ai's `403: <body>` or the Anthropic SDK's `403 <body>`) has a top-level `message` or an `error.message` beginning with OpenRouter's workspace-budget wording, measured on its chat-completions and its messages endpoints, or its per-key `Key limit exceeded`, the wording deciding and never an error type, never beside an explicit credential or parameter wording; such a stop is `1` / `error` with `quota-exhausted` evidence where it was `2` / `provider-auth-refused`; `decideExit` takes the observer's `measured` evidence. The credential row of the table gains that exception, and its residuals gain NEW "A spending limit in a shape not measured stays a credential refusal", which names every api the observer does not wrap. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: NEW conditional key `providerMessage` after `mainCredential`, the signed exit line's message beside `provider-auth-refused` or `error`, every secret value the attempt held taken out, cut to 500 characters, logged as `provider_error`, a named residual of the PII-free rule that reaches no comment and no model; the "Failover facts (#716)" bullet points to it; `mainCredential` is no longer the last key before `v`. UNCHANGED, checked: exit codes, signing and supervisor precedence, the `providerFailure` channel and its closed kinds (no new kind), the `reason` enum (no new token), `RECORD_CORE_FIELDS` and `v`, and `INT-MODEL-COOLDOWN-KEY` (the existing quota cooldown). **Code evidence**: image/runner/src/provider-failure.mjs -> providerSpendLimit, classifyProviderFailure, installProviderFailureObserver; image/runner/src/outcome.mjs -> providerAuthRefused, classifyStopReason, decideExit; image/runner/run-job.mjs; worker/src/run-history.mjs -> parseExitProviderMessage, providerMessageOf, recordedProviderMessage, PROVIDER_MESSAGE_MAX_CHARS, makeLogSink, buildRecord; worker/src/redact-secrets.mjs -> redactCutEnd; worker/src/run-container.mjs -> makeRunContainer; worker/src/index.mjs -> makeProcessor; admin/src/read-model.mjs -> modelRunRecord. |
 | 2026-11-26 (#1104) | **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, NEW sub-bullet "A CLI child that outlives the abort": the child killed with SIGKILL 10 s after the abort (`run_client_killed { container, afterMs }`), `clientKilled` and `started` on that result alone, the teardown's runtime steps killed at 2.5 s after a kill, the stop killed at 10 s, the orphan marked `killedClient` and removed in any state through the registry's `containerGone(name, venue, { force: true })`, the one signature every venue's takes, and the processor's never-started rule with all its conditions, a shutdown under way among them. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**, the "What each disagreement fails toward" table: NEW row "runtime silent at the stop". **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, `mainCredential`: absent also for a stop's `container-never-started`; the `reason` enum is UNCHANGED, checked (`container-never-started` is already in it, and `v` stays 1). **Code evidence**: worker/src/run-container.mjs -> RUN_CLIENT_KILL_MS, TEARDOWN_STEP_AFTER_KILL_MS, boundedSpawn, makeRunContainer; worker/src/backend-local.mjs -> STOP_TIMEOUT_MS, makeStopContainer, makeContainerGone; worker/src/backend-registry.mjs -> makeBackendRegistry; worker/src/backend-openshell.mjs -> makeOpenshellBackend; worker/src/host-budget.mjs -> makeHostBudget; worker/src/processor.mjs -> isNeverStartedExit, runAttempt; worker/src/index.mjs -> makeProcessor. |
 | 2026-11-25 (#1098) | **`INT-AUTH-CONNECTIONS-FILE-CONTRACT` AMENDED**: a pi child runs a subscription admission of its own, and one without it is refused; the file's shape is unchanged. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: `tokens.costNotional` adds the price of the children's ledger rows on the job's notional providers that the child marked as let through by its own admission, judged by the runner's own set. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: NEW capability token `subscriptionChildren`, not a `CAPABILITY_GATES` row (an older image refuses such a child's calls before they are sent), proved offline by a real pi child through the baked preload on an OpenAI subscription. **The child ledger** AMENDED: version 4, each row's optional `notional` mark, which the runner counts only on its own verified set. UNCHANGED, checked: `PI_SUBSCRIPTION_AUTH`'s shape, the worker's closed key list and the reason enum (no new token). **Code evidence**: image/runner/src/usage-meter.mjs -> startChildMeter, ledgerNotional, ledgerSettled, foldChildLedgers, spentFile, createUsageMeter; image/runner/src/child-route.mjs -> subscriptionAdapterRoots; image/runner/src/child-watch.mjs -> createChildWatch; image/Dockerfile; image/verify-image.sh. |

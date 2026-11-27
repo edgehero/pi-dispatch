@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { billedModelRows, candidateWindowReservation, notionalConnection, notionalProvidersOf, notionalSnapshotProviders, reserveVerdict, zeroRatedFor } from "../src/reserve-estimate.mjs";
-import { dollarSettlement, FLOOR_COUNTERS, notionalMicros } from "../src/dollar-budget.mjs";
+import { billedFloorCount, dollarSettlement, FLOOR_COUNTERS, modelDollarSettlement, NOTIONAL_FLOOR_PARTS, notionalMicros } from "../src/dollar-budget.mjs";
 import { makeSubscriptionRuntime, subscriptionRoutes } from "../src/subscription-runtime.mjs";
 import { subscriptionRoutes as leafRoutes } from "../src/model-ref.mjs";
 import { buildContainerEnv } from "../src/env-allowlist.mjs";
@@ -94,6 +94,64 @@ test("settlement charges the billed part: present, absent (older image), inconsi
 	assert.equal(notionalMicros(null, USD), 0);
 });
 
+test("issue #1058: unpriced and costUnreported floor by their billed part, read only beside a valid costNotional on a trusted metered line", () => {
+	const complete = { metered: true, calls: 4, costCapMicros: 5 * USD, ...Object.fromEntries(FLOOR_COUNTERS.map((key) => [key, 0])) };
+	const usage = { v: 1, truncated: 0, models: [] };
+	const settle = (tokens, trusted = true) => dollarSettlement({ tokens: { ...complete, ...tokens }, usage, reservedMicros: 5 * USD, trusted });
+	const metered = { settledMicros: 250_000, basis: "metered" };
+	const floor = { settledMicros: 5 * USD, basis: "floor" };
+	const mixed = { cost: 3.25, costNotional: 3, unpriced: 1, unpricedNotional: 1, costUnreported: 2, costUnreportedNotional: 2 };
+	assert.deepEqual(settle(mixed), metered, "every unknown cost on a subscription: metered at the billed $0.25");
+	assert.deepEqual(settle({ ...mixed, unpriced: 2 }), floor, "one billed unpriced call: the floor");
+	assert.deepEqual(settle({ ...mixed, costUnreported: 3 }), floor, "one billed broken-usage call: the floor");
+	const { unpricedNotional: _u, costUnreportedNotional: _c, ...older } = mixed;
+	assert.deepEqual(settle(older), floor, "an image from before the keys: every such call billed, the floor");
+	assert.deepEqual(settle({ ...older, costUnreported: 0 }), floor, "one key absent is 0 for that counter alone");
+	assert.deepEqual(settle({ ...mixed, unpricedNotional: 2 }), floor, "a count above its total");
+	for (const bad of [0.5, -1, "1", null, Infinity, Number.MAX_SAFE_INTEGER + 2]) {
+		assert.deepEqual(settle({ ...mixed, unpricedNotional: bad }), floor, `unpricedNotional ${String(bad)}`);
+		assert.deepEqual(settle({ ...mixed, costUnreportedNotional: bad }), floor, `costUnreportedNotional ${String(bad)}`);
+	}
+	assert.deepEqual(settle({ ...mixed, unpriced: 1.5, unpricedNotional: 1 }), floor, "a total that is not a count");
+	// A count that is not a safe integer at or above 0 beside a valid part and a valid costNotional: the floor, never the
+	// part taken off a value that only coerces to a number ("1" - 1 is 0).
+	for (const bad of ["1", true, [1], 1.5, -1]) {
+		assert.deepEqual(settle({ ...mixed, unpriced: bad, unpricedNotional: 1 }), floor, `unpriced ${JSON.stringify(bad)}`);
+		assert.deepEqual(settle({ ...mixed, costUnreported: bad, costUnreportedNotional: 1 }), floor, `costUnreported ${JSON.stringify(bad)}`);
+	}
+	// Never read where costNotional is not: an untrusted line, the fallback meter, no costNotional, or a malformed one.
+	assert.deepEqual(settle(mixed, false), { settledMicros: 5 * USD, basis: "floor" }, "an untrusted line: forged counts lower nothing");
+	assert.deepEqual(settle({ ...mixed, metered: false }), floor);
+	const { costNotional: _n, ...noNotional } = mixed;
+	assert.deepEqual(settle(noNotional), floor, "counts without costNotional are not the meter's: every call billed");
+	assert.deepEqual(settle({ ...mixed, costNotional: "3" }), floor);
+	// The other six counters count every call, a notional part or not.
+	for (const key of FLOOR_COUNTERS.filter((k) => !Object.hasOwn(NOTIONAL_FLOOR_PARTS, k))) assert.deepEqual(settle({ ...mixed, [key]: 1, [`${key}Notional`]: 1 }), floor, key);
+	assert.deepEqual(Object.entries(NOTIONAL_FLOOR_PARTS), [["unpriced", "unpricedNotional"], ["costUnreported", "costUnreportedNotional"]]);
+	// The billed model's window settles from its own row, as on any metered line.
+	const rows = { v: 1, truncated: 0, models: [{ provider: "anthropic", model: "claude-opus-5-5", cost: 0.25 }, { provider: "openai-codex", model: "gpt-6.1-sol", cost: 3 }] };
+	const job = dollarSettlement({ tokens: { ...complete, ...mixed }, usage: rows, reservedMicros: 5 * USD, trusted: true });
+	assert.deepEqual(job, metered);
+	assert.deepEqual(modelDollarSettlement({ ref: "anthropic/claude-opus-5-5", basis: job.basis, tokens: { ...complete, ...mixed }, usage: rows, reservedMicros: 5 * USD, trusted: true }), metered);
+	// billedFloorCount itself: the count less its part, or the count as it is when the part is not read.
+	assert.equal(billedFloorCount({ unpriced: 3, unpricedNotional: 2 }, "unpriced", true), 1);
+	assert.equal(billedFloorCount({ unpriced: 3, unpricedNotional: 2 }, "unpriced", false), 3);
+	assert.equal(billedFloorCount({ unpriced: 3 }, "unpriced", true), 3);
+	assert.equal(billedFloorCount({ unpriced: 3, unpricedNotional: 4 }, "unpriced", true), null);
+	assert.equal(billedFloorCount({ unresolved: 3, unresolvedNotional: 3 }, "unresolved", true), 3);
+	assert.equal(billedFloorCount({}, "unpriced", true), undefined, "absent stays absent, so the caller floors");
+});
+
+test("issue #1058: the record keeps unpricedNotional and costUnreportedNotional right after costNotional, numbers only", () => {
+	const line = { input: 1, output: 2, total: 3, cost: 3.25, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 3, unresolved: 0, unpriced: 1, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costUnreported: 1, costNotional: 3, unpricedNotional: 1, costUnreportedNotional: 1, costCapMicros: 5 * USD };
+	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(line)}}`)), JSON.stringify(line), "byte-identical round trip");
+	const at = TOKEN_KEYS.indexOf("costNotional");
+	assert.deepEqual(TOKEN_KEYS.slice(at, at + 3), ["costNotional", "unpricedNotional", "costUnreportedNotional"]);
+	const words = parseExitTokens('{"event":"exit","tokens":{"total":1,"unpricedNotional":"1","costUnreportedNotional":[1]}}');
+	assert.deepEqual([Object.hasOwn(words, "unpricedNotional"), Object.hasOwn(words, "costUnreportedNotional")], [false, false], "numbers only");
+	assert.equal(FLOOR_COUNTERS.includes("unpricedNotional") || FLOOR_COUNTERS.includes("costUnreportedNotional"), false, "parts, never counters of their own");
+});
+
 test("the worker marks a snapshot notional only for a connection with no paid extra usage, prepared from the row it checked", async () => {
 	const connection = { id: "claude", connectionId: "claude", provider: "anthropic", ownerHost: "owner", adapter: "pi-anthropic-oauth@0.3.6", accountGroup: "opaque-group", generation: 2 };
 	const job = { provider: "anthropic", model: "sonnet", models: ["anthropic/sonnet"], maxCostMicros: 500_000 };
@@ -140,7 +198,7 @@ test("PI_SUBSCRIPTION_AUTH carries notional: true only when the snapshot was mar
 
 test("costNotional survives the exit-line rebuild after costUnreported, and the record names the notional providers from a closed list", () => {
 	const at = TOKEN_KEYS.indexOf("costUnreported");
-	assert.deepEqual(TOKEN_KEYS.slice(at + 1, at + 3), ["costNotional", "costCapMicros"], "the meter writes it after costUnreported, the guard's fields follow");
+	assert.deepEqual(TOKEN_KEYS.slice(at + 1, at + 5), ["costNotional", "unpricedNotional", "costUnreportedNotional", "costCapMicros"], "the meter writes it after costUnreported (issue #1058's two after it), the guard's fields follow");
 	const line = { input: 1, output: 2, total: 3, cost: 3.25, metered: true, rootTotal: 3, otherTotal: 0, looseTotal: 0, sessions: 1, calls: 1, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costUnreported: 0, costNotional: 3, costCapMicros: 5 * USD };
 	assert.equal(JSON.stringify(parseExitTokens(`{"event":"exit","tokens":${JSON.stringify(line)}}`)), JSON.stringify(line), "byte-identical round trip");
 	assert.equal(parseExitTokens('{"event":"exit","tokens":{"total":1,"costNotional":"3"}}').costNotional, undefined, "numbers only");

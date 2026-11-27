@@ -424,7 +424,8 @@ the Model usage table marks each such row `notional`, and a run whose trigger se
   - the runner's own meter counted the run (`tokens.metered` is `true`, not the fallback meter);
   - `tokens.costCapMicros` is present and not above the reservation;
   - every "not fully counted" counter is present and 0: `unresolved`, `unpriced`, `boundExceeded`,
-    `longContext`, `costUnjudged`, `costUnanswered`, `costUnreported` and `unmeteredChildren`;
+    `longContext`, `costUnjudged`, `costUnanswered`, `costUnreported` and `unmeteredChildren`. `unpriced` and
+    `costUnreported` count only their billed calls ([a subscription call whose cost is unknown](#a-subscription-call-whose-cost-is-unknown));
   - a per-model usage ledger is present, unless the run made no model call at all.
 - `floor`: the cost was not fully known. The windows keep at least the whole hold, and more when the measured
   part already costs more.
@@ -452,6 +453,26 @@ Some cases worth knowing:
 usage ledger was folded, some spend was on no named model, there was no ledger, or the job's own basis was not
 metered.
 
+### A subscription call whose cost is unknown
+
+A subscription call without paid extra usage bills nothing, so not knowing its cost does not make the billed cost
+unknown (issue #1058). The runner's meter still counts such a call in `unpriced` (no price came back) or
+`costUnreported` (its usage came back broken), and also counts it in `tokens.unpricedNotional` or
+`tokens.costUnreportedNotional`, right after `tokens.costNotional`. The windows and the cost views read only the
+billed part, the count less its subscription part: a job that mixed an API key with such a subscription call settles
+to its billed cost, and its dollar shows no `≥`. One billed call whose cost is unknown still settles the whole job at
+the floor. On the run page, **Unpriced calls** (in Model usage) and **Cost unreported** (in Tokens and dollars) say how
+many calls were billed and how many were on a subscription.
+
+The two subscription counts are read only beside a valid `tokens.costNotional`, and only on a trusted line from the
+runner's own meter, so a forged count cannot lower a charge. A count that is not a whole number at least 0, or is above
+the count it is part of, settles at the floor. A `pi` child process counts its own the same way, and the runner counts
+them only for a provider it holds notional itself.
+
+The job image and the worker both have to know this. An image from before it writes neither count, and a worker from
+before it drops them: either way every such call counts as billed and the job settles at the floor, as before. The
+console reads the counts only from a record that carries them. See [the upgrade guide](upgrading.md).
+
 ### Long context
 
 Anthropic bills input above 200,000 tokens at a higher rate, and pi's rate tables have no such tier. So the
@@ -468,7 +489,8 @@ non-Anthropic Bedrock model on one of those APIs can floor this way too
 Some answers carry no usage numbers, or only part of them. pi then records the call as zero tokens and $0, or
 with the part it saw, so the meter cannot tell it from a free call. The runner's meter counts such a call in
 `costUnreported`, on every run, with or without a dollar cap, and in every `pi` child process. A run with
-`costUnreported` above 0 settles at the floor, and the cost views show it as `≥`. Under a dollar cap the runner
+`costUnreported` above 0 settles at the floor, and the cost views show it as `≥`, unless every such call was on a
+subscription without paid extra usage ([a subscription call whose cost is unknown](#a-subscription-call-whose-cost-is-unknown)). Under a dollar cap the runner
 also charges such a call its bound during the run.
 
 The meter counts a call on a model that costs money when its answer has:
