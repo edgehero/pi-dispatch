@@ -2,7 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { assertUserns, CONTAINER_HOME, SHIPPED_IMAGE_UID, transfersFromSpec, USERNS_MODES } from "../src/container-spec.mjs";
-import { buildDockerRunArgs, buildPodmanRunArgs, containerSpec, DOCKER_EXTRA_ALLOWED, DOCKER_EXTRA_FORBIDDEN, dockerArgsFromSpec, insideDir, ISOLATION_FLAGS, PODMAN_PINNED_FLAGS, podmanArgsFromSpec } from "../src/docker-run.mjs";
+import { assertJobEnvArgv, BARE_ENV_NAME, buildDockerRunArgs, buildPodmanRunArgs, CLIENT_ENV_GUARD, containerSpec, DOCKER_EXTRA_ALLOWED, DOCKER_EXTRA_FORBIDDEN, dockerArgsFromSpec, insideDir, isClientEnvGuarded, ISOLATION_FLAGS, jobClientEnv, jobEnvArgs, PODMAN_PINNED_FLAGS, podmanArgsFromSpec } from "../src/docker-run.mjs";
+import { containerEnvOf, envNamesOf } from "./helpers/container-env.mjs";
+import { createHash } from "node:crypto";
+import { egressCanaryProbeArgs } from "../src/doctor.mjs";
+import { egressEnv } from "../src/egress.mjs";
+import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
+import { DEFAULT_JOB_SIZE, jobSizeEnv } from "../src/job-size.mjs";
+import { ephemeralRunArgs, liveFixture, liveProbeRunArgs, peerRunArgs, pinningProbeRunArgs } from "../src/live-probes.mjs";
+import { EGRESS_ENV_KEYS, NON_SECRET_ENV_KEYS } from "../src/redact-secrets.mjs";
+import { buildSandboxRunArgs } from "../src/sandbox.mjs";
 
 const base = {
 	image: "pi-job:pinned",
@@ -54,14 +63,20 @@ test("the operator global overlay mounts /opt/pi-global:ro only when configured"
 	assert.ok(!off.some((a) => a.includes("/opt/pi-global")), "no overlay mount when PI_GLOBAL_PI_DIR is unset");
 });
 
-test("env is an explicit -e NAME=VALUE allowlist, never a pass-through or --env-file", () => {
+test("env is an explicit allowlist, never a pass-through or --env-file: a credential is a bare -e NAME whose value only the job gives the client (issue #1114)", () => {
 	const args = buildDockerRunArgs(base);
-	assert.ok(args.includes("-e") && args.includes("ANTHROPIC_API_KEY=sk-real"));
 	assert.ok(!args.includes("--env-file"), "must never use --env-file");
-	// No bare `-e NAME` (which would inherit the host value) -- every -e is followed by NAME=VALUE.
-	for (let i = 0; i < args.length; i++) {
-		if (args[i] === "-e") assert.match(args[i + 1], /=/, `bare -e ${args[i + 1]} would inherit from host`);
-	}
+	assert.deepEqual(envNamesOf(args), ["PI_PROVIDER", "ANTHROPIC_API_KEY"]);
+	assert.ok(args.includes("PI_PROVIDER=anthropic"), "a structural name keeps its value on the argv");
+	assert.equal(args[args.indexOf("ANTHROPIC_API_KEY") - 1], "-e", "the credential is a bare -e NAME");
+	assert.ok(!args.some((a) => a.includes("sk-real")), "and its value is on no argv token");
+	// What the old "every -e is NAME=VALUE" assertion was for: no HOST value reaches the container. A bare name is filled
+	// from the client's own environment, and `jobClientEnv` drops the host's key of that name, in any case, and puts the
+	// job's value there; the rest of the client's environment is the host's.
+	const clientEnv = jobClientEnv(base.env, { ANTHROPIC_API_KEY: "sk-host", anthropic_api_key: "sk-host-lower", PATH: "/usr/bin" });
+	assert.deepEqual(clientEnv, { PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-real" });
+	assert.deepEqual(containerEnvOf(args, { env: clientEnv }), base.env, "the container gets exactly the closed map");
+	assert.deepEqual(containerEnvOf(args, { env: { PATH: "/usr/bin" } }), { PI_PROVIDER: "anthropic" }, "and a client env without the value leaves the variable out");
 });
 
 /** Every `-v` VALUE in argv, in order -- the enumerated mount list CONST-ISOLATION-CONTAINER-PER-JOB pins. */
@@ -521,7 +536,7 @@ test("the docker builder REFUSES a spec with a userns: the docker CLI rejects --
 test("the podman argv, literally: --userns=keep-id immediately after --user=, then the cidfile, dockerExtra, env, mounts and the image", () => {
 	const args = buildPodmanRunArgs({
 		image: "pi-job:pinned",
-		env: { A: "1" },
+		env: { PI_MODEL: "m", A: "1" },
 		jobDir: "/j",
 		workspace: "/j/workspace",
 		name: "pi-job-1",
@@ -562,7 +577,9 @@ test("the podman argv, literally: --userns=keep-id immediately after --user=, th
 		"--http-proxy=false",
 		"--cidfile=/j.cid",
 		"-e",
-		"A=1",
+		"PI_MODEL=m",
+		"-e",
+		"A",
 		"-v",
 		"/j:/job:ro,Z",
 		"-v",
@@ -732,4 +749,169 @@ test("the image's WORKDIR is /sandbox, owned by its user, and /workspace still e
 	const dockerfile = readFileSync(new URL("../../image/Dockerfile", import.meta.url), "utf8");
 	assert.deepEqual([...dockerfile.matchAll(/^WORKDIR (\S+)$/gm)].map((m) => m[1]).slice(-1), ["/sandbox"], "the final stage's last WORKDIR");
 	assert.match(dockerfile, /^RUN mkdir -p \/sandbox \/workspace && chown pi:pi \/sandbox && chmod 0755 \/sandbox \/workspace$/m);
+});
+
+// --- issue #1114: credentials leave the runtime client's argv ------------------------------------------------------
+
+/** The env tokens the builder emitted before issue #1114: `-e NAME=VALUE` for every defined entry, in order. */
+const legacyEnvArgs = (env) => Object.entries(env ?? {}).filter(([, v]) => v !== undefined && v !== null).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+
+/** Arbitrary secret names a run secret or a forwarded variable could carry: fixed, so the test reads the same every run. */
+const arbitraryNames = Array.from({ length: 24 }, (_, i) => `X${createHash("sha256").update(`name-${i}`).digest("hex").slice(0, 10).toUpperCase()}`);
+
+test("issue #1114: no credential value the worker writes is on the argv, and the client env rebuilds the closed map exactly", () => {
+	// Every forge token name a mint writes, the provider credentials pi reads, the worker's own names that are in no
+	// structural list (they go bare too, the safe direction), and arbitrary secret names.
+	const secretNames = [...MINTED_TOKEN_VARS, "ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AZURE_OPENAI_API_KEY", "PI_JOB_IDLE_MS", "PI_JOB_STALL_MS", "PI_JOB_MAX_MS", "PI_JOB_LEFT_MS", "PI_CREDENTIAL_REFRESH", "PI_PACKAGE_CANARY", "PI_SUBSCRIPTION_AUTH", ...arbitraryNames];
+	const secrets = Object.fromEntries(secretNames.map((name, i) => [name, `sk-test-${i}-${createHash("sha256").update(name).digest("hex").slice(0, 24)}`]));
+	const env = { PI_PROVIDER: "anthropic", PI_MODEL: "m", PI_JOB_ID: "pi-job-1", HOME: "/home/pi", ...egressEnv({ armed: true }), ...secrets };
+	for (const args of [buildDockerRunArgs({ ...base, env }), buildPodmanRunArgs({ ...base, env, user: "1234:1234" })]) {
+		for (const [name, value] of Object.entries(secrets)) {
+			assert.equal(args.some((a) => a.includes(value)), false, `${name}'s value is on the argv`);
+			assert.equal(args[args.indexOf(name) - 1], "-e", `${name} is a bare -e NAME`);
+		}
+		assert.deepEqual(containerEnvOf(args, { env: jobClientEnv(env, { PATH: "/usr/bin" }) }), env);
+	}
+	const { bare, kept } = jobEnvArgs(env, { workerSet: egressEnv({ armed: true }) });
+	assert.deepEqual(bare, secrets);
+	assert.deepEqual(kept, [], "nothing secret stays inline: the egress variables are the worker's own");
+});
+
+test("issue #1114: what stays -e NAME=VALUE: a structural name, the egress set, the terminal pair, an empty value, a client name in any case, a case twin that is not the upper-case spelling, a name no shell spells", () => {
+	const structural = Object.fromEntries([...NON_SECRET_ENV_KEYS].map((name) => [name, `v-${name}`]));
+	const egress = egressEnv({ armed: true });
+	const terminal = { TERM: "xterm", TMOUT: "600" };
+	assert.deepEqual(jobEnvArgs({ ...structural, ...egress, ...terminal, EMPTY_SECRET: "" }), { args: legacyEnvArgs({ ...structural, ...egress, ...terminal, EMPTY_SECRET: "" }), bare: {}, kept: [...EGRESS_ENV_KEYS] });
+	// A private endpoint's host and port are structural through the same function the redactor asks.
+	assert.deepEqual(jobEnvArgs({ PI_DISPATCH_ENDPOINT_NAS_HOST: "192.168.1.5", PI_DISPATCH_ENDPOINT_NAS_PORT: "5000" }).bare, {});
+	// Every guard name and a name under every guard prefix, upper, lower and mixed: inline, and named in `kept`.
+	const spellings = (name) => [name, name.toLowerCase(), name.split("").map((c, i) => (i % 2 ? c.toLowerCase() : c)).join("")];
+	const guarded = [...CLIENT_ENV_GUARD.names, ...CLIENT_ENV_GUARD.prefixes.map((p) => `${p}SECRET`)].flatMap(spellings).filter((name) => !NON_SECRET_ENV_KEYS.has(name) && !EGRESS_ENV_KEYS.includes(name));
+	for (const name of guarded) {
+		assert.ok(isClientEnvGuarded(name), name);
+		assert.deepEqual(jobEnvArgs({ [name]: "sk-test-guarded" }), { args: ["-e", `${name}=sk-test-guarded`], bare: {}, kept: [name] }, name);
+	}
+	for (const name of ["GITHUB_TOKEN", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "PIDOCKER_X", "SSHKEY", "LDAP_PASSWORD", "XDGX", "DOCKERHUB_TOKEN"]) assert.equal(isClientEnvGuarded(name), false, name);
+	// Names Windows would hold as one: the upper-case spelling goes bare as it would alone (the minted token's name, here
+	// beside an operator's twin, never reaches the argv), and every other spelling stays inline and is kept.
+	assert.deepEqual(jobEnvArgs({ GITHUB_TOKEN: "sk-test-a", github_token: "sk-test-b", OTHER: "sk-test-c" }), { args: ["-e", "GITHUB_TOKEN", "-e", "github_token=sk-test-b", "-e", "OTHER"], bare: { GITHUB_TOKEN: "sk-test-a", OTHER: "sk-test-c" }, kept: ["github_token"] });
+	assert.deepEqual(jobEnvArgs({ api_key: "sk-test-l", Api_Key: "sk-test-m", API_KEY: "sk-test-u" }), { args: ["-e", "api_key=sk-test-l", "-e", "Api_Key=sk-test-m", "-e", "API_KEY"], bare: { API_KEY: "sk-test-u" }, kept: ["api_key", "Api_Key"] }, "three spellings, whatever their order");
+	assert.deepEqual(jobEnvArgs({ Foo_Key: "sk-test-f", foo_key: "sk-test-g" }).kept, ["Foo_Key", "foo_key"], "a group with no upper-case spelling stays inline whole");
+	assert.deepEqual(jobEnvArgs({ PI_MODEL: "m", pi_model: "sk-test-d" }).kept, ["pi_model"], "a twin of a structural name too");
+	assert.deepEqual(jobEnvArgs({ DOCKER_HOST: "tcp://a.invalid", docker_host: "tcp://b.invalid" }).bare, {}, "an upper-case spelling the guard holds stays inline too");
+	// One key per folded name in the client's environment, so a Windows dedupe has nothing to choose between.
+	const twinClient = jobClientEnv({ GITHUB_TOKEN: "sk-test-a", github_token: "sk-test-b" }, { github_token: "sk-test-host", PATH: "/usr/bin" });
+	assert.deepEqual(Object.entries(twinClient).filter(([k]) => k.toUpperCase() === "GITHUB_TOKEN"), [["GITHUB_TOKEN", "sk-test-a"]]);
+	// Podman globs a bare `NAME*`, and a `=` would split where the CLI splits: a name outside the pattern is never bare.
+	for (const name of ["FOO*", "FOO-BAR", "1ABC", "A.B", "A B", "ÄX", ""]) {
+		assert.equal(BARE_ENV_NAME.test(name), false, JSON.stringify(name));
+		assert.deepEqual(jobEnvArgs({ [name]: "sk-test-e" }), { args: ["-e", `${name}=sk-test-e`], bare: {}, kept: [name] }, JSON.stringify(name));
+	}
+	for (const name of ["A", "_", "_A1", "lower_case", "GITHUB_TOKEN"]) assert.equal(BARE_ENV_NAME.test(name), true, name);
+	// The egress variables are kept only while their value is not the one the worker wrote; the argv is the same both ways.
+	assert.deepEqual(jobEnvArgs({ HTTPS_PROXY: "http://user:pw@proxy:3128" }, { workerSet: egress }), { args: ["-e", "HTTPS_PROXY=http://user:pw@proxy:3128"], bare: {}, kept: ["HTTPS_PROXY"] });
+	assert.ok(Object.isFrozen(CLIENT_ENV_GUARD) && Object.isFrozen(CLIENT_ENV_GUARD.names) && Object.isFrozen(CLIENT_ENV_GUARD.prefixes));
+});
+
+test("issue #1114: the client env drops every host key a bare name folds to, and keeps the host's value of every name the client acts on", () => {
+	const env = { GITHUB_TOKEN: "sk-test-job", docker_host: "tcp://job.invalid:2375", CONTAINER_HOST: "ssh://job.invalid", CONTAINERS_CONF_OVERRIDE: "/job/containers.conf", _CONTAINERS_USERNS_CONFIGURED: "job" };
+	const host = { PATH: "/usr/bin", GITHUB_TOKEN: "sk-test-host", github_token: "sk-test-host-lower", Github_Token: "sk-test-host-mixed", DOCKER_HOST: "unix:///worker.sock", CONTAINER_HOST: "unix:///worker-podman.sock", CONTAINERS_CONF_OVERRIDE: "/worker/containers.conf", _CONTAINERS_USERNS_CONFIGURED: "worker" };
+	const clientEnv = jobClientEnv(env, host);
+	assert.deepEqual(Object.keys(clientEnv).filter((k) => k.toUpperCase() === "GITHUB_TOKEN"), ["GITHUB_TOKEN"], "one key, so a Windows dedupe has nothing to choose between");
+	assert.equal(clientEnv.GITHUB_TOKEN, "sk-test-job");
+	for (const key of ["PATH", "DOCKER_HOST", "CONTAINER_HOST", "CONTAINERS_CONF_OVERRIDE", "_CONTAINERS_USERNS_CONFIGURED"]) assert.equal(clientEnv[key], host[key], key);
+	assert.equal(Object.hasOwn(clientEnv, "docker_host"), false, "a guarded job name never enters the client's environment");
+	// A job with no bare name hands the client the host's environment unchanged.
+	assert.deepEqual(jobClientEnv({ PI_MODEL: "m" }, host), host);
+	// Node on win32 keeps the first of keys that differ only by case (sorted); what survives is still the job's value.
+	const win32 = Object.fromEntries(Object.entries(clientEnv).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).filter(([k], i, all) => all.findIndex(([o]) => o.toUpperCase() === k.toUpperCase()) === i));
+	assert.equal(win32.GITHUB_TOKEN, "sk-test-job");
+	// A name like `__proto__` is an own key, never a prototype write that drops it.
+	assert.equal(Object.hasOwn(jobEnvArgs({ __proto__x: "1", ["__proto__"]: "sk-test-p" }).bare, "__proto__"), true);
+});
+
+test("issue #1114: the pre-spawn check holds the env flags to the job's env exactly, reading every token but the last (the image), and never refuses a real argv", () => {
+	const env = { PI_MODEL: "m", GITHUB_TOKEN: "sk-test-job" };
+	const args = buildDockerRunArgs({ ...base, env });
+	const clientEnv = jobClientEnv(env, { PATH: "/usr/bin", GITHUB_TOKEN: "sk-test-host" });
+	assert.doesNotThrow(() => assertJobEnvArgv(args, env, clientEnv));
+	const image = args.at(-1);
+	const head = args.slice(0, -1);
+	const withoutCredential = head.filter((a, i) => !(a === "GITHUB_TOKEN" || (a === "-e" && head[i + 1] === "GITHUB_TOKEN")));
+	const refused = [
+		[[...head, "-e", "GITHUB_TOKEN=sk-test-job", image], /carries the value of GITHUB_TOKEN/],
+		[[...head, "--env", "GITHUB_TOKEN=sk-test-job", image], /carries the value of GITHUB_TOKEN/],
+		[[...head, "--env=GITHUB_TOKEN=sk-test-job", image], /carries the value of GITHUB_TOKEN/],
+		[head.map((a) => (a === "GITHUB_TOKEN" ? "GITHUB_TOKEN=sk-test-job" : a)).concat(image), /carries the value of GITHUB_TOKEN/],
+		[[...head, "-e", "github_token=sk-test-job", image], /entry 3 is github_token with a value where nothing was due/],
+		[[...head, "-e", "AWS_SECRET_ACCESS_KEY", image], /bare -e AWS_SECRET_ACCESS_KEY whose value is not this job's/],
+		[[...head, "-e", "github_token", image], /bare -e github_token whose value is not this job's/],
+		[[...head, "-e", "AWS_SECRET_ACCESS_KEY=sk-test-other", image], /entry 3 is AWS_SECRET_ACCESS_KEY with a value where nothing was due/],
+		[[...withoutCredential, image], /entry 2 is nothing where a bare GITHUB_TOKEN was due/],
+		[head.map((a) => (a === "PI_MODEL=m" ? "PI_MODEL=sk-test-other" : a)).concat(image), /entry 1 gives PI_MODEL a value other than the job's/],
+		[[...head, "-eGITHUB_TOKEN=sk-test-job", image], /fused env flag for GITHUB_TOKEN/],
+		[[...head, "-e=GITHUB_TOKEN=sk-test-job", image], /fused env flag for GITHUB_TOKEN/],
+		[[...head, "-e", image], /last -e has no entry before the image/],
+		[[...head, "--env", image], /last --env has no entry before the image/],
+		// Every token but the last is read: one after the image is a job argv no builder makes, and it is read too.
+		[[...args, "-e", "GITHUB_TOKEN=sk-test-job", "more"], /carries the value of GITHUB_TOKEN/],
+	];
+	for (const [argv, why] of refused) {
+		assert.throws(() => assertJobEnvArgv(argv, env, clientEnv), (error) => why.test(error.message) && !error.message.includes("sk-test"), why.source);
+	}
+	assert.throws(() => assertJobEnvArgv(args, env, { ...clientEnv, GITHUB_TOKEN: "sk-test-host" }), /bare -e GITHUB_TOKEN whose value is not this job's/, "the client must hold the JOB's value");
+	assert.throws(() => assertJobEnvArgv(args, env, { PATH: "/usr/bin" }), /bare -e GITHUB_TOKEN/, "and hold it at all");
+	// Env flags only: a value the builder put in another flag is a builder defect this check does not look for.
+	assert.doesNotThrow(() => assertJobEnvArgv([...head, "--label=x=sk-test-job", image], env, clientEnv));
+	// Every argv a builder makes passes: both runtimes, twins, guarded names, empty values, the egress set, no env at all,
+	// and the extra flags the callers pass (the signed exit line's `-i`, the sandbox's, the probes').
+	const shapes = [
+		env,
+		{},
+		{ PI_MODEL: "m", GITHUB_TOKEN: "sk-test-a", github_token: "sk-test-b", docker_host: "tcp://x.invalid", EMPTY: "", "FOO-BAR": "sk-test-c", ...egressEnv({ armed: true }) },
+		{ HOME: "/home/pi", TERM: "xterm", TMOUT: "60", ANTHROPIC_API_KEY: "sk-test-d", PI_PACKAGE_CANARY: "/job/canary/x" },
+	];
+	for (const shape of shapes) {
+		for (const extraFlags of [[], ["-i"], ["-i", "-t", "--entrypoint", "bash"], ["-d"]]) {
+			for (const argv of [buildDockerRunArgs({ ...base, env: shape, extraFlags }), buildPodmanRunArgs({ ...base, env: shape, extraFlags, user: "1234:1234", cgroupParent: null })]) {
+				assert.doesNotThrow(() => assertJobEnvArgv(argv, shape, jobClientEnv(shape, { PATH: "/usr/bin" })), JSON.stringify(Object.keys(shape)));
+			}
+		}
+	}
+});
+
+test("issue #1114: the sandbox, the live and display probes and doctor's canaries emit no bare name, so their argv is byte for byte what it was", () => {
+	const egress = egressEnv({ armed: true });
+	for (const venue of ["local", "podman"]) {
+		const args = buildSandboxRunArgs({ venue, image: "pi-job:pinned", name: "pi-sandbox-gh-1", workspace: "/w", jobDir: "/j", term: "xterm", idleSeconds: 600, network: "pi-sandbox-gh-1-net", egressEnv: egress, user: "1234:1234", home: "/home/pi" });
+		const expected = { TERM: "xterm", TMOUT: "600", HOME: "/home/pi", ...jobSizeEnv(DEFAULT_JOB_SIZE), ...egress };
+		assert.deepEqual(args.filter((_, i) => args[i - 1] === "-e"), legacyEnvArgs(expected).filter((_, i) => i % 2 === 1), venue);
+	}
+	const fixture = liveFixture("/srv/doctor");
+	for (const buildArgs of [buildDockerRunArgs, (opts) => buildPodmanRunArgs({ ...opts, user: "1:1" })]) {
+		for (const args of [liveProbeRunArgs({ image: "i", name: "n", fixture, buildArgs }), pinningProbeRunArgs({ name: "n", nonce: "x", fixture, buildArgs }), ephemeralRunArgs({ image: "i", name: "n", fixture, nonce: "x", run: 1, buildArgs }), peerRunArgs({ image: "i", name: "n", fixture, network: "net", nonce: "x", buildArgs })]) {
+			assert.equal(args.includes("-e"), false, "a probe has no environment at all");
+		}
+	}
+	for (const bin of ["docker", "podman"]) {
+		const args = egressCanaryProbeArgs({ bin, slug: "provider", pid: 1, network: "n", proxy: "p", image: "pi-job:pinned", url: "https://x", user: "1234:1234", httpProxy: true });
+		const head = args.slice(0, args.indexOf("pi-job:pinned"));
+		assert.ok(head.filter((_, i) => head[i - 1] === "-e").every((t) => t.includes("=")), `${bin}: every -e before the image carries its value`);
+	}
+	// The CI scripts' env shapes (job-user-e2e.mjs, podman-host-check.mjs: their names, with placeholder values) build
+	// exactly the legacy tokens.
+	for (const shape of [{ PI_PROVIDER: "p", PI_MODEL: "m", PI_MAX_TURNS: "1" }, { PI_PROVIDER: "p", PI_MODEL: "m", PI_MAX_TURNS: "1", HOME: CONTAINER_HOME }, { HOME: CONTAINER_HOME }, {}]) {
+		assert.deepEqual(jobEnvArgs(shape), { args: legacyEnvArgs(shape), bare: {}, kept: [] });
+	}
+});
+
+test("issue #1114: the network canary smoke's probe variable goes bare, and the script hands its run the client env built from the same map", () => {
+	// The script's own build (.github/scripts/canary-network-smoke.mjs), which cannot be imported: it runs docker at load.
+	const env = { PROBE_PROXY: "pi-dispatch-canary-smoke-1-proxy" };
+	const args = buildDockerRunArgs({ image: "pi-job:pinned", name: "pi-dispatch-canary-smoke-1", network: "n-in", jobDir: "/r/job", workspace: "/r/workspace", env, extraFlags: ["--entrypoint", "node"] });
+	assert.equal(args[args.indexOf("PROBE_PROXY") - 1], "-e");
+	assert.deepEqual(containerEnvOf(args, { env: jobClientEnv(env, {}) }), env);
+	const script = readFileSync(new URL("../../.github/scripts/canary-network-smoke.mjs", import.meta.url), "utf8");
+	assert.match(script, /buildDockerRunArgs\(\{[^\n]*env, extraFlags/);
+	assert.match(script, /await docker\(\[\.\.\.args, "--eval", probe\], jobClientEnv\(env\)\)/);
 });

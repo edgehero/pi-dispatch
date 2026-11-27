@@ -4,8 +4,10 @@
  * Every flag here is the enforcement surface of CONST-ISOLATION-CONTAINER-PER-JOB -- pi has no
  * permission system, so the container is the only real control. The argv is built as an explicit
  * array (never a shell string): no interpolation, no injection, and the env allowlist is passed
- * with explicit `-e NAME` where the value is read from the argv env map, never `--env-file` and
- * never a host pass-through.
+ * with an explicit `-e` per entry of the closed map, never `--env-file` and never a host pass-through.
+ * Since issue #1114 a credential's entry is a bare `-e NAME` whose value the runtime client reads from
+ * the environment the worker spawns it with (`jobEnvArgs`, `jobClientEnv`), so no credential value is on
+ * the client's argv; every other entry stays `-e NAME=VALUE`.
  *
  * HOW Docker spells a container. WHAT a container IS moved to `container-spec.mjs` (issue #227), which is
  * the move #261 deferred to "the PR that adds a second consumer" -- the backend seam is that consumer, since
@@ -24,6 +26,7 @@ import { isAbsolute, relative } from "node:path";
 import { SIZE_LABEL_CPU, SIZE_LABEL_MEM, assertCidFile, assertJobUser, containerSpec } from "./container-spec.mjs";
 import { LAYOUTS } from "./job-layout.mjs";
 import { CGROUP_PARENT, CPU_SHARES_MAX, CPU_SHARES_MIN } from "./job-size.mjs";
+import { EGRESS_ENV_KEYS, isNonSecretEnvKey } from "./redact-secrets.mjs";
 
 /** The fixed isolation flags. Not configurable -- these ARE the boundary. */
 export const ISOLATION_FLAGS = [
@@ -231,6 +234,167 @@ export function podmanArgsFromSpec(spec) {
 export const PODMAN_PINNED_FLAGS = Object.freeze(["--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private", "--env-host=false", "--http-proxy=false"]);
 
 /**
+ * Issue #1114: the names the runtime client ITSELF acts on, which never go bare. A bare `-e NAME` puts the job's value
+ * in the docker or podman CLI's own environment, where the CLI, the children it starts (conmon, a wrapper script, a
+ * credential helper) and the host's loader and shell read it before any container exists: a job's `DOCKER_HOST` would
+ * pick the daemon, its `LD_PRELOAD` would load into the CLI, its `HTTPS_PROXY` would carry the CLI's own requests. So a
+ * name here stays `-e NAME=VALUE`, and the client's environment keeps the worker's own value for it. That is also what
+ * keeps the venue's endpoint observation true of the job's client (backends.mjs, "WHAT THE OBSERVATION CANNOT SEE"):
+ * the observation runs under the worker's environment, and no `DOCKER_*`, `CONTAINER_*` or `CONTAINERS_*` name of a job
+ * can change the client's.
+ *
+ * Matched WITHOUT REGARD TO CASE (`isClientEnvGuarded`): Windows is a supported host, its environment ignores case, and
+ * a trigger may name a lower-case variable. `names` are whole names, `prefixes` cover a family. A BACKSTOP, not a
+ * complete list: a CLI release can read a new variable. A credential whose name is here stays on the argv, and the job's
+ * log line (`secret_env_on_argv`) and doctor name it.
+ */
+export const CLIENT_ENV_GUARD = Object.freeze({
+	names: Object.freeze([
+		// The process's identity and the paths every program resolves through.
+		"HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP",
+		// The proxy family Go's HTTP client (both CLIs) and curl read; REQUEST_METHOD turns Go's HTTP_PROXY off.
+		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "FTP_PROXY", "GRPC_PROXY", "REQUEST_METHOD",
+		// Session plumbing and TLS trust.
+		"DISPLAY", "SSL_CERT_FILE", "SSL_CERT_DIR", "DBUS_SESSION_BUS_ADDRESS", "NOTIFY_SOCKET",
+		// Podman's storage and registry login.
+		"STORAGE_DRIVER", "STORAGE_OPTS", "REGISTRY_AUTH_FILE",
+		// What a shell reads at start, for a client that is a wrapper script (podman-docker's `docker`).
+		"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "IFS", "PS4", "CDPATH",
+		// The Go runtime's own variables, read by both CLIs before main.
+		"GODEBUG", "GOGC", "GOMAXPROCS", "GOMEMLIMIT", "GOTRACEBACK", "GORACE", "GOCOVERDIR",
+		// Windows' system variables, which the CLI and its networking resolve through.
+		"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+		"PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "COMMONPROGRAMW6432",
+		"ALLUSERSPROFILE", "PUBLIC", "HOMEDRIVE", "HOMEPATH", "USERNAME", "USERDOMAIN", "COMPUTERNAME", "OS",
+		"PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "PSMODULEPATH", "DRIVERDATA",
+	]),
+	prefixes: Object.freeze(["DOCKER_", "CONTAINER_", "CONTAINERS_", "_CONTAINERS_", "PODMAN_", "XDG_", "SSH_", "LD_", "DYLD_", "BASH_FUNC_", "LISTEN_", "OTEL_"]),
+});
+
+/** Whether the runtime client acts on `name` itself (`CLIENT_ENV_GUARD`), compared upper-case. */
+export function isClientEnvGuarded(name) {
+	const upper = String(name).toUpperCase();
+	return CLIENT_ENV_GUARD.names.includes(upper) || CLIENT_ENV_GUARD.prefixes.some((prefix) => upper.startsWith(prefix));
+}
+
+/**
+ * A name that may go bare (issue #1114): one a shell can spell. Podman reads a bare `-e NAME*` as a glob over its own
+ * environment, and a `=` would split where the CLI splits, so anything else stays `-e NAME=VALUE`. `ENV_NAME` in
+ * triggers.mjs is the same pattern for `run.secrets` and bundles; `PI_FORWARD_ENV` names are not held to it, so a
+ * forwarded name outside it is kept on the argv and said rather than refused.
+ */
+export const BARE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** The sandbox's terminal pair (sandbox.mjs): never a credential, and not in `NON_SECRET_ENV_KEYS`. */
+const TERMINAL_ENV_NAMES = Object.freeze(["TERM", "TMOUT"]);
+
+/**
+ * THE ONE DECISION between `-e NAME=VALUE` and a bare `-e NAME` (issue #1114), for every entry of a container's closed
+ * env map. `argsFromSpec` emits `args`; `jobClientEnv` puts `bare` in the client's environment; the pre-spawn check
+ * (`assertJobEnvArgv`) and the tests read the same answer, so no two of them can disagree about a name.
+ *
+ * openshell's rule (`openshellExecArgs`) plus a guard. A name STAYS INLINE when it carries no secret (`isNonSecretEnvKey`,
+ * redact-secrets.mjs), is one of the egress variables (`EGRESS_ENV_KEYS`), is `TERM` or `TMOUT`, has the empty value
+ * (Windows cannot hold an empty variable, and it carries nothing), is a name the client acts on (`CLIENT_ENV_GUARD`),
+ * is not a name a shell can spell (`BARE_ENV_NAME`), or matches another key of the same map without regard to case and
+ * is not the one spelling of that group written entirely in upper case. EVERY OTHER NAME GOES BARE, an inverted rule
+ * like the redactor's: a variable added to the container env later is kept off the argv until someone lists it as
+ * structural.
+ *
+ * THE CASE TWINS. A Windows environment holds one of two keys that differ only by case, so two bare names of one fold
+ * would leave the client one value for both. Yet keeping the whole group inline would let an operator's `github_token`
+ * (a run secret or a forwarded name, which the loaders accept) put the minted `GITHUB_TOKEN` back on the argv. So the
+ * upper-case spelling goes bare, as it would alone, and every other spelling stays `-e NAME=VALUE` and is `kept`: the
+ * client's environment still holds exactly one key per folded name. Every name the worker writes itself (the minted
+ * token's, the provider credential's, the structural ones) is upper case, so none of them is ever pushed onto the argv
+ * by an operator's twin.
+ *
+ * `kept` names the entries that are secret by that rule and stayed inline anyway (the guard, the pattern, a case twin,
+ * or an egress variable whose value is not the one the worker wrote for this job: `workerSet`, `secretValuesOf`'s
+ * meaning), which the job's log line says, by name only. `workerSet` moves nothing on the argv.
+ */
+export function jobEnvArgs(env, { workerSet = {} } = {}) {
+	const entries = Object.entries(env ?? {}).filter(([, v]) => v !== undefined && v !== null);
+	const folded = new Map();
+	for (const [name] of entries) folded.set(name.toUpperCase(), (folded.get(name.toUpperCase()) ?? 0) + 1);
+	const args = [];
+	const bare = [];
+	const kept = [];
+	for (const [name, raw] of entries) {
+		const value = `${raw}`;
+		const workerWrote = EGRESS_ENV_KEYS.includes(name) && Object.hasOwn(workerSet ?? {}, name) && workerSet[name] === value;
+		if (isNonSecretEnvKey(name) || TERMINAL_ENV_NAMES.includes(name) || value === "" || workerWrote) {
+			args.push("-e", `${name}=${value}`);
+			continue;
+		}
+		if (EGRESS_ENV_KEYS.includes(name) || isClientEnvGuarded(name) || !BARE_ENV_NAME.test(name) || (folded.get(name.toUpperCase()) > 1 && name !== name.toUpperCase())) {
+			args.push("-e", `${name}=${value}`);
+			kept.push(name);
+			continue;
+		}
+		args.push("-e", name);
+		bare.push([name, value]);
+	}
+	// `fromEntries`, so a name like `__proto__` is an own key here rather than a prototype assignment that drops it.
+	return { args, bare: Object.fromEntries(bare), kept };
+}
+
+/**
+ * The runtime client's spawn environment for a job (issue #1114): the host's (`hostEnv`, by default this process's own,
+ * which the client inherited whole before this), WITHOUT every host key whose upper-case form is a bare name's, PLUS the job's
+ * value for each bare name. So the client sees what it always saw, and no host value can fill a bare name on any
+ * platform: on Windows node keeps one of two keys that differ only by case and the docker CLI's lookup ignores case,
+ * so a host `github_token` beside the job's `GITHUB_TOKEN` must go too. A guarded name is never bare, so the client's
+ * `DOCKER_HOST`, `CONTAINER_HOST` and the rest are always the worker's.
+ */
+export function jobClientEnv(env, hostEnv = process.env) {
+	const { bare } = jobEnvArgs(env);
+	const names = new Set(Object.keys(bare).map((name) => name.toUpperCase()));
+	return Object.fromEntries([...Object.entries(hostEnv ?? {}).filter(([key]) => !names.has(key.toUpperCase())), ...Object.entries(bare)]);
+}
+
+/**
+ * The pre-spawn check (issue #1114), on the argv a venue's builder returned and the environment the client is about to
+ * get: the argv's env flags must be EXACTLY `jobEnvArgs(env).args`, in order, and each bare name's value must be this
+ * job's in `clientEnv`. So it refuses, by throwing, a credential's value on the argv, a credential dropped from it, an
+ * entry the map does not hold, a wrong value, a flag the CLI reads as an env entry in a fused form (`-eNAME`, `-e=NAME`),
+ * and a `-e` or `--env` with nothing after it but the image. It reads every token but the last, which is the image a job
+ * argv ends with (a probe's own `-e` after its image is never handed to this check). It checks env flags only: a value
+ * the builder put in another flag (a `--label=`) is a builder defect it does not look for. Names only in the message,
+ * never a value.
+ */
+export function assertJobEnvArgv(args, env, clientEnv) {
+	const expected = jobEnvArgs(env);
+	const head = args.slice(0, -1);
+	const entries = [];
+	const nameOf = (entry) => (entry.includes("=") ? entry.slice(0, entry.indexOf("=")) : entry);
+	const shown = (entry) => (entry === undefined ? "nothing" : entry.includes("=") ? `${nameOf(entry)} with a value` : `a bare ${entry}`);
+	for (let i = 0; i < head.length; i++) {
+		const token = head[i];
+		if (token === "-e" || token === "--env") {
+			if (i + 1 >= head.length) throw new Error(`docker run: refusing an argv whose last ${token} has no entry before the image (issue #1114)`);
+			entries.push(String(head[++i]));
+		} else if (typeof token === "string" && token.startsWith("--env=")) {
+			entries.push(token.slice("--env=".length));
+		} else if (typeof token === "string" && /^-e./.test(token)) {
+			throw new Error(`docker run: refusing a fused env flag for ${nameOf(token.slice(2).replace(/^=/, ""))}: the CLI reads it as an env entry, and the builder passes -e and the entry as two tokens (issue #1114)`);
+		}
+	}
+	const want = expected.args.filter((_, i) => i % 2 === 1);
+	for (let k = 0; k < Math.max(entries.length, want.length); k++) {
+		if (entries[k] === want[k]) continue;
+		const got = entries[k];
+		if (got !== undefined && got.includes("=") && Object.hasOwn(expected.bare, nameOf(got))) throw new Error(`docker run: refusing an argv that carries the value of ${nameOf(got)}, which travels as a bare -e ${nameOf(got)} (issue #1114)`);
+		if (got !== undefined && !got.includes("=") && !Object.hasOwn(expected.bare, got)) throw new Error(`docker run: refusing a bare -e ${got} whose value is not this job's in the client's environment (issue #1114)`);
+		if (got !== undefined && want[k] !== undefined && got.includes("=") && want[k].includes("=") && nameOf(got) === nameOf(want[k])) throw new Error(`docker run: refusing an argv whose env flags are not this job's: entry ${k + 1} gives ${nameOf(got)} a value other than the job's (issue #1114)`);
+		throw new Error(`docker run: refusing an argv whose env flags are not this job's: entry ${k + 1} is ${shown(got)} where ${shown(want[k])} was due (issue #1114)`);
+	}
+	for (const [name, value] of Object.entries(expected.bare)) {
+		if (clientEnv?.[name] !== value) throw new Error(`docker run: refusing a bare -e ${name} whose value is not this job's in the client's environment (issue #1114)`);
+	}
+}
+
+/**
  * The shared body of both builders. `userns` is the caller's, never the spec's: each public builder has already decided
  * what its runtime may say, and reading the spec here would let a docker argv carry a flag its CLI refuses.
  */
@@ -314,13 +478,11 @@ function argsFromSpec(spec, { userns }) {
 	if (spec.cidFile) args.push(`--cidfile=${spec.cidFile}`);
 	args.push(...(spec.dockerExtra ?? []));
 
-	// Explicit env allowlist. Each entry is `-e NAME=VALUE`, built from the closed map -- so a
-	// stray host variable cannot ride along (no bare `-e NAME` inheriting from the host, no
-	// --env-file). Undefined values are skipped, never passed as an empty string.
-	for (const [k, v] of Object.entries(spec.env ?? {})) {
-		if (v === undefined || v === null) continue;
-		args.push("-e", `${k}=${v}`);
-	}
+	// Explicit env allowlist, built from the closed map and nothing else (no --env-file). Issue #1114: a credential is
+	// a bare `-e NAME`, its value in the client's spawn environment (`jobClientEnv`), which holds no host value under a
+	// bare name; everything else is `-e NAME=VALUE` as before. `jobEnvArgs` decides which, for the argv here, the spawn
+	// env and the pre-spawn check alike. Undefined values are skipped, never passed as an empty string.
+	args.push(...jobEnvArgs(spec.env).args);
 
 	// `-v` and its value stay TWO argv elements rather than one `--volume=` token. Not cosmetic: the mount
 	// assertions across this suite extract mounts by adjacency (`args[i - 1] === "-v"`), so collapsing the

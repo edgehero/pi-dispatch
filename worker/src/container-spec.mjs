@@ -138,7 +138,8 @@ export function assertUserns(userns) {
  * Calling it `extraFlags` at the boundary would have hidden that.
  *
  * @param image      pinned job image tag/digest
- * @param env        the closed env map from buildContainerEnv -- passed as explicit -e NAME=VALUE
+ * @param env        the closed env map from buildContainerEnv -- an explicit -e per entry: NAME=VALUE, or a bare NAME
+ *                   whose value the runtime client's environment holds for a credential (issue #1114, `jobEnvArgs`)
  * @param jobDir     host path to the /job inputs dir (contains prompt.md and pi/); mounted /job:ro
  * @param workspace  host path to the fresh clone / local folder (mounted /workspace:rw)
  * @param outboxDir  host path to the /outbox chain-request dir (local jobs only); mounted /outbox:rw

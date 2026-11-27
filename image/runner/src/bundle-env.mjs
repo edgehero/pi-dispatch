@@ -8,8 +8,8 @@ import { configError } from "./outcome.mjs";
  * part 3, the `bundleEnvFile` capability): the worker writes them as one JSON object to `bundle-env.json` in the job's
  * own directory (`/sandbox/job` on the copy venue, the read-only `/job` bind on the bind venue) and sets
  * PI_BUNDLE_ENV=1; this runner reads the file before pi's runtime exists and puts each variable into its OWN
- * environment, which is pi's (pi runs in this process) and every tool pi starts inherits, exactly what `-e NAME=VALUE`
- * gives a job on `local` and `podman`.
+ * environment, which is pi's (pi runs in this process) and every tool pi starts inherits, exactly what `-e` gives a job
+ * on `local` and `podman` (a bare `-e NAME` there since issue #1114, the value from the runtime client's environment).
  *
  * WHY A FILE, AND NOT THE EXEC'S `--env`. OpenShell 0.1.4's exec takes env only as `KEY=VALUE` on the CLI's argv, and
  * the gateway puts those pairs at the head of the remote command and logs its first 120 characters at INFO
@@ -23,7 +23,7 @@ import { configError } from "./outcome.mjs";
  * sandbox's CA and proxy variables, the git helper's), and never one whose current value is an OpenShell placeholder
  * (`openshell:resolve:env:`, a provider key: the model key, the forge token, a run.secrets or endpoint value); no value
  * carries a NUL (an environment cannot hold one). Any OTHER name already set (an `ENV` the job image bakes in) is
- * REPLACED, as `-e NAME=VALUE` replaces an image's ENV on `local` and `podman` (final review round: refusing every set
+ * REPLACED, as an `-e` (bare or with its value) replaces an image's ENV on `local` and `podman` (refusing every set
  * name failed a job after spend for a name the worker had admitted). A closed list rather than "anything set" for that
  * reason; the worker's own gate (backend-openshell.mjs `OPENSHELL_SET_ENV_NAMES`, held to be a subset of this list by
  * its test) refuses the same names before spend, so this is the backstop, never the first answer. The worker refused every reserved

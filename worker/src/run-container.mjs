@@ -6,7 +6,7 @@ import { DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { CONTAINER_GLOBAL_PI_DIR, CONTAINER_HOME, memoryBytesOfArgs } from "./container-spec.mjs";
 import { layoutFor } from "./job-layout.mjs";
 import { cpuCeilingCenti, cpuRangeRefusal, DEFAULT_JOB_SIZE } from "./job-size.mjs";
-import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-run.mjs";
+import { assertJobEnvArgv, buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir, jobClientEnv, jobEnvArgs } from "./docker-run.mjs";
 import { configError } from "./config.mjs";
 import { DEFAULT_EGRESS_PROXY, createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { grantOnAttach, removeGrantsOf } from "./endpoint-grants.mjs";
@@ -142,6 +142,15 @@ export function makeRunContainer({
 	// and look for it (or remove its network) under another. The defaults are the local venue's, byte-identical.
 	bin = "docker",
 	buildArgs = buildDockerRunArgs,
+	// Issue #1114: the third of the set, `(env) => spawn env`, the environment the run's CLI child is spawned with, which
+	// holds each credential's value for the bare `-e NAME` the builder emitted (`jobClientEnv`). The local and podman
+	// venues use it; null (openshell, whose exec carries no bare name) spawns exactly as before, with no `env`, and is what
+	// any venue whose argv is not a `docker run` or `podman run` one passes: with a client env set, the argv's env flags
+	// must be the job's exactly (`assertJobEnvArgv`), so an argv with none is refused. Its base
+	// is this PROCESS's environment, which the child inherited whole before, and not `hostEnv`: that is what the job's env
+	// is built from, and a caller may narrow it to a credential (the canary replay does), which must not take PATH or
+	// DOCKER_HOST away from the CLI.
+	clientEnv = jobClientEnv,
 	// Issue #452, gate round 4: `(job) => runtime | undefined`, the runtime THIS job was ADMITTED on (recorded per job),
 	// handed to the teardown's detach gate so the teardown never reads the daemon again; `undefined` falls back to a read.
 	// `log` names a teardown the gate refused, which leaves the job's network for the boot reaper.
@@ -739,6 +748,24 @@ export function makeRunContainer({
 			...(bundleKeys !== null && typeof bundleKeys === "object" ? { bundleKeys } : {}),
 		};
 		const args = beforeSpawn(() => buildArgs(buildOpts));
+		// Issue #1114: the CLI child's environment, built from the job's env and this worker's own, then held against the
+		// argv before anything spawns: env flags that are not exactly `jobEnvArgs`'s (a credential's value on the argv, one
+		// dropped, an entry the map does not hold, a wrong value), or a bare name whose value is not this job's, are refused
+		// here, on the path a refused argv already takes (a plain throw, so nothing is spawned and the processor treats it as
+		// any builder refusal). Null for a venue that passes none (openshell), whose spawn is unchanged.
+		const spawnEnv = clientEnv === null ? null : beforeSpawn(() => {
+			const built = clientEnv(buildOpts.env);
+			assertJobEnvArgv(args, buildOpts.env, built);
+			return built;
+		});
+		// Issue #1114: a credential the rule kept on the argv (a name the client acts on, a case twin of another name, a name
+		// no shell can spell, a proxy variable the worker did not write), said by name, never value, so the operator can
+		// rename it. Not a `run.secretFiles` variable: its value is the file's path, never the secret (the redactor leaves
+		// those names out above for the same reason, and so does doctor).
+		if (spawnEnv !== null) {
+			const kept = jobEnvArgs(buildOpts.env, { workerSet: egressEnv({ proxy: egressProxy, armed: egress }) }).kept.filter((n) => !fileNames.includes(n));
+			if (kept.length > 0) log("secret_env_on_argv", { container: name, names: kept });
+		}
 
 		// Issue #596: the memory bound this container actually got, in bytes, read off the argv the runtime is handed (both
 		// builders spell it `--memory=`, from the job's size), never re-derived from the environment or the size. The
@@ -1119,7 +1146,8 @@ export function makeRunContainer({
 			const startClock = createdCheck.now ?? (() => Date.now());
 			const spawnedAt = startClock();
 			if (timed) stopCreated = watchCreated({ cidFile, fs, onCreated: (ms) => log("container_created", { container: name, ms }), ...createdCheck, since: spawnedAt });
-			const child = spawnFn(bin, args, { stdio: [exitKey !== null ? "pipe" : "ignore", "pipe", "pipe"] });
+			// Issue #1114: `env` only beside a client env; without one (openshell) the options are exactly what they were.
+			const child = spawnFn(bin, args, { stdio: [exitKey !== null ? "pipe" : "ignore", "pipe", "pipe"], ...(spawnEnv !== null ? { env: spawnEnv } : {}) });
 			if (timed) child.stdout?.once?.("data", () => log("container_first_output", { container: name, ms: Math.max(0, Math.round(startClock() - spawnedAt)) }));
 			// Issue #888: the container exists from here, so the backstop's clocks start now.
 			armActivity();

@@ -84,6 +84,8 @@ function harness({ relayOpener = "fake", opener = true, child, binds = false, la
 		mintExitKey: () => KEY,
 		...(stdinExitGraceMs !== undefined ? { stdinExitGraceMs } : {}),
 		buildArgs: (opts) => ((seen.env = opts.env), (seen.buildOpts = opts), ["sandbox", "exec"]),
+		// The copying venue's exec, as openshell spawns it: no client env, its argv carries no `-e` (issue #1114).
+		clientEnv: null,
 		memoryLimitOf: () => null,
 		spawnFn: child,
 		onOutput: () => {},

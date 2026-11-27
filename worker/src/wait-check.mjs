@@ -11,7 +11,7 @@
  *     refuses. Whether a check may return a reason string worth showing is deferred, and deferring it is
  *     cheaper than un-shipping it later.
  *   - **no size cap, no NUL check, no newline stripping.** Those exist because a resolved value becomes an
- *     `-e NAME=VALUE` argv element. Nothing here becomes anything.
+ *     environment entry of the runtime client (or an `-e NAME=VALUE` argv element). Nothing here becomes anything.
  *   - **no dedup by reference.** A resolver dedups because two variables may name one item and rotation
  *     could straddle the pair. Two conditions naming one profile are refused at load instead.
  *   - **four codes rather than three** (`INT-RUNNER-EXIT-CODE-PROTOCOL`'s wait-profile table), because a

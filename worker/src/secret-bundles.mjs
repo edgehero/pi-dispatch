@@ -88,7 +88,7 @@ export function bundleLoaderName(name) {
  *   - `bad-name`    a name that is not an environment variable name (ENV_NAME), or `__proto__`; not named;
  *   - `duplicate`   one name twice: which value wins would be the parser's choice, never the operator's;
  *   - `empty-value` an empty value: a set-but-empty variable is how a broken manager reads as configured;
- *   - `nul`         a value with a NUL, which `-e NAME=VALUE` would silently cut;
+ *   - `nul`         a value with a NUL, which an environment entry or an `-e NAME=VALUE` would silently cut;
  *   - `value-too-large` a value over `MAX_SECRET_BYTES`;
  *   - `too-many`    over `SECRET_BUNDLE_VARS_MAX` variables;
  *   - `empty`       no variable at all: exit 0 that grants nothing is the silent-no-op class `runResolver` refuses

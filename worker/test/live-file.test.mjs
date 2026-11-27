@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { cleanup, makePrepareWorkspace } from "../src/prepare.mjs";
 import { makeLiveTranscript, stageLiveFile } from "../src/live-transcript.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { containerEnvOf } from "./helpers/container-env.mjs";
 
 // Issue #643: the live transcript file every job now gets, and the publisher's wiring in runContainer. run-container
 // imports env-allowlist -> @earendil-works/pi-ai, so those tests skip below the node floor, as run-container.test.mjs's do.
@@ -29,10 +30,11 @@ const JOB = { kind: "github", repo: "o/n", provider: "anthropic", model: "m", ma
 /** The mounts of an argv, as `host -> container`, by `-v` adjacency (docker-run.mjs spells every mount that way). */
 const mountsOf = (args) => args.flatMap((a, i) => (args[i - 1] === "-v" ? [a] : []));
 
-/** A fake runtime child: runs `during(args)` (the container "working"), then closes with `code`. */
+/** A fake runtime child: records its argv and spawn options, runs `during(args)` (the container "working"), then closes with `code`. */
 function fakeSpawn(rec, { code = 0, during = () => {} } = {}) {
-	return (cmd, args) => {
+	return (cmd, args, opts) => {
 		rec.args = args;
+		rec.opts = opts;
 		const child = new EventEmitter();
 		child.stdout = new EventEmitter();
 		child.stderr = new EventEmitter();
@@ -120,7 +122,7 @@ test("a non-resume job now mounts its live file at /session and gets PI_SESSION_
 		const as = podman ? { user: "1000:1000", home: CONTAINER_HOME } : {};
 		await rc.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(rec), ...venue })({ job: JOB, token: "ghs_x", prepared: live, name: "j1", signal: new AbortController().signal, ...as });
 		if (podman) assert.ok(rec.args.includes("--userns=keep-id"), "the rootless podman argv");
-		assert.ok(rec.args.includes("PI_SESSION_FILE=/session/current.jsonl"), "the runner is pointed at the file");
+		assert.equal(containerEnvOf(rec.args, rec.opts).PI_SESSION_FILE, "/session/current.jsonl", "the runner is pointed at the file");
 		const sessionMounts = mountsOf(rec.args).filter((m) => m.split(":")[1] === "/session");
 		assert.equal(sessionMounts.length, 1);
 		assert.ok(sessionMounts[0].startsWith(`${jobDir}/session:`), "CONST-ISOLATION-CONTAINER-PER-JOB: the mount is the job's own directory");

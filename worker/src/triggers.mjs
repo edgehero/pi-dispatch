@@ -311,7 +311,8 @@ export const REPLICAS_MAX = 3;
  * them SEQUENTIALLY, before the container, each with its own timeout, so N references hold a
  * `PI_CONCURRENCY` slot for up to N x PI_SECRET_RESOLVE_TIMEOUT_MS inside the job's own 30-minute kill
  * timer. A cap at load turns an unbounded slot occupancy into a bounded one for free, before anything
- * runs. It bounds the host argv too: every resolved value is pushed as `-e NAME=VALUE` (docker-run.mjs).
+ * runs. It bounds the runtime client's environment too: every resolved value rides it under a bare `-e NAME`
+ * (docker-run.mjs, issue #1114), or the argv as `-e NAME=VALUE` for a name the client guard keeps inline.
  *
  * Sixteen rather than three: unlike `REPLICAS_MAX` this multiplies no spend, and a deploy job legitimately
  * wants a handful of credentials. A literal for REPLICAS_MAX's reason -- this validator is pure and fs-free.
@@ -321,8 +322,9 @@ const SECRETS_MAX = 16;
 /**
  * A POSIX environment variable name. Nothing in this repo validated one before `run.secrets` (checked), so
  * this is the definition rather than a copy of one. Deliberately stricter than what `execve` would accept:
- * a name is `-e NAME=VALUE` in the docker argv, so `=` would split in the wrong place, and the leading
- * digit is excluded because a shell cannot expand `$1FOO` as that variable.
+ * a name is `-e NAME=VALUE` or a bare `-e NAME` in the docker argv, so `=` would split in the wrong place, and
+ * the leading digit is excluded because a shell cannot expand `$1FOO` as that variable. docker-run.mjs's
+ * `BARE_ENV_NAME` is the same pattern: only a name it admits goes bare.
  */
 export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -1604,8 +1606,9 @@ function validateReplicas(run, at, path) {
  *   - not a plain object, or a value that is not a non-empty string. An array or a nested object is an
  *     operator writing a different feature than the one that exists.
  *   - more than SECRETS_MAX entries -- see that constant: it bounds a worker slot, not a preference.
- *   - a key that is not an environment variable name. There is no downstream check: `-e NAME=VALUE` goes
- *     into the docker argv as written, so a key with an `=` in it silently binds a different variable.
+ *   - a key that is not an environment variable name. There is no downstream refusal: the name goes into the
+ *     docker argv as written (`-e NAME=VALUE`, or a bare `-e NAME` since issue #1114), so a key with an `=` in it
+ *     silently binds a different variable.
  *   - a key in RESERVED_ENV_NAMES. The mint, the egress policy and the closed map all write AFTER this
  *     feature does, so such a key would be accepted, overwritten, and the job would run without the value
  *     it named on a clean exit 0. Ordering is the backstop; this is the refusal, which is the same
@@ -1821,8 +1824,8 @@ function undeclarableReason(name) {
 /**
  * The most variables one bundle may carry (issue #704), and so the most `endpoints` it may name. Sixty-four, four
  * times `SECRETS_MAX`, and the justification is the one that cap gives, re-measured for one call: a bundle is ONE
- * resolver call with ONE timeout, so the count multiplies no slot time; what it multiplies is the host argv
- * (`-e NAME=VALUE` per variable on local and podman, OQ-028) and the redaction set, and 64 x 64 KiB is bounded
+ * resolver call with ONE timeout, so the count multiplies no slot time; what it multiplies is the runtime client's
+ * environment (a bare `-e NAME` per variable on local and podman since issue #1114, OQ-028) and the redaction set, and 64 x 64 KiB is bounded
  * anyway by the 256 KiB total the resolver's output may have (`secret-bundles.mjs`). A project with more than 64
  * variables in one environment is one whose blast radius this feature should not make one grant.
  */
@@ -1942,8 +1945,8 @@ function validateBundleFiles(value, endpoints, at, path) {
 /**
  * A bundle's `endpoints` (issue #704): `{ NAME: { host, auth } }`, the variables the openshell venue may hold as a
  * per-job provider key bound to that one host. Shape-checked here on every venue so the file is one file; USED
- * only on openshell, and on every other venue a named variable goes in plain like the rest, which is what it
- * would be without the field (OQ-028 says so).
+ * only on openshell, and on every other venue a named variable goes in plain like the rest (a bare `-e NAME`, its
+ * value in the client's environment, issue #1114), which is what it would be without the field (OQ-028 says so).
  */
 function validateBundleEndpoints(endpoints, at, path) {
 	if (endpoints === undefined) return undefined;

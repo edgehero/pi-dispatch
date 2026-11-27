@@ -81,7 +81,7 @@ import { declaredEndpointsIn, declaredPrivateEndpointsIn, endpointsDeclaredIn, e
 import { privateEndpointChecks, privateRunsOf, sharedServerChecks } from "./private-endpoints-doctor.mjs";
 import { loadPauseWindows, parsePauseWindows, parseScopeString, pauseWindowsVersionFor } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
-import { isForgeKind } from "./forges.mjs";
+import { MINTED_TOKEN_VARS, isForgeKind } from "./forges.mjs";
 import { findLiteralSecret, ADMIN_RE } from "./import-pi.mjs";
 import { mcpServerWhere, readOverlayMcp } from "./mcp-config.mjs";
 import { allowlistEntryFor, egressRefusalFor, packageRunnerHosts, parseAllowlist } from "./egress-allowlist.mjs";
@@ -98,7 +98,10 @@ import { PROXY_STATE_FORMAT, parseProxyState, rulesIncludeEndpoints, rulesInclud
 import { PACKAGED_EGRESS_PROXY_CONF, PACKAGE_VERSION, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf } from "./egress-conf-copy.mjs";
 import { ABSENT, ASSERTED, BACKENDS, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, HOST_ROUTE_LAN, HOST_ROUTE_REFUTED, HOST_ROUTE_WORKS, backendRefusals, declarationOf, floorShortfall, hostRouteFor, isProxyLocalHost, openshellSetupOf, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, podmanPausable, observePodman, observeRootlessNetns, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
-import { PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
+import { PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs, containerSpec, isClientEnvGuarded, jobEnvArgs, podmanArgsFromSpec } from "./docker-run.mjs";
+import { EGRESS_ENV_KEYS } from "./redact-secrets.mjs";
+import { PROVIDER_KEY_NAMES } from "./provider-key-names.mjs";
+import { CONTAINER_ENV_NAMES } from "./reserved-env.mjs";
 import { PODMAN_SERVICE_TIMEOUT_MS, PODMAN_SERVICE_UNIT, makePodmanServiceReader, observeHost, observeRootfulConf, readRootfulService, rootfulConfFix, rootfulConfRetries, rootfulConfResidual, rootfulUnreadList } from "./runtime-observations.mjs";
 import { JOB_NAME_PREFIX, endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
 import { grantOnAttach, grantsDirOf, removeGrantsOf } from "./endpoint-grants.mjs";
@@ -2162,7 +2165,7 @@ export async function collectChecks(shellVars, seams) {
 	// runTable, blockTable }, jobData: { table } }`, each part the store module's own when absent. This seam is how a test
 	// drives a need above 1 through the real collection, for a store whose table has no row of its own and at a version no row holds yet.
 	const versionTables = seams.versionTables ?? {};
-	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, localEvents, secreting, keyHolders, onceArmed, onceSpent, quotaReserves, secretProfiles, localSecretFolders, secretNames, fileSecretRuns, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, privateRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
+	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, localEvents, secreting, keyHolders, onceArmed, onceSpent, quotaReserves, secretProfiles, localSecretFolders, secretNames, envSecretNames, fileSecretRuns, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, privateRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
 	const modelRoleProjects = readProjectFacts(bootEnv, fileExists).projects;
 	const scopedLimitFacts = readScopedLimitFacts(bootEnv, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(bootEnv, fileExists, versionTables.pauseWindows);
@@ -2638,6 +2641,8 @@ export async function collectChecks(shellVars, seams) {
 					: null);
 	section("backends");
 	checks.push(...backendChecks(env, { endpoint, daemon, fs: seams.observationFs, unit: jobUser.unit, ...(podman ? { podman: podman.observed } : {}) }));
+	// Issue #1114: the configured credential names a docker or podman job would keep on its client's argv.
+	checks.push(...argvCredentialChecks({ localUsed, podmanUsed, forwarded: (env.PI_FORWARD_ENV ?? "").split(",").map((n) => n.trim()).filter((n) => n !== ""), secretNames: envSecretNames, bundles: Object.keys(triggerBundles ?? {}).length > 0 }));
 	section("sizing");
 	// Issue #596: the default job size, and what this host's runtime says about the bounds a size becomes.
 	// Each venue this deployment runs, from that venue's own read: `undefined` leaves a venue out, null is "not read".
@@ -7719,7 +7724,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables = {}) {
-	const none = { privateRuns: [], watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, localEvents: [], secreting: 0, keyHolders: [], onceArmed: 0, onceSpent: 0, quotaReserves: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], fileSecretRuns: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
+	const none = { privateRuns: [], watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, localEvents: [], secreting: 0, keyHolders: [], onceArmed: 0, onceSpent: 0, quotaReserves: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], envSecretNames: [], fileSecretRuns: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -7812,6 +7817,9 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			// rather than leaving the operator to meet it as a public refusal on a live job. With the names an answer
 			// rule or the zeroTouch block declares (issue #1013), judged by the same lines.
 			secretNames: [...new Set([...triggers.flatMap((t) => [...Object.keys(t.run.secrets ?? {}), ...Object.keys(t.run.secretFiles ?? {})]), ...keyHolders.flatMap((h) => h.secretNames)])].sort(),
+			// Issue #1114: the same without run.secretFiles' names, whose variable holds a path and never the secret: the names
+			// a job's env takes a credential under, for the argv line (`argvCredentialChecks`).
+			envSecretNames: [...new Set([...triggers.flatMap((t) => Object.keys(t.run.secrets ?? {})), ...keyHolders.flatMap((h) => h.secretNames)])].sort(),
 			fileSecretRuns: triggers.map((t, index) => ({ label: triggerLabel(t, index), provider: t.run.provider, secretsProfile: t.run.secretsProfile, secretFiles: t.run.secretFiles })).filter((run) => run.secretFiles !== undefined),
 			// Issue #242: every local run.folder, CANONICALIZED the way the scoped-limits matcher
 			// canonicalizes a job's folder (one derivation -- canonicalScope, never re-spelled here), so
@@ -11739,6 +11747,72 @@ export function backendChecks(env, { endpoint = null, daemon = null, fs = { stat
 	}
 
 	return checks;
+}
+
+/**
+ * The names the worker writes into a job's env itself (issue #1114): the minted token's under every forge's names
+ * (`MINTED_TOKEN_VARS`), every provider credential pi reads (`PROVIDER_KEY_NAMES`), and the structural names
+ * (`CONTAINER_ENV_NAMES`). Each is upper case, so it goes bare beside an operator's case twin, and the twin stays inline.
+ */
+const WORKER_WRITTEN_ENV_NAMES = Object.freeze([...new Set([...MINTED_TOKEN_VARS, ...Object.values(PROVIDER_KEY_NAMES).flat(), ...CONTAINER_ENV_NAMES])]);
+
+/**
+ * Issue #1114: whether a credential this deployment configures would stay on the docker or podman client's argv, one
+ * static line for the local and podman venues, from configuration alone (no job runs, no process list is read). A job's
+ * credential travels as a bare `-e NAME`, its value in the client's environment, EXCEPT a name the rule keeps inline
+ * (`jobEnvArgs`, docker-run.mjs): one the client reads itself (`CLIENT_ENV_GUARD`), one that differs only by case from
+ * another and is not that group's upper-case spelling, one no shell can spell, and a forwarded proxy variable (only
+ * forwardable while PI_EGRESS=0). Those names are read off `forwarded` (PI_FORWARD_ENV) and `secretNames` (every
+ * trigger's `run.secrets` keys, and the keys an answer rule or the zeroTouch block declares beside its
+ * `secretsProfile`), each name and never a value, and are judged beside the names the worker writes itself
+ * (`WORKER_WRITTEN_ENV_NAMES`), so an operator's `github_token` is named with the `GITHUB_TOKEN` it differs from. A
+ * secret bundle's names exist only when a job resolves it (`bundles`: the triggers file declares one), so the line says
+ * it cannot speak for them; the job's own log line (`secret_env_on_argv`) does. A warning, never a failure: the job
+ * runs, and the exposure is the one it always had. NOTHING is said where nothing is configured: the provider key and
+ * the minted token are never names the client acts on, and a deployment that names no variable is not told about the
+ * rule (the `run.resume` block's rule, which "a deployment that binds no secrets is told nothing about them at all"
+ * holds).
+ */
+export function argvCredentialChecks({ localUsed = false, podmanUsed = false, forwarded = [], secretNames = [], bundles = false } = {}) {
+	const venues = [...(localUsed ? ["local"] : []), ...(podmanUsed ? ["podman"] : [])];
+	const names = [...new Set([...forwarded, ...secretNames].filter((n) => typeof n === "string" && n !== ""))];
+	if (venues.length === 0 || (names.length === 0 && bundles !== true)) return [];
+	const configured = new Set(names);
+	const decided = jobEnvArgs(Object.fromEntries([...WORKER_WRITTEN_ENV_NAMES.map((n) => [n, "written"]), ...names.map((n) => [n, "configured"])]));
+	const kept = decided.kept.filter((n) => configured.has(n));
+	const where = venues.join(" and ");
+	const bundleClause = bundles === true ? "; a secret bundle's names are known only when a job resolves it, and the job's log line names any it keeps (secret_env_on_argv)" : "";
+	if (kept.length === 0) {
+		const bare = names.filter((n) => Object.hasOwn(decided.bare, n)).length;
+		const rest = names.length - bare;
+		return [{ ok: true, label: `${where}: no credential name configured here stays on the runtime client's argv (of the ${names.length} name${names.length === 1 ? "" : "s"} PI_FORWARD_ENV and the triggers file configure, ${bare} go${bare === 1 ? "es" : ""} as a bare -e NAME with ${bare === 1 ? "its value" : "their values"} in the client's environment${rest > 0 ? `, and ${rest} carr${rest === 1 ? "ies" : "y"} no secret` : ""})${bundleClause}` }];
+	}
+	// The other spellings of a kept name's fold, configured or written by the worker: what it differs from only by case.
+	const twinsOf = (n) => [...new Set([...names, ...WORKER_WRITTEN_ENV_NAMES])].filter((m) => m !== n && m.toUpperCase() === n.toUpperCase());
+	// One reason per name, the first that holds, in the order `jobEnvArgs` keeps a name inline.
+	const reasonOf = (n) => (EGRESS_ENV_KEYS.includes(n) ? "egress" : isClientEnvGuarded(n) ? "guard" : twinsOf(n).length > 0 ? "case" : "spelling");
+	const sayCase = (n) => twinsOf(n).map((m) => `${m}${configured.has(m) ? ", also configured" : ", which the worker writes into a job that uses it"}`).join(" and ");
+	// What happens to the upper-case spelling, by the same decision: bare only when it is a credential itself (a structural
+	// PI_MODEL stays inline too, so nothing of the pair goes bare), absent when no spelling of the fold is upper case.
+	const sayFold = (n) => {
+		const upper = twinsOf(n).filter((m) => m === m.toUpperCase());
+		if (upper.some((m) => Object.hasOwn(decided.bare, m))) return "wherever both are in a job the upper-case one goes bare and this one stays";
+		if (upper.length > 0) return "wherever both are in a job this one stays";
+		return "none of them being the upper-case spelling, all of them stay";
+	};
+	const groups = [
+		["egress", (group) => `${group.join(", ")} (a proxy variable, which always travels with its value)`],
+		["guard", (group) => `${group.join(", ")} (the docker or podman client reads it itself)`],
+		["case", (group) => group.map((n) => `${n} (it differs only by case from ${sayCase(n)}; a Windows environment holds one of two such names, so ${sayFold(n)})`).join(", ")],
+		["spelling", (group) => `${group.join(", ")} (it is not a name a shell can spell)`],
+	];
+	const why = groups.map(([key, say]) => [kept.filter((n) => reasonOf(n) === key), say]).filter(([group]) => group.length > 0).map(([group, say]) => say(group));
+	return [{
+		ok: false,
+		warn: true,
+		label: `${where}: ${kept.length === 1 ? "this credential name stays" : "these credential names stay"} on the runtime client's argv as -e NAME=VALUE, readable from the host's process list while a job runs: ${why.join("; ")}${bundleClause}`,
+		fix: "rename it in PI_FORWARD_ENV or the triggers file to a name the client does not act on (docker-run.mjs CLIENT_ENV_GUARD lists them: HOME, PATH, the proxy variables, DOCKER_*, CONTAINER_*, SSH_*, XDG_* and the rest) and that is not a case variant of another; or accept it as before this release; a forwarded proxy variable can only stay there, and only PI_EGRESS=0 forwards one; a job logs each one it kept as secret_env_on_argv",
+	}];
 }
 
 /**

@@ -215,8 +215,9 @@ const PROPERTIES_TABLE = {
 	secretsCustody: {
 		// Stated as what the code actually earns and a test can read back, rather than as "values stay on the
 		// operator's host", which is a topological fact about `remote: false` and not something the worker
-		// builds. The host-side argv exposure under a default `hidepid` is real, pre-existing, disclosed in
-		// SECURITY.md, and deliberately outside this sentence rather than denied by it. WHETHER THE VALUES
+		// builds. The host-side argv exposure under a default `hidepid` (`OQ-028`: closed on docker and podman by
+		// issue #1114 but for the names the client guard keeps inline) is disclosed in SECURITY.md, and
+		// deliberately outside this sentence rather than denied by it. WHETHER THE VALUES
 		// CROSS A NETWORK is deliberately not asked here either -- that is `credentialTransit`, which answers
 		// it honestly, and folding the two would let this one's verified half carry the other's unverified.
 		question: "no resolved secret VALUE reaches a log, a run record or a forge comment",
@@ -400,7 +401,8 @@ export const PODMAN_ADDS_NO_MOUNTS = "podmanAddsNoMounts";
  * The observation that the podman CLI this worker spawns runs its containers in-process on this host rather than through
  * a remote service (issue #354): `podman info` reports `host.serviceIsRemote: false`. `CONTAINER_HOST`, `--remote` or a
  * `containers.conf` service destination turn it `true` (measured), and a remote service is where the provider key and
- * the per-job forge token would travel as `-e NAME=VALUE`.
+ * the per-job forge token would travel, in the run's create request (a bare `-e NAME` since issue #1114 moves them off
+ * the argv, not off that request).
  */
 export const PODMAN_SERVICE_LOCAL = "podmanServiceLocal";
 
@@ -596,7 +598,7 @@ const BACKENDS_TABLE = {
 		describe: "the Docker daemon on this worker's host",
 		remote: false,
 		// Issue #683 (`DES-CONTAINER-BACKEND-REGISTRY`, `CONST-VENUE-EGRESS-LAYER`): the provider key and the forge token sit
-		// in the job's own container, as `-e NAME=VALUE` the agent can read. Not a word on the three-word scale: who holds
+		// in the job's own container, as environment variables the agent can read. Not a word on the three-word scale: who holds
 		// the credentials is a closed choice (`CREDENTIAL_CUSTODY`), and `PI_BACKEND_FLOOR` does not compare it.
 		credentialCustody: "container",
 		// Issue #712: what the run-time features this venue serves, in words (`SERVES`). The bundle binds the job's
@@ -653,9 +655,10 @@ const BACKENDS_TABLE = {
 			// `credentialTransit`'s question, not this one's.
 			secretsCustody: ENFORCED,
 			// ENFORCED, AND ONLY WHILE OBSERVED (issue #278). Every spawn is `docker` with the worker's own
-			// environment inherited, and `DOCKER_HOST`, `DOCKER_CONTEXT` or a context selected in the CLI's config
-			// can send that connection to another machine with the provider key and the per-job forge token riding
-			// along as `-e NAME=VALUE`. This was `asserted` while nothing in the repository looked. Now the worker
+			// environment (the job's run adds its credentials under their bare names, issue #1114), and `DOCKER_HOST`,
+			// `DOCKER_CONTEXT` or a context selected in the CLI's config can send that connection to another machine
+			// with the provider key and the per-job forge token riding along in the create request. This was
+			// `asserted` while nothing in the repository looked. Now the worker
 			// asks the CLI which endpoint it resolves (`backend-local.mjs`, `makeDockerEndpointResolver`) at boot
 			// and before every job's spend, and the word is what that answer earns: `observedBy` below names the
 			// observation, and `effectiveWord` degrades this to `asserted` -- asserted by the operator who pointed
@@ -667,7 +670,10 @@ const BACKENDS_TABLE = {
 			// unix socket or a loopback port that is really a tunnel (`ssh -L`, socat) to another machine reads as
 			// local, as does a `localhost` this host's resolver maps elsewhere; and a redirect that lands between the per-job read and that job's `docker run` spawn is not
 			// caught for that job. That window is not small: the read sits before the spend, so it spans the secret
-			// resolution, the token mint, the clone and the reservation.
+			// resolution, the token mint, the clone and the reservation. The read runs under the worker's environment, and
+			// it describes the job's client only because that client gets the worker's value of every name it acts on: a
+			// job's `DOCKER_*`, `CONTAINER_*`, `CONTAINERS_*` or `_CONTAINERS_*` variable stays `-e NAME=VALUE`, never in the
+			// client's environment (`CLIENT_ENV_GUARD`, docker-run.mjs, issue #1114).
 			credentialTransit: ENFORCED,
 			// The whole reason `DES-WORKER-ON-HOST` reversed the containerised worker.
 			localFolders: ENFORCED,
@@ -718,7 +724,7 @@ const BACKENDS_TABLE = {
 		// The containers run on this host, as this account. A remote service is refused rather than declared remote, so
 		// the venue is never one; `credentialTransit`'s observation is what notices a CLI that tries.
 		remote: false,
-		// `local`'s: the credentials are `-e` values in the job's own container.
+		// `local`'s: the credentials are environment variables in the job's own container.
 		credentialCustody: "container",
 		// `local`'s, for `local`'s reasons: the bundle binds, the transcript is a host file, and SANDBOX_LAUNCHERS has a podman row.
 		serves: { liveTranscript: "yes", steering: "yes", recovery: "yes", sandboxShell: "yes" },

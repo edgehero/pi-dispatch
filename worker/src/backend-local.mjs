@@ -746,7 +746,8 @@ export function makeReaper({ log, exec = execReaperBounded, bin = "docker" }) {
  *
  * `credentialTransit` is the property that the provider key and the per-job forge token reach the container
  * without crossing a network this deployment does not own. For `local` they ride the worker's own `docker run`
- * argv as `-e NAME=VALUE`, so the question is which daemon that CLI talks to -- and the CLI decides it from
+ * (a bare `-e NAME` each since issue #1114, its value in the CLI's environment, and in the create request the CLI sends
+ * either way), so the question is which daemon that CLI talks to -- and the CLI decides it from
  * `DOCKER_HOST`, else `DOCKER_CONTEXT`, else the config file's `currentContext`, with its own normalisation
  * (`DOCKER_HOST=bogus` becomes `tcp://bogus:2375`). Checking `DOCKER_HOST` alone misses both other sources, and
  * this very machine resolves through a context. So the CLI is ASKED, never re-implemented: `DES-WORKER-ON-HOST`

@@ -168,7 +168,7 @@ and reference it as `"apiKey": "$MY_PROVIDER_KEY"`:
 
 ```bash
 # .env
-# comma-separated NAMES; forwarded by exact -e NAME=VALUE, never a pass-through
+# comma-separated NAMES; forwarded by exact name, never a pass-through (a bare -e NAME, value off the command line)
 PI_FORWARD_ENV=MY_PROVIDER_KEY
 ```
 

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFile
 import * as realFs from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { envNamesOf } from "./helpers/container-env.mjs";
 import { describe, test } from "node:test";
 import { ISOLATION_FLAGS, PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs } from "../src/docker-run.mjs";
 import { WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
@@ -91,7 +92,8 @@ test("an unset TERM and a disabled idle timeout emit nothing rather than empty s
 	const pairs = args.filter((a, i) => args[i - 1] === "-e");
 	assert.deepEqual(pairs, ["PI_JOB_SIZE_CPUS=2", "PI_JOB_SIZE_MEMORY_MIB=4096"], "no terminal pair at all when both are absent; the run's size is always there (issue #865)");
 	assert.ok(!args.join(" ").includes("TMOUT"), "idleSeconds 0 disables the idle logout");
-	assert.ok(!args.join(" ").includes("TERM="), "an unset TERM emits nothing");
+	// By name, bare or with a value (issue #1114): "TERM=" alone would miss a bare -e TERM.
+	assert.ok(!envNamesOf(args).includes("TERM"), "an unset TERM emits nothing");
 });
 
 test("the name namespace sits OUTSIDE the boot reaper's pi-job- filter", () => {
@@ -355,7 +357,9 @@ test("an armed sandbox joins its OWN network and carries the proxy variables -- 
 	assert.ok(envValues.includes("NODE_USE_ENV_PROXY=1"));
 	// The clause that does not move. A proxy URL is not a credential, and buildContainerEnv is still not
 	// reused here, so there is no path by which a mint or a provider key could arrive.
-	assert.ok(!envValues.some((v) => /TOKEN|API_KEY|_KEY=/.test(v)), "no credential reaches a sandbox");
+	// By name, bare or with a value (issue #1114): a `_KEY=` pattern would miss a credential that went bare.
+	assert.ok(!envNamesOf(args).some((name) => /TOKEN|API_KEY|_KEY$/.test(name)), "no credential reaches a sandbox");
+	assert.ok(envValues.every((v) => v.includes("=")), "and nothing travels bare: a sandbox carries no credential to put in the client's environment");
 	// And every isolation flag still reaches this shape, asserted against the imported array as ever.
 	for (const flag of ISOLATION_FLAGS) assert.ok(args.includes(flag), `missing isolation flag: ${flag}`);
 });

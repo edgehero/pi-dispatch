@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { makeLiveTranscriptOpener } from "../src/live-transcript.mjs";
 import { makeRunCheckpointer } from "../src/run-checkpoint.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { containerEnvOf, envNamesOf } from "./helpers/container-env.mjs";
+import { jobClientEnv } from "../src/docker-run.mjs";
 
 // run-container imports env-allowlist -> @earendil-works/pi-ai, so this skips below the node floor
 // and runs in CI (PI_DISPATCH_REQUIRE_WORKER_TESTS=1 makes a skip a hard failure).
@@ -40,7 +42,7 @@ test("a grouping container receives its two provider credentials but no forwarde
 	const hostEnv = { ANTHROPIC_API_KEY: "primary-provider-key", OPENROUTER_API_KEY: "classifier-provider-key", VALKEY_URL: "redis://credential@private-host", GITHUB_TOKEN: "forge-token-not-needed", PRIVATE_DATABASE: "unrelated-secret" };
 	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv, forwardEnv: ["VALKEY_URL", "PRIVATE_DATABASE"], allowGlobalExtensions: true, packagePaths: ["/opt/pi-global/packages/unrelated"], spawnFn: fakeSpawn(recorder) });
 	await run({ job: { ...JOB, packages: false, questionGrouping: { runId: "source" }, questionGroupModel: { provider: "openrouter", id: "typesafe/jev-1.13" } }, prepared: { ...PREPARED }, name: "grouping-env", signal: new AbortController().signal });
-	const env = Object.fromEntries(recorder.args.flatMap((arg, i, all) => arg === "-e" ? [all[i + 1].split(/=(.*)/s).slice(0, 2)] : []));
+	const env = containerEnvOf(recorder.args, recorder.opts);
 	assert.equal(env.ANTHROPIC_API_KEY, hostEnv.ANTHROPIC_API_KEY);
 	assert.equal(env.OPENROUTER_API_KEY, hostEnv.OPENROUTER_API_KEY);
 	for (const key of ["VALKEY_URL", "GITHUB_TOKEN", "GH_TOKEN", "PRIVATE_DATABASE"]) assert.equal(env[key], undefined, key);
@@ -57,7 +59,7 @@ test("issue #967: the declared main credential's name reaches the env builder, s
 	const recorder = {};
 	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv, authFromPi: false, spawnFn: fakeSpawn(recorder) });
 	await run({ job, prepared: { ...PREPARED }, secrets: { OPENROUTER_API_KEY: "sk-or-declared" }, mainCredential: "OPENROUTER_API_KEY", name: "declared-env", signal: new AbortController().signal });
-	assert.ok(recorder.args.includes("OPENROUTER_API_KEY=sk-or-declared"), "the declared value is the credential");
+	assert.equal(containerEnvOf(recorder.args, recorder.opts).OPENROUTER_API_KEY, "sk-or-declared", "the declared value is the credential");
 	await assert.rejects(() => run({ job, prepared: { ...PREPARED }, secrets: { OPENROUTER_API_KEY: "sk-or-declared" }, name: "host-env", signal: new AbortController().signal }), (error) => error.piDispatchConfig === true, "without it the host is asked, as before");
 	// Never off the job: a queued field of that name chooses nothing.
 	await assert.rejects(() => run({ job: { ...job, mainCredential: "OPENROUTER_API_KEY" }, prepared: { ...PREPARED }, secrets: { OPENROUTER_API_KEY: "sk-or-declared" }, name: "job-field", signal: new AbortController().signal }), (error) => error.piDispatchConfig === true);
@@ -69,7 +71,7 @@ test("issue #997: the declared role credential's name reaches the env builder, s
 	const recorder = {};
 	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv, authFromPi: false, spawnFn: fakeSpawn(recorder) });
 	await run({ job, prepared: { ...PREPARED }, secrets: { OPENROUTER_API_KEY: "sk-or-role" }, secondaryCredential: "OPENROUTER_API_KEY", name: "role-env", signal: new AbortController().signal });
-	assert.ok(recorder.args.includes("OPENROUTER_API_KEY=sk-or-role"), "the declared value is the classifier's credential");
+	assert.equal(containerEnvOf(recorder.args, recorder.opts).OPENROUTER_API_KEY, "sk-or-role", "the declared value is the classifier's credential");
 	// Without it the secret is the reserved classifier variable, and never off the job.
 	for (const call of [{ job }, { job: { ...job, secondaryCredential: "OPENROUTER_API_KEY" } }]) await assert.rejects(() => run({ ...call, prepared: { ...PREPARED }, secrets: { OPENROUTER_API_KEY: "sk-or-role" }, name: "host-env", signal: new AbortController().signal }), (error) => error.piDispatchConfig === true);
 });
@@ -97,11 +99,12 @@ test("issue #998: a container's answer says where its main credential came from 
 	await assert.rejects(() => mod.makeRunContainer({ image: "pi-job:x", hostEnv: { PATH: "/usr/bin" }, authFromPi: false, spawnFn: fakeSpawn({}, 0) })(call({ secrets: {}, mainCredential: null })), (error) => error.piDispatchConfig === true && error.mainCredentialSource === undefined);
 });
 
-/** A fake `docker` child: records argv, lets the test drive its exit. */
+/** A fake `docker` child: records argv and the spawn's options (issue #1114: a credential's value is in `opts.env`), lets the test drive its exit. */
 function fakeSpawn(recorder, exitCode = 0) {
-	return (cmd, args) => {
+	return (cmd, args, opts) => {
 		recorder.cmd = cmd;
 		recorder.args = args;
+		recorder.opts = opts;
 		const child = new EventEmitter();
 		child.stdout = new EventEmitter();
 		child.stderr = new EventEmitter();
@@ -127,9 +130,10 @@ function fakeSpawnAbortedThenClose(ac, exitCode) {
 /** A `docker` child that streams stdout `data` chunks BEFORE the `close`, so a test can exercise the
  *  tee (onOutput + sink.write) and then observe the resolved result. Chunks arrive in array order. */
 function fakeSpawnWithData(recorder, { chunks = [], exitCode = 0 } = {}) {
-	return (cmd, args) => {
+	return (cmd, args, opts) => {
 		recorder.cmd = cmd;
 		recorder.args = args;
+		recorder.opts = opts;
 		const child = new EventEmitter();
 		child.stdout = new EventEmitter();
 		child.stderr = new EventEmitter();
@@ -144,9 +148,10 @@ function fakeSpawnWithData(recorder, { chunks = [], exitCode = 0 } = {}) {
 /** A `docker` child that fails to launch: it emits `error` and NEVER `close`, modelling docker-not-found
  *  / daemon-down. Drives the `container-never-started` InfraRetry path and its best-effort sink teardown. */
 function fakeSpawnError(recorder, err = new Error("spawn docker ENOENT")) {
-	return (cmd, args) => {
+	return (cmd, args, opts) => {
 		recorder.cmd = cmd;
 		recorder.args = args;
+		recorder.opts = opts;
 		const child = new EventEmitter();
 		child.stdout = new EventEmitter();
 		child.stderr = new EventEmitter();
@@ -197,7 +202,8 @@ test("launches docker with the isolation argv and returns the container's exit c
 	assert.ok(rec.args.includes("--cap-drop=ALL"), "isolation flags present");
 	assert.ok(rec.args.includes("/host/jobs/j1:/job:ro"), "whole /job mounted read-only");
 	assert.ok(rec.args.includes("/host/folder:/workspace"), "the folder is the workspace");
-	assert.ok(rec.args.includes("ANTHROPIC_API_KEY=sk-real"), "the provider key is forwarded");
+	assert.equal(containerEnvOf(rec.args, rec.opts).ANTHROPIC_API_KEY, "sk-real", "the provider key is forwarded");
+	assert.ok(!rec.args.some((a) => a.includes("sk-real")), "through the client's environment, never the argv (issue #1114)");
 });
 
 test("exit 1 (infra) is returned, not thrown -- it is retryable, not a spawn error", { skip }, async () => {
@@ -249,11 +255,11 @@ test("a canary's candidate replaces the staged copy for this job, and a job besi
 	const prepared = { ...PREPARED, packageCanary: { replaces: "pi-lint", tree: "pi-lint--2.0.0--abcd1234" } };
 	await runContainer({ job: JOB, prepared, name: "j1", signal: new AbortController().signal });
 	assert.ok(rec.args.includes("PI_PACKAGES=/opt/pi-global/packages/pi-playwright:/job/canary/pi-lint--2.0.0--abcd1234"), "in its place, and the staged copy is gone");
-	assert.ok(rec.args.includes("PI_PACKAGE_CANARY=/job/canary/pi-lint--2.0.0--abcd1234"));
+	assert.equal(containerEnvOf(rec.args, rec.opts).PI_PACKAGE_CANARY, "/job/canary/pi-lint--2.0.0--abcd1234");
 	// The same factory, the same overlay, and no candidate: this is the concurrent job.
 	const beside = await argvFor(JOB);
 	assert.ok(beside.includes(PI_PACKAGES_ARG));
-	assert.ok(!beside.some((a) => String(a).startsWith("PI_PACKAGE_CANARY")), "a job that is not a canary names none");
+	assert.ok(!envNamesOf(beside).includes("PI_PACKAGE_CANARY"), "a job that is not a canary names none, bare or valued");
 });
 
 test("a canary's candidate is at this layout's own /job, so that it means the same on every venue (issue #796)", { skip }, async () => {
@@ -263,7 +269,7 @@ test("a canary's candidate is at this layout's own /job, so that it means the sa
 	await runContainer({ job: JOB, prepared: { ...PREPARED, packageCanary: { replaces: "pi-lint", tree: "pi-lint--2.0.0--abcd1234" } }, name: "j1", signal: new AbortController().signal });
 	const job = layoutFor("sandbox").job;
 	assert.notEqual(job, "/job", "this layout is the one that differs");
-	assert.ok(rec.args.includes(`PI_PACKAGE_CANARY=${job}/canary/pi-lint--2.0.0--abcd1234`), rec.args.filter((a) => String(a).startsWith("PI_PACKAGE")).join(" "));
+	assert.equal(containerEnvOf(rec.args, rec.opts).PI_PACKAGE_CANARY, `${job}/canary/pi-lint--2.0.0--abcd1234`);
 });
 
 test("what the runner said of a canary reaches the result from a verified line, and an unverified one says nothing (issue #796)", { skip }, async () => {
@@ -517,23 +523,121 @@ test("the argv can never fetch an image -- --pull=never rides every run, whichev
 	}
 });
 
-test("the job's docker run passes NO env, so it talks to the daemon the endpoint read observed (#278)", { skip }, async () => {
-	// credentialTransit's observation asks the docker CLI with this process's own environment. If the job's
-	// spawn passed an env of its own, the read would describe a different CLI than the one carrying the
-	// provider key and forge token, and the enforced word would be about the wrong connection.
-	let opts = null;
-	const spawnFn = (cmd, args, o) => {
-		opts = o;
-		const child = new EventEmitter();
-		child.stdout = new EventEmitter();
-		child.stderr = new EventEmitter();
-		queueMicrotask(() => child.emit("close", 0));
-		return child;
-	};
-	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn });
+test("the job's docker run gets this process's environment with only the job's credentials put in, so it talks to the daemon the endpoint read observed (#278, issue #1114)", { skip }, async () => {
+	// credentialTransit's observation asks the docker CLI with this process's own environment. Since issue #1114 the job's
+	// spawn passes an env, so the read describes the job's CLI only while that env is this process's own in everything
+	// but the bare credentials. The base is the PROCESS's environment, not `hostEnv`, which is the job env's source and
+	// here holds the provider key alone, as the canary replay's does: built on it, the CLI would lose PATH and HOME.
+	const rec = {};
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(rec) });
 	await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
-	assert.ok(opts, "docker was spawned");
-	assert.equal(Object.hasOwn(opts, "env"), false);
+	assert.ok(rec.opts?.env, "docker was spawned with an env");
+	// Whatever this process's environment holds (a runner may set its own provider key): every key of it is the client's
+	// with the same value, but a key that folds to the credential's name, which is the job's alone.
+	const credential = (k) => k.toUpperCase() === "ANTHROPIC_API_KEY";
+	for (const [key, value] of Object.entries(process.env)) if (!credential(key)) assert.equal(rec.opts.env[key], value, key);
+	assert.deepEqual(Object.keys(rec.opts.env).filter((k) => !Object.hasOwn(process.env, k) || credential(k)), ["ANTHROPIC_API_KEY"], "nothing else is added, and one key holds the credential");
+	assert.equal(rec.opts.env.ANTHROPIC_API_KEY, "sk-real");
+	assert.equal(containerEnvOf(rec.args, rec.opts).ANTHROPIC_API_KEY, "sk-real");
+});
+
+test("issue #1114: a host credential of the same name, in any case, never reaches the client env with the host's value, and a job's DOCKER_HOST, CONTAINER_HOST or CONTAINERS_CONF_OVERRIDE never moves the client", { skip }, async () => {
+	const base = { PATH: "/usr/bin", GITHUB_TOKEN: "ghs_host_value", github_token: "ghs_host_lower", GH_TOKEN: "ghs_host_gh", DOCKER_HOST: "unix:///worker.sock", CONTAINER_HOST: "unix:///worker-podman.sock", CONTAINERS_CONF_OVERRIDE: "/worker/containers.conf" };
+	const job = { kind: "github", provider: "anthropic", model: "m", maxTurns: 5, repo: "o/r" };
+	const hostEnv = { ...HOST, DOCKER_HOST: "tcp://job.invalid:2375", CONTAINER_HOST: "ssh://job.invalid", CONTAINERS_CONF_OVERRIDE: "/job/containers.conf" };
+	const rec = {};
+	const logs = [];
+	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv, forwardEnv: ["DOCKER_HOST", "CONTAINER_HOST", "CONTAINERS_CONF_OVERRIDE"], clientEnv: (env) => jobClientEnv(env, base), spawnFn: fakeSpawn(rec), log: (event, fields) => logs.push({ event, ...fields }) });
+	await run({ job, token: "ghs_minted", prepared: { workspace: "/host/jobs/j1/workspace", jobDir: "/host/jobs/j1" }, name: "j1", signal: new AbortController().signal });
+	const env = containerEnvOf(rec.args, rec.opts);
+	assert.equal(env.GITHUB_TOKEN, "ghs_minted");
+	assert.equal(env.GH_TOKEN, "ghs_minted");
+	assert.deepEqual(Object.keys(rec.opts.env).filter((k) => k.toUpperCase() === "GITHUB_TOKEN"), ["GITHUB_TOKEN"], "the lower-case host key is gone too");
+	assert.equal(Object.values(rec.opts.env).some((v) => String(v).startsWith("ghs_host")), false, "no host credential value is left in the client's environment");
+	for (const key of ["DOCKER_HOST", "CONTAINER_HOST", "CONTAINERS_CONF_OVERRIDE"]) {
+		assert.equal(rec.opts.env[key], base[key], `${key}: the client talks where the worker does`);
+		assert.equal(env[key], hostEnv[key], `${key}: the container still gets the forwarded value, inline`);
+	}
+	// Kept on the argv, so the log says which, by name and never by value.
+	assert.deepEqual(logs.filter((l) => l.event === "secret_env_on_argv"), [{ event: "secret_env_on_argv", container: "j1", names: ["DOCKER_HOST", "CONTAINER_HOST", "CONTAINERS_CONF_OVERRIDE"] }]);
+	assert.ok(!JSON.stringify(logs).includes("job.invalid"));
+});
+
+test("issue #1114: the pre-spawn check passes every argv the worker's own callers build: a local job, a podman job, the canary replay", { skip }, async () => {
+	const { buildPodmanRunArgs } = await import("../src/docker-run.mjs");
+	const job = { kind: "github", provider: "anthropic", model: "m", maxTurns: 5, repo: "o/r" };
+	const prepared = { workspace: "/host/jobs/j4/workspace", jobDir: "/host/jobs/j4" };
+	const callers = {
+		// start.mjs's local venue: the defaults, egress armed, a job user, run secrets and a forwarded variable.
+		local: { factory: { hostEnv: { ...HOST, PRIVATE_DATABASE: "sk-test-db" }, forwardEnv: ["PRIVATE_DATABASE"], egress: true }, call: { token: "ghs_x", secrets: { DEPLOY_KEY: "sk-test-deploy", github_token: "sk-test-twin" }, user: "1234:1234", home: "/home/pi" } },
+		// The podman bundle's builder and client env.
+		podman: { factory: { hostEnv: HOST, bin: "podman", buildArgs: (opts) => buildPodmanRunArgs({ ...opts, cgroupParent: null }), clientEnv: jobClientEnv, egress: true }, call: { token: "ghs_x", user: "1234:1234", home: "/home/pi" } },
+		// canary-runtime.mjs: the provider credential as the whole host env, egress armed, the signed exit line's `-i`.
+		canary: { factory: { hostEnv: HOST, allowGlobalExtensions: false, packagePaths: [], egress: true, egressProxy: "pi-dispatch-canary-1-proxy" }, call: { exitAuth: true, jobId: "canary-1", user: "1234:1234", home: "/home/pi" } },
+	};
+	for (const [label, { factory, call }] of Object.entries(callers)) {
+		const rec = {};
+		const result = await mod.makeRunContainer({ image: "pi-job:x", onOutput: () => {}, spawnFn: stderrDocker(rec, { code: 0 }), ...factory })({ job, prepared, name: `j4-${label}`, signal: new AbortController().signal, ...call });
+		assert.equal(result.code, 0, label);
+		assert.ok(rec.opts?.env && rec.args.includes("ANTHROPIC_API_KEY"), `${label}: spawned, the credential bare`);
+	}
+});
+
+test("issue #1114: an operator's case twin of the minted token stays inline and is named, and the minted value never reaches the argv", { skip }, async () => {
+	// The loaders accept a run secret named `github_token` (only the exact GITHUB_TOKEN is reserved): beside a forge job's
+	// minted GITHUB_TOKEN, the upper-case name goes bare and the twin stays `-e NAME=VALUE`.
+	const job = { kind: "github", provider: "anthropic", model: "m", maxTurns: 5, repo: "o/r" };
+	const rec = {};
+	const logs = [];
+	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, clientEnv: (env) => jobClientEnv(env, { PATH: "/usr/bin", github_token: "ghs_host_lower" }), spawnFn: fakeSpawn(rec), log: (event, fields) => logs.push({ event, ...fields }) });
+	await run({ job, token: "ghs_minted_value", secrets: { github_token: "operator-twin-value" }, prepared: { workspace: "/host/jobs/j3/workspace", jobDir: "/host/jobs/j3" }, name: "j3", signal: new AbortController().signal });
+	assert.equal(rec.args.some((a) => a.includes("ghs_minted_value")), false, "the minted value is on no argv token");
+	assert.equal(rec.args[rec.args.indexOf("GITHUB_TOKEN") - 1], "-e", "the minted token's name is bare");
+	assert.ok(rec.args.includes("github_token=operator-twin-value"), "the operator's twin is inline");
+	assert.deepEqual(Object.entries(rec.opts.env).filter(([k]) => k.toUpperCase() === "GITHUB_TOKEN"), [["GITHUB_TOKEN", "ghs_minted_value"]], "one key per folded name in the client's environment, the minted value");
+	const env = containerEnvOf(rec.args, rec.opts);
+	assert.deepEqual([env.GITHUB_TOKEN, env.GH_TOKEN, env.github_token], ["ghs_minted_value", "ghs_minted_value", "operator-twin-value"]);
+	assert.deepEqual(logs.filter((l) => l.event === "secret_env_on_argv"), [{ event: "secret_env_on_argv", container: "j3", names: ["github_token"] }]);
+});
+
+test("issue #1114: an argv that puts a credential's value back, or names a bare variable the job did not give the client, is refused before anything spawns", { skip }, async () => {
+	const { buildDockerRunArgs } = await import("../src/docker-run.mjs");
+	const { InfraRetry } = await import("../src/processor.mjs");
+	// A builder from before issue #1114, and one that adds a bare name: both must stop at the pre-spawn check.
+	const legacy = (opts) => buildDockerRunArgs(opts).map((a, i, all) => (all[i - 1] === "-e" && !a.includes("=") ? `${a}=${opts.env[a]}` : a));
+	const extra = (opts) => {
+		const args = buildDockerRunArgs(opts);
+		return [...args.slice(0, -1), "-e", "AWS_SECRET_ACCESS_KEY", args.at(-1)];
+	};
+	for (const [buildArgs, why] of [[legacy, /carries the value of ANTHROPIC_API_KEY/], [extra, /bare -e AWS_SECRET_ACCESS_KEY whose value is not this job's/]]) {
+		const rec = {};
+		const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, buildArgs, spawnFn: fakeSpawn(rec) });
+		await assert.rejects(() => run({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal }), (error) => why.test(error.message) && !error.message.includes("sk-real") && !(error instanceof InfraRetry) && error.piDispatchConfig !== true);
+		assert.equal(rec.cmd, undefined, "nothing spawned");
+	}
+	// A venue with no client env (openshell's exec) is not held to a docker argv's rule, and spawns with no `env`.
+	const rec = {};
+	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, buildArgs: legacy, clientEnv: null, spawnFn: fakeSpawn(rec) })({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
+	assert.deepEqual(rec.opts, { stdio: ["ignore", "pipe", "pipe"] });
+});
+
+test("issue #1114: every credential of a full job leaves the argv, and the container env rebuilt from the argv and the client env is buildContainerEnv's map exactly", { skip }, async () => {
+	const { buildContainerEnv } = await import("../src/env-allowlist.mjs");
+	const job = { kind: "github", provider: "anthropic", model: "m", maxTurns: 5, repo: "o/r" };
+	const hostEnv = { ANTHROPIC_API_KEY: "sk-test-provider-0001", PRIVATE_DATABASE: "postgres://u:sk-test-pw-0002@db.invalid/x" };
+	const secrets = { DEPLOY_KEY: "sk-test-secret-0003", lower_case_secret: "sk-test-secret-0004" };
+	const rec = {};
+	const logs = [];
+	// The run's own spawn, not the job network's around it.
+	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv, forwardEnv: ["PRIVATE_DATABASE"], egress: true, spawnFn: stderrDocker(rec, { code: 0 }), log: (event, fields) => logs.push({ event, ...fields }) });
+	await run({ job, token: "ghs_test_minted_0005", secrets, prepared: { workspace: "/host/jobs/j2/workspace", jobDir: "/host/jobs/j2" }, name: "j2", signal: new AbortController().signal });
+	assert.ok(rec.args, "the run was spawned");
+	const expected = buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 5, jobId: "j2", githubToken: "ghs_test_minted_0005", forgeKind: "github", hostEnv, forwardEnv: ["PRIVATE_DATABASE"], secrets, egress: true });
+	const env = containerEnvOf(rec.args, rec.opts);
+	// Its defined entries: an undefined one is no variable, on the argv or in the container.
+	assert.deepEqual(env, Object.fromEntries(Object.entries(expected).filter(([, v]) => v !== undefined && v !== null)));
+	for (const value of [...Object.values(secrets), hostEnv.ANTHROPIC_API_KEY, hostEnv.PRIVATE_DATABASE, "ghs_test_minted_0005"]) assert.equal(rec.args.some((a) => a.includes(value)), false, "a credential value is on the argv");
+	assert.deepEqual(logs.filter((l) => l.event === "secret_env_on_argv"), [], "the worker's own egress variables are not a kept secret");
 });
 
 test("a job user runs as --user with HOME=/home/pi beside it, and no user means neither (issue #341)", { skip }, async () => {
@@ -957,7 +1061,7 @@ test("a binding venue's run logs container_created { container, ms } from its ci
 	const { buildPodmanRunArgs } = await import("../src/docker-run.mjs");
 	const { CONTAINER_HOME } = await import("../src/container-spec.mjs");
 	// `out`: what the child writes while it runs, each `[channel, text, clock]` (the clock read when it is written).
-	const drive = async ({ write, poll = false, removeBeforeClose = false, buildArgs, bin, out = [] }) => {
+	const drive = async ({ write, poll = false, removeBeforeClose = false, buildArgs, bin, clientEnv, out = [] }) => {
 		let clock = 7_000;
 		const mtimes = {};
 		const fs = statFs({}, mtimes);
@@ -986,7 +1090,7 @@ test("a binding venue's run logs container_created { container, ms } from its ci
 			});
 			return child;
 		};
-		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn, fs, log: (event, fields) => logs.push({ event, fields }), createdCheck: { now: () => clock, timers }, ...(buildArgs ? { buildArgs } : {}), ...(bin ? { bin } : {}) });
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn, fs, log: (event, fields) => logs.push({ event, fields }), createdCheck: { now: () => clock, timers }, ...(buildArgs ? { buildArgs } : {}), ...(bin ? { bin } : {}), ...(clientEnv !== undefined ? { clientEnv } : {}) });
 		const result = await runContainer({ job: JOB, prepared: PREPARED, name: "pi-job-j1", signal: new AbortController().signal, ...(bin === "podman" ? { user: "1234:1234", home: CONTAINER_HOME } : {}) });
 		return { result, created: logs.filter((l) => l.event === "container_created"), first: logs.filter((l) => l.event === "container_first_output"), fs, timers };
 	};
@@ -1006,8 +1110,9 @@ test("a binding venue's run logs container_created { container, ms } from its ci
 	const none = await drive({ write: false, poll: true, out: [["stderr", "docker: Error response from daemon: Conflict.\n", 7_100]] });
 	assert.deepEqual(none.created, [], "no ID written (a name conflict, a create refused): nothing said");
 	assert.deepEqual(none.first, [], "the CLI's own error on stderr is no output of the container's");
-	// An argv with no cidfile (an exec into a sandbox made at create) is never polled at all.
-	const exec = await drive({ write: true, poll: true, buildArgs: () => ["exec", "box", "true"], out: [["stdout", runner, 9_000]] });
+	// An argv with no cidfile (an exec into a sandbox made at create) is never polled at all. Such a venue passes no
+	// client env, as openshell does (issue #1114): its argv carries no `-e`.
+	const exec = await drive({ write: true, poll: true, buildArgs: () => ["exec", "box", "true"], clientEnv: null, out: [["stdout", runner, 9_000]] });
 	assert.deepEqual(exec.created, []);
 	assert.deepEqual(exec.first, [], "an exec into a box made at create starts no container: neither number");
 	assert.equal(exec.timers.set, 0);
@@ -1138,7 +1243,8 @@ test("issue #503: a keyless job with PI_EGRESS=0 dials its endpoint directly; th
 	assert.ok(local.args.includes("PI_DISPATCH_KEYLESS=keyless"));
 	assert.ok(!local.args.some((a) => a.startsWith("ANTHROPIC_")), "the host's key does not ride along on a keyless job");
 	assert.ok(!local.args.some((a) => /^--add-host|^--network|^--net=/.test(a)), "no --add-host and no network");
-	const swap = { "PI_PROVIDER=local-ollama": "PI_PROVIDER=anthropic", "PI_MODEL=qwen": "PI_MODEL=m", "PI_DISPATCH_KEYLESS=keyless": "ANTHROPIC_API_KEY=sk-real" };
+	// Issue #1114: the hosted job's key is a bare name, its value in the client's environment.
+	const swap = { "PI_PROVIDER=local-ollama": "PI_PROVIDER=anthropic", "PI_MODEL=qwen": "PI_MODEL=m", "PI_DISPATCH_KEYLESS=keyless": "ANTHROPIC_API_KEY" };
 	assert.deepEqual(local.args.map((a) => swap[a] ?? a), hosted.args, "otherwise the argv is the hosted job's, flag for flag");
 });
 
@@ -1381,8 +1487,11 @@ test("issue #596: the size handed to runContainer is the size on the argv, never
 
 /** A `docker run` that writes `stderr` and exits `code`; every other command answers 0 with nothing. */
 function stderrDocker(recorder, { code, stderr = "" }) {
-	return (cmd, args) => {
-		if (args[0] === "run") recorder.args = args;
+	return (cmd, args, opts) => {
+		if (args[0] === "run") {
+			recorder.args = args;
+			recorder.opts = opts;
+		}
 		const child = new EventEmitter();
 		child.stdout = new EventEmitter();
 		child.stderr = new EventEmitter();
@@ -1647,9 +1756,11 @@ test("watch reviewed classifier credential accompanies the primary model without
 	const rec = {};
 	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv: { ...HOST, OPENROUTER_API_KEY: "classifier-key", GEMINI_API_KEY: "unrelated-provider-key" }, onOutput: () => {}, spawnFn: fakeSpawn(rec) });
 	await run({ job: { ...JOB, watch: { findingId: "a".repeat(64) }, watchDecisionModel: { provider: "openrouter", id: "typesafe/jev-1.13" } }, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
-	assert.ok(rec.args.includes("ANTHROPIC_API_KEY=sk-real"));
-	assert.ok(rec.args.includes("OPENROUTER_API_KEY=classifier-key"), "the reviewed classifier cannot authenticate without its own provider credential");
+	const env = containerEnvOf(rec.args, rec.opts);
+	assert.equal(env.ANTHROPIC_API_KEY, "sk-real");
+	assert.equal(env.OPENROUTER_API_KEY, "classifier-key", "the reviewed classifier cannot authenticate without its own provider credential");
 	assert.equal(rec.args.some((value) => value.includes("unrelated-provider-key")), false);
+	assert.equal(Object.values(env).includes("unrelated-provider-key"), false, "nor in the container, through the client's environment");
 });
 
 test("a forge job's staged artifacts folder is mounted at /artifacts on a binding venue, and left off, said once, on a copying one (issue #920)", { skip }, async () => {
