@@ -3121,12 +3121,22 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 				let sent;
 				let finalBound = Infinity;
 				try {
-					// Clone once and send exactly this plain JSON. The bound is the larger of the context's and this body's
-					// (callCostBound's `body`, issue #985): the body adds every byte a provider or caller hook introduced,
-					// and the context covers what a continued request leaves on the server.
-					sent = JSON.parse(JSON.stringify(next === undefined ? payload : next));
+					// Clone once (cloneBody) and send exactly this copy, never the hook's object. The bound is the larger of the
+					// context's and this body's (callCostBound's `body`, issue #985): the body adds every byte a provider or
+					// caller hook introduced, and the context covers what a continued request leaves on the server.
+					sent = cloneBody(next === undefined ? payload : next, GOOGLE_GENAI_APIS.has(model?.api));
 					if (!isPlain(sent)) throw new Error("unboundable payload");
-					const caps = [sent.max_tokens, sent.max_completion_tokens, sent.max_output_tokens, sent.config?.maxOutputTokens, sent.inferenceConfig?.maxTokens].filter((value) => value !== undefined && value !== null);
+					// Issue #1067: on google's two apis @google/genai turns automatic continuation ON when the body does not
+					// say `false` (shouldEnableAutomaticContinuation), and then makes further requests and stream resumes for
+					// this one call, after this check: their output together can pass the `maxOutputTokens` read below. pi
+					// writes `false` (pinned), so only a hook that rebuilt `config` without it, or turned it on, gets here, and
+					// that body is refused like a cap a hook removed.
+					if (GOOGLE_GENAI_APIS.has(model?.api) && sent.config?.automaticContinuation !== false) throw new Error("unboundable payload");
+					// Issue #1059: mistral-conversations keeps its cap as camelCase `maxTokens`, and its wire step
+					// (toMistralWirePayload, pinned) renames that key to `max_tokens`, replacing one a hook left there. So a
+					// present `maxTokens` is the cap sent, and a `maxTokens: null` sends none whatever `max_tokens` says.
+					const wireMaxTokens = model?.api === "mistral-conversations" && Object.hasOwn(sent, "maxTokens") ? sent.maxTokens : sent.max_tokens;
+					const caps = [wireMaxTokens, sent.max_completion_tokens, sent.max_output_tokens, sent.config?.maxOutputTokens, sent.inferenceConfig?.maxTokens].filter((value) => value !== undefined && value !== null);
 					if (caps.some((value) => typeof value !== "number" || !Number.isFinite(value))) throw new Error("unboundable output cap");
 					// A hook can remove or disable the cap it was given. The caller's options are no longer evidence of
 					// the wire limit. An operator's completions server has no known default, so its missing/zero/negative
@@ -3337,6 +3347,91 @@ function snapshotPayload(value, seen = new Map()) {
 	seen.set(value, out);
 	for (const key of Object.keys(value)) out[key] = snapshotPayload(value[key], seen);
 	return out;
+}
+
+/** The two apis that send through @google/genai, whose `config` carries the call's signal and the continuation switch (pinned). */
+const GOOGLE_GENAI_APIS = new Set(["google-generative-ai", "google-vertex"]);
+/** AbortSignal's own `aborted` getter. Node's checks only for a symbol a real signal carries as its own property. */
+const SIGNAL_ABORTED = Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted").get;
+
+/**
+ * The cost guard's copy of a final payload (issues #985 and #1067): the body it bounds IS the body pi sends, so a hook
+ * that keeps its object cannot change the request after the check. It was `JSON.parse(JSON.stringify(...))`, which
+ * broke two values pi itself puts in a body, so those two are the exceptions to JSON's reading:
+ *   - google's call signal is kept BY REFERENCE, at `config.abortSignal` on google-generative-ai and google-vertex
+ *     (`googleSignal`) and nowhere else. @google/genai listens on it: JSON's `{}` made every Google call under a cap
+ *     throw before it was sent, and a copy would be a signal no one aborts. It is never sent: the SDK builds the request
+ *     body from named `config` fields only and hands `config.abortSignal` to fetch as the request's signal (both pinned),
+ *     so nothing it carries reaches the wire. Kept only when isCallSignal says it is one. A signal anywhere else, on any
+ *     api, is refused: there a transport serialises it, and a `toJSON` on its prototype would answer the bound and the
+ *     wire differently.
+ *   - a Uint8Array or a Buffer (bedrock's image bytes) is copied byte for byte into a new one of the same kind, which
+ *     the SDK sends as bytes, not as the object of numbers JSON made of it. The bound still measures its JSON form, as
+ *     before (numbers, at least two characters a byte), which is more than the bytes, raw or in base64.
+ * Plain objects (prototype Object.prototype or null) and arrays are copied, each own enumerable key read ONCE, as
+ * JSON.stringify reads it, so a getter or a Proxy cannot answer the bound and the wire differently. The rest is read as
+ * JSON reads it, deliberately, so that the body measured is the body sent and a body the old clone sent is sent the
+ * same: a key whose value is undefined is left out, an undefined array entry and a number that is not finite become
+ * null. Anything else throws, and the payload is unboundable: a function (an own `toJSON` too), a symbol, a bigint, a
+ * cycle, and every other object (a Date, a Map, a class instance, another typed array, a DataView, a signal outside
+ * google's `config`), which JSON turned into something other than what the hook built, or threw on.
+ */
+function cloneBody(value, googleSignal = false) {
+	return copyBody(value, new Set(), googleSignal ? "body" : null);
+}
+
+/** cloneBody's walk. `at` is "body" for a Google body's top level and "config" for its `config`, else null. */
+function copyBody(value, ancestors, at) {
+	if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+	if (typeof value === "number") return Number.isFinite(value) ? value : null;
+	if (typeof value !== "object") throw new Error("unboundable payload");
+	if (Array.isArray(value) || isPlain(value)) {
+		if (ancestors.has(value)) throw new Error("unboundable payload");
+		ancestors.add(value);
+		let out;
+		if (Array.isArray(value)) {
+			out = [];
+			const length = value.length;
+			for (let index = 0; index < length; index += 1) {
+				const item = value[index];
+				out.push(item === undefined ? null : copyBody(item, ancestors, null));
+			}
+		} else {
+			out = {};
+			for (const key of Object.keys(value)) {
+				const item = value[key];
+				if (item === undefined) continue;
+				const copied = at === "config" && key === "abortSignal" && isCallSignal(item) ? item : copyBody(item, ancestors, at === "body" && key === "config" ? "config" : null);
+				// An own `__proto__` key is data (JSON.parse makes it so); an assignment would set the copy's prototype.
+				if (key === "__proto__") Object.defineProperty(out, key, { value: copied, enumerable: true, writable: true, configurable: true });
+				else out[key] = copied;
+			}
+		}
+		ancestors.delete(value);
+		return out;
+	}
+	if (ArrayBuffer.isView(value)) {
+		const proto = Object.getPrototypeOf(value);
+		if (proto === Buffer.prototype) return Buffer.from(value);
+		if (proto === Uint8Array.prototype) return new Uint8Array(value);
+	}
+	throw new Error("unboundable payload");
+}
+
+/**
+ * Whether `value` is a signal @google/genai can listen on: no Proxy, its prototype exactly AbortSignal.prototype, Node's
+ * `aborted` getter answers, and no own enumerable keys. The getter alone is not enough: it passes a real signal given
+ * another prototype and any object given a real signal's own symbols, and the prototype check refuses both. An object
+ * made to pass all four is still never sent (cloneBody).
+ */
+function isCallSignal(value) {
+	if (value === null || typeof value !== "object" || utilTypes.isProxy(value) || Object.getPrototypeOf(value) !== AbortSignal.prototype) return false;
+	try {
+		SIGNAL_ABORTED.call(value);
+	} catch {
+		return false;
+	}
+	return Object.keys(value).length === 0;
 }
 
 /** Deep structural equality, as the wire sees it: plain objects by own keys, arrays and typed arrays by content, the rest by identity. */

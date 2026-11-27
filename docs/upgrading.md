@@ -444,6 +444,20 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: a Google model under a cost cap makes its calls again (#1067, #1059)
+
+A job image from this release sends a Google call (google-generative-ai, google-vertex) under a cost cap. The cap's
+check of the final request copied it in a way that turned the call's abort signal into an empty object, so every such
+call failed before it was sent (the job exited 1 and its retries failed the same way). The same copy sent Bedrock's
+image bytes as an object of numbers; they go as bytes now. The check also refuses a Google request whose
+`config.automaticContinuation` a hook removed or turned on, and on Mistral it reads the `maxTokens` a hook raised. The
+job image alone: the worker, the receiver and the console are unchanged, and nothing stored changes.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Run record `reason` | Same words. A capped Google call now runs. A final request the check cannot bound (a Google request without `automaticContinuation: false`, or one holding a value that is not plain data, such as a Date or a signal anywhere but a Google request's `config.abortSignal`, which the old check turned into text or `{}`) and a Mistral call whose hook raised `maxTokens` past the room left are refused as `cost-cap` with `why: "final-payload"`, as any such final request already was. `v` stays 1. |
+| Mixed versions | Nothing to order: the job image alone. |
+
 ### 5.4.4
 
 #### A provider's spending limit is a used-up quota (#1106)
