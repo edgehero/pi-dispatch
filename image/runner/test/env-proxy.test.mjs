@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { PI_PACKAGE, restoreEnvProxyDispatcher } from "../src/env-proxy.mjs";
 
 const RUNNER_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
+const OFFLINE = new URL("../../../.github/scripts/offline-tests.mjs", import.meta.url).href;
 
 function fakeUndici() {
 	const installed = [];
@@ -49,7 +50,11 @@ test("run-job.mjs restores the dispatcher after pi is loaded and before auth, th
  * The real pi, the real `undici` it resolves, and a real `fetch`, in a child process so the dispatcher it installs
  * cannot leak into this one. The "proxy" is a local server that accepts the tunnel and answers through it itself, and the
  * target is a `.invalid` name (RFC 2606), which no resolver answers: a request that reaches the server went through
- * the proxy, and one that tried to go direct fails to resolve. Nothing leaves the machine either way.
+ * the proxy. One that tries to go direct is refused before any lookup by the refusal the child loads first
+ * (`.github/scripts/offline-tests.mjs`, issue #1102): imported here, so it is there whether or not this process runs
+ * under that preload, which hands itself on only from a process it is loaded in. Nothing leaves the machine either
+ * way. The direct try is refused ON PURPOSE, so the child names `OFFLINE_TESTS_LOG` as "": a refusal this test expects
+ * must not fail CI's offline check, which reads that log.
  */
 let piImportable = true;
 try {
@@ -77,6 +82,7 @@ async function fetchAfterPi({ restore }) {
 	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const proxy = `http://127.0.0.1:${server.address().port}`;
 	const script = `
+		await import(${JSON.stringify(OFFLINE)});
 		// The restoring path is loadPiThenRestore, the one doctor's canary takes; the runner's own static import followed
 		// by restoreEnvProxyDispatcher() is the same two steps, and the order in run-job.mjs is pinned above.
 		if (${restore}) await (await import(${JSON.stringify(pathToFileURL(join(RUNNER_DIR, "src/env-proxy.mjs")).href)})).loadPiThenRestore();
@@ -94,7 +100,7 @@ async function fetchAfterPi({ restore }) {
 			execFile(
 				process.execPath,
 				["--no-warnings", "--input-type=module", "-e", script],
-				{ cwd: RUNNER_DIR, timeout: 30_000, env: { PATH: process.env.PATH, HTTP_PROXY: proxy, HTTPS_PROXY: proxy, NO_PROXY: "", NODE_USE_ENV_PROXY: "1" } },
+				{ cwd: RUNNER_DIR, timeout: 30_000, env: { PATH: process.env.PATH, HTTP_PROXY: proxy, HTTPS_PROXY: proxy, NO_PROXY: "", NODE_USE_ENV_PROXY: "1", OFFLINE_TESTS_LOG: "" } },
 				(error, out, err) => (error ? reject(new Error(`${error.message}\n${err}`)) : resolve(out.trim())),
 			),
 		);
@@ -115,6 +121,8 @@ test("control: without the restore the same fetch never reaches the proxy", { sk
 	// taking the proxy away; on an older one the flag was never read. Either way the proxy must see nothing, which
 	// is what shows the positive case above is the restore and not the environment.
 	const { stdout, seen } = await fetchAfterPi({ restore: false });
-	assert.match(stdout, /^direct /);
+	// Refused on this machine, before any lookup (issue #1102): CI's offline log cannot see this child, so the refusal's
+	// own code is what shows it never left. A direct try that reached a resolver would end in its lookup error instead.
+	assert.equal(stdout, "direct ECONNREFUSED");
 	assert.deepEqual(seen, []);
 });

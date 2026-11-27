@@ -160,6 +160,11 @@ Two consequences worth internalising before you design anything:
   excluded by exact name; `mkdtemp` always appends random characters, so no test directory can match one). Same fast-hint-plus-oracle pairing as the clock guards above, and for
   the same reason: the grep sees a call shape, only the count sees a missing cleanup. A directory rooted
   somewhere the helper already made (`join(jobsDir, "job-")`) is fine and is not matched.
+- **A test makes no connection off this machine** (issue #1102): inject the stub fetch, loopback server or factory the
+  code already accepts. `contract-tests` runs the suite under `.github/scripts/offline-tests.mjs`, which refuses any
+  TCP connection a test's Node processes open to anything but loopback (it hands itself on to every Node child) and
+  logs it, and fails the job on any line, since a test that tolerates the refusal passes anyway. It cannot see a worker
+  thread, a child that is not Node, or UDP and DNS queries; those stay the author's to keep offline.
 - `admin/dist/` is gitignored and built by `node admin/build.mjs`. Never commit it.
 - Two mirrors must stay **byte-identical**, pinned by tests: `worker/.env.example` to the root
   `.env.example`, and `worker/deploy/*` to `deploy/*`. Edit both.

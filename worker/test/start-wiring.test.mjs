@@ -11,6 +11,10 @@ import { makePodmanBackend as realPodmanBackend } from "../src/backend-podman.mj
 import { makeOpenshellBackend as realOpenshellBackend } from "../src/backend-openshell.mjs";
 import { RUNNER_POLICY_REASONS, sanitizeJobId } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+// Issue #1102: this file booted the worker on the real GitHub sign-in, which reaches api.github.com wherever `gh` is
+// logged in, from every test that passed no makeAuth, and all of them passed. The import refuses any connection off
+// this machine and fails the file on one, here and in CI alike.
+import "./helpers/offline.mjs";
 import { makeSandboxReaper as realSandboxReaper } from "../src/sandbox-store.mjs";
 import { makeSweepFollowUps as realSweepFollowUps } from "../src/retention-sweep.mjs";
 import { sandboxInventoryKey, SANDBOX_INVENTORY_HOSTS } from "../src/sandbox-inventory.mjs";
@@ -182,6 +186,17 @@ async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorS
 	// inject their own.
 	const reaper = makeReaper ?? (() => async () => {});
 
+	// Never the real GitHub sign-in (issue #1102). Given none, the boot fell back to `makeGitHubAuth` on the default `gh`
+	// source: it ran the real `gh auth token` and, wherever `gh` is logged in, sent this machine's own token to
+	// api.github.com in `GET /user`. The default fails as an unreachable GitHub does: untagged, so transient, and the
+	// boot's re-resolver asks this same fake again. Every test passes on it unchanged, as each did with that connect
+	// refused, so none depends on the sign-in. A test's own makeAuth still wins.
+	const auth =
+		makeAuth ??
+		(async () => {
+			throw new Error("GitHub is not reachable from a wiring test (issue #1102): pass makeAuth to sign in");
+		});
+
 	// Default the run-history factories to inert fakes so the wiring tests never touch disk (the real
 	// factories mkdirSync/readdirSync at construction). Each default records the args it was constructed
 	// with so a test can assert config threading without a fs. A `logsDir`-only sentinel is fine here:
@@ -288,7 +303,7 @@ async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorS
 				bootLines.push(String(chunk));
 				return true;
 			},
-			makeAuth,
+			makeAuth: auth,
 			makeHost,
 			createWorkerFn,
 			...(makeCpuReserve ? { makeCpuReserve } : {}),

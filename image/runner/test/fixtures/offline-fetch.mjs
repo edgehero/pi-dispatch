@@ -34,15 +34,15 @@ const record = (line) => {
 
 const connect = net.Socket.prototype.connect;
 net.Socket.prototype.connect = function (...args) {
+	// net's own reading (`normalizeArgs`): an object is the options; a string that is not a number of 0 or more is a
+	// pipe path; anything else is a port, with a host only when the second argument is a string (a function there is
+	// the callback, and the host is then localhost). Issue #1102 found the earlier reading let `("0x1bb", host)` through.
 	let options = Array.isArray(args[0]) ? args[0][0] : args[0];
-	if (typeof options !== "object" || options === null) options = typeof args[0] === "string" && !/^\d+$/.test(args[0]) ? { path: args[0] } : { port: args[0], host: args[1] };
-	// A Unix socket is a string path with no host and no port (node:http's agent passes `path: null` beside its host, so a
-	// path that is not a string is no socket). Anything else must name a loopback address; a missing host is
-	// "localhost" only when no path was given at all, as net.connect reads it.
-	const socketPath = typeof options.path === "string" && options.host == null && options.port == null;
-	const host = options.host ?? (options.path == null ? "localhost" : null);
-	if (!socketPath && !loopback(host)) {
-		record({ blocked: String(host) });
+	if (typeof options !== "object" || options === null) options = typeof args[0] === "string" && !(Number(args[0]) >= 0) ? { path: args[0] } : { port: args[0], host: typeof args[1] === "string" ? args[1] : undefined };
+	// Any path at all is a Unix socket, as `Socket.prototype.connect` reads it, whatever else is set beside it
+	// (node:http's agent passes `path: null` beside its host when it means TCP). A missing host is "localhost".
+	if (!options.path && !loopback(options.host ?? "localhost")) {
+		record({ blocked: String(options.host) });
 		const error = new Error("offline: an outbound connection was refused");
 		process.nextTick(() => this.destroy(error));
 		return this;
