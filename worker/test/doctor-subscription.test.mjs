@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { writeFileSync, existsSync } from "node:fs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { collectChecks, runDoctor } from "./helpers/doctor.mjs";
-import { doctorSubscriptionCredentials, subscriptionCredentialCheck, listedProviderCredentialChecks, notionalCapChecks, notionalRoute, WORKER_SERVICE_KEYS } from "../src/doctor.mjs";
+import { doctorSubscriptionCredentials, subscriptionCredentialCheck, listedProviderCredentialChecks, notionalCapChecks, notionalChatgptChecks, notionalRoute, WORKER_SERVICE_KEYS } from "../src/doctor.mjs";
 import { TRIGGERS_FILE_VERSION } from "../src/triggers.mjs";
 
 const instant = 1_800_000_000_000;
@@ -75,6 +75,34 @@ test("actual doctor collection selects subscription metadata instead of its lega
 	assert.equal(line.ok, true);
 	assert.match(line.label, /Subscription credential selected/);
 	assert.doesNotMatch(JSON.stringify(line), /set OPENAI_API_KEY|never-print/);
+});
+
+test("issue #1057: doctor names each ChatGPT connection this host owns with no extraUsageCreditMicros as notional, as a fact, and says how to keep purchased credits counted", async () => {
+	const status = { provider: "openai", adapter: "openai-chatgpt", ownerHost: "owner-a", active: true, state: "connected", extraUsageCreditMicros: null };
+	const label = (id) => `ChatGPT connection ${id} sets no extraUsageCreditMicros, so its calls are notional: they leave the job cost cap and every dollar window. If the account has purchased credits, set extraUsageCreditMicros on this connection in the auth connections file to keep its calls counted`;
+	const rows = [
+		{ ...status, id: "chatgpt-main" },
+		{ ...status, id: "chatgpt-paid", extraUsageCreditMicros: 400_000 },
+		{ ...status, id: "chatgpt-far", ownerHost: "owner-b", state: "other-host" },
+		{ ...status, id: "chatgpt-unstaged", state: "adapter-unavailable" },
+		{ ...status, id: "/private/path" },
+		{ ...status, provider: "anthropic", adapter: "pi-anthropic-oauth@0.3.6", id: "claude-main" },
+	];
+	const lines = await notionalChatgptChecks(env, { connections: async () => rows });
+	assert.deepEqual(lines, [{ ok: true, label: label("chatgpt-main") }, { ok: true, label: label("chatgpt-unstaged") }, { ok: true, label: label("CONNECTION") }]);
+	for (const unread of [async () => null, async () => undefined, undefined]) assert.deepEqual(await notionalChatgptChecks(env, { connections: unread }), []);
+	assert.deepEqual(await notionalChatgptChecks({ ...env, PI_AUTH_CONNECTIONS_FILE: "" }, { connections: () => assert.fail("not read") }), []);
+	// Through the real collection, next to the per-connection lines, from the same read-only status rows.
+	const root = tempDir("doctor-sub-chatgpt-");
+	const collect = (statusRows, extraEnv = {}) => collectChecks({ ...env, ...extraEnv }, { cwd: root, home: root, out() {}, spawn: missingBinary, fileExists: () => false, probeValkey: async () => false, nodeVersion: "22.19.0", platform: "linux", agentDir: join(root, "agent"), wallClock: now, subscriptionFactory: () => ({ auth: { async check(provider) { return provider === "openai" ? ready : { ok: true, managed: false }; }, async status() { return statusRows; } } }) });
+	const named = (checks) => checks.filter((check) => check.label?.startsWith("ChatGPT connection"));
+	assert.deepEqual(named(await collect(rows.slice(0, 1))), [{ ok: true, label: label("chatgpt-main") }]);
+	assert.deepEqual(named(await collect(rows.slice(1, 3))), [], "a credit, or another host's connection: nothing");
+	// Its place: right after the quota reserve's per-connection lines, which read the same rows.
+	const placed = await collect([rows[5], rows[0]], { PI_QUOTA_RESERVE_PERCENT: "85" });
+	const at = placed.findIndex((check) => check.label === label("chatgpt-main"));
+	assert.deepEqual(placed.slice(at - 2, at + 1).map((check) => check.label.split(":")[0]), ["Quota reserve 85% (anthropic claude-main)", "Quota reserve 85% (openai chatgpt-main)", "ChatGPT connection chatgpt-main sets no extraUsageCreditMicros, so its calls are notional"]);
+	assert.doesNotMatch(placed[at + 1]?.label ?? "", /^Quota reserve/, "and no reserve line after it");
 });
 
 test("real local auth metadata on an absent store remains read-only", async () => {

@@ -425,10 +425,20 @@ positive safe-integer `extraUsageCreditMicros` on that connection and set a per-
 it. For example, `250000` is a conservative model-cost ceiling of 0.25 USD per job, not 250000 provider credits.
 Deployment and scoped dollar windows still apply. Authorization never silently changes the bound account.
 
+The same field declares ChatGPT purchased credits. A ChatGPT account with purchased credits can be billed for calls
+past its plan, and a connection without the field counts none of its calls ([below](#the-cost-cap-and-the-dollar-windows)).
+Put `extraUsageCreditMicros` on the `openai-chatgpt` connection, with a per-job dollar cap no larger than it, and
+every call on it counts against the job's cost cap and the dollar windows, as on a Claude connection with paid extra
+usage; a job whose cap is above the credit, or that runs with no cap, is refused before it spends
+(`auth-credit-cap-required`). The field does not let a job past a used-up window: ChatGPT publishes no extra-usage
+state, so a job waits for the reset of a window the provider reported used up, with the field or without it.
+`pi-dispatch doctor` prints a line for each ChatGPT connection the host owns without the field, saying its calls are
+notional and how to keep purchased credits counted.
+
 ## The cost cap and the dollar windows
 
-A connection without paid extra usage (no `extraUsageCreditMicros`) bills nothing per call, so its calls are
-notional: the per-job cost cap (`maxCostUsd`) does not count them, and they leave every dollar window, a
+A connection without `extraUsageCreditMicros` (no Claude paid extra usage, no ChatGPT purchased credits declared) is
+taken to bill nothing per call, so its calls are notional: the per-job cost cap (`maxCostUsd`) does not count them, and they leave every dollar window, a
 `model:<provider>/<model>` row of `scoped-limits.json` included. The run record still prices them at list price, in
 `tokens.cost`, with that part as `tokens.costNotional`, and `notionalProviders` names the providers. What bounds such
 a job is the account's quota, checked before the job starts, the job's turn and time limits (`run.maxTurns`,
@@ -449,13 +459,16 @@ retry starts again at 0, as the cap does), not a share of the account's
 quota: the five-hour and seven-day windows are the account's, shared by every job on it. See
 [triggers.md](triggers.md#a-subscription-allowance-per-job).
 
-A connection WITH paid extra usage keeps counting every call against the cap and the windows: any of its calls may
-be billed, and nothing tells which, so the case in issue #1008 (a long subscription job stopped at the cap over list
-prices) can still happen there. Two residuals are known, and in both a call can be billed with no dollar bound,
-where before this release it was capped at list price: a ChatGPT connection has no modelled paid overage, so it is
-treated as notional, an account with purchased credits included; and a Claude connection is admitted only while extra
-usage is known to be off, so if extra usage is turned on at the provider while a job runs, with no
-`extraUsageCreditMicros` edit, that job's calls past the quota are billed as extra usage and nothing caps them.
+A connection WITH paid extra usage, or with ChatGPT purchased credits declared, keeps counting every call against the
+cap and the windows: any of its calls may be billed, and nothing tells which, so the case in issue #1008 (a long
+subscription job stopped at the cap over list prices) can still happen there. A ChatGPT account with purchased
+credits whose connection does not declare them is notional like any other connection without the field, so its calls
+past the plan are billed while the cap and the dollar windows count none of them: declare them
+([paid extra usage](#paid-extra-usage)). One residual is
+known, where a call can be billed with no dollar bound that before this release was capped at list price: a Claude
+connection is admitted only while extra usage is known to be off, so if extra usage is turned on at the provider while
+a job runs, with no `extraUsageCreditMicros` edit, that job's calls past the quota are billed as extra usage and
+nothing caps them.
 
 The job image decides whether a call is counted, and it trusts the worker's mark only with the subscription's
 adapter admitted and a model list in force. A pi child process that holds an admission of its own (below) has its calls

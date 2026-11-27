@@ -3747,6 +3747,8 @@ export async function collectChecks(shellVars, seams) {
 	// else ./triggers.json), and what the shared loader made of it above.
 	const reserveTriggers = { path: triggersPath(env, cwd), state: parseError !== null ? (triggersFileIsNewer ? "newer" : "refused") : triggersFilePath === null ? "absent" : "read", marked: quotaReserves };
 	checks.push(...(await quotaReserveChecks(env, { triggers: reserveTriggers, connections: () => subscriptionCredentials.status?.() ?? null, readQuota: (row) => (seams.readSubscriptionQuota ?? defaultReadSubscriptionQuota)(valkeyUsable ? valkeyTalkUrl : null, row, { now: seams.wallClock ?? Date.now }), now: seams.wallClock ?? Date.now })));
+	// Issue #1057: each ChatGPT connection this host owns whose calls are notional for want of a declared credit.
+	checks.push(...(await notionalChatgptChecks(env, { connections: () => subscriptionCredentials.status?.() ?? null })));
 
 
 	section("overlay");
@@ -7347,6 +7349,30 @@ export async function quotaReserveChecks(env, { connections, readQuota, triggers
 		const measured = status.windows.filter((w) => typeof w?.usedPercent === "number");
 		const unknown = status.windows.length - measured.length;
 		checks.push({ ok: true, label: `${subject}: no window holds jobs back${measured.length ? ` (${measured.map(atPercent).join(", ")})` : ""}${unknown ? `; ${unknown} window${unknown === 1 ? "" : "s"} without a reading, which never holds` : ""}${measured.some((w) => !Number.isSafeInteger(w.resetAt) && w.fresh !== true && w.usedPercent >= percent) ? "; a stale reading at or above it with no reset is read again before the next job starts" : ""}` });
+	}
+	return checks;
+}
+
+/**
+ * Issue #1057: one fact line per ChatGPT connection this host owns that sets no `extraUsageCreditMicros`, beside the
+ * reserve's per-connection lines and from the same read-only `auth.status` rows (`connections`). Such a connection is
+ * notional (reserve-estimate.mjs `notionalConnection`): its calls leave the job cost cap and every dollar window. An
+ * account with purchased credits can still be billed for calls past its plan, and only that field tells the worker so:
+ * with it every call counts and the job's cap may not exceed it (`auth-credit-cap-required`). A fact, never a warning:
+ * a plan without purchased credits bills nothing past its quota. Nothing for a Claude connection, one with a credit,
+ * one another host owns, or rows that cannot be read (the credential line above already fails for a policy it cannot
+ * read).
+ * Names a connection by a shaped id only.
+ */
+export async function notionalChatgptChecks(env, { connections } = {}) {
+	if (typeof env.PI_AUTH_CONNECTIONS_FILE !== "string" || env.PI_AUTH_CONNECTIONS_FILE === "") return [];
+	const rows = await connections?.();
+	if (!Array.isArray(rows)) return [];
+	const checks = [];
+	for (const row of rows) {
+		if (row?.provider !== "openai" || row.state === "other-host" || !notionalConnection(row)) continue;
+		const id = typeof row.id === "string" && WORKER_NAME_RE.test(row.id) ? row.id : "CONNECTION";
+		checks.push({ ok: true, label: `ChatGPT connection ${id} sets no extraUsageCreditMicros, so its calls are notional: they leave the job cost cap and every dollar window. If the account has purchased credits, set extraUsageCreditMicros on this connection in the auth connections file to keep its calls counted` });
 	}
 	return checks;
 }

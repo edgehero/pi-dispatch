@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { COST_WAIT, createCostGuard, createPolicyGuard, createUsageMeter, makeHardStopStream, notionalProviders, startChildMeter, wrapModelRuntime } from "../src/usage-meter.mjs";
 import { COST_CAP, MODEL_NOT_ALLOWED } from "../src/outcome.mjs";
-import { SONNET_4_5 } from "./helpers/catalog-models.mjs";
+import { GPT_5_5, SONNET_4_5 } from "./helpers/catalog-models.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
@@ -118,6 +118,39 @@ test("notionalProviders: only a verified entry marked exactly true, with an admi
 	const both = notionalProviders({ ...ok, subscriptions: [entry({ notional: true }), { ...entry(), provider: "openai", adapter: "openai-chatgpt" }] });
 	assert.deepEqual([...both], ["anthropic"]);
 	assert.notEqual(notionalProviders({ ...ok, subscriptions: [entry({ notional: true })] }), notionalProviders({ ...ok, subscriptions: [entry({ notional: true })] }), "a new set each time, never a shared one");
+});
+
+test("issue #1057: a ChatGPT entry the worker left unmarked (purchased credits declared) is counted: bounded, held and charged", async () => {
+	// The entry as the worker writes it for an `openai-chatgpt` connection with `extraUsageCreditMicros` (no marker).
+	const chatgpt = (extra = {}) => ({ provider: "openai", connectionId: "chatgpt", adapter: "openai-chatgpt", generation: 1, expiresAt: instant + 3_600_000, deadlineAt: instant + 1_800_000, ...extra });
+	const list = [{ provider: "openai", model: GPT_5_5.id }];
+	const admitted = (provider) => provider === "openai";
+	const guardFor = (entry, cap) => {
+		const notional = notionalProviders({ subscriptions: [entry], subscriptionAdmission: admitted, allowedModels: list });
+		return { notional, guard: createPolicyGuard({ maxCostMicros: cap, allowedModels: list, subscriptions: [entry], subscriptionAdmission: admitted, env: { OPENAI_API_KEY: "fixture.oauth.access" }, now, notional }) };
+	};
+	const tight = guardFor(chatgpt(), 1);
+	assert.equal(tight.notional.size, 0, "not notional");
+	assert.equal(tight.guard.admit(call(GPT_5_5)), COST_CAP, "refused under a 1-micro cap before it is sent");
+	withinCap(tight.guard, 1, "refused");
+	// $10 holds the call's bound, which the guard puts at about $9.70.
+	const cap = 10_000_000;
+	const { guard } = guardFor(chatgpt(), cap);
+	assert.equal(guard.admit(call(GPT_5_5)), null);
+	assert.ok(guard.spend().inflightMicros > 0, "the call holds its bound");
+	withinCap(guard, cap, "admitted");
+	guard.bind({ result: () => Promise.resolve(answer(0.25)) });
+	await flush();
+	assert.deepEqual(guard.spend(), { spentMicros: 250_000, inflightMicros: 0 }, "and is charged what it cost");
+	// The meter reads it as billed: in cost, nothing notional.
+	const meter = createUsageMeter({ maxTokens: null, notionalProviders: tight.notional });
+	meter.record(answer(0.25).usage, { provider: "openai", modelId: GPT_5_5.id });
+	assert.deepEqual([meter.snapshot().cost, meter.snapshot().costNotional], [0.25, 0]);
+	// The marker alone decides, on ChatGPT as on Claude: the same entry marked (no credit) passes the 1-micro cap free.
+	const marked = guardFor(chatgpt({ notional: true }), 1);
+	assert.deepEqual([...marked.notional], ["openai"]);
+	assert.equal(marked.guard.admit(call(GPT_5_5)), null);
+	assert.deepEqual(marked.guard.spend(), { spentMicros: 0, inflightMicros: 0 });
 });
 
 test("a child process never exempts a call, whatever its inherited entries say", async () => {

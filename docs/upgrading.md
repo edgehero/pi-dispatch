@@ -444,6 +444,20 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: ChatGPT purchased credits are declared with `extraUsageCreditMicros` (#1057)
+
+A ChatGPT connection whose account has purchased credits declares them with `extraUsageCreditMicros`, the field a
+Claude connection declares paid extra usage with: every call on it then counts against the job's cost cap and the
+dollar windows, and a job whose cap is above the credit is refused as `auth-credit-cap-required`. Without the field a
+ChatGPT connection is notional, as before. The worker already read the field this way on a ChatGPT connection; this
+release states it and pins it with tests, and `pi-dispatch doctor` prints a line for each ChatGPT connection the host
+owns without the field. The worker alone: the job image, the receiver and the console are unchanged.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| `PI_AUTH_CONNECTIONS_FILE` | Same shape and version. To keep a ChatGPT account's purchased credits counted, add `extraUsageCreditMicros` to its connection and keep each job's cap at or below it. Nothing to move. |
+| Mixed versions | Nothing to order: an older worker reads the field the same way; only doctor's line is new. |
+
 ### Unreleased: an unknown cost on a subscription call no longer holds the billed dollar windows (#1058)
 
 A job that mixed an API key with a subscription connection without paid extra usage settled every dollar window at its

@@ -132,6 +132,29 @@ test("paid overage requires an explicit positive policy ceiling and a job bound 
 	assert.equal((await runtime.check({ ...job, maxCostMicros: 300_000 })).ok, true);
 	assert.equal(calls[0].policy.maxCreditMicros, 400_000);
 });
+test("issue #1057: a ChatGPT connection with purchased credits is paid; its job cap is held to the credit and an exhausted window still waits", async () => {
+	const chatgpt = { id: "chatgpt", connectionId: "chatgpt", provider: "openai", ownerHost: "owner", adapter: "openai-chatgpt", accountGroup: "opaque-group", generation: 2, extraUsageCreditMicros: 400_000 };
+	const gpt = { provider: "openai", model: "gpt-5.5", models: ["openai/gpt-5.5"] };
+	for (const maxCostMicros of [400_001, undefined, null]) {
+		const { runtime, calls } = fixture({ row: chatgpt });
+		assert.equal((await runtime.check({ ...gpt, maxCostMicros })).reason, "auth-credit-cap-required", String(maxCostMicros));
+		assert.deepEqual(calls, [], "refused before any quota claim");
+	}
+	for (const maxCostMicros of [400_000, 300_000]) {
+		const { runtime, calls } = fixture({ row: chatgpt });
+		const checked = await runtime.check({ ...gpt, maxCostMicros });
+		assert.equal(checked.ok, true, String(maxCostMicros));
+		assert.equal(checked.managed[0].extraUsageCreditMicros, 400_000, "the admitted row keeps its credit for the snapshot and pickup readers");
+		const { policy } = calls[0];
+		assert.deepEqual([policy.allowExtraUsage, policy.maxCreditMicros, policy.requireExtraUsageKnownDisabled, policy.modelRef], [true, 400_000, false, "openai/gpt-5.5"]);
+	}
+	// The credit authorizes billed calls, not a pass over the quota: an exhausted window is a wait, never a throw.
+	const until = instant + 3_600_000;
+	const { runtime, calls } = fixture({ row: chatgpt, quotaResult: { ok: false, reason: "subscription-quota", until } });
+	const waiting = await runtime.prepare({ ...gpt, maxCostMicros: 400_000 }, { deadlineAt: instant + 1_800_000, attemptId: "delivery-1" });
+	assert.deepEqual([waiting.ok, waiting.wait, waiting.until], [false, "subscription-quota", until]);
+	assert.equal(calls.includes("refresh"), false);
+});
 test("OpenAI subscription classifier roles refuse before any quota claim", async () => {
 	const { runtime, calls } = fixture({ row: { ...connection, provider: "openai", adapter: "openai-chatgpt" } });
 	const result = await runtime.check({ provider: "openai", model: "gpt", models: ["openai/gpt"], watchDecisionModel: { provider: "openai", id: "gpt" } });

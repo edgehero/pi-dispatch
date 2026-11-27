@@ -102,8 +102,9 @@ silently short. Upgrade the console to count them.
 Explicit [subscription authentication](subscription-auth.md) is configured separately. Its connection policy
 and quota observations do not change this accounting file or its hypothetical plans. A call on a connection
 without paid extra usage bills nothing, so the dollar caps and windows do not count it, while the run still records
-its API-equivalent cost ([what the cap counts](#what-the-cap-counts)); a connection with paid extra usage keeps
-conservative model-cost reservations and normal dollar caps. A vendor quota percentage or prepaid plan
+its API-equivalent cost ([what the cap counts](#what-the-cap-counts)); a connection with paid extra usage, or with
+ChatGPT purchased credits declared (both `extraUsageCreditMicros`), keeps conservative model-cost reservations and
+normal dollar caps. A vendor quota percentage or prepaid plan
 is not an exact per-request cash charge, and missing provider credit units are not assumed USD.
 
 The rate tables pi ships never state a subscription plan's price. Some subscription providers ship
@@ -280,9 +281,11 @@ bounded here."
 ### What the cap counts
 
 The cap and the dollar windows count the calls that can be billed (issue #1008): every call on an API key, and every
-call on a [subscription connection](subscription-auth.md#the-cost-cap-and-the-dollar-windows) that allows paid
-extra usage (`extraUsageCreditMicros`), since any of those may be billed and nothing tells which. A call on a
-subscription connection without paid extra usage bills nothing per call: the runner lets it through with no bound and
+call on a [subscription connection](subscription-auth.md#the-cost-cap-and-the-dollar-windows) that declares
+`extraUsageCreditMicros` (Claude paid extra usage, or ChatGPT purchased credits, issue #1057), since any of those may
+be billed and nothing tells which. A call on a subscription connection without it is taken to bill nothing, so the
+calls of a ChatGPT account with purchased credits count only once its connection declares them
+([paid extra usage](subscription-auth.md#paid-extra-usage)). Such a call is notional: the runner lets it through with no bound and
 no charge, the run record still prices it at list price in `tokens.cost`, and `tokens.costNotional` is that part.
 The windows are charged `tokens.cost` less `tokens.costNotional`, and `notionalProviders` on the record names the
 providers whose calls were notional.

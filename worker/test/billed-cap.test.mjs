@@ -188,6 +188,57 @@ test("the worker marks a snapshot notional only for a connection with no paid ex
 	assert.equal(Object.hasOwn(await prepared(connection, { paidAtSnapshot: true }), "notional"), false, "a snapshot not prepared from the checked row is never marked");
 });
 
+// Issue #1057: a ChatGPT connection that declares purchased credits with `extraUsageCreditMicros`, taken through the
+// worker's own runtime with fakes at the auth and quota seams (the shapes auth-connections.mjs `check` returns).
+const chatgptRow = { id: "chatgpt", connectionId: "chatgpt", provider: "openai", ownerHost: "owner", adapter: "openai-chatgpt", accountGroup: "opaque-group", generation: 2 };
+const gptJob = { provider: "openai", model: "gpt-5.5", models: ["openai/gpt-5.5"], maxCostMicros: 400_000 };
+function chatgptRuntime(row) {
+	const signed = { ...row, bindingSignature: Number.isSafeInteger(row.extraUsageCreditMicros) ? "sig-paid" : "sig-unpaid" };
+	return makeSubscriptionRuntime({
+		auth: {
+			check: async (provider) => (provider === "openai" ? { ok: true, managed: true, ...signed, extraUsageCreditMicros: row.extraUsageCreditMicros ?? null } : { ok: true, managed: false }),
+			prepareSnapshot: async () => ({ ok: true, snapshot: { kind: "subscription", provider: "openai", connectionId: row.connectionId, adapter: row.adapter, accountGroup: row.accountGroup, generation: row.generation, expiresAt: instant + 4_000_000, deadlineAt: instant + 1_800_000, bindingSignature: signed.bindingSignature, env: { OPENAI_API_KEY: "fixture.oauth.access" } } }),
+			validateSnapshot: async (snapshot) => snapshot.bindingSignature === signed.bindingSignature,
+			status: async () => [signed],
+		},
+		quota: { admit: async () => ({ ok: true }), record: async () => ({ ok: true }), read: async () => ({ state: "unknown" }) },
+		now: () => instant,
+		lookup: () => ({ api: "openai-responses", baseUrl: "https://api.openai.com/v1" }),
+		// The worker's own reader answers null for an adapter that stages no package (subscription-config.mjs).
+		packageRootFor: () => null,
+	});
+}
+
+test("issue #1057: a ChatGPT connection with purchased credits is prepared unmarked, so the runner's entry carries no notional key", async () => {
+	const entryOf = (snapshot) => JSON.parse(buildContainerEnv({ provider: "openai", model: "gpt-5.5", maxTurns: 2, hostEnv: {}, subscriptionAuth: [snapshot] }).PI_SUBSCRIPTION_AUTH)[0];
+	const paid = await chatgptRuntime({ ...chatgptRow, extraUsageCreditMicros: 400_000 }).prepare(gptJob, { deadlineAt: instant + 1_800_000, attemptId: "delivery-1" });
+	assert.equal(paid.ok, true);
+	assert.equal(Object.hasOwn(paid.snapshots[0], "notional"), false, "purchased credits: no marker, so every call counts");
+	assert.deepEqual(entryOf(paid.snapshots[0]), { provider: "openai", connectionId: "chatgpt", adapter: "openai-chatgpt", generation: 2, expiresAt: instant + 4_000_000, deadlineAt: instant + 1_800_000 });
+	assert.equal(notionalSnapshotProviders(paid.snapshots).size, 0);
+	// The same connection without the field is notional, as a Claude one without paid extra usage is.
+	const unpaid = await chatgptRuntime(chatgptRow).prepare(gptJob, { deadlineAt: instant + 1_800_000, attemptId: "delivery-1" });
+	assert.equal(unpaid.snapshots[0].notional, true);
+	assert.equal(entryOf(unpaid.snapshots[0]).notional, true);
+});
+
+test("issue #1057: a pickup reserves the model windows and the cap of a job on a ChatGPT connection with purchased credits", async () => {
+	const modelRows = [{ ref: "openai/gpt-5.5", keyPrefix: "gpt", caps: {} }];
+	const paidRow = { ...chatgptRow, extraUsageCreditMicros: 400_000 };
+	const checked = await chatgptRuntime(paidRow).check(gptJob);
+	assert.equal(checked.ok, true);
+	assert.equal(notionalProvidersOf(checked).size, 0);
+	assert.equal(candidateWindowReservation(gptJob, checked), 400_000, "its model windows are judged against its cap");
+	const prepared = await chatgptRuntime(paidRow).prepare(gptJob, { deadlineAt: instant + 1_800_000, attemptId: "delivery-1" });
+	const notional = notionalSnapshotProviders(prepared.snapshots);
+	assert.deepEqual(reserveVerdict(gptJob, { notional, modelEndpoints }), { reserve: "cap", zeroRated: false });
+	assert.deepEqual(billedModelRows(modelRows, notional), modelRows, "and its model row stays in the ledgers");
+	// Without the field, the same pickup skips the window and reserves nothing.
+	const unpaid = await chatgptRuntime(chatgptRow).check(gptJob);
+	assert.equal(candidateWindowReservation(gptJob, unpaid), 0);
+	assert.deepEqual(reserveVerdict(gptJob, { notional: notionalSnapshotProviders((await chatgptRuntime(chatgptRow).prepare(gptJob, { deadlineAt: instant + 1_800_000, attemptId: "delivery-1" })).snapshots), modelEndpoints }), { reserve: "none", zeroRated: false });
+});
+
 test("PI_SUBSCRIPTION_AUTH carries notional: true only when the snapshot was marked, byte-identical otherwise", () => {
 	const snapshot = { provider: "anthropic", connectionId: "claude", adapter: "pi-anthropic-oauth@0.3.6", generation: 1, expiresAt: 1_900_010_000_000, deadlineAt: 1_900_000_000_000, root: "/opt/pi-global/packages/claude", digest: "a".repeat(64), env: { ANTHROPIC_OAUTH_TOKEN: "access-only" } };
 	const entries = (extra) => JSON.parse(buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 2, hostEnv: {}, subscriptionAuth: [{ ...snapshot, ...extra }] }).PI_SUBSCRIPTION_AUTH);
