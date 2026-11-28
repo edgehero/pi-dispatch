@@ -22,15 +22,15 @@
     "vis-timeline": {
       "moment": "2.31.0"
     },
-    "@earendil-works/pi-agent-core": "1.6.1",
-    "@earendil-works/pi-ai": "1.6.1",
-    "@earendil-works/pi-codemode": "1.6.1",
-    "@earendil-works/pi-coding-agent": "1.6.1",
-    "@earendil-works/pi-mcp": "1.6.1",
-    "@earendil-works/pi-telemetry": "1.6.1",
-    "@earendil-works/pi-tui": "1.6.1",
+    "@earendil-works/pi-agent-core": "1.7.0",
+    "@earendil-works/pi-ai": "1.7.0",
+    "@earendil-works/pi-codemode": "1.7.0",
+    "@earendil-works/pi-coding-agent": "1.7.0",
+    "@earendil-works/pi-mcp": "1.7.0",
+    "@earendil-works/pi-telemetry": "1.7.0",
+    "@earendil-works/pi-tui": "1.7.0",
     "dockview-core": "8.8.3",
-    "@earendil-works/pi-schema": "1.6.1"
+    "@earendil-works/pi-schema": "1.7.0"
   },
   "devDependencies": {
     "primary-anthropic-sdk": "npm:@anthropic-ai/sdk@0.124.0"
