@@ -123,12 +123,13 @@ try {
       catch (e) { if (n >= 15 || !/context|navigat/.test(e.message)) throw e; await sleep(40); }
     }
   };
-  // Revoked authority reaches the page by whichever comes first: the store's answer ("Operator session ended") or this
-  // process's own lease deadline ("Authorization could not be checked"), and under a loaded runner the deadline can win
-  // (gateway/test/two-process.test.mjs says the same of silence). Both disconnect and both fail closed, so which word lands
-  // is a race, not a property. What a revocation must do is asserted after the revocation stage's wait: no terminal, and the
-  // shell alive.
-  const AUTHORITY_ENDED = "['Operator session ended','Authorization could not be checked'].includes((document.querySelector('.wb-pane[data-active=true] [data-terminal-state-title]')||document.getElementById('gateway-state-title')).textContent)";
+  // A revoked operator's terminal says "Operator session ended", and only that (issue #1124). The broker revokes a lost
+  // operator at the start of every one-second tick, before its slower reads, and the gateway reads a refusal that arrives
+  // before its own lease deadline by the store's word (issues #1039, #1048). Only a store or console that stalled past
+  // the lease lets the deadline speak first ("Authorization could not be checked"), so that word here is the regression
+  // these stages exist to catch, not a race to tolerate. What a revocation must also do is asserted after the wait: no
+  // terminal, and the shell alive.
+  const SESSION_ENDED = "(document.querySelector('.wb-pane[data-active=true] [data-terminal-state-title]')||document.getElementById('gateway-state-title'))?.textContent==='Operator session ended'";
   const until = async (expression, ms = 12000) => {
     const end = performance.now() + ms;
     while (performance.now() < end) { if (await evaluate(`Boolean(${expression})`)) return; await sleep(30); }
@@ -441,7 +442,7 @@ try {
   await capture("phone-fallback");
   await sleep(200); assert.equal(JSON.parse((await exec(bin, ["inspect", name])).stdout)[0].State.Running, true);
   stage = "revocation"; await launch("dark"); file.generation++;
-  await until(AUTHORITY_ENDED, 6500);
+  await until(SESSION_ENDED, 6500);
   assert.equal(await evaluate("document.querySelectorAll('.xterm').length"), 0); await capture("revoked-dark");
   assert.equal(JSON.parse((await exec(bin, ["inspect", name])).stdout)[0].State.Running, true);
   stage = "roles and read-only";
@@ -485,7 +486,7 @@ try {
     await tab.send("Emulation.setScriptExecutionDisabled", { value: false });
   }
   stage = "read-only transition"; await launch("dark"); config.readOnly = true;
-  await until(AUTHORITY_ENDED, 6500);
+  await until(SESSION_ENDED, 6500);
   await capture("read-only-transition-dark"); config.readOnly = false;
   assert.equal(ctaLaunches, 2, "both Sandboxes and Run use their actual rendered own-tab CTA");
   stage = "four actual sandbox terminals";
