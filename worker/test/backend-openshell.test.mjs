@@ -599,6 +599,9 @@ test("credentials (#684): every secret goes into a per-job provider by the CLI's
 	assert.deepEqual(fake.state.written.profile.credentials.map((c) => Object.keys(c).sort()), names.map(() => ["env_vars", "name", "required"]), "endpointless: no endpoint, no binary");
 	assert.equal(fake.state.provider.env.ANTHROPIC_API_KEY, "sk-ant-real-provider-key-0001");
 	assert.equal(fake.state.provider.env.GH_TOKEN, "ghs_real_forge_token_0002");
+	// Issue #1117: the rest of the child's environment is the worker's own, as on every other openshell step, which is
+	// what the specs say; a narrower one has to change them too.
+	for (const [key, value] of Object.entries(process.env)) if (!names.includes(key)) assert.equal(fake.state.provider.env[key], value, key);
 	for (const call of fake.state.calls) {
 		const flat = call.join(" ");
 		assert.ok(!flat.includes("sk-ant-real-provider-key-0001") && !flat.includes("ghs_real_forge_token_0002"), `no value on any argv: ${call.slice(0, 4).join(" ")}`);
