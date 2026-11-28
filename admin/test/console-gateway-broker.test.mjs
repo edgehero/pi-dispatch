@@ -4,16 +4,16 @@ import { test } from "node:test";
 import { makeGatewayBroker } from "../src/console/gateway-broker.mjs";
 import { makeSessionStore, sessionDigest } from "../src/console/sessions.mjs";
 import { findToken } from "../../worker/src/console-tokens.mjs";
-import { gatewayHash } from "../../worker/src/sandbox-gateway-protocol.mjs";
+import { GATEWAY_AUTH_MS, gatewayHash } from "../../worker/src/sandbox-gateway-protocol.mjs";
 
 const AT = Date.UTC(2026, 10, 2, 12);
 const sha = (s) => createHash("sha256").update(s).digest("hex");
 const TOKEN = "pdc_" + "x".repeat(43), OTHER = "pdc_" + "y".repeat(43);
 const RECEIPT = "r".repeat(43);
-function fixture({ readRun = async () => null } = {}) {
-  let at = AT, readOnly = false, tokenRead = true;
+function fixture({ readRun = async () => null, idleMs = 1000 } = {}) {
+  let at = AT, readOnly = false, tokenRead = true, tokenThrows = false, tokenReads = 0;
   const file = { version: 1, generation: 0, tokens: [{ name: "ops", role: "operator", sha256: sha(TOKEN) }, { name: "other", role: "operator", sha256: sha(OTHER) }] };
-  const sessions = makeSessionStore({ now: () => at, idleMs: 1000, maxMs: 3600000 });
+  const sessions = makeSessionStore({ now: () => at, idleMs, maxMs: 3600000 });
   const create = (entry = file.tokens[0]) => {
     const { id } = sessions.create({ name: entry.name, role: entry.role, tokenHash: entry.sha256, generation: file.generation });
     return sessions.peek(id, file);
@@ -21,8 +21,16 @@ function fixture({ readRun = async () => null } = {}) {
   const session = create(), actor = { name: session.name, role: session.role, session: sessionDigest(session.id) };
   const target = { host: "mini1", id: "gh-42", venue: "local", nonce: "a".repeat(32), containerId: "b".repeat(64), by: "terminal", since: AT - 1000, at: AT };
   let registrations = { sessions: [target] };
+  // The fleet read the broker awaits. `slowFleet` holds the next one open until released, as a loaded runner would.
+  let fleet = async () => registrations;
+  const slowFleet = () => {
+    let release, entered;
+    const reading = new Promise((resolve) => { entered = resolve; });
+    fleet = () => { fleet = async () => registrations; entered(); return new Promise((resolve) => { release = () => resolve(registrations); }); };
+    return { entered: reading, release: () => release?.() };
+  };
   const registry = { config: { consoleOrigin: "http://localhost:4790", hosts: { mini1: { origin: "http://127.0.0.1:4791" } } }, digest: "r1" };
-  const values = new Map(), audit = [], renews = [], revokes = [];
+  const values = new Map(), audit = [], renews = [], revokes = [], revokedAt = [];
   const store = {
     async readRoom() { return null; },
     async observeTime() { return { ok: true, nowMs: at }; },
@@ -30,16 +38,16 @@ function fixture({ readRun = async () => null } = {}) {
     async readIntent(id) { return values.get(id) ?? null; },
     async authorizeIntent({ intentId, actor }) { const value = values.get(intentId); if (value.state !== "bound") return { refused: "changed" }; value.state = "authorized"; value.actor = actor; return { ok: true }; },
     async renewAuthorization(input) { renews.push(input); return { ok: true }; },
-    async revoke(input) { revokes.push(input); values.get(input.intentId).state = "revoked"; return { ok: true }; },
+    async revoke(input) { revokes.push(input); revokedAt.push(at); values.get(input.intentId).state = "revoked"; return { ok: true }; },
   };
-  const broker = makeGatewayBroker({ store, sessions, readTokens: () => tokenRead ? { file } : { refusal: "unreadable" }, findToken, readRegistry: () => registry, readSessions: async () => registrations, readRun, readOnly: () => readOnly, audit: { append: (row) => audit.push(row) }, now: () => at, schedule: false });
+  const broker = makeGatewayBroker({ store, sessions, readTokens: () => { tokenReads++; if (tokenThrows) throw new Error("EIO"); return tokenRead ? { file } : { refusal: "unreadable" }; }, findToken, readRegistry: () => registry, readSessions: () => fleet(), readRun, readOnly: () => readOnly, audit: { append: (row) => audit.push(row) }, now: () => at, schedule: false });
   const origin = registry.config.consoleOrigin;
   const launch = (body = { host: target.host, id: target.id, width: 1440 }, as = session) => broker.launch({ session: as, body, origin, actor });
   const bind = (out) => { Object.assign(values.get(out.intentId), { state: "bound", receiptHash: gatewayHash(RECEIPT) }); };
   const context = (out, as = session, proof = out.tabProof, receipt = RECEIPT) => broker.context({ session: as, origin, body: { intentId: out.intentId, tabProof: proof, receipt } });
   const authorize = (out, token = TOKEN, as = session, receipt = RECEIPT) => broker.authorize({ session: as, origin, actor, body: { intentId: out.intentId, tabProof: out.tabProof, receipt, token, width: 1440 } });
-  return { broker, store, session, sessions, file, registry, values, actor, target, audit, renews, revokes, launch, bind, context, authorize, create,
-    advance: (ms) => at += ms, readonly: () => readOnly = true, unreadable: () => tokenRead = false, registrations: (next) => registrations = next };
+  return { broker, store, session, sessions, file, registry, values, actor, target, audit, renews, revokes, revokedAt, slowFleet, launch, bind, context, authorize, create,
+    advance: (ms) => at += ms, readonly: () => readOnly = true, unreadable: () => tokenRead = false, throwing: (value) => tokenThrows = value, tokenReads: () => tokenReads, registrations: (next) => registrations = next };
 }
 test("launch is secret-free outside its explicit handoff and requires an existing enrolled shell", async () => {
   const f = fixture(), out = await f.launch();
@@ -148,6 +156,77 @@ test("an unreadable or invalid Redis clock cannot mint or refresh authority", as
     const active = fixture(), opened = await active.launch(); active.bind(opened); assert.equal((await active.authorize(opened)).ok, true);
     active.store.observeTime = async () => value; await active.broker.tick(); assert.equal(active.renews.length, 0); await active.broker.close();
   }
+});
+
+// Two operators hold authorized terminals, so a tick still has a fleet read to wait on after one of them is revoked.
+async function twoDrivers(f) {
+  const out = await f.launch(); f.bind(out); assert.equal((await f.authorize(out)).ok, true);
+  const other = f.create(f.file.tokens[1]), theirs = await f.launch(undefined, other); f.bind(theirs);
+  assert.equal((await f.authorize(theirs, OTHER, other)).ok, true);
+  return { out, theirs };
+}
+const renewed = (f, id) => f.renews.filter((r) => r.intentId === id);
+test("a removed token is revoked before a slow fleet read answers, inside the lease it last renewed (issues #1039, #1048)", async () => {
+  // Revoked after that lease, the gateway's own deadline comes first and the browser reads "could not confirm its
+  // authority" instead of "Operator session ended".
+  const f = fixture({ idleMs: 3600000 }), { out, theirs } = await twoDrivers(f);
+  f.advance(1000); await f.broker.tick();
+  const lease = renewed(f, out.intentId).at(-1).observedAt + GATEWAY_AUTH_MS;
+  f.file.tokens.splice(0, 1);
+  const slow = f.slowFleet();
+  f.advance(1000); const ticking = f.broker.tick(); await slow.entered;
+  assert.deepEqual(f.revokes.map((r) => r.intentId), [out.intentId], "revoked before the fleet read answers");
+  f.advance(GATEWAY_AUTH_MS + 1000); slow.release(); await ticking;
+  assert.equal(f.revokes.length, 1);
+  assert.ok(f.revokedAt[0] < lease, `revoked at +${f.revokedAt[0] - AT} ms, after the lease it last renewed ran out at +${lease - AT} ms`);
+  // The renewal that tick still makes carries the clock it read before its fleet read, never a later one.
+  assert.deepEqual(renewed(f, theirs.intentId).map((r) => r.observedAt - AT), [1000, 2000]);
+  await f.broker.close();
+});
+test("a tick still in flight does not hold back a removed token's revoke, and its own renewals rest on a judgment made after its clock read (issues #1039, #1048)", async () => {
+  const f = fixture({ idleMs: 3600000 }), { out } = await twoDrivers(f), before = renewed(f, out.intentId).length, slow = f.slowFleet();
+  f.advance(1000); const first = f.broker.tick(); await slow.entered;
+  f.file.tokens.splice(0, 1);
+  f.advance(1000); await f.broker.tick();
+  assert.deepEqual(f.revokes.map((r) => r.intentId), [out.intentId], "the next tick revokes it at once instead of skipping while the first one runs");
+  assert.equal(f.revokedAt[0], AT + 2000);
+  slow.release(); await first;
+  assert.equal(renewed(f, out.intentId).length, before, "the tick in flight renews nothing it no longer holds");
+  assert.equal(f.revokes.length, 1, "and does not revoke it twice");
+  await f.broker.close();
+  // With no later tick, the one in flight judges again after its fleet read: a token removed after its clock read gets no renewal.
+  const g = fixture({ idleMs: 3600000 }), mine = await twoDrivers(g), held = renewed(g, mine.out.intentId).length, wait = g.slowFleet();
+  g.advance(1000); const only = g.broker.tick(); await wait.entered;
+  g.file.tokens.splice(0, 1); wait.release(); await only;
+  assert.deepEqual(g.revokes.map((r) => r.intentId), [mine.out.intentId]); assert.equal(renewed(g, mine.out.intentId).length, held);
+  assert.equal(renewed(g, mine.theirs.intentId).length, 1, "while the operator whose token stays is renewed");
+  await g.broker.close();
+});
+test("the early pass also revokes on a changed enrollment or an ended sign-in, before the tick awaits anything, and leaves a read that throws to the full judgment (issues #1039, #1048)", async () => {
+  for (const [why, change] of [["enrollment", (f) => f.registry.digest = "changed"], ["sign-in", (f) => f.sessions.destroy(f.session.id)]]) {
+    const f = fixture({ idleMs: 3600000 }), out = await f.launch(); f.bind(out); assert.equal((await f.authorize(out)).ok, true);
+    const slow = f.slowFleet(), renewals = f.renews.length;
+    change(f); f.advance(1000);
+    const ticking = f.broker.tick();
+    assert.deepEqual(f.revokes.map((r) => r.intentId), [out.intentId], `${why}: revoked before the clock or fleet read is even asked`);
+    slow.release(); await ticking;
+    assert.equal(f.revokes.length, 1); assert.equal(f.renews.length, renewals, `${why}: and nothing renewed`);
+    await f.broker.close();
+  }
+  // A token file whose read throws is no judgment of anyone: the early pass skips it, and the full one drops the
+  // attachment unrenewed, as it always has, so its short lease expires without a revocation anybody decided.
+  const f = fixture({ idleMs: 3600000 }); await twoDrivers(f);
+  const renewals = f.renews.length;
+  f.throwing(true); f.advance(1000); await f.broker.tick();
+  assert.deepEqual([f.revokes.length, f.renews.length], [0, renewals]);
+  f.throwing(false); f.advance(1000); await f.broker.tick();
+  assert.equal(f.renews.length, renewals, "dropped, so a later readable tick renews neither");
+  // One read of the token file serves the whole early pass, however many attachments it judges.
+  const g = fixture({ idleMs: 3600000 }); await twoDrivers(g);
+  const before = g.tokenReads(); g.advance(1000); const counted = g.broker.tick();
+  assert.equal(g.tokenReads() - before, 1, "the early pass reads the token file once");
+  await counted;
+  await f.broker.close(); await g.broker.close();
 });
 
 function watchingRoom() {

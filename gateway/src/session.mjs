@@ -4,6 +4,12 @@ import { gatewayDimensions, GATEWAY_LIMITS } from "./terminal-protocol.mjs";
 import { makeSharingController } from "./sharing.mjs";
 export { GATEWAY_LIMITS } from "./terminal-protocol.mjs";
 
+// What a refused renewal tells the browser (issues #1039, #1048). A refusal is the store's word that this authority
+// ended; four words say more exactly how, and pass through. A store that could not be read, or answered with nothing
+// that parses, is no evidence anyone revoked the operator, so the browser hears its authority was not confirmed.
+const STORE_UNANSWERED = Object.freeze(["control-unavailable", "control-invalid", "intent-invalid"]);
+const refusedEnding = refused => ["window-lost", "watch-disabled", "watch-removed", "driver-ended"].includes(refused) ? refused : STORE_UNANSWERED.includes(refused) ? "authorization-unavailable" : "session-ended";
+
 /** No transcript or replay buffer: bytes exist only while crossing a currently authorized attachment. */
 export function runGatewaySession({ ws, channel, store, intent, connectionId, browserHash, room = null, authRemainingMs, idleMinutes, runtime, audit, now = () => performance.now(), setTimer = setInterval, clearTimer = clearInterval, onEnd = () => {}, onClosing = () => {}, onLocalStop = () => {} }) {
 	const watch = intent.kind === "watch";
@@ -28,14 +34,18 @@ export function runGatewaySession({ ws, channel, store, intent, connectionId, br
 		catch { onEnd({ reason, auditFailed: true }); return; }
 		onEnd({ reason });
 	};
+	// The store says `authorization-expired` of a revoked operator and of a lease that ran out alike, and this deadline
+	// is never later than the store's own expiry. So a refusal read before it can only be a revocation, and one read
+	// after it is the lapse this timer would have ended a moment earlier, whatever its word and whichever came first.
+	const lapsed = () => now() >= deadline;
 	const authorized = () => {
 		if (ended) return false;
-		if (now() >= deadline) { void finish("authorization-unavailable"); return false; }
+		if (lapsed()) { void finish("authorization-unavailable"); return false; }
 		if (transportLost) return false;
 		if (!watch && idleMinutes > 0 && now() - lastInput >= idleMinutes * 60000) { void finish("idle"); return false; }
 		return true;
 	};
-	const sharing = makeSharingController({ store, intent, connectionId, browserHash, ws, authorized, fail: finish, onLocalStop, audit });
+	const sharing = makeSharingController({ store, intent, connectionId, browserHash, ws, authorized, lapsed, fail: finish, onLocalStop, audit });
 	function output(bytes) {
 		if (!authorized()) return;
 		if (ws.bufferedAmount + bytes.length > GATEWAY_LIMITS.bufferedBytes) { void finish("backpressure"); return; }
@@ -49,15 +59,18 @@ export function runGatewaySession({ ws, channel, store, intent, connectionId, br
 		try {
 			const result = await store.renewAttachment({ intentId: intent.intentId, connectionId, browserHash });
 			if (ended) return;
-			if (!result.ok || !Number.isFinite(result.authRemainingMs) || result.authRemainingMs <= 0) { await finish(["window-lost", "watch-disabled", "watch-removed", "driver-ended"].includes(result.refused) ? result.refused : "session-ended"); return; }
+			if (!result.ok) { await finish(lapsed() ? "authorization-unavailable" : refusedEnding(result.refused)); return; }
+			if (!Number.isFinite(result.authRemainingMs) || result.authRemainingMs <= 0) { await finish("authorization-unavailable"); return; }
 			if (!authorized()) return;
 			deadline = requestedAt + Math.min(GATEWAY_AUTH_MS, result.authRemainingMs);
 			if (!authorized()) return;
 			if (room && !result.room) { await finish("authorization-unavailable"); return; }
 			sharing.observe(result.room);
-			const state = await runtime.inspect(intent.target);
+			// An inspection that throws is the runtime's failure, as for a lost stream below, not unconfirmed authority.
+			let state = null;
+			try { state = await runtime.inspect(intent.target); } catch { /* Read below as the runtime's failure. */ }
 			if (ended) return;
-			if (!state.ok) await finish(state.refused === "sandbox-ended" ? "sandbox-ended" : "runtime-unavailable");
+			if (!state?.ok) await finish(state?.refused === "sandbox-ended" ? "sandbox-ended" : "runtime-unavailable");
 		} catch { await finish("authorization-unavailable"); }
 		finally { polling = false; }
 	}

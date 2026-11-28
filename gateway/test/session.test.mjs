@@ -196,3 +196,70 @@ test("a peer that stops answering pings is let go; one that answers stays, and i
 	for (let turn = 0; turn < 50 && !flooding.ends.length; turn++) await Promise.resolve();
 	assert.equal(flooding.ends[0]?.reason, "protocol-error");
 });
+
+const endedWith = f => f.sends.filter(s => !Buffer.isBuffer(s)).map(s => JSON.parse(s)).find(m => m.type === "ended")?.reason;
+const settled = async f => { for (let turn = 0; turn < 50 && !f.ends.length; turn++) await new Promise(resolve => setImmediate(resolve)); };
+test("a renewal refused by the store names a revocation; a store that could not answer, or a lease that ran out first, does not (issues #1039, #1048)", async () => {
+	// What the worker's store can answer a renewal with, and what the browser is then told. Only a refusal is evidence that
+	// the console ended this authority; a store that could not be read or did not parse proves nothing about the operator.
+	for (const [refused, reason] of [["authorization-expired", "session-ended"], ["intent-missing", "session-ended"], ["self-watch", "session-ended"], ["control-unavailable", "authorization-unavailable"], ["control-invalid", "authorization-unavailable"], ["intent-invalid", "authorization-unavailable"], ["window-lost", "window-lost"], ["driver-ended", "driver-ended"], ["watch-disabled", "watch-disabled"], ["watch-removed", "watch-removed"]]) {
+		const f = fixture({ renew: async () => ({ refused }) });
+		f.setAt(1000); await f.session.tick();
+		assert.equal(endedWith(f), reason, refused); assert.equal(f.detaches, 1);
+	}
+	for (const answer of [{ ok: true }, { ok: true, authRemainingMs: 0 }]) {
+		const f = fixture({ renew: async () => answer });
+		f.setAt(1000); await f.session.tick();
+		assert.equal(endedWith(f), "authorization-unavailable", "an answer with no lease in it confirms nothing");
+	}
+	// The same revocation, answered only after the lease ran out: the lapse came first, so nothing confirmed the revocation.
+	let answer; const late = fixture({ renew: () => new Promise(resolve => { answer = resolve; }) });
+	late.setAt(1000); const asking = late.session.tick(); late.setAt(5000); late.timer();
+	answer({ refused: "authorization-expired" }); await asking; await settled(late);
+	assert.equal(endedWith(late), "authorization-unavailable");
+	// A shared driver whose renewal carries no room, and a room naming another driver, are not confirmed either.
+	const room = { driverConnectionId: "connection", enabled: true, rosterRevision: 1, watchers: {}, geometry: { cols: 80, rows: 24, revision: 1 } };
+	const roomless = fixture({ room, renew: async () => ({ ok: true, authRemainingMs: 5000 }) });
+	roomless.setAt(1000); await roomless.session.tick(); assert.equal(endedWith(roomless), "authorization-unavailable");
+	const replaced = fixture({ room, renew: async () => ({ ok: true, authRemainingMs: 5000, room: { ...room, driverConnectionId: "replacement" } }) });
+	replaced.setAt(1000); await replaced.session.tick(); assert.equal(endedWith(replaced), "authorization-unavailable");
+});
+test("a runtime inspection that throws after a good renewal ends as the runtime, never as authority (issues #1039, #1048)", async () => {
+	const f = fixture({ inspect: async () => { throw new Error("daemon"); } });
+	f.setAt(1000); await f.session.tick();
+	assert.equal(endedWith(f), "runtime-unavailable"); assert.equal(f.audits.at(-1)[3], "runtime-unavailable");
+});
+test("a driver revoked while its roster acknowledgement or a sharing control is in flight ends as a revocation (issues #1039, #1048)", async () => {
+	// A new watcher bumps the roster, the driver's page acknowledges it, and the console revokes the driver meanwhile. The
+	// store refuses that acknowledgement exactly as it refuses a renewal, so the browser must read the same words.
+	const room = { driverConnectionId: "connection", enabled: true, rosterRevision: 1, watchers: {}, geometry: { cols: 80, rows: 24, revision: 1 } };
+	for (const [method, message] of [["acknowledgeRoster", { type: "sharing-seen", revision: 1 }], ["setWatching", { type: "watch-policy", enabled: false }], ["removeWatcher", { type: "watch-remove", watcherKey: "a".repeat(64) }]]) {
+		for (const [refused, reason] of [["authorization-expired", "session-ended"], ["control-unavailable", "authorization-unavailable"], ["driver-ended", "authorization-unavailable"]]) {
+			const f = fixture({ room, controls: { [method]: async () => ({ refused }) } });
+			f.ws.emit("message", Buffer.from(JSON.stringify(message)), false); await settled(f);
+			assert.equal(endedWith(f), reason, `${method} refused ${refused}`); assert.equal(f.audits.at(-1)[3], reason);
+		}
+	}
+});
+test("a refusal read after the session's own deadline is the lapse, whatever its word, even before the timer runs (issues #1039, #1048)", async () => {
+	// The store says `authorization-expired` of a revocation and of a lease that simply ran out. The answer can land after
+	// the deadline but before the 100 ms timer notices it; the browser must then read what the timer would have told it.
+	const room = { driverConnectionId: "connection", enabled: true, rosterRevision: 1, watchers: {}, geometry: { cols: 80, rows: 24, revision: 1 } };
+	const held = () => { const call = {}; call.entered = new Promise(resolve => { call.enter = resolve; }); call.fn = () => new Promise(resolve => { call.answer = resolve; call.enter(); }); return call; };
+	for (const [refused, before] of [["authorization-expired", "session-ended"], ["window-lost", "window-lost"], ["control-unavailable", "authorization-unavailable"]]) {
+		for (const [at, expected] of [[4999, before], [5000, "authorization-unavailable"]]) {
+			const renewal = held(), f = fixture({ renew: renewal.fn });
+			f.setAt(1000); const asking = f.session.tick(); await renewal.entered;
+			f.setAt(at); renewal.answer({ refused }); await asking; await settled(f);
+			assert.equal(endedWith(f), expected, `renewal refused ${refused} at ${at}`);
+		}
+	}
+	for (const [at, expected] of [[4999, "session-ended"], [5000, "authorization-unavailable"]]) {
+		for (const [method, message] of [["acknowledgeRoster", { type: "sharing-seen", revision: 1 }], ["setWatching", { type: "watch-policy", enabled: false }], ["removeWatcher", { type: "watch-remove", watcherKey: "a".repeat(64) }], ["updateGeometry", { type: "resize", cols: 90, rows: 30, width: 1200 }]]) {
+			const control = held(), f = fixture({ room, controls: { [method]: control.fn } });
+			f.setAt(1000); f.ws.emit("message", Buffer.from(JSON.stringify(message)), false); await control.entered;
+			f.setAt(at); control.answer({ refused: "authorization-expired" }); await settled(f);
+			assert.equal(endedWith(f), expected, `${method} refused authorization-expired at ${at}`); assert.equal(f.audits.at(-1)[3], expected);
+		}
+	}
+});
