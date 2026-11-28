@@ -241,6 +241,18 @@ test("a driver revoked while its roster acknowledgement or a sharing control is 
 		}
 	}
 });
+test("a driver control refused with any word but a revocation's ends unconfirmed, the watch words and a renewal's other words included (issue #1123)", async () => {
+	// A control's `driver-ended` says its room is gone, which this driver's own page would misread; and a word a renewal
+	// reads as the store's refusal of its authority (`intent-missing`, `roster-invalid`) is no revocation from a control.
+	const room = { driverConnectionId: "connection", enabled: true, rosterRevision: 1, watchers: {}, geometry: { cols: 80, rows: 24, revision: 1 } };
+	for (const [method, message] of [["acknowledgeRoster", { type: "sharing-seen", revision: 1 }], ["setWatching", { type: "watch-policy", enabled: false }], ["removeWatcher", { type: "watch-remove", watcherKey: "a".repeat(64) }], ["updateGeometry", { type: "resize", cols: 90, rows: 30, width: 1200 }]]) {
+		for (const refused of ["driver-ended", "window-lost", "intent-missing", "roster-invalid"]) {
+			const f = fixture({ room, controls: { [method]: async () => ({ refused }) } });
+			f.ws.emit("message", Buffer.from(JSON.stringify(message)), false); await settled(f);
+			assert.equal(endedWith(f), "authorization-unavailable", `${method} refused ${refused}`);
+		}
+	}
+});
 test("a refusal read after the session's own deadline is the lapse, whatever its word, even before the timer runs (issues #1039, #1048)", async () => {
 	// The store says `authorization-expired` of a revocation and of a lease that simply ran out. The answer can land after
 	// the deadline but before the 100 ms timer notices it; the browser must then read what the timer would have told it.

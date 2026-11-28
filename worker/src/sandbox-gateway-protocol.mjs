@@ -216,8 +216,14 @@ ${answer}`,
 local target=cjson.decode(ARGV[1]); local r=roomFor(target); if not r or not sameTarget(r.target,target) then return denied('room-missing') end
 local remaining=driverRemaining(r); if remaining<=0 then return denied('driver-ended') end
 return cjson.encode({ok=true,room=r,authRemainingMs=remaining})`,
+	// Three words, in this order (issue #1123). A request that is not this drive intent's own connection and browser, or
+	// a second start, learns nothing more of it. Then authority before the window, as renewAttachment judges them, so one
+	// state reads one word whichever the gateway sends first: a revoked or lapsed intent is `authorization-expired`,
+	// which the gateway reads by its deadline (a revocation before it), and only then a window another connection holds.
 	startDriver: `${READ}
-if m.kind~='drive' or m.state~='connected' or m.connectionId~=ARGV[1] or m.browserHash~=ARGV[2] or redis.call('GET',KEYS[2])~=m.owner or redis.call('GET',KEYS[3])~=ARGV[1] or m.driverReady then return denied('driver-ended') end
+if m.kind~='drive' or m.connectionId~=ARGV[1] or m.browserHash~=ARGV[2] or m.driverReady then return denied('driver-ended') end
+if m.state~='connected' or redis.call('GET',KEYS[2])~=m.owner then return denied('authorization-expired') end
+if redis.call('GET',KEYS[3])~=ARGV[1] then return denied('window-lost') end
 local remaining=math.min(${GATEWAY_AUTH_MS},redis.call('PTTL',KEYS[2])); if remaining<=0 then return denied('authorization-expired') end
 local r={v=2,target=m.target,driverIntentId=m.intentId,driverConnectionId=m.connectionId,driverActor=m.actor,sessionKey=m.sessionKey,gatewayOrigin=m.gatewayOrigin,consoleOrigin=m.consoleOrigin,enabled=false,epoch=cjson.null,geometry={cols=tonumber(ARGV[3]),rows=tonumber(ARGV[4]),revision=1},rosterRevision=0,seenRosterRevision=0,watchers={}}
 m.driverReady=true; redis.call('SET',KEYS[1],cjson.encode(m),'KEEPTTL'); redis.call('SET',roomKey(m.target),cjson.encode(r),'PX',remaining)
@@ -251,7 +257,8 @@ return cjson.encode({ok=true,intent=m,room=r,authRemainingMs=driverRemaining(r)}
 if m.kind~='watch' or m.state~='connected' or m.connectionId~=ARGV[1] or m.browserHash~=ARGV[2] then return denied('authorization-expired') end
 local r,reason=watchRoom(m); if not r then return denied(reason) end
 local w=r.watchers[m.intentId]; if not w or w.expiresAt<=now then return denied('watch-removed') end
-if redis.call('GET',KEYS[2])~=m.owner or redis.call('GET',watchWindow(m))~=ARGV[1] then return denied('authorization-expired') end
+if redis.call('GET',KEYS[2])~=m.owner then return denied('authorization-expired') end
+if redis.call('GET',watchWindow(m))~=ARGV[1] then return denied('window-lost') end
 if r.seenRosterRevision<w.registeredRevision then return denied('roster-unseen') end
 if w.state~='watching' then w.state='watching'; r.rosterRevision=r.rosterRevision+1 end; saveRoom(r)
 return cjson.encode({ok=true,intent=m,room=r,authRemainingMs=math.min(driverRemaining(r),redis.call('PTTL',KEYS[2]))})`,

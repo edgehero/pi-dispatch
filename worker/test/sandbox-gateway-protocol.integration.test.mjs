@@ -85,6 +85,72 @@ test("an acknowledgement from before a watcher joined never admits it: the drive
 	} finally { await f.close(); }
 });
 
+test("startDriver tells a revoked or lapsed driver and a lost window apart from a request that is not its own (issue #1123)", { skip: !url && "needs VALKEY_TEST_URL" }, async () => {
+	const redis = makeRedisClient(url, { disconnectTimeoutMs: 0 }); redis.on("error", () => {});
+	const prefix = `gateway-start-test:${gatewayRandom().replaceAll("-", "_")}:`, store = makeGatewayStore({ redis, prefix });
+	const target = { host: "host-a", id: "run-a", nonce: "a".repeat(32), containerId: "b".repeat(64), venue: "local" }, lock = `${prefix}window:${target.host}:${target.containerId}`;
+	const actor = { name: "ops", role: "operator", session: "a".repeat(12) };
+	// A driver redeemed and connected, not yet started: the gateway's state between its upgrade and startDriver.
+	async function connected() {
+		const handoff = gatewayRandom(), m = { intentId: gatewayRandom(), owner: gatewayRandom(), kind: "drive", sessionKey: gatewayHash("session"), runFacts: null, handoffHash: gatewayHash(handoff), target, gatewayOrigin: "https://gateway.example", consoleOrigin: "https://console.example" };
+		assert.equal((await store.createIntent(m)).ok, true);
+		m.browserHash = gatewayHash(gatewayRandom()); m.connectionId = gatewayRandom();
+		assert.equal((await store.bindIntent({ receiptHash: gatewayHash("receipt"), intentId: m.intentId, handoff, browserHash: m.browserHash, gatewayOrigin: m.gatewayOrigin, host: target.host })).ok, true);
+		assert.equal((await store.authorizeIntent({ intentId: m.intentId, owner: m.owner, actor, observedAt: await observe(store) })).ok, true);
+		assert.equal((await store.redeem({ intentId: m.intentId, browserHash: m.browserHash, connectionId: m.connectionId })).ok, true);
+		return m;
+	}
+	const start = (m, other = {}) => store.startDriver({ intentId: m.intentId, connectionId: m.connectionId, browserHash: m.browserHash, cols: 80, rows: 24, ...other });
+	const done = async m => { await store.release({ intentId: m.intentId, connectionId: m.connectionId }); await redis.del(lock); };
+	try {
+		let m = await connected();
+		await store.revoke({ intentId: m.intentId, owner: m.owner, reason: "session-ended" });
+		assert.equal((await start(m)).refused, "authorization-expired", "the console revoked it between redeem and start: the gateway reads a revocation, not a lost driver");
+		await done(m);
+		m = await connected(); await redis.del(`${prefix}auth:${m.intentId}`);
+		assert.equal((await start(m)).refused, "authorization-expired", "its owner key ran out: the word a renewal gets for a lapse too");
+		await done(m);
+		m = await connected(); await redis.set(lock, gatewayRandom(), "PX", 15000);
+		assert.equal((await start(m)).refused, "window-lost", "another connection holds its window");
+		// Authority is judged before the window, as a renewal does, so one store state reads one word whichever comes first.
+		await store.revoke({ intentId: m.intentId, owner: m.owner, reason: "session-ended" });
+		assert.equal((await start(m)).refused, "authorization-expired");
+		assert.equal((await store.renewAttachment({ intentId: m.intentId, connectionId: m.connectionId, browserHash: m.browserHash })).refused, "authorization-expired", "the word its renewal reads for the same state");
+		await done(m);
+		// A request that is not this intent's own connection or browser, or a second start, learns nothing of its authority.
+		m = await connected();
+		assert.equal((await start(m, { connectionId: gatewayRandom() })).refused, "driver-ended");
+		assert.equal((await start(m, { browserHash: gatewayHash("another browser") })).refused, "driver-ended");
+		assert.equal((await start(m)).ok, true);
+		assert.equal((await start(m)).refused, "driver-ended", "started already");
+		await store.revoke({ intentId: m.intentId, owner: m.owner, reason: "session-ended" });
+		assert.equal((await start(m, { connectionId: gatewayRandom() })).refused, "driver-ended", "identity first, even of a revoked intent");
+		await done(m);
+	} finally {
+		const keys = await redis.keys(`${prefix}*`); if (keys.length) await redis.del(...keys); redis.disconnect();
+	}
+});
+
+test("readyWatch tells a watch window another connection took apart from a revoked watcher (issue #1123)", { skip: !url && "needs VALKEY_TEST_URL" }, async () => {
+	const f = await observerFixture();
+	try {
+		const enabled = await f.store.setWatching({ ...f.identity(f.driver), enabled: true }); assert.equal(enabled.ok, true);
+		const reference = { intentId: f.driver.intentId, connectionId: f.driver.connectionId, epoch: enabled.room.epoch };
+		const seen = async () => assert.equal((await f.store.acknowledgeRoster({ ...f.identity(f.driver), revision: (await f.store.readRoom(f.target)).rosterRevision })).ok, true);
+		const lost = await f.bound("watch", reference); assert.equal((await f.authorize(lost, { ...f.actor, name: "lee" })).ok, true); assert.equal((await f.connect(lost)).ok, true);
+		await seen();
+		const [lease] = await f.redis.keys(`${f.prefix}watch-window:*`); assert.ok(lease);
+		await f.redis.set(lease, gatewayRandom(), "KEEPTTL");
+		assert.equal((await f.store.readyWatch(f.identity(lost))).refused, "window-lost", "not a revocation: the console revoked nobody");
+		assert.equal((await f.store.renewAttachment(f.identity(lost))).refused, "window-lost", "the word its renewal reads for the same state");
+		await f.redis.del(lease);
+		const revoked = await f.bound("watch", reference); assert.equal((await f.authorize(revoked, { ...f.actor, name: "sam" })).ok, true); assert.equal((await f.connect(revoked)).ok, true);
+		await seen();
+		await f.store.revoke({ intentId: revoked.intentId, owner: revoked.owner, reason: "session-ended" });
+		assert.equal((await f.store.readyWatch(f.identity(revoked))).refused, "authorization-expired");
+	} finally { await f.close(); }
+});
+
 test("two control processes reserve three watches, require roster acknowledgement, and never trust the window TTL as driver authority", { skip: !url && "needs VALKEY_TEST_URL" }, async () => {
 	const f = await observerFixture();
 	try {

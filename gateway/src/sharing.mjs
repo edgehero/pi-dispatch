@@ -1,4 +1,5 @@
 import { GATEWAY_LIMITS } from "./terminal-protocol.mjs";
+import { endingFor, GATEWAY_ANSWERS } from "./endings.mjs";
 
 /** Only these public room fields cross an already authenticated terminal socket. */
 export function sharingFrame(room) {
@@ -13,8 +14,8 @@ export function makeSharingController({ store, intent, connectionId, browserHash
 	// The store refuses a control of a revoked driver with the same word it refuses that driver's renewal with, so the
 	// browser reads the same ending whichever of the two reaches the store first (issues #1039, #1048). A new watcher
 	// makes the driver's page acknowledge the roster at once; a console revoking that driver meanwhile is a session end.
-	// Read after the session's own deadline, the same word is the lapse, as for a renewal.
-	const refusal = result => new Error(!lapsed() && result.refused === "authorization-expired" ? "session-ended" : "authorization-unavailable");
+	// Read after the session's own deadline, the same word is the lapse, as for a renewal (`endingFor`).
+	const refusal = result => new Error(endingFor(result.refused, lapsed(), GATEWAY_ANSWERS.control));
 	const send = value => {
 		if (!authorized() || ws.readyState !== 1) return;
 		const wire = JSON.stringify(value);
