@@ -317,7 +317,9 @@ with no dollar limit. A malformed value on a queued job reads as 0 and refuses t
 
 A job that runs subagents makes several model calls at once. Each call holds the most it could cost against the cap
 until it finishes, and then only what it really cost stays counted. The most a call could cost is far above what it
-usually costs: it counts every byte of the request at the dearest input price and the model's whole output limit. So
+usually costs: it counts every byte of the request at the dearest input price and the model's whole output limit at
+its output price, or at its image output price where that is higher (pi 1.7.0 prices image tokens there, and every
+output token when the provider does not say how many were images). So
 six or seven calls at once can hold most of the cap while the job has spent a fifth of it.
 
 A call that would pass the cap only because of what other calls still hold does not stop the job. It waits until

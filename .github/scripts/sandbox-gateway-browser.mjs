@@ -748,7 +748,7 @@ try {
     stage = `the real pi TUI in a workbench pane, ${theme}`;
     on(owner, "ops"); await launch(theme, 1440);
     const pane = ".wb-pane[data-active=true]", area = `${pane} .xterm-helper-textarea`, rows = `[...document.querySelectorAll(${JSON.stringify(pane + " .xterm-rows>div")})].map(e=>e.textContent).join(String.fromCharCode(10))`;
-    await type(area, `env -i PATH=/app/node_modules/.bin:/usr/local/bin:/usr/bin:/bin HOME=/home/pi TERM=xterm-256color PI_CODING_AGENT_DIR=/tmp/pi-browser-example PI_TELEMETRY=0 PI_OFFLINE=1 pi --offline --no-session --no-extensions --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-tools --tui-mode fullscreen --use-theme ${theme}\n`);
+    await type(area, `env -i PATH=/app/node_modules/.bin:/usr/local/bin:/usr/bin:/bin HOME=/home/pi TERM=xterm-256color PI_CODING_AGENT_DIR=/tmp/pi-browser-example PI_OFFLINE=1 pi --offline --no-session --no-extensions --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-tools --tui-mode fullscreen --use-theme ${theme}\n`);
     await until(`${rows}.includes(${JSON.stringify(`v${pinnedPi}`)})`, 20000);
     await sleep(800);
     await type(area, "Inspect this repository. (Draft, not submitted)");

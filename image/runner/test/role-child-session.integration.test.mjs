@@ -231,7 +231,6 @@ test("an in-process child runs on a copy of the job's settings with no packages 
 		const [{ settings, disposed }] = created;
 		assert.equal(settings.retry?.maxRetries, 7, "the job's retry settings");
 		assert.equal(settings.cacheWarming, "off", "no cache warming call");
-		assert.equal(settings.enableInstallTelemetry, false, "no telemetry");
 		assert.deepEqual([settings.packages, settings.extensions], [[], []]);
 		assert.equal(disposed, 1, "disposed once, when it ended");
 	} finally {

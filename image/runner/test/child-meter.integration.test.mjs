@@ -300,6 +300,20 @@ test("a pi subcommand gets no injection, and one ledger `done` with zeros for it
 	assert.equal(fold.unmetered, 0);
 });
 
+test("issue #1119: a subcommand after pi 1.7.0's `--agent-dir <dir>` is still a subcommand, with no injection and its `done` ledger", { skip }, async () => {
+	// pi takes `--agent-dir <dir>` out of its arguments before it looks for a subcommand. A preload that read argv[2]
+	// alone saw `--agent-dir` there, put its -e in front, and pi then read `list` as a prompt.
+	const w = world();
+	const result = await run([entry("dist/bundle/cli.js"), "--agent-dir", join(w.root, "other-agent"), "list"], { env: w.env, cwd: w.root });
+	assert.equal(result.code, 0, result.stderr);
+	assert.equal(w.callCount(), 0);
+	const control = await run([entry("dist/bundle/cli.js"), "list"], { env: w.env, cwd: w.root });
+	assert.equal(result.stdout, control.stdout, "it printed what `pi list` prints");
+	const { parsed, fold } = ledgers(w.ledger);
+	assert.deepEqual(parsed.map((entry) => [entry.raw.state, entry.raw.totals.calls]), [["done", 0], ["done", 0]]);
+	assert.equal(fold.unmetered, 0);
+});
+
 test("an off-list model is refused in the child, with modelRefused 1 in its ledger (issue #500)", { skip }, async () => {
 	const w = world();
 	const result = await run([entry("dist/bundle/cli.js"), ...printArgs(w), "hello"], { env: { ...w.env, PI_ALLOWED_MODELS: "fake/other" }, cwd: w.root });

@@ -21,12 +21,13 @@ export const JOB_MODEL = "m1";
  * test can stop a run while its first call is out. `calls` counts what reached it: a test that means no spend reads it.
  * `replies` (issue #985) scripts the answers instead, one per call and the last repeating: `{ toolCall }` (a tool name and
  * its arguments) or `{ content }`, each with the `promptTokens` it reports (10 by default), so a priced model spends what
- * the test says. `bodies()` is every request body it was sent, parsed.
+ * the test says. `bodies()` is every request body it was sent, parsed, and `headers()` each request's headers.
  */
 export async function chatServer({ hold = false, replies = null } = {}) {
 	const held = [];
 	const waiting = [];
 	const bodies = [];
+	const headers = [];
 	let calls = 0;
 	const reply = (res, n) => {
 		const spec = replies ? replies[Math.min(n - 1, replies.length - 1)] : { content: "done" };
@@ -44,6 +45,7 @@ export async function chatServer({ hold = false, replies = null } = {}) {
 		req.on("data", (chunk) => (body += chunk));
 		req.on("end", () => {
 			calls++;
+			headers.push(req.headers);
 			try {
 				bodies.push(JSON.parse(body));
 			} catch {
@@ -59,6 +61,7 @@ export async function chatServer({ hold = false, replies = null } = {}) {
 		base: `http://127.0.0.1:${server.address().port}/v1`,
 		calls: () => calls,
 		bodies: () => bodies.slice(),
+		headers: () => headers.slice(),
 		firstCall: () => new Promise((resolve) => (calls > 0 ? resolve() : waiting.push(resolve))),
 		close: () => {
 			for (const res of held) res.destroy();

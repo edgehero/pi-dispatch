@@ -72,7 +72,11 @@ export function cheaperRouteChecks(roles, routes, models, endpoints, builtin = g
 		if (!active.has(route.model)) continue;
 		const a = lookup(route.model, false), b = lookup(route.alternative, true);
 		const fields = ["input", "output", "cacheRead", "cacheWrite"];
-		if (a && b && !a.tiers && !b.tiers && fields.every((f) => Number.isFinite(a[f]) && a[f] >= 0 && Number.isFinite(b[f]) && b[f] >= 0 && b[f] <= a[f]) && fields.some((f) => b[f] < a[f])) checks.push({ proposal: { kind: "cheaper-route", model: route.model, candidate: route.alternative }, ok: true, label: `Model proposal: ${route.alternative} has lower recorded rates than ${route.model} through a declared endpoint; equivalence is operator-declared, review with a capped canary` });
+		// pi 1.7.0 (issue #1119) prices image tokens at `imageOutput`, at `output` when a table has none: that rate is
+		// compared too, and one that is not a finite number of 0 or more makes no proposal.
+		const image = (cost) => cost.imageOutput === undefined ? cost.output : cost.imageOutput;
+		const usable = (value) => Number.isFinite(value) && value >= 0;
+		if (a && b && !a.tiers && !b.tiers && fields.every((f) => usable(a[f]) && usable(b[f]) && b[f] <= a[f]) && usable(image(a)) && usable(image(b)) && image(b) <= image(a) && (fields.some((f) => b[f] < a[f]) || image(b) < image(a))) checks.push({ proposal: { kind: "cheaper-route", model: route.model, candidate: route.alternative }, ok: true, label: `Model proposal: ${route.alternative} has lower recorded rates than ${route.model} through a declared endpoint; equivalence is operator-declared, review with a capped canary` });
 	}
 	return checks;
 }

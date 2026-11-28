@@ -80,17 +80,18 @@ const MAXIMAL = {
 					thinkingLevelMap: { off: null, low: "low" },
 					input: ["text", "image"],
 					inputLimits: { maxRequestBytes: 10, images: { resize: { maxWidth: 1, maxHeight: 1, maxBytes: 1, jpegQuality: 100 }, maxPerMessage: 1, maxPerRequest: 1 } },
-					cost: { ...COST, tiers: [{ inputTokensAbove: 200000, ...COST }] },
+					// pi 1.7.0's image output rate (issue #1119), on the table and never on a tier.
+					cost: { ...COST, imageOutput: 30, tiers: [{ inputTokensAbove: 200000, ...COST }] },
 					promptCache: { short: 1, long: 2 },
 					contextWindow: 32768,
 					maxTokens: 4096,
 					samplingParams: { temperature: 0.2, anything: [1, { x: 2 }] },
 					samplingParamsByThinkingLevel: { off: { temperature: 0 }, high: { max_tokens: 100, anything: [1] }, max: {} },
 					headers: { "x-m": "n" },
-					compat: { supportsEagerToolInputStreaming: true, supportsMidConvoToolChanges: false, supportsMessageThreads: false, allowedFallbackModels: [{ provider: "anthropic", model: "claude-x", cost: COST }] },
+					compat: { supportsEagerToolInputStreaming: true, supportsMidConvoToolChanges: false, supportsMessageThreads: false, supportsReasoningReplay: false, allowedFallbackModels: [{ provider: "anthropic", model: "claude-x", cost: { ...COST, imageOutput: 3 } }] },
 				},
 			],
-			modelOverrides: { "qwen2.5:0.5b": { name: "Q", cost: { input: 1 }, contextWindow: 1, samplingParamsByThinkingLevel: { low: { top_p: 0.5 } }, compat: { supportsMaxOutputTokens: true, supportsAdditionalTools: false, supportsToolSearch: false, supportsExplicitPromptCacheMode: false } } },
+			modelOverrides: { "qwen2.5:0.5b": { name: "Q", cost: { input: 1, imageOutput: 2 }, contextWindow: 1, samplingParamsByThinkingLevel: { low: { top_p: 0.5 } }, compat: { supportsMaxOutputTokens: true, supportsAdditionalTools: false, supportsToolSearch: false, supportsExplicitPromptCacheMode: false } } },
 		},
 		radius: { oauth: "radius" },
 	},
@@ -185,8 +186,10 @@ const MIRRORED_PI_FILES = Object.freeze({
 	// Since 1.5.0 model-config.js reads its schemas through this file, so it is part of what the mirror transcribes.
 	"dist/core/pi-ai-schemas.js": "1bb7c31c57b5af6282b406679c5bc2b10f1d5009b62491fb72f3c069cec98874",
 	// 1.5.2: the composer passes the call's signal on and sets refreshModelsAuth; neither composes api, baseUrl or
-	// maxTokensField, so overlayProviderProblem and outputCapView are unchanged.
-	"dist/core/provider-composer.js": "98facdd61bdb741804f8f303c5b2661db7f40b64a8ec0ef4767df0d71ec03608",
+	// maxTokensField, so overlayProviderProblem and outputCapView are unchanged. 1.7.0 (issue #1119): applyModelOverride
+	// merges the override's imageOutput over the model's like the four rates, which composes no api, baseUrl or
+	// maxTokensField either; the worker's other copy of that merge, model-endpoints.mjs composedCost, takes it too.
+	"dist/core/provider-composer.js": "b12d8250a2cc2b7da2690ba5de590eaed130b260e14875280143f1a60f81aee2",
 	// Since 1.2.0 model-config.js imports its compat, cost, prompt-cache, input-limit and thinking-map schemas from
 	// pi-ai, so the two files they live in are part of what the mirror transcribes. Relative to PI: the hoisted pi-ai.
 	// Re-transcribed at 1.5.2: requiresNonNullAssistantContent, requiresToolsWithToolHistory, promptCacheKeyMode and
@@ -196,8 +199,12 @@ const MIRRORED_PI_FILES = Object.freeze({
 	// Re-verified at 1.6.1: a Google schema (google-generative-ai and google-vertex) whose one key is supportsStrictMode,
 	// the same boolean, joins the merge, so ProviderCompat is unchanged; model-schema.js changes the thinking map's
 	// description only.
-	"../pi-ai/dist/providers/compat-schema.js": "40fbaf1898631bb84aa0620fb6335b3f8751695e5ced7b1103b96387adf6442e",
-	"../pi-ai/dist/providers/model-schema.js": "b9a6997ae175f1ed74af6cf950eebf2587ccab2720b452889bad692cc1b654aa",
+	// Re-transcribed at 1.7.0 (issue #1119): the Bedrock schema gains supportsReasoningReplay, a boolean no other schema
+	// has, so the merge takes it as it is; thinkingFormat keeps the same eleven values ("ant-ling" now a deprecated alias
+	// of "deepseek", moved in the list); ModelCostSchema gains an optional number, imageOutput, on the table only (not on
+	// a tier), which the model, the fallback and, through PartialModelCostSchema, the override cost all take.
+	"../pi-ai/dist/providers/compat-schema.js": "0d2552e22645dc970ce723f00c4e970f5ee3aff77122cbbbb0451680dbb45f6b",
+	"../pi-ai/dist/providers/model-schema.js": "cb185ea62592e67a5bd0f3439e2c4c512786697351901d42c988310ac863f870",
 });
 
 test("System One image compat accepts every transport and rejects malformed values before spend", () => {

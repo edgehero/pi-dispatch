@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertPackagePathsExist, commandName, enforceOfflineMode, enforceTelemetryOff, jobSettings, parseRunnerEnv } from "../src/config.mjs";
+import { assertPackagePathsExist, commandName, enforceOfflineMode, jobSettings, parseRunnerEnv } from "../src/config.mjs";
 import { EXIT_POLICY } from "../src/outcome.mjs";
 
 const base = { PI_PROVIDER: "anthropic", PI_MODEL: "claude-x", PI_MAX_TURNS: "20" };
@@ -188,22 +188,13 @@ test("enforceOfflineMode sets PI_OFFLINE=1 and is idempotent", () => {
 	}
 });
 
-test("enforceTelemetryOff pins PI_TELEMETRY to \"0\" whatever reached the container (issue #509)", () => {
-	// pi reads PI_TELEMETRY as an OVERRIDE of the enableInstallTelemetry setting, so a forwarded "1" would undo
-	// jobSettings' false; the canonical off value is written unconditionally.
-	for (const value of [undefined, "1", "true", "yes", "", "0", "no"]) {
-		const env = value === undefined ? {} : { PI_TELEMETRY: value };
-		enforceTelemetryOff(env);
-		assert.equal(env.PI_TELEMETRY, "0", `PI_TELEMETRY=${JSON.stringify(value)} must end as "0"`);
-	}
-});
-
-test("jobSettings pins retry, turns cache warming and telemetry off, and lets PI_RETRY_* win (issue #509)", () => {
+test("jobSettings pins retry, turns cache warming off, and lets PI_RETRY_* win (issue #509)", () => {
+	// No telemetry key since pi 1.7.0 (issue #1119): pi has no install telemetry and no setting for it any more, and the
+	// pinned-api test holds that.
 	const settings = jobSettings({ maxRetries: 2, baseDelayMs: 2000 });
 	assert.deepEqual(settings, {
 		retry: { enabled: true, maxAgentDelayMs: 60_000, maxRetries: 2, baseDelayMs: 2000 },
 		cacheWarming: "off",
-		enableInstallTelemetry: false,
 	});
 	// The spread comes last, so a future knob for the delay cap wins over the pinned default...
 	assert.equal(jobSettings({ maxAgentDelayMs: 5 }).retry.maxAgentDelayMs, 5);

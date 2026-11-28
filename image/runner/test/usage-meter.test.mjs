@@ -534,6 +534,57 @@ test("the runtime layer counts every model-calling method, with sessionId and th
 	}
 });
 
+test("issue #1119: every method's call reaches the provider with no attribution in its identity, its other fields and options kept", async () => {
+	// pi 1.7.0 puts `attribution: PI_ATTRIBUTION` in every session request's identity (attribution.integration.test.mjs
+	// holds that against a real job); a job's requests carry none, as they did at 1.6.1, policy or not.
+	const seen = [];
+	class Runtime {
+		streamSimple(model, context, options) {
+			seen.push(options);
+			return streamOf(usage({ input: 1, output: 1 }));
+		}
+		stream(model, context, options) {
+			seen.push(options);
+			return streamOf(usage({ input: 1, output: 1 }));
+		}
+		streamDeferred(model, handle, options) {
+			seen.push(options);
+			return streamOf(usage({ input: 1, output: 1 }));
+		}
+		async classify(model, context, options) {
+			seen.push(options);
+			return { answers: {}, usage: usage({ input: 1, output: 0 }), stopReason: "stop" };
+		}
+		async generateImages(model, context, options) {
+			seen.push(options);
+			return { output: [], usage: usage({ input: 0, output: 1 }), stopReason: "stop" };
+		}
+	}
+	const meter = createUsageMeter({ maxTokens: null, rootSessionId: "root" });
+	const layer = wrapModelRuntime({ ModelRuntime: Runtime, meter });
+	try {
+		const identity = { userAgent: "detailed", version: "1.7.0", attribution: { name: "pi", url: "https://pi.dev", categories: ["cli-agent"] } };
+		const options = { sessionId: "root", headers: { "X-Mine": "kept" }, identity };
+		const runtime = new Runtime();
+		runtime.streamSimple(MODEL, [], options);
+		runtime.stream(MODEL, [], options);
+		runtime.streamDeferred(MODEL, { id: "h" }, options);
+		await runtime.classify(MODEL, {}, options);
+		await runtime.generateImages(MODEL, {}, options);
+		await runtime.classify(MODEL, {});
+		await flush();
+		assert.equal(seen.length, 6);
+		for (const [i, sent] of seen.slice(0, 5).entries()) {
+			assert.deepEqual(sent.identity, { userAgent: "detailed", version: "1.7.0", attribution: null }, `call ${i}`);
+			assert.deepEqual([sent.sessionId, sent.headers], ["root", { "X-Mine": "kept" }], `call ${i}`);
+		}
+		assert.deepEqual(seen[5].identity, { attribution: null }, "a call with no options gets none either");
+		assert.equal(identity.attribution.name, "pi", "the caller's own objects are left as they were");
+	} finally {
+		layer.restore();
+	}
+});
+
 test("a virtual model is counted ONCE, as the physical model it routed to", async () => {
 	// ModelRuntime.streamSimple routes a pi-virtual model and calls this.streamSimple again with the physical
 	// model; counting both would double every routed request and put a model nobody billed in the ledger.
@@ -685,6 +736,26 @@ function fakeInner() {
 	};
 	return { api: MODEL.api, calls, streamSimple: streams("streamSimple"), stream: streams("stream") };
 }
+
+test("issue #1119: a legacy call through the compat half reaches its provider with no attribution, a forward's dispatch mark kept", async () => {
+	// pi-agent-core's agent loop puts pi's attribution in every call it makes (DEFAULT_AGENT_IDENTITY), and an extension
+	// driving its own Agent calls pi-ai's legacy stream functions, which the compat half routes.
+	const meter = createUsageMeter({ maxTokens: null });
+	const inner = fakeInner();
+	const wrapper = wrapProviderStreams({ inner, fallbackModels: fakeCatalog([]), meter });
+	const identity = { userAgent: "detailed", attribution: { name: "pi", url: "https://pi.dev", categories: ["cli-agent"] } };
+	const token = dispatchToken(MODEL);
+	const options = { sessionId: "child-9", headers: { "X-Mine": "kept" }, identity, [DISPATCH_MARK]: token };
+	wrapper.streamSimple(MODEL, [], options);
+	wrapper.stream(MODEL, []);
+	await flush();
+	assert.equal(inner.calls.length, 2);
+	const [first, second] = inner.calls.map((call) => call.options);
+	assert.deepEqual(first.identity, { userAgent: "detailed", attribution: null });
+	assert.deepEqual([first.sessionId, first.headers, first[DISPATCH_MARK]], ["child-9", { "X-Mine": "kept" }, token], "the rest as given, the token included");
+	assert.deepEqual(second.identity, { attribution: null }, "a call with no options gets none either");
+	assert.equal(identity.attribution.name, "pi", "the caller's own objects are left as they were");
+});
 
 test("routes a model of a builtin provider to that provider's own stream, as compat itself would", async () => {
 	// Overriding a builtin api makes compat's getBuiltinProviderForModel answer undefined, so compat hands us
@@ -2036,6 +2107,9 @@ test("pricedModel: any rate above 0 in the table, a tier or an allowed fallback;
 	assert.equal(pricedModel({ ...FREE, cost: undefined }), true, "no table: not proof of a free call");
 	assert.equal(pricedModel({ ...FREE, cost: { input: "1", output: 0 } }), true, "a rate that is not a number");
 	assert.equal(pricedModel({ ...FREE, cost: { input: 0, output: 0 } }), false, "absent rates are 0");
+	// Issue #1119: pi 1.7.0 prices an image model's output at imageOutput, and many carry no other price.
+	assert.equal(pricedModel({ ...FREE, cost: { ...FREE.cost, imageOutput: 9.8 } }), true, "an image output rate");
+	assert.equal(pricedModel({ ...FREE, cost: { ...FREE.cost, imageOutput: 0 } }), false, "an image output rate of 0");
 });
 
 test("unreportedUsage: zero input, a started failure, and content with no output count are broken; an unanswered call is not", () => {

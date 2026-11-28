@@ -66,7 +66,8 @@ export function getPricedModel(provider, id) {
  * metered providers are zero too), so a subscription is known only from subscriptions.json. Tiers are
  * deliberately ignored: a zero-rate provider ships no tiers, and a priced provider
  * with a zero base rate somewhere does not become "free" by it. Null/malformed input is false --
- * "not zero-rated" is the safe answer for a thing that is not a model.
+ * "not zero-rated" is the safe answer for a thing that is not a model. pi 1.7.0's `imageOutput` (issue #1119) is not
+ * read: no model this façade lists carries one (pinned in pricing.test.mjs), so the four rates are its whole table.
  */
 export function isZeroRated(model) {
 	const cost = model?.cost;

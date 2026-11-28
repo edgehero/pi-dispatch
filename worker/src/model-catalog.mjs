@@ -341,7 +341,10 @@ export const FIRST_CALL_SHORT_TASK_BYTES = 10_667;
  * limit `model.maxTokens` (pi sends none of its own, so the guard uses the model's), an input of the overhead plus
  * `FIRST_CALL_MIN_CONTEXT_BYTES`, and the runner's own service-tier multiplier (`serviceTierMultiplier`). The input
  * rate is the guard's: the highest of input, cache read and cache write (not the 1h write, which needs long
- * retention). Null for a table or limit it cannot read.
+ * retention). The output rate is the guard's too: the higher of output and pi 1.7.0's `imageOutput`, which pi prices
+ * image tokens at, and every output token when the provider reports no split (issue #1119). Null for a table or limit
+ * it cannot read, an `imageOutput` that is present and not a finite number of 0 or more included (the guard cannot
+ * bound it either).
  */
 export function firstCallFloorMicros(model) {
 	return firstCallBoundMicros(model, FIRST_CALL_MIN_CONTEXT_BYTES);
@@ -356,10 +359,12 @@ export function firstCallBoundMicros(model, contextBytes) {
 	const cost = model?.cost;
 	const usable = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
 	if (!cost || !["input", "output", "cacheRead", "cacheWrite"].every((field) => usable(cost[field]))) return null;
+	if (cost.imageOutput !== undefined && !usable(cost.imageOutput)) return null;
 	const maxTokens = model.maxTokens;
 	if (!(typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0)) return null;
 	const inputRate = Math.max(cost.input, cost.cacheRead, cost.cacheWrite);
-	return Math.ceil(((FIRST_CALL_OVERHEAD_TOKENS + contextBytes) * inputRate + maxTokens * cost.output) * serviceTierMultiplier(model));
+	const outputRate = Math.max(cost.output, cost.imageOutput ?? 0);
+	return Math.ceil(((FIRST_CALL_OVERHEAD_TOKENS + contextBytes) * inputRate + maxTokens * outputRate) * serviceTierMultiplier(model));
 }
 
 /**

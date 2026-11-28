@@ -24,9 +24,10 @@
  *      The preload writes the `starting` stub ledger, inserts `-e <child-meter.ts>` FIRST in the arguments (so the
  *      meter loads before every other extension and before any `--`, after which arguments are messages), and hands
  *      usage-meter.mjs over on globalThis. A CLI whose first argument is one of pi's subcommands gets no `-e`: pi
- *      dispatches those on args[0], and an `-e` in front turns `pi list` into a chat turn (measured). It gets a ledger
- *      written `done` with zeros instead, so the parent's detector, which reads only `pi` off its command line once
- *      setupCli ran, finds a ledger for its pid. `--version` and
+ *      dispatches those on args[0], and an `-e` in front turns `pi list` into a chat turn (measured). The first
+ *      argument is read as pi reads it, after pi 1.7.0 took any `--agent-dir <dir>` out (child-route.mjs
+ *      piCommandArgs). It gets a ledger written `done` with zeros instead, so the parent's detector, which reads only
+ *      `pi` off its command line once setupCli ran, finds a ledger for its pid. `--version` and
  *      `--export` exit before any extension loads, so the meter never starts; an exit handler marks such a stub `done`
  *      (zeros) rather than leave it `starting` for good. Every other flag is injected like any run (measured).
  *      A NESTED RUNNER takes this route too (child-route.mjs nestedRunnerKind: argv[1] is this image's run-job.mjs and
@@ -59,7 +60,7 @@ import * as nodeModule from "node:module";
 import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isMainThread } from "node:worker_threads";
-import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_ENTRIES, PI_SUBCOMMANDS, subscriptionAdapterRoots } from "./child-route.mjs";
+import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, piCommandArgs, PI_ENTRIES, PI_SUBCOMMANDS, subscriptionAdapterRoots } from "./child-route.mjs";
 
 export { CHILD_METER_PATH, injectChildMeter, PI_ENTRIES, PI_SUBCOMMANDS };
 
@@ -129,10 +130,16 @@ export function entryKind(argv1, { packageDir = defaultPackageDir, realpath = re
 	return null;
 }
 
-/** Whether pi's own arguments (before any `--`) carry a flag that exits before extensions load. */
+/**
+ * Whether pi's own arguments (before any `--`) carry a flag that exits before extensions load, or are ones pi refuses
+ * before it loads any (an `--agent-dir` with no directory). Read as pi reads them (piCommandArgs): in
+ * `--agent-dir --version` the flag is the directory, and the run is a session.
+ */
 export function exitsBeforeExtensions(args) {
-	const end = args.indexOf("--");
-	return (end === -1 ? args : args.slice(0, end)).some((arg) => EXITS_BEFORE_EXTENSIONS.includes(arg));
+	const own = piCommandArgs(args);
+	if (own === null) return true;
+	const end = own.indexOf("--");
+	return (end === -1 ? own : own.slice(0, end)).some((arg) => EXITS_BEFORE_EXTENSIONS.includes(arg));
 }
 
 /** A module URL without its query and hash. */

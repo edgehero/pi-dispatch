@@ -52,7 +52,7 @@ if (pi) {
 	mkdirSync(join(home, ".pi", "agent", "extensions"), { recursive: true });
 	writeFileSync(join(home, ".pi", "agent", "extensions", "probe.ts"), CHILD_PROBE);
 	// What the child inherits from a job's runner (`openChildLedger`), which is what makes it a nested runner and pi's CLI.
-	Object.assign(process.env, { HOME: home, PI_OFFLINE: "1", PI_TELEMETRY: "0", ROLE_CHILD_PROBE: probeFile });
+	Object.assign(process.env, { HOME: home, PI_OFFLINE: "1", ROLE_CHILD_PROBE: probeFile });
 	delete process.env.PI_CODING_AGENT_DIR;
 	const ledger = openChildLedger({ env: process.env, pid: process.pid, preloadUrl: PRELOAD });
 	assert.equal(ledger.error ?? null, null);

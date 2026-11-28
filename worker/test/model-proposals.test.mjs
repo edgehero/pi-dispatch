@@ -129,6 +129,11 @@ test("cheaper-route proposals require declared equivalence, mapped source and de
 	assert.equal(cheaperRouteChecks(roles, routes, models, endpoints).length, 1);
 	assert.deepEqual(cheaperRouteChecks(roles, routes, models, []), []);
 	assert.deepEqual(cheaperRouteChecks(roles, [], models, endpoints), []);
+	// Issue #1119: an image output rate is a rate, compared as pi 1.7.0 prices it (at `output` when a table has none).
+	const priced = (old, alternative) => cheaperRouteChecks(roles, routes, { providers: { local: { baseUrl: "http://server:8000/v1", models: [{ id: "old", cost: old }, { id: "new", cost: alternative }] } } }, endpoints).length;
+	assert.equal(priced(rates, { ...rates, output: 1, imageOutput: 30 }), 0, "a dearer image rate is no cheaper route");
+	assert.equal(priced({ ...rates, imageOutput: 30 }, { ...rates, imageOutput: 10 }), 1, "a lower image rate alone is one");
+	assert.equal(priced(rates, { ...rates, output: 1, imageOutput: -1 }), 0, "a broken image rate makes no proposal");
 });
 
 

@@ -122,6 +122,12 @@ test("no policy: a script's classify and generateImages are metered, each in its
 		assert.equal(j.row(CLASSIFIER.id)?.input, 1200);
 		assert.equal(j.row(PAINTER.id)?.calls, 1);
 		assert.ok(j.row(PAINTER.id).cost > 0, "the image call's cost reaches the ledger");
+		// At pi's own price (issue #1119): pi 1.7.0 prices image tokens at the model's imageOutput, and all 1290 output
+		// tokens are image tokens when OpenRouter reports no split, so 50 x input + 1290 x imageOutput micro-dollars
+		// (pi 1.6.1 priced them at the text output rate).
+		const { cost } = j.runtime.getModelOfType("image", PAINTER.provider, PAINTER.id);
+		assert.ok(cost.imageOutput > cost.output, "the premise: the catalog's image rate is above its text rate");
+		assert.equal(Math.round(j.row(PAINTER.id).cost * 1e6), Math.round(50 * cost.input + 1290 * cost.imageOutput));
 		assert.ok(j.meter.state.cost > 0);
 		assert.equal(j.meter.state.stopReason, null);
 	} finally {

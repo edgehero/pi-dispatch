@@ -20,6 +20,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { EXPLANATION as REFUSAL_EXPLANATION, HOSTILE_EXPLANATION, PI_AI_FALLBACK, refusalEvents } from "./fixtures/anthropic-refusal.mjs";
 // Importing the child preload runs nothing without a ledger directory.
 import { makeLibraryResolveHook, MODEL_RUNTIME_SUFFIX, PI_ENTRIES, PI_SUBCOMMANDS } from "../src/child-preload.mjs";
+import { piCommandArgs } from "../src/child-route.mjs";
 
 /**
  * REQ-UPSTREAM-CONTRACT-TESTS -- assert against the PINNED ARTIFACT, not against HEAD.
@@ -219,13 +220,30 @@ test("the job's settings mean what jobSettings says at the pin, each against pi'
 	assert.equal(retry.DEFAULT_MAX_AGENT_RETRY_DELAY_MS, 60_000, "pi's default agent retry cap moved: jobSettings pins the old value, decide deliberately whether to follow");
 	assert.equal(retry.retryDelayMs(job.getRetrySettings(), 2), 4000, "at the runner's defaults the second retry waits 4 s and the cap does not bind");
 	assert.equal(retry.retryDelayMs({ baseDelayMs: 2000, maxAgentDelayMs: 60_000 }, 7), 60_000, "and it binds once base * 2^(n-1) passes 60 s");
-	// Telemetry: the setting, and the env override enforceTelemetryOff exists to close.
-	assert.equal(stock.getEnableInstallTelemetry(), true, "pi's default install telemetry moved");
-	assert.equal(job.getEnableInstallTelemetry(), false);
-	const telemetry = await import(pathToFileURL(join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "core", "telemetry.js")).href);
-	assert.equal(telemetry.isInstallTelemetryEnabled(job, "1"), true, "the premise: PI_TELEMETRY overrides the setting -- if this is false, enforceTelemetryOff guards nothing");
-	assert.equal(telemetry.isInstallTelemetryEnabled(job, "0"), false, "the value enforceTelemetryOff writes must read as off");
-	assert.equal(telemetry.isInstallTelemetryEnabled(job, undefined), false, "and with no override, the setting decides");
+	// Telemetry (issue #1119): pi 1.7.0 removed install telemetry (the `/api/report-install` ping), the
+	// enableInstallTelemetry setting and PI_TELEMETRY, so jobSettings pins no telemetry key and the runner writes no
+	// PI_TELEMETRY. Held here, so a pi that brings any of it back fails before a job runs it: the getter and the default
+	// are gone, telemetry.js is gone, and no file of pi's own packages names the ping or the variable (dist/bundle/
+	// aside, the vendored build the runner does not load).
+	assert.equal(typeof stock.getEnableInstallTelemetry, "undefined", "pi has an install telemetry setting again: re-read what it sends before a job runs it");
+	const dist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+	const { SETTINGS_DEFAULTS } = await import(pathToFileURL(join(dist, "core", "settings-defaults.js")).href);
+	assert.equal(Object.hasOwn(SETTINGS_DEFAULTS, "enableInstallTelemetry"), false, "pi's settings carry install telemetry again");
+	assert.equal(existsSync(join(dist, "core", "telemetry.js")), false, "pi ships telemetry.js again");
+	const naming = [];
+	for (const name of ["pi-coding-agent", "pi-ai", "pi-agent-core", "pi-tui", "pi-codemode", "pi-mcp", "pi-schema", "pi-telemetry"]) {
+		const root = join(piOwnPackageDir(name), "dist");
+		const walk = (dir) => {
+			for (const entry of readdirSync(dir, { withFileTypes: true })) {
+				const path = join(dir, entry.name);
+				if (entry.isDirectory()) {
+					if (path !== join(root, "bundle")) walk(path);
+				} else if (entry.name.endsWith(".js") && /report-install|PI_TELEMETRY/.test(readFileSync(path, "utf8"))) naming.push(`${name}/${path.slice(root.length + 1)}`);
+			}
+		};
+		walk(root);
+	}
+	assert.deepEqual(naming, [], "pi names its install ping or PI_TELEMETRY again");
 });
 
 test("the resource-loader options the instruction model depends on still exist", { skip }, () => {
@@ -1230,8 +1248,13 @@ test("each driven pi-ai chat family's credential refusal lands in its expected e
 	// returns an AssistantMessage (generateImages and classify answer AssistantImages / ClassifierResult), so
 	// neither can be the terminal the runner classifies; both are pinned so a new one is looked at. pi 1.1.0 added
 	// openai-decisions and pi 1.6.1 added pi-decision (Radius's decision models): each a `classify` export only,
-	// answering a ClassifierResult like the others.
-	assert.match(types, /export type KnownImageApi = "openrouter-images";/, "the image api set moved -- re-check whether any of it can end a chat turn");
+	// answering a ClassifierResult like the others. pi 1.7.0 added pi-image (Radius's image models): a `generateImages`
+	// export only (api/pi-image.lazy.js), answering AssistantImages like openrouter-images.
+	assert.match(types, /export type KnownImageApi = "openrouter-images" \| "pi-image";/, "the image api set moved -- re-check whether any of it can end a chat turn");
+	for (const file of ["openrouter-images.lazy.js", "pi-image.lazy.js"]) {
+		const loader = readFileSync(fileURLToPath(new URL(`./api/${file}`, candidates[0].url)), "utf8");
+		assert.deepEqual([...loader.matchAll(/^\s+(\w+): async/gm)].map((match) => match[1]), ["generateImages"], `${file} serves more than generateImages`);
+	}
 	assert.match(types, /export type KnownClassifierApi = "typesafe-system-one" \| "cloudflare-workers-ai-system-one" \| "llama-cpp-classify" \| "openai-decisions" \| "pi-decision";/, "the classifier api set moved -- re-check whether any of it can end a chat turn");
 });
 
@@ -1720,7 +1743,8 @@ test("PRICED_APIS is exactly the set of pi-ai api modules that reach calculateCo
 	const source = new Map(modules.map((name) => [name, readFileSync(join(apiDir, `${name}.js`), "utf8")]));
 	// Direct: imports calculateCost from ../models.js. Then the fixpoint over sibling imports (the two shared
 	// modules carry it for the responses family and the classifiers: pi 1.1.0 moved the System One pricing into
-	// classifier-shared, which openai-decisions uses too).
+	// classifier-shared, which openai-decisions uses too; pi 1.7.0 moved the request into json-request, which prices a
+	// pi-decision or pi-image answer from the server's usage).
 	const reaches = new Set(modules.filter((name) => /import \{[^}]*\bcalculateCost\b[^}]*\} from "\.\.\/models\.js";/.test(source.get(name))));
 	assert.ok(reaches.has("openai-responses-shared") && reaches.has("classifier-shared"), "the premise: the two shared modules price");
 	for (let grew = true; grew; ) {
@@ -1741,7 +1765,18 @@ test("PRICED_APIS is exactly the set of pi-ai api modules that reach calculateCo
 	for (const file of readdirSync(dataDir).filter((name) => name.endsWith(".json"))) {
 		for (const key of Object.keys(JSON.parse(readFileSync(join(dataDir, file), "utf8")))) catalogApis.add(key);
 	}
-	const lazy = [...reaches].filter((name) => existsSync(join(apiDir, `${name}.lazy.js`)) && new RegExp(`"\\./${name}\\.(?:js|ts)"`).test(readFileSync(join(apiDir, `${name}.lazy.js`), "utf8")));
+	// pi 1.7.0's two image apis price through calculateCost too: openrouter-images at the catalog's image output rate (the
+	// catalog files its models under that id), replaced by what OpenRouter reports billing when it does, and the new
+	// pi-image from what Radius's server reports. Neither is a priced api, and neither can be: an image api serves
+	// generateImages alone (pinned in the credential-refusal test above), which the cost guard refuses under a cap
+	// whatever its api, before it asks callCostBound (createCostGuard's admit; cost-guard.test.mjs and
+	// codemode-models.integration.test.mjs drive it), and callCostBound prices chat and classify calls only. So they are
+	// taken out by pi's own list of image apis: a new image api lands in that list, and a chat api that starts pricing
+	// images still lands in `served` below.
+	const imageApis = nestedPiAi("types.d.ts").match(/export type KnownImageApi = ([^;]+);/)?.[1].match(/"([^"]+)"/g)?.map((name) => name.slice(1, -1)) ?? [];
+	assert.deepEqual(imageApis, ["openrouter-images", "pi-image"], "pi's image apis moved -- decide each one's bound before taking it out here");
+	assert.ok(imageApis.every((api) => reaches.has(api)), "the premise: pi 1.7.0's image apis reach calculateCost");
+	const lazy = [...reaches].filter((name) => !imageApis.includes(name) && existsSync(join(apiDir, `${name}.lazy.js`)) && new RegExp(`"\\./${name}\\.(?:js|ts)"`).test(readFileSync(join(apiDir, `${name}.lazy.js`), "utf8")));
 	const served = lazy.filter((name) => catalogApis.has(name)).sort();
 	assert.deepEqual(served, [...PRICED_APIS], "the priced apis moved -- update PRICED_APIS, the bound refuses everything else under a cap");
 	for (const api of PRICED_APIS) assert.ok(catalogApis.has(api), `${api} is not an api id the catalog files models under`);
@@ -1752,7 +1787,29 @@ test("PRICED_APIS is exactly the set of pi-ai api modules that reach calculateCo
 	// lands in `served` above and fails, which is the prompt to decide it again.
 	assert.deepEqual(lazy.filter((name) => !catalogApis.has(name)).sort(), ["pi-decision"], "an api that prices but files no catalog model -- decide whether the bound can price it");
 	// And the ones that do NOT price from the table, by name, so the refusal of each is a decision on record.
-	for (const api of ["pi-messages", "pi-decision", "openrouter-images", "llama-cpp-classify"]) assert.ok(!PRICED_APIS.includes(api) && modules.includes(api), api);
+	for (const api of ["pi-messages", "pi-decision", "openrouter-images", "pi-image", "llama-cpp-classify"]) assert.ok(!PRICED_APIS.includes(api) && modules.includes(api), api);
+});
+
+test("issue #1119: a job reaches pi's catalog image models and no Radius one, and the cost guard refuses an image call on either under a cap", { skip }, async () => {
+	// pi 1.7.0 prices image output and adds pi-image (Radius's image models) beside openrouter-images. A job reaches an
+	// image model through codemode's models.generateImages(). Its runtime holds the catalog's OpenRouter image models
+	// and no pi-image one: Radius lists its image models from its gateway at run time, and a job's runtime never asks
+	// (allowModelNetwork false, a discarding models store) while the catalog files none. A pi that files some fails
+	// here; under a cap they are refused all the same, as the last lines show.
+	const root = tempDir("pi-image-models-");
+	const runtime = await createJobModelRuntime({ ModelRuntime: mod.ModelRuntime, agentDir: root, modelsPath: join(root, "models.json") });
+	const images = runtime.getModelsOfType("image");
+	assert.ok(images.length > 0, "the premise: pi's catalog serves image models to a job");
+	assert.deepEqual([...new Set(images.map((model) => model.api))], ["openrouter-images"], "a job now reaches another image api: re-read how it prices and what the guard does with it");
+	assert.ok(images.some((model) => typeof model.cost?.imageOutput === "number" && model.cost.imageOutput > 0), "the premise: catalog image models carry an image output rate");
+	// The guard never asks a bound for generateImages: refused under any cap, on a real catalog image model and on a
+	// pi-image one.
+	const { createCostGuard } = await import("../src/usage-meter.mjs");
+	for (const model of [images[0], { ...images[0], api: "pi-image", provider: "radius" }]) {
+		const guard = createCostGuard({ capMicros: 1_000_000_000 });
+		assert.equal(guard.admit({ method: "generateImages", model, args: [{ input: [{ type: "text", text: "a dot" }] }, {}] }), "cost-cap", model.api);
+		assert.equal(guard.snapshot().costRefused, 1);
+	}
 });
 
 test("calculateCost: one table per call, the highest tier the input passes, and a 1h write at 2 x that table's input", { skip }, () => {
@@ -1761,7 +1818,11 @@ test("calculateCost: one table per call, the highest tier the input passes, and 
 	assert.match(fn, /const inputTokens = usage\.input \+ usage\.cacheRead \+ usage\.cacheWrite;/, "tiers select on input + cache read + cache write");
 	assert.match(fn, /if \(inputTokens > tier\.inputTokensAbove && tier\.inputTokensAbove > matchedThreshold\) \{\s*rates = tier;/, "strictly above a threshold, and ONE table");
 	assert.match(fn, /usage\.cost\.cacheWrite = \(rates\.cacheWrite \* shortWrite \+ rates\.input \* 2 \* longWrite\) \/ 1000000;/, "the 1h write rate is 2 x the table's input");
-	assert.match(fn, /usage\.cost\.output = \(rates\.output \/ 1000000\) \* usage\.output;/, "rates are dollars per million tokens, so tokens x rate is micro-dollars");
+	// pi 1.7.0 (issue #1119): image tokens at the BASE table's imageOutput (model.cost, whatever tier `rates` is), the
+	// rest of the output at the table's output, and every output token an image token when the provider reports no
+	// split. So one output token costs at most the higher of the two rates, which is the output rate callCostBound takes.
+	assert.match(fn, /const imageRate = model\.cost\.imageOutput;\s*const imageTokens = imageRate === undefined \? 0 : Math\.min\(usage\.output, usage\.imageOutput \?\? usage\.output\);/, "an image token's rate or the no-split rule moved");
+	assert.match(fn, /usage\.cost\.output = \(rates\.output \* \(usage\.output - imageTokens\) \+ \(imageRate \?\? 0\) \* imageTokens\) \/ 1000000;/, "rates are dollars per million tokens, so tokens x rate is micro-dollars");
 	// Only the two Anthropic apis report a 1h write; the bound's 2 x input applies to exactly them.
 	const apiDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
 	const reporting = readdirSync(apiDir).filter((name) => name.endsWith(".js") && !name.endsWith(".lazy.js") && readFileSync(join(apiDir, name), "utf8").includes("cacheWrite1h")).sort();
@@ -1810,12 +1871,19 @@ test("what else picks the model that answers, as the model guard reads it (issue
 	// returns, so the guard's wrapper sees the final routing fields. A new module without it is a payload the guard
 	// cannot read, and fails here.
 	const hooked = modules.filter((name) => /await options\??\.onPayload\?\.\((?:params|payload|commandInput|body), model\)/.test(readFileSync(join(apiDir, name), "utf8"))).sort();
-	assert.deepEqual(hooked, ["anthropic-messages.js", "azure-openai-responses.js", "bedrock-converse-stream.js", "classifier-shared.js", "google-generative-ai.js", "google-vertex.js", "llama-cpp-classify.js", "mistral-conversations.js", "openai-codex-responses.js", "openai-completions.js", "openai-responses.js", "openrouter-images.js", "pi-messages.js"]);
-	// pi 1.1.0: the System One classifiers and openai-decisions send through classifier-shared's postClassifierRequest,
-	// the one place their onPayload is called. pi 1.6.1's pi-decision does too.
+	assert.deepEqual(hooked, ["anthropic-messages.js", "azure-openai-responses.js", "bedrock-converse-stream.js", "google-generative-ai.js", "google-vertex.js", "json-request.js", "llama-cpp-classify.js", "mistral-conversations.js", "openai-codex-responses.js", "openai-completions.js", "openai-responses.js", "openrouter-images.js", "pi-messages.js"]);
+	// pi 1.1.0: the System One classifiers and openai-decisions send through classifier-shared's postClassifierRequest.
+	// pi 1.6.1's pi-decision does too. pi 1.7.0 moved that function's body into json-request's postJsonRequest, the one
+	// place their onPayload is called now: postClassifierRequest only hands its arguments on, and pi 1.7.0's pi-image
+	// calls postJsonRequest itself.
 	for (const file of ["system-one-shared.js", "openai-decisions.js", "pi-decision.js"]) {
 		assert.match(nestedPiAi("api", file), /import \{[^}]*\bpostClassifierRequest\b[^}]*\} from "\.\/classifier-shared\.js";/, file);
 		assert.doesNotMatch(nestedPiAi("api", file), /requestFetch|globalThis\.fetch/, `${file} sends a request of its own`);
+	}
+	assert.match(piFunction(nestedPiAi("api", "classifier-shared.js"), "postClassifierRequest"), /^function postClassifierRequest\(label, url, model, body, options, noRetryStatuses\) \{\s*return postJsonRequest\(label, url, model, body, options, noRetryStatuses\);\s*\}$/, "postClassifierRequest does more than hand its arguments to postJsonRequest");
+	for (const file of ["classifier-shared.js", "pi-image.js"]) {
+		assert.match(nestedPiAi("api", file), /import \{[^}]*\bpostJsonRequest\b[^}]*\} from "\.\/json-request\.js";/, file);
+		assert.doesNotMatch(nestedPiAi("api", file), /requestFetch|globalThis\.fetch|\.onPayload\?\.\(/, `${file} sends a request of its own`);
 	}
 	assert.match(nestedPiAi("api", "simple-options.js"), /onPayload: options\?\.onPayload,/, "streamSimple's options keep the caller's onPayload");
 	assert.match(agentDistFile("core", "model-runtime.js"), /const \{ transformHeaders, \.\.\.rawProviderOptions \} = options \?\? \{\};[\s\S]*?options: \{\s*\.\.\.providerOptions,/, "prepareRequest passes the caller's options, onPayload included, to the provider");
@@ -1917,7 +1985,9 @@ test("issue #985: each priced api module awaits the hook once, and its single se
 	// `stream: true` to the hook's result (pinned whole in the test above), about 14 bytes that BOUND_OVERHEAD_TOKENS
 	// covers; mistral-conversations sends `toMistralWirePayload(payload)`, which only renames keys (a byte or two each,
 	// inside the same overhead and the one-byte-per-token reading), pinned by hash below. The system-one classifiers and
-	// openai-decisions send through classifier-shared (pinned in the test above).
+	// openai-decisions send through classifier-shared, and since pi 1.7.0 it through json-request (pinned in the test
+	// above), which also sends pi-decision's and pi-image's requests: unpriced, so refused under a cap before they get
+	// there.
 	const apiDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
 	const hook = (variable, next) => new RegExp(`const ${next} = await options\\?\\.onPayload\\?\\.\\(${variable}, model\\);\\s*if \\(${next} !== undefined\\) \\{\\s*${variable} = ${next};\\s*\\}`);
 	const SENDS = {
@@ -1925,9 +1995,9 @@ test("issue #985: each priced api module awaits the hook once, and its single se
 		"anthropic-messages.js": { variable: "params", hook: /const nextParams = await options\?\.onPayload\?\.\(params, model\);\s*if \(nextParams !== undefined\) \{\s*params = \{ \.\.\.nextParams, stream: true \};\s*\}/, send: /: \{ response: await send\(params\), thread: undefined \}/, transport: /client\.beta\.messages\.create\(/, calls: [/\bsend\(/g, 4] },
 		"azure-openai-responses.js": { variable: "params", hook: hook("params", "nextParams"), send: /client\.responses\.create\(params, requestOptions\)/, transport: /\.create\(/ },
 		"bedrock-converse-stream.js": { variable: "commandInput", hook: hook("commandInput", "nextCommandInput"), send: /client\.send\(new ConverseStreamCommand\(commandInput\), \{ abortSignal: options\.signal \}\)/, transport: /\.send\(new / },
-		"classifier-shared.js": { variable: "payload", hook: /const transformed = await options\.onPayload\?\.\(payload, model\);\s*if \(transformed !== undefined\)\s*payload = transformed;/, send: /body: JSON\.stringify\(payload\),/, transport: /requestFetch\(/ },
 		"google-generative-ai.js": { variable: "params", hook: hook("params", "nextParams"), send: /client\.models\.generateContentStream\(params\)/, transport: /\.generateContent(?:Stream)?\(/ },
 		"google-vertex.js": { variable: "params", hook: hook("params", "nextParams"), send: /client\.models\.generateContentStream\(params\)/, transport: /\.generateContent(?:Stream)?\(/ },
+		"json-request.js": { variable: "payload", hook: /const transformed = await options\.onPayload\?\.\(payload, model\);\s*if \(transformed !== undefined\)\s*payload = transformed;/, send: /body: JSON\.stringify\(payload\),/, transport: /requestFetch\(/ },
 		"mistral-conversations.js": { variable: "payload", hook: hook("payload", "nextPayload"), send: /await requestMistralStream\(model, payload, apiKey, options\)/, transport: /globalThis\.fetch\)\(/ },
 		"openai-codex-responses.js": { variable: "body", hook: hook("body", "nextBody"), send: /const bodyJson = JSON\.stringify\(body\);/, transport: /globalThis\.fetch\)\(/ },
 		"openai-completions.js": { variable: "params", hook: hook("params", "nextParams"), send: /client\.chat\.completions\.create\(params, requestOptions\)/, transport: /\.create\(/ },
@@ -2258,16 +2328,38 @@ test("-ne keeps explicit -e paths, \"--\" ends option parsing, and the subcomman
 	// main() from its start to parseArgs: the dispatches in it, exactly. A new `args[0]` branch here (a ninth
 	// subcommand) fails this even when the help text does not list it.
 	const mainSource = agentDistFile("main.js");
-	const start = mainSource.indexOf("export async function main(args, options) {");
+	const start = mainSource.indexOf("export async function main(cliArgs, options) {");
 	const end = mainSource.indexOf("const parsed = parseArgs(args);", start);
 	assert.ok(start >= 0 && end > start, "main() or its parseArgs call moved");
 	// The bundle's main() is the one a child runs, so the same dispatch is read from both copies.
 	const chunkDir = join(agentPackageDir(), "dist", "bundle", "chunks");
-	const bundleMain = readdirSync(chunkDir).map((name) => readFileSync(join(chunkDir, name), "utf8")).filter((text) => text.includes("async function main(args,options){"));
+	const bundleMain = readdirSync(chunkDir).map((name) => readFileSync(join(chunkDir, name), "utf8")).filter((text) => text.includes("async function main(cliArgs,options){"));
 	assert.equal(bundleMain.length, 1, "expected one bundle chunk that defines main()");
-	const bundleStart = bundleMain[0].indexOf("async function main(args,options){");
+	const bundleStart = bundleMain[0].indexOf("async function main(cliArgs,options){");
 	const bundleEnd = bundleMain[0].indexOf("parseArgs(args)", bundleStart);
 	assert.ok(bundleEnd > bundleStart, "the bundle's main() no longer calls parseArgs(args)");
+	// Issue #1119: since pi 1.7.0 main() first takes `--agent-dir <dir>` out of what it was started with, and every
+	// dispatch below reads what is left, so the preload reads the subcommand as pi does (child-route.mjs piCommandArgs).
+	// Here: nothing but resetTimings comes before it in either copy, and the dispatches read the arguments it leaves.
+	assert.match(mainSource.slice(start, end), /^export async function main\(cliArgs, options\) \{\n {4}resetTimings\(\);\n(?: {4}\/\/[^\n]*\n)*\s*const agentDirArg = applyAgentDirArg\(cliArgs\);\n {4}if \(agentDirArg\.kind === "error"\) \{\n[\s\S]*?process\.exit\(1\);\n {4}\}\n {4}const args = agentDirArg\.args;\n/, "dist/main.js: the agent dir flag is no longer the first thing taken out of main()'s arguments");
+	assert.match(bundleMain[0].slice(bundleStart, bundleEnd), /^async function main\(cliArgs,options\)\{resetTimings\(\);let agentDirArg=applyAgentDirArg\(cliArgs\);agentDirArg\.kind==="error"&&\([^;]*process\.exit\(1\)\);let args=agentDirArg\.args,/, "the bundle: the agent dir flag is no longer the first thing taken out of main()'s arguments");
+	assert.equal([...mainSource.slice(start, end).matchAll(/\bcliArgs\b/g)].length, 2, "dist/main.js: main() reads its arguments somewhere else before the agent dir flag is out");
+	// pi's rule, and the preload's copy of it, case by case through pi's own function (it sets PI_CODING_AGENT_DIR,
+	// put back after). A missing directory is pi's error exit, which the copy answers null.
+	const agentDirArg = agentDistFile("cli", "agent-dir-arg.js");
+	assert.equal(sha256(piFunction(agentDirArg, "takeAgentDirArg")), "b237771271483f5fe22112b809028fce1541306c15b3fa56bf75fec263d1818d", "pi's takeAgentDirArg changed: re-read child-route.mjs piCommandArgs against it");
+	assert.ok(bundleMain[0].includes('function takeAgentDirArg(args){let rest=[],agentDir;for(let i=0;i<args.length;i++){let arg=args[i];if(arg==="--"){rest.push(...args.slice(i));break}if(arg!=="--agent-dir"){rest.push(arg);continue}if(agentDir=args[++i],!agentDir)return{kind:"error",message:"--agent-dir requires a directory"}}return{kind:"ok",args:rest,agentDir}}'), "the bundle's takeAgentDirArg is no longer dist's");
+	const { applyAgentDirArg } = await import(pathToFileURL(join(agentPackageDir(), "dist", "cli", "agent-dir-arg.js")).href);
+	const before = process.env.PI_CODING_AGENT_DIR;
+	try {
+		for (const args of [["list"], ["--agent-dir", "/d", "list"], ["-p", "--agent-dir", "/d", "list"], ["--agent-dir", "/d", "--", "--agent-dir", "/e"], ["--", "--agent-dir"], ["--agent-dir"], ["--agent-dir", ""], ["--agent-dir", "--", "list"], ["--agent-dir", "/a", "--agent-dir", "/b", "install", "x"]]) {
+			const piSays = applyAgentDirArg([...args]);
+			assert.deepEqual(piCommandArgs(args), piSays.kind === "error" ? null : piSays.args, JSON.stringify(args));
+		}
+	} finally {
+		if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = before;
+	}
 	for (const [copy, dispatch] of [["dist/main.js", mainSource.slice(start, end)], ["the bundle", bundleMain[0].slice(bundleStart, bundleEnd)]]) {
 		// Every call that hands args to a command handler (the minified bundle uses comma expressions, not `if`).
 		assert.deepEqual([...dispatch.matchAll(/await (\w+)\(args\b/g)].map((match) => match[1]), ["runAuthCommand", "handlePackageCommand", "handleConfigCommand", "runMcpCommand"], `${copy}: main() dispatches a different set of command handlers before parseArgs`);
@@ -2304,7 +2396,7 @@ test("the child route's own files: the preload imports no pi module, the child m
 		'import { fileURLToPath, pathToFileURL } from "node:url";',
 		'import { isMainThread } from "node:worker_threads";',
 		// Issue #1098: subscriptionAdapterRoots, which reads only the environment.
-		'import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, PI_ENTRIES, PI_SUBCOMMANDS, subscriptionAdapterRoots } from "./child-route.mjs";',
+		'import { CHILD_METER_PATH, injectChildMeter, ledgerDirProblem, nestedRunnerKind, piCommandArgs, PI_ENTRIES, PI_SUBCOMMANDS, subscriptionAdapterRoots } from "./child-route.mjs";',
 	], "child-preload.mjs imports changed: no pi module, and node:module only as a namespace");
 	// The parent's children hook (issue #500 part E) runs in the job runner: no static pi import (it resolves pi's package
 	// root by specifier only to name the entry files), and not the preload, which runs on import.

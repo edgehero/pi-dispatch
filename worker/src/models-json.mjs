@@ -158,16 +158,17 @@ const affinity = T.union(T.lit("openai"), T.lit("openai-nosession"), T.lit("open
 const cacheKeyMode = T.union(T.lit("auto"), T.lit("enabled"), T.lit("disabled"));
 const costRates = { input: req(T.num()), output: req(T.num()), cacheRead: req(T.num()), cacheWrite: req(T.num()) };
 const ModelCostTier = T.obj({ inputTokensAbove: req(T.num()), ...costRates });
-const ModelCost = T.obj({ ...costRates, tiers: opt(T.arr(ModelCostTier)) });
+// pi 1.7.0 (issue #1119): an image model's output rate, on the table and not on a tier, any number like the rest.
+const ModelCost = T.obj({ ...costRates, imageOutput: opt(T.num()), tiers: opt(T.arr(ModelCostTier)) });
 // `Partial(Record(Enum(["short", "long"]), Number > 0))`, like the thinking map.
 const ModelPromptCache = T.obj({ short: opt(T.num({ exclusiveMinimum: 0 })), long: opt(T.num({ exclusiveMinimum: 0 })) });
 const posInt = T.int({ minimum: 1 });
 const ImageResize = T.obj({ maxWidth: opt(posInt), maxHeight: opt(posInt), maxBytes: opt(posInt), jpegQuality: opt(T.int({ minimum: 1, maximum: 100 })) });
 const ModelInputLimits = T.obj({ maxRequestBytes: opt(posInt), images: opt(T.obj({ resize: opt(ImageResize), maxPerMessage: opt(posInt), maxPerRequest: opt(posInt) })) });
 // compat-schema.js's ProviderCompatSchema: the merged properties of the OpenAI completions, OpenAI responses, Anthropic
-// messages, Bedrock, Mistral, Google (1.6.1) and System One schemas. A key two of them share takes pi's generic override, which for every shared
-// key here is the same type as each api's own (a boolean, the three-way affinity format, or 1.5.2's three-way
-// promptCacheKeyMode), so the superset is exact.
+// messages, Bedrock (supportsReasoningReplay since 1.7.0), Mistral, Google (1.6.1) and System One schemas. A key two
+// of them share takes pi's generic override, which for every shared key here is the same type as each api's own (a
+// boolean, the three-way affinity format, or 1.5.2's three-way promptCacheKeyMode), so the superset is exact.
 const bool = opt(T.bool());
 const ProviderCompat = T.obj({
 	// OpenAI completions
@@ -216,6 +217,8 @@ const ProviderCompat = T.obj({
 	supportsMidConvoEffort: bool,
 	supportsMidConvoToolChanges: bool,
 	supportsMessageThreads: bool,
+	// Bedrock (pi 1.7.0): whether earlier reasoning is sent back.
+	supportsReasoningReplay: bool,
 	// System One classifier image transport, checked before pi reads the overlay.
 	imageInput: opt(T.union(T.lit("assets"), T.lit("images"), T.lit("state-image-urls"))),
 	sendImageOptInHeader: bool,
@@ -250,7 +253,7 @@ const ModelOverride = T.obj({
 	thinkingLevelMap: opt(ThinkingLevelMap),
 	input: opt(inputKinds),
 	inputLimits: opt(ModelInputLimits),
-	cost: opt(T.obj({ input: opt(T.num()), output: opt(T.num()), cacheRead: opt(T.num()), cacheWrite: opt(T.num()), tiers: opt(T.arr(ModelCostTier)) })),
+	cost: opt(T.obj({ input: opt(T.num()), output: opt(T.num()), cacheRead: opt(T.num()), cacheWrite: opt(T.num()), imageOutput: opt(T.num()), tiers: opt(T.arr(ModelCostTier)) })),
 	promptCache: opt(ModelPromptCache),
 	contextWindow: opt(tokenCount),
 	maxTokens: opt(tokenCount),

@@ -116,11 +116,35 @@ function markForwarded(dispatch) {
 	if (outer !== undefined && outer !== null && typeof outer === "object") outer.forwarded = true;
 }
 
-/** The call's arguments with its options (the second argument after the model, in all three stream methods) marked. */
+/**
+ * The call's arguments with its options (the second argument after the model, in all three stream methods) marked, and
+ * pi's attribution off in them (withoutAttribution).
+ */
 function markOptions(args, token) {
 	const marked = [...args];
-	marked[1] = { ...(marked[1] ?? {}), [DISPATCH_MARK]: token };
+	marked[1] = { ...withoutAttribution(marked[1]), [DISPATCH_MARK]: token };
 	return marked;
+}
+
+/**
+ * A call's options with no provider attribution in its identity (issue #1119), everything else as given. pi 1.6.1
+ * attributed a session's requests to pi (`HTTP-Referer`, `X-OpenRouter-Title` and `X-OpenRouter-Categories` to
+ * OpenRouter, an invoke origin to NVIDIA NIM, a client name to OpenCode) only while install telemetry was on, and a job
+ * kept telemetry off; pi 1.7.0 removed telemetry and puts `attribution: PI_ATTRIBUTION` in every session request's
+ * identity (core/client-identity.js, read by sdk.js buildRequestOptions). pi-ai documents `attribution: null` as no
+ * attribution headers, overriding a merged identity's, and applies an identity's headers below the model's, the
+ * provider's and the request's own, so this takes away exactly what pi 1.7.0 added and nothing an operator configured:
+ * a session's requests carry the headers they carried at 1.6.1. Both halves of the meter call it, the runtime wrappers
+ * on every ModelRuntime call and the compat half on every legacy pi-ai call (pi-agent-core's agent loop puts pi's
+ * attribution in every call it makes, at 1.6.1 too, so an extension driving its own Agent sent it then and sends none
+ * now), which is every call a session, a role child, an extension or a metered pi child makes through pi. Not reached:
+ * an extension's call through pi-ai's per-api stream functions imported directly, or a raw fetch, which go around the
+ * meter altogether. Rejected: a `before_provider_headers` handler setting those headers to null, which needs a
+ * registration in every loader (the job's, a watch run's, each role child's, each pi child's) and a hand-kept list of
+ * each provider's header names.
+ */
+function withoutAttribution(options) {
+	return { ...(options ?? {}), identity: { ...(options?.identity ?? {}), attribution: null } };
 }
 
 /**
@@ -1210,7 +1234,8 @@ function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = 
  *   4. Everything else is the original method, its stream observed (or its promise, for classify and
  *      generateImages) with the (provider, model) pair read off the Model object dispatched on and the
  *      sessionId off the options -- never parsed back out of a settled message, whose provider/model a
- *      provider is free to normalise, alias or omit.
+ *      provider is free to normalise, alias or omit. The options it is called with carry no provider
+ *      attribution (withoutAttribution, issue #1119), with or without a guard.
  *
  * `this` is preserved on every call, because the originals read instance state (credentials, providers).
  * There is deliberately NO swallowing try/catch: a throw in here is OUR bug, and swallowing it would turn a metering
@@ -1297,7 +1322,8 @@ export function wrapModelRuntime({ ModelRuntime, meter, hardStop = null, hardSto
 				const verdict = verdictFor(name, model, [context, given], waiter);
 				if (verdict === DEFERRED) return DEFERRED;
 				if (verdict !== null && verdict !== ADMITTED) return Promise.resolve(hardStopResult(name, model, STOP_MESSAGES[verdict]));
-				const [, options] = prepareFor(verdict, name, model, [context, given]);
+				const [, prepared] = prepareFor(verdict, name, model, [context, given]);
+				const options = withoutAttribution(prepared);
 				// A token too, though no result method re-enters the compat half: a legacy call made inside it is never its own.
 				const token = dispatchToken(model);
 				markForwarded(dispatch);
@@ -1385,7 +1411,12 @@ export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, gu
 			const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: reentry, isStopped, legacy: true, priced: guard !== null && hardStop ? priceEntry(prices, model) : undefined, waitable, waiter });
 			if (verdict === DEFERRED) return DEFERRED;
 			if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
-			const options = verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method: kind, model, args: [context, given], stop: (reason) => meter.stop(reason), stopped: () => stopNow(meter, isStopped) })[1] : given;
+			const prepared = verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method: kind, model, args: [context, given], stop: (reason) => meter.stop(reason), stopped: () => stopNow(meter, isStopped) })[1] : given;
+			// No provider attribution on a legacy call either (withoutAttribution, issue #1119): pi-agent-core's agent loop puts
+			// pi's in every call it makes, so an extension driving its own Agent would send it. The copy keeps the dispatch
+			// mark, a symbol the spread carries, so a forward made with these options is still told from a re-entry, which was
+			// claimed above on the options as given.
+			const options = withoutAttribution(prepared);
 			const provider = fallbackModels?.getProvider?.(model.provider);
 			const builtin = provider?.getModels?.().some((candidate) => candidate.api === model.api) ? provider : null;
 			// Any call other than the runtime call's own re-entry, made under a runtime call's dispatch, is that call's forward
@@ -2096,7 +2127,9 @@ export function policyEnforcement(handle) {
  * classifier-shared.js, which carries the System One classifiers and openai-decisions since pi 1.1.0). pinned-api.test.mjs derives that set from the pinned source and requires it to equal
  * this list, so a new priced api fails the pin rather than the budget. An api NOT here prices itself or not at
  * all (`pi-messages` and the Radius providers report their own cost; images and classifiers have their own
- * modules), so the catalog's table says nothing about what its call costs, and the bound is Infinity.
+ * modules), so the catalog's table says nothing about what its call costs, and the bound is Infinity. The image apis
+ * are left out although pi 1.7.0 prices both through `calculateCost` (issue #1119): their one call, generateImages,
+ * is refused under a cap before any bound is asked (createCostGuard's admit).
  */
 export const PRICED_APIS = Object.freeze([
 	"anthropic-messages",
@@ -2234,8 +2267,8 @@ function sendsMaxTokens(model, options) {
  *      with no tiers on the two Anthropic apis, a SYNTHETIC long-context tier above 200k input tokens (2 x input,
  *      cache read and cache write, 1.5 x output). The catalog carries no Anthropic long-context prices, and the
  *      user decision was a generic tier rather than a hand-kept price table. A rate that is not a finite
- *      non-negative number: Infinity.
- *   3. Every rate 0: 0, so a zero-rated local model runs under a cap of 0.
+ *      non-negative number: Infinity. A table's `imageOutput` (pi 1.7.0, issue #1119), when present, is a rate too.
+ *   3. Every rate 0, `imageOutput` included: 0, so a zero-rated local model runs under a cap of 0.
  *   4. inputBound = UTF-8 bytes of JSON.stringify(context) + BOUND_OVERHEAD_TOKENS. ASSUMPTION: one token is at
  *      least one UTF-8 byte; `boundExceeded` on the exit line is the evidence if a tokenizer breaks it. NOT capped
  *      by model.contextWindow: pi does not enforce the window (gpt-5.4 lists 272k and prices a tier above it).
@@ -2249,9 +2282,9 @@ function sendsMaxTokens(model, options) {
  *   5. The output bound: options.maxTokens (when positive and the api sends it) else model.maxTokens; raised to
  *      model.maxTokens when options.reasoning is set (adjustMaxTokensForThinking may lift the caller's budget up
  *      to it); at least 16 on openai-responses and azure. 0 for `classify`, which is Infinity if any output rate
- *      is above 0 (pi exposes no output bound for it). No usable number, or a present maxTokens that is not
- *      finite: Infinity. On the three apis that merge samplingParams after the cap, an output-cap key there wins
- *      if larger and `n` multiplies (samplingOutput). On openai-completions to a host outside
+ *      (`imageOutput` included) is above 0 (pi exposes no output bound for it). No usable number, or a present
+ *      maxTokens that is not finite: Infinity. On the three apis that merge samplingParams after the cap, an
+ *      output-cap key there wins if larger and `n` multiplies (samplingOutput). On openai-completions to a host outside
  *      COMPLETIONS_CATALOG_HOSTS and COMPLETIONS_EXTRA_HOSTS (issue #507), only the cap the request carries as
  *      `max_tokens` counts: a model whose compat does not set that field is Infinity, and so is a raw `stream` with
  *      no options.maxTokens and a caller's cap of 0. A negative cap on openai-completions is Infinity on every host.
@@ -2262,7 +2295,10 @@ function sendsMaxTokens(model, options) {
  *      openai-codex-responses (pi multiplies the settled cost by the tier the RESPONSE reports, which can be the
  *      account's default, not only the request's); 1 elsewhere, azure included (it applies none).
  *   8. ceil(max over tables of (inputBound x inputRate + output x outputRate) x multiplier). Per table, because
- *      pi prices one call with exactly one table.
+ *      pi prices one call with exactly one table. The output rate is the higher of the table's output and the
+ *      `imageOutput` of the base table it belongs to (a tier carries none of its own): since pi 1.7.0 calculateCost
+ *      prices an image token at the model's `imageOutput` whatever tier applies, and every output token as one when
+ *      the provider reports no split, so one output token costs at most the higher of the two (issue #1119).
  */
 export function callCostBound(method, model, context, options, env = process.env, body = undefined) {
 	// 1.
@@ -2272,6 +2308,7 @@ export function callCostBound(method, model, context, options, env = process.env
 	const fields = ["input", "output", "cacheRead", "cacheWrite"];
 	for (const table of bases) {
 		if (!table || !fields.every((field) => rate(table[field]))) return Infinity;
+		if (table.imageOutput !== undefined && !rate(table.imageOutput)) return Infinity;
 		const tiers = table.tiers ?? [];
 		if (!Array.isArray(tiers)) return Infinity;
 		for (const tier of tiers) {
@@ -2279,7 +2316,7 @@ export function callCostBound(method, model, context, options, env = process.env
 		}
 	}
 	// 3.
-	const everyRate = bases.flatMap((table) => [table, ...(table.tiers ?? [])]).flatMap((table) => fields.map((field) => table[field]));
+	const everyRate = [...bases.flatMap((table) => [table, ...(table.tiers ?? [])]).flatMap((table) => fields.map((field) => table[field])), ...bases.map((table) => table.imageOutput ?? 0)];
 	if (everyRate.every((value) => value === 0)) return 0;
 	// 4.
 	let serialised;
@@ -2296,7 +2333,7 @@ export function callCostBound(method, model, context, options, env = process.env
 	// 5.
 	let output;
 	if (method === "classify") {
-		const outputRates = bases.flatMap((table) => [table, ...(table.tiers ?? [])]).map((table) => table.output);
+		const outputRates = [...bases.flatMap((table) => [table, ...(table.tiers ?? [])]).map((table) => table.output), ...bases.map((table) => table.imageOutput ?? 0)];
 		if (outputRates.some((value) => value > 0)) return Infinity;
 		output = 0;
 	} else {
@@ -2343,11 +2380,15 @@ export function callCostBound(method, model, context, options, env = process.env
 	let dearest = 0;
 	for (const table of bases) {
 		const tiers = table.tiers ?? [];
-		const candidates = [table, ...tiers.filter((tier) => inputBound > tier.inputTokensAbove)];
-		if (anthropic && tiers.length === 0 && inputBound > LONG_CONTEXT_TOKENS) candidates.push(longContextTier(table));
-		for (const rates of candidates) {
+		// Each candidate with its image rate: the base table's for itself and every tier (pi reads `model.cost.imageOutput`
+		// whatever tier applies, and never a tier's own), 1.5 x it on the synthetic tier, whose lift at settle is 1.5 x
+		// pi's output cost, image tokens included.
+		const imageRate = table.imageOutput ?? 0;
+		const candidates = [table, ...tiers.filter((tier) => inputBound > tier.inputTokensAbove)].map((rates) => [rates, imageRate]);
+		if (anthropic && tiers.length === 0 && inputBound > LONG_CONTEXT_TOKENS) candidates.push([longContextTier(table), 1.5 * imageRate]);
+		for (const [rates, image] of candidates) {
 			const inputRate = Math.max(rates.input, rates.cacheRead, rates.cacheWrite, longWrite ? 2 * rates.input : 0);
-			dearest = Math.max(dearest, inputBound * inputRate + output * rates.output);
+			dearest = Math.max(dearest, inputBound * inputRate + output * Math.max(rates.output, image));
 		}
 	}
 	const bound = Math.ceil(dearest * multiplier);
@@ -2527,11 +2568,13 @@ function started(message) {
 	return blocks(message?.content) || blocks(message?.output);
 }
 
-const PRICE_RATES = Object.freeze(["input", "output", "cacheRead", "cacheWrite"]);
+/** The four rates of every table, and pi 1.7.0's `imageOutput`, which a base table may carry (issue #1119). */
+const PRICE_RATES = Object.freeze(["input", "output", "cacheRead", "cacheWrite", "imageOutput"]);
 
 /**
- * Does a call on this model cost money (issue #571)? True when any rate of its cost table, of one of its tiers, or of
- * an allowed fallback model's table (anthropic-messages bills a fallback answer at the fallback's rates) is above 0.
+ * Does a call on this model cost money (issue #571)? True when any rate of its cost table (PRICE_RATES, an image output
+ * rate included), of one of its tiers, or of an allowed fallback model's table (anthropic-messages bills a fallback
+ * answer at the fallback's rates) is above 0.
  * The Model object a call is dispatched on carries the cost pi composed (overlay entry, override and tiers applied),
  * so this reads it as it is. Through pi a table is never missing: pi's composer gives a model with no `cost` all zeros
  * (provider-composer.js, modelFromJson), so such a model is zero-rated here as it is in pi's own pricing. A Model

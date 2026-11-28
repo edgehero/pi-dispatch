@@ -285,6 +285,9 @@
 		"if (Object.keys(process.env).length > 0) re": 1,
 		") { process.env[entry.slice(0, idx)] = entry.sli": 1
 	},
+	"@earendil-works/pi-coding-agent/dist/cli/agent-dir-arg.js": {
+		"agentDir) { process.env[ENV_AGENT_DIR] = resolve(e": 1
+	},
 	"@earendil-works/pi-coding-agent/dist/cli/setup.js": {
 		"tle = APP_NAME; process.env.PI_CODING_AGENT = \"true": 1,
 		"AGENT = \"true\"; process.env.AI_AGENT = \"pi\"; pr": 1
@@ -519,6 +522,11 @@
 		"return function (env) { function fai": 1,
 		"il(e) { env.error = env.hasError ?": 1,
 		"\") : e; env.hasError = true;": 1
+	},
+	"@earendil-works/pi-tui/dist/program-resume.js": {
+		"eProgramResumeToken(env = process.env) { co": 1,
+		"amResumeToken(env = process.env) { const token = en": 1,
+		"EN_ENV]; delete env[PROGRAM_RESUME_TOKEN_ENV]; return": 1
 	},
 	"@earendil-works/pi-tui/dist/terminal.js": {
 		"olveEscapeTimeoutMs(env = process.env) { co": 1,
