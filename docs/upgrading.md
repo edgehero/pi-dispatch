@@ -448,6 +448,25 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: a tokens or enrollment file the console cannot read no longer ends browser terminals as revoked (#1122)
+
+A console from this release no longer revokes every browser terminal when it cannot read its tokens file or the gateway
+enrollment file (`sandbox-gateways.json`), say while an editor that saves in place has the tokens file half written, nor
+a remembered browser's terminal when that browser's record cannot be read. Each page said "Operator session ended"
+though nobody revoked anyone. The console now stops renewing those terminals while the file cannot be read: a file it
+reads again at its next one-second check costs nothing, and one that stays unreadable ends each terminal within its
+five-second lease as "Authorization could not be checked" (with a sandbox gateway from this release, below). A terminal
+whose operator did lose authority (a sign-out, a removed or rotated token, ended sessions, a read-only console, a
+changed or removed enrollment) still ends as "Operator session ended" at once, also while the other file cannot be read.
+[Change the tokens file](console.md#create-the-first-token) with the token commands, or write a new file beside it and
+rename that over it. The console only: the sandbox gateway, the worker, the job image and the receiver are unchanged,
+and nothing stored changes.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Control store (`sandbox-gateway:` keys) | Nothing: the same keys, scripts and refusal words. The console writes no revocation for a file it could not read. |
+| Mixed versions | An older console revokes on an unreadable file, as before. A terminal that lapses while a file stays unreadable says "Authorization could not be checked" with a sandbox gateway from this release; an older gateway, released before #1039 and #1048, can still read that lapse as "Operator session ended" when a renewal crosses the lease's end. Upgrade the console and the sandbox gateway together, as #1039 and #1048 already need. |
+
 ### Unreleased: pi 1.7.0 (#1119)
 
 The job image and the worker run pi 1.7.0. pi 1.7.0 removed its install telemetry, the `enableInstallTelemetry`

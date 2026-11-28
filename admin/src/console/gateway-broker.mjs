@@ -40,15 +40,31 @@ export function makeGatewayBroker({ redis, sessions, readTokens, findToken, read
   const protocolRefusal = (result) => refusal(["watch-limit", "watch-disabled", "watch-removed", "driver-ended", "self-watch"].includes(result?.refused) ? result.refused : "changed");
   const secret = () => random(32).toString("base64url");
   const full = (sessionId) => held.size + pending.size >= GATEWAY_BROKER_LIMITS.pending || [...held.values()].filter((e) => e.sessionId === sessionId).length + [...pending.values()].filter((id) => id === sessionId).length >= GATEWAY_BROKER_LIMITS.perSession;
-  const live = (session, tokens = readTokens) => {
-    if (closed || readOnly() || !session || session.role !== "operator") return null;
-    const file = tokens()?.file;
-    const current = file && sessions.peek(session.id, file);
-    return current?.role === "operator" ? current : null;
+  // Each judgment below is "live", "lost" or "unknown" (issue #1122). Unknown is a file that could not be read: the
+  // tokens file or enrollment answered `{refusal}` (half written by an editor that saves in place, say), or the session
+  // store could not judge a remembered device's record. It says nothing about whether anyone revoked the operator. A
+  // sign-in the store no longer holds (signed out) is lost whatever the tokens file says: that needs no file.
+  const operator = (sessionId, tokens = readTokens) => {
+    if (closed || readOnly() || !sessions.holds(sessionId)) return "lost";
+    const read = tokens();
+    if (!read?.file) return read?.refusal ? "unknown" : "lost";
+    const verdict = sessions.verdict(sessionId, read.file);
+    return verdict.unjudged ? "unknown" : verdict.session?.role === "operator" ? "live" : "lost";
   };
-  const registryFor = (entry, enrollment = readRegistry) => {
+  const enrolled = (entry, enrollment = readRegistry) => {
     const read = enrollment();
-    return read.config && read.digest === entry.registryDigest && read.config.consoleOrigin === entry.consoleOrigin && read.config.hosts[entry.target.host]?.origin === entry.gatewayOrigin;
+    if (read.refusal) return "unknown";
+    return read.config && read.digest === entry.registryDigest && read.config.consoleOrigin === entry.consoleOrigin && read.config.hosts[entry.target.host]?.origin === entry.gatewayOrigin ? "live" : "lost";
+  };
+  // A launch, its context and its step-up refuse anything short of live, as they always have.
+  const live = (session, tokens = readTokens) => session?.role === "operator" && operator(session.id, tokens) === "live";
+  const registryFor = (entry, enrollment = readRegistry) => enrolled(entry, enrollment) === "live";
+  // A held attachment as both passes of a tick judge it. A loss either read proves wins over the other's unknown.
+  const standing = (entry, tokens = readTokens, enrollment = readRegistry) => {
+    const signedIn = operator(entry.sessionId, tokens);
+    if (signedIn === "lost") return "lost";
+    const host = enrolled(entry, enrollment);
+    return host === "lost" ? "lost" : signedIn === "unknown" || host === "unknown" ? "unknown" : "live";
   };
   async function registered(target) {
     const result = await readSessions();
@@ -67,15 +83,17 @@ export function makeGatewayBroker({ redis, sessions, readTokens, findToken, read
   // never after the clock and fleet reads below, and never skipped because the previous tick is still running.
   // Revoked only after the lease it last renewed ran out, the gateway's own deadline comes first and the browser
   // reads "could not confirm its authority" for a revocation the console had already decided. It renews nothing.
+  // An unknown standing revokes nothing here or in the full judgment: the gateway never reads a revocation's stored
+  // reason, so any revocation it reads before its own deadline says "Operator session ended" (issue #1122).
   function revokeLost() {
     // One read of each file serves the whole pass. A read that throws caches nothing, and each entry skips this pass.
     let tokens, enrollment;
     const tokensOnce = () => tokens ??= readTokens(), enrollmentOnce = () => enrollment ??= readRegistry();
     const revoking = [];
     for (const [id, entry] of held) {
-      let lost;
-      try { lost = !live({ id: entry.sessionId, role: "operator" }, tokensOnce) || !registryFor(entry, enrollmentOnce); } catch { continue; /* The full judgment drops it, as before. */ }
-      if (lost) revoking.push(revoke(id, entry, "session-ended").catch(() => { /* Not renewed either, so its short lease expires. */ }));
+      let judged;
+      try { judged = standing(entry, tokensOnce, enrollmentOnce); } catch { continue; /* The full judgment drops it, as before. */ }
+      if (judged === "lost") revoking.push(revoke(id, entry, "session-ended").catch(() => { /* Not renewed either, so its short lease expires. */ }));
     }
     return Promise.all(revoking);
   }
@@ -97,8 +115,13 @@ export function makeGatewayBroker({ redis, sessions, readTokens, findToken, read
       await Promise.all([revoked, ...[...held].map(async ([id, entry]) => {
         try {
           const current = !snapshot?.unreachable && snapshot?.sessions?.some((s) => tuple(s) === tuple(entry.target));
-          if (!current || !live({ id: entry.sessionId, role: "operator" }) || !registryFor(entry)) { await revoke(id, entry, "session-ended"); return; }
+          const judged = current ? standing(entry) : "lost";
+          if (judged === "lost") { await revoke(id, entry, "session-ended"); return; }
           if (!entry.authorized && now() - entry.createdAt >= GATEWAY_BROKER_LIMITS.pendingMs) { await revoke(id, entry, "session-ended"); return; }
+          // Unknown: no renewal this tick, and the attachment stays held. A file unreadable for one tick costs nothing
+          // when the next one reads it; one that stays unreadable lets the five-second lease lapse, and the gateway ends
+          // the terminal as "Authorization could not be checked". A lapsed attachment goes at its next refused renewal.
+          if (judged === "unknown") return;
           if (entry.authorized) {
             if (observedAt === null) { held.delete(id); return; }
             const result = await protocol.renewAuthorization({ intentId: id, owner: entry.owner, observedAt });

@@ -49,7 +49,11 @@ pi-dispatch-console token add --name sam --role viewer
 
 The tokens live in `console-tokens.json` in the deployment folder (`PI_CONSOLE_TOKENS_FILE` moves it). It must be a
 regular file at mode 0600, owned by the account that runs the console: `serve` refuses a symlink, a file anyone else
-can read, or one another account owns, and says which. `token add` creates it that way.
+can read, or one another account owns, and says which. `token add` creates it that way. Change it with the token
+commands ([Managing tokens](#managing-tokens)), which write a new file beside it and rename that over the old one. If
+you edit it some other way, do the same: write the new file in the same folder at mode 0600, then rename it over
+`console-tokens.json`. An editor that saves in place, or a script that rewrites the file without a rename, lets the
+running console read it half written ([Sessions](#sessions) says what that costs).
 
 ## Start it
 
@@ -492,7 +496,13 @@ repeated on the page but a `next` the console accepts as one of its own pages. A
 console's tokens file cannot be used right now" (503, with `pi-dispatch doctor` to run on the host), your browser
 keeps its session, and open live pages stay connected and show their data as last seen, under a note that says the
 console could not read its tokens file. Signing out still works. Once the file reads again everything carries on,
-and a session that ended in the meantime (its idle limit, say) ends then, with its reason.
+and a session that ended in the meantime (its idle limit, say) ends then, with its reason. A browser terminal ([Open
+in browser](#opening-a-sandbox)) is not revoked either while the tokens file or the gateway enrollment file cannot be
+read: the console stops renewing its five-second authority instead. A file unreadable for a moment costs it nothing;
+one that stays unreadable ends it within those five seconds as "Authorization could not be checked", not as "Operator
+session ended", which says the console revoked it. That takes a sandbox gateway from the same release as this console
+or later: an older one can still say "Operator session ended" when one of its renewals crosses the lease's end.
+Signing out still ends a browser terminal at once.
 
 ## Managing tokens
 

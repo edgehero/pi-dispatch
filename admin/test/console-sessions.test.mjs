@@ -330,6 +330,19 @@ test("a token entry with the session's hash AND role passes, whatever other entr
   assert.deepEqual(Object.keys(s.verdict(id, both)), ["session"]);
 });
 
+test("holds says whether the store has a session with no file and no side effect, for a sign-out the tokens file cannot show (issue #1122)", () => {
+  const now = clock();
+  const s = store(now);
+  const id = signIn(s);
+  assert.equal(s.holds(id), true);
+  assert.deepEqual(s.verdict(id, null), { unjudged: true }, "an unusable file judges nothing");
+  now.advance(60 * MIN + 1);
+  assert.equal(s.holds(id), true, "idle past its limit, still held until a request or a sweep ends it");
+  assert.equal(s.endedOf(id), null, "and holds ended nothing");
+  s.destroy(id, "elsewhere");
+  assert.equal(s.holds(id), false, "signed out: gone, whatever any file says");
+  for (const value of [undefined, null, 42, "x".repeat(43)]) assert.equal(s.holds(value), false);
+});
 test("peek and verdict write nothing: no tombstone, no delete, no lastSeen move, so endedOf stays null for a held id", () => {
   const now = clock();
   const s = store(now);

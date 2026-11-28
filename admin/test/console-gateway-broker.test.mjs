@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { test } from "node:test";
-import { makeGatewayBroker } from "../src/console/gateway-broker.mjs";
+import { GATEWAY_BROKER_LIMITS, makeGatewayBroker } from "../src/console/gateway-broker.mjs";
 import { makeSessionStore, sessionDigest } from "../src/console/sessions.mjs";
 import { findToken } from "../../worker/src/console-tokens.mjs";
 import { GATEWAY_AUTH_MS, gatewayHash } from "../../worker/src/sandbox-gateway-protocol.mjs";
@@ -10,10 +10,10 @@ const AT = Date.UTC(2026, 10, 2, 12);
 const sha = (s) => createHash("sha256").update(s).digest("hex");
 const TOKEN = "pdc_" + "x".repeat(43), OTHER = "pdc_" + "y".repeat(43);
 const RECEIPT = "r".repeat(43);
-function fixture({ readRun = async () => null, idleMs = 1000 } = {}) {
-  let at = AT, readOnly = false, tokenRead = true, tokenThrows = false, tokenReads = 0;
+function fixture({ readRun = async () => null, idleMs = 1000, deviceVerdict = null } = {}) {
+  let at = AT, readOnly = false, tokenRead = true, tokenThrows = false, tokenReads = 0, tokenAnswer = null, enrollment = "read";
   const file = { version: 1, generation: 0, tokens: [{ name: "ops", role: "operator", sha256: sha(TOKEN) }, { name: "other", role: "operator", sha256: sha(OTHER) }] };
-  const sessions = makeSessionStore({ now: () => at, idleMs, maxMs: 3600000 });
+  const sessions = makeSessionStore({ now: () => at, idleMs, maxMs: 3600000, ...(deviceVerdict ? { deviceVerdict } : {}) });
   const create = (entry = file.tokens[0]) => {
     const { id } = sessions.create({ name: entry.name, role: entry.role, tokenHash: entry.sha256, generation: file.generation });
     return sessions.peek(id, file);
@@ -40,14 +40,18 @@ function fixture({ readRun = async () => null, idleMs = 1000 } = {}) {
     async renewAuthorization(input) { renews.push(input); return { ok: true }; },
     async revoke(input) { revokes.push(input); revokedAt.push(at); values.get(input.intentId).state = "revoked"; return { ok: true }; },
   };
-  const broker = makeGatewayBroker({ store, sessions, readTokens: () => { tokenReads++; if (tokenThrows) throw new Error("EIO"); return tokenRead ? { file } : { refusal: "unreadable" }; }, findToken, readRegistry: () => registry, readSessions: () => fleet(), readRun, readOnly: () => readOnly, audit: { append: (row) => audit.push(row) }, now: () => at, schedule: false });
+  const broker = makeGatewayBroker({ store, sessions, readTokens: () => { tokenReads++; if (tokenThrows) throw new Error("EIO"); if (tokenAnswer) return tokenAnswer(); return tokenRead ? { file } : { refusal: "unreadable" }; }, findToken, readRegistry: () => enrollment === "read" ? registry : enrollment === "removed" ? { disabled: true } : { refusal: "Gateway enrollment could not be read or validated." }, readSessions: () => fleet(), readRun, readOnly: () => readOnly, audit: { append: (row) => audit.push(row) }, now: () => at, schedule: false });
   const origin = registry.config.consoleOrigin;
   const launch = (body = { host: target.host, id: target.id, width: 1440 }, as = session) => broker.launch({ session: as, body, origin, actor });
   const bind = (out) => { Object.assign(values.get(out.intentId), { state: "bound", receiptHash: gatewayHash(RECEIPT) }); };
   const context = (out, as = session, proof = out.tabProof, receipt = RECEIPT) => broker.context({ session: as, origin, body: { intentId: out.intentId, tabProof: proof, receipt } });
   const authorize = (out, token = TOKEN, as = session, receipt = RECEIPT) => broker.authorize({ session: as, origin, actor, body: { intentId: out.intentId, tabProof: out.tabProof, receipt, token, width: 1440 } });
   return { broker, store, session, sessions, file, registry, values, actor, target, audit, renews, revokes, revokedAt, slowFleet, launch, bind, context, authorize, create,
-    advance: (ms) => at += ms, readonly: () => readOnly = true, unreadable: () => tokenRead = false, throwing: (value) => tokenThrows = value, tokenReads: () => tokenReads, registrations: (next) => registrations = next };
+    advance: (ms) => at += ms, readonly: () => readOnly = true, unreadable: (value = true) => tokenRead = !value, throwing: (value) => tokenThrows = value, tokenReads: () => tokenReads, registrations: (next) => registrations = next,
+    // The enrollment as the broker's next read finds it: "read", "unreadable" (a `{refusal}`) or "removed" (`{disabled}`).
+    enrollment: (state) => enrollment = state,
+    // Any answer the token reader gives next, in place of `{file}` or `{refusal}`; null for those again.
+    tokenAnswer: (fn) => tokenAnswer = fn };
 }
 test("launch is secret-free outside its explicit handoff and requires an existing enrolled shell", async () => {
   const f = fixture(), out = await f.launch();
@@ -91,14 +95,15 @@ for (const [name, mutate] of [
   ["role change", (f) => f.file.tokens[0].role = "viewer"],
   ["sessions end-all", (f) => f.file.generation++],
   ["read-only", (f) => f.readonly()],
-  ["unreadable token file", (f) => f.unreadable()],
   ["enrollment change", (f) => f.registry.digest = "changed"],
+  ["enrollment removed", (f) => f.enrollment("removed")],
   ["replaced container", (f) => f.registrations({ sessions: [{ ...f.target, containerId: "c".repeat(64) }] })],
   ["unknown tracking", (f) => f.registrations({ unreachable: true })],
 ]) test(`${name} revokes original browser authority`, async () => {
   const f = fixture(), out = await f.launch(); f.bind(out); assert.equal((await f.authorize(out)).ok, true);
-  mutate(f); await f.broker.tick(); assert.equal(f.revokes.length, 1); assert.equal(f.renews.length, 0); await f.broker.close();
+  mutate(f); await f.broker.tick(); assert.equal(f.revokes.length, 1); assert.equal(f.revokes[0].reason, "session-ended"); assert.equal(f.renews.length, 0); await f.broker.close();
 });
+
 test("viewer, agent and read-only refuse before private dependencies and opening audit failure mints nothing", async () => {
   let calls = 0;
   const f = fixture();
@@ -227,6 +232,105 @@ test("the early pass also revokes on a changed enrollment or an ended sign-in, b
   assert.equal(g.tokenReads() - before, 1, "the early pass reads the token file once");
   await counted;
   await f.broker.close(); await g.broker.close();
+});
+
+// A file the console could not read is no evidence that anyone revoked anyone (issue #1122). A revocation the gateway
+// reads before its own deadline says "Operator session ended" whatever reason the console stored, so the broker
+// revokes nothing and renews nothing on such a read: one unreadable tick costs nothing, and a file that stays
+// unreadable lets the five-second lease lapse into "Authorization could not be checked".
+const unreadableFiles = [["tokens file", (f, value = true) => f.unreadable(value)], ["enrollment", (f, value = true) => f.enrollment(value ? "unreadable" : "read")]];
+test("a tokens file or enrollment that cannot be read revokes and renews nothing, and renewal resumes once it reads again (issue #1122)", async () => {
+  for (const [what, unreadable] of unreadableFiles) {
+    const f = fixture({ idleMs: 3600000 }), out = await f.launch(); f.bind(out); assert.equal((await f.authorize(out)).ok, true);
+    f.advance(1000); await f.broker.tick(); assert.equal(f.renews.length, 1, what);
+    unreadable(f);
+    for (let n = 0; n < 3; n++) { f.advance(1000); await f.broker.tick(); }
+    assert.deepEqual([f.revokes.length, f.renews.length], [0, 1], `${what}: no revocation and no renewal while it cannot be read`);
+    assert.equal((await f.launch()).refused, what === "tokens file" ? "changed" : "configuration", `${what}: and a launch still refuses on it`);
+    unreadable(f, false); f.advance(1000); await f.broker.tick();
+    assert.deepEqual([f.revokes.length, f.renews.length], [0, 2], `${what}: still held, so the next readable tick renews it`);
+    assert.equal(f.renews[1].observedAt, AT + 5000, `${what}: from that tick's own clock read`);
+    await f.broker.close();
+  }
+});
+test("a file unreadable for a while, then read without the operator's token, revokes the terminal as a session end (issue #1122)", async () => {
+  for (const [what, unreadable] of unreadableFiles) {
+    const f = fixture({ idleMs: 3600000 }), out = await f.launch(); f.bind(out); assert.equal((await f.authorize(out)).ok, true);
+    unreadable(f); f.advance(1000); await f.broker.tick(); assert.equal(f.revokes.length, 0, what);
+    f.file.tokens.splice(0, 1); unreadable(f, false); f.advance(1000); await f.broker.tick();
+    assert.deepEqual(f.revokes.map((r) => [r.intentId, r.reason]), [[out.intentId, "session-ended"]], what);
+    assert.equal(f.renews.length, 0, what);
+    await f.broker.close();
+  }
+});
+test("a loss one read proves revokes as a session end though the other file cannot be read (issue #1122)", async () => {
+  for (const [why, change] of [
+    ["read-only, tokens file unreadable", (f) => { f.readonly(); f.unreadable(); }],
+    ["token removed, enrollment unreadable", (f) => { f.file.tokens.splice(0, 1); f.enrollment("unreadable"); }],
+    ["sign-out everywhere, enrollment unreadable", (f) => { f.file.generation++; f.enrollment("unreadable"); }],
+    ["enrollment removed, tokens file unreadable", (f) => { f.enrollment("removed"); f.unreadable(); }],
+    ["enrollment changed, tokens file unreadable", (f) => { f.registry.digest = "changed"; f.unreadable(); }],
+    // A sign-out needs no tokens file: the session store no longer holds the session.
+    ["signed out, tokens file unreadable", (f) => { f.sessions.destroy(f.session.id, "elsewhere"); f.unreadable(); }],
+    ["signed out, enrollment unreadable", (f) => { f.sessions.destroy(f.session.id, "elsewhere"); f.enrollment("unreadable"); }],
+  ]) {
+    const f = fixture({ idleMs: 3600000 }), out = await f.launch(); f.bind(out); assert.equal((await f.authorize(out)).ok, true);
+    const slow = f.slowFleet();
+    change(f); f.advance(1000);
+    const ticking = f.broker.tick();
+    assert.deepEqual(f.revokes.map((r) => [r.intentId, r.reason]), [[out.intentId, "session-ended"]], `${why}: revoked by the early pass`);
+    slow.release(); await ticking;
+    assert.deepEqual([f.revokes.length, f.renews.length], [1, 0], why);
+    await f.broker.close();
+  }
+});
+test("an unreadable file while a tick is in flight: neither pass revokes, the tick in flight renews nothing, and the lapsed attachment goes at its next refused renewal (issue #1122)", async () => {
+  for (const [what, unreadable] of unreadableFiles) {
+    const f = fixture({ idleMs: 3600000 }), { out, theirs } = await twoDrivers(f), renewals = f.renews.length, slow = f.slowFleet();
+    f.advance(1000); const first = f.broker.tick(); await slow.entered;
+    unreadable(f);
+    f.advance(1000); await f.broker.tick();
+    assert.equal(f.revokes.length, 0, `${what}: the early pass of the next tick revokes nothing`);
+    slow.release(); await first;
+    assert.deepEqual([f.revokes.length, f.renews.length], [0, renewals], `${what}: and the tick in flight, judging after its fleet read, neither revokes nor renews`);
+    // Unreadable past the lease: the store refuses the next renewal, and that attachment is no longer held.
+    for (let n = 0; n < 5; n++) { f.advance(1000); await f.broker.tick(); }
+    f.store.renewAuthorization = async (input) => { f.renews.push(input); return input.intentId === out.intentId ? { refused: "authorization-expired" } : { ok: true }; };
+    const mine = renewed(f, out.intentId).length, others = renewed(f, theirs.intentId).length;
+    unreadable(f, false); f.advance(1000); await f.broker.tick(); f.advance(1000); await f.broker.tick();
+    assert.deepEqual([renewed(f, out.intentId).length - mine, renewed(f, theirs.intentId).length - others, f.revokes.length], [1, 2, 0], `${what}: dropped unrevoked, the other renewed on each tick`);
+    await f.broker.close();
+  }
+});
+test("only a refusal from the token reader is unknown: an answer with no file and no refusal is lost, as before (issue #1122)", async () => {
+  for (const answer of [{}, null, undefined, { file: null }, { refusal: "unreadable" }]) {
+    const f = fixture({ idleMs: 3600000 }), out = await f.launch(); f.bind(out); assert.equal((await f.authorize(out)).ok, true);
+    f.tokenAnswer(() => answer); f.advance(1000); await f.broker.tick();
+    const lost = !answer?.refusal;
+    assert.deepEqual(f.revokes.map((r) => [r.intentId, r.reason]), lost ? [[out.intentId, "session-ended"]] : [], JSON.stringify(answer) ?? "undefined");
+    assert.equal(f.renews.length, 0, JSON.stringify(answer) ?? "undefined");
+    await f.broker.close();
+  }
+});
+test("a launch nobody authorized is still revoked once its pending time is up, while a file cannot be read (issue #1122)", async () => {
+  // The pending bound frees a sign-in's launch slots; it does not rest on either file.
+  for (const [what, unreadable] of unreadableFiles) {
+    const f = fixture({ idleMs: 3600000 }), out = await f.launch();
+    unreadable(f); f.advance(GATEWAY_BROKER_LIMITS.pendingMs); await f.broker.tick();
+    assert.deepEqual(f.revokes.map((r) => [r.intentId, r.reason]), [[out.intentId, "session-ended"]], what);
+    await f.broker.close();
+  }
+});
+test("a remembered device whose record cannot be read is unknown too, while an ended device revokes (issue #1122)", async () => {
+  for (const [verdict, revoked] of [[{ unjudged: true }, 0], ["device", 1]]) {
+    let device = null;
+    const f = fixture({ idleMs: 3600000, deviceVerdict: () => device }), other = f.file.tokens[1];
+    const signedIn = f.sessions.peek(f.sessions.ensureDevice({ deviceHash: "d".repeat(64), name: other.name, role: other.role, tokenHash: other.sha256, generation: 0 }).id, f.file);
+    const out = await f.launch(undefined, signedIn); f.bind(out); assert.equal((await f.authorize(out, OTHER, signedIn)).ok, true);
+    device = verdict; f.advance(1000); await f.broker.tick();
+    assert.deepEqual([f.revokes.length, f.renews.length], [revoked, 0], JSON.stringify(verdict));
+    await f.broker.close();
+  }
 });
 
 function watchingRoom() {
