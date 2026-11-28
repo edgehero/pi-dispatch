@@ -13,6 +13,10 @@ const VARIABLE = "MANAGER_VARIABLE_TOOL_CANARY";
 const PRIVATE = "/Users/private-tool-person/root";
 const REF = "PRIVATE_REFERENCE_TOOL_CANARY";
 const VALUE = "PRIVATE_VALUE_TOOL_CANARY";
+// The Valkey the registered tools' connections read is given: one no client can be built for, so its publication
+// reads fail at once, before any connection (issue #1121). Left to the environment, that read went to
+// redis://127.0.0.1:6379 when VALKEY_URL was unset (a developer's own Redis) and to CI's shared Valkey when it was set.
+const NO_VALKEY_URL = "not-a-url";
 const paths = { projectsFile: "/deployment/projects.json", scopedLimitsPath: "/deployment/scoped-limits.json", settingsFile: "/deployment/settings.json", logsDir: "/deployment/logs", triggersPath: "/deployment/triggers.json" };
 function fleetOf(snapshot, calls, { failSnapshot = false, pages = [] } = {}) {
   return (_paths, opts) => {
@@ -150,7 +154,7 @@ test("registered dispatch_secrets, dispatch_connections and dispatch_projects ex
   const registered = [];
   module.default(new Proxy({}, { get: (_target, key) => key === "registerTool" ? (tool) => registered.push(tool) : () => {} }));
   const events = [];
-  module.setConfigToolReadsForTest({ projects: () => ({ projects: [{ id: "billing", name: "Billing", members: ["github:acme/billing"] }] }), limits: () => ({ limits: [] }), fleet: fleetOf(snapshotOf(), events), secrets: (args) => secretsView({ ...args, fs: { realpathSync: (p) => p } }), connections: (args) => readConnections({ ...args, reads: { environment: () => ({ env: { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: VALUE } }), endpoints: () => [], allowlist: () => [] } }), project: () => { const out = consoleProjectFixture(NOW); out.bundle.last.variables = [VARIABLE]; return out; } });
+  module.setConfigToolReadsForTest({ projects: () => ({ projects: [{ id: "billing", name: "Billing", members: ["github:acme/billing"] }] }), limits: () => ({ limits: [] }), fleet: fleetOf(snapshotOf(), events), secrets: (args) => secretsView({ ...args, fs: { realpathSync: (p) => p } }), connections: (args) => readConnections({ ...args, paths: { ...args.paths, valkeyUrl: NO_VALKEY_URL }, reads: { environment: () => ({ env: { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: VALUE } }), endpoints: () => [], allowlist: () => [] } }), project: () => { const out = consoleProjectFixture(NOW); out.bundle.last.variables = [VARIABLE]; return out; } });
   try {
     for (const name of ["dispatch_secrets", "dispatch_connections", "dispatch_projects"]) {
       const tools = registered.filter((tool) => tool.name === name);
@@ -158,6 +162,8 @@ test("registered dispatch_secrets, dispatch_connections and dispatch_projects ex
       const response = await tools[0].execute("call", {}, null, null, { hasUI: false, ui: { confirm() { throw Error("read tools must not ask for a confirmation"); } } });
       const parsed = JSON.parse(response.content.find((c) => c.type === "text").text);
       noSecrets(parsed);
+      // Its publication reads reached no Valkey: one that answered would say "reported" and a complete receiver list.
+      if (name === "dispatch_connections") assert.deepEqual([parsed.endpointStatus.state, parsed.receivers.complete], ["unknown", false], "the publication reads reached no Valkey");
       assert.ok(name === "dispatch_secrets" ? parsed.profiles.some((p) => p.name === "prod") : name === "dispatch_connections" ? parsed.mcp.servers.some((s) => s.name === "tracker" && s.referenceCount === 1) : parsed.projects[0].suggestion.action.action === "limit-edit" && parsed.projects[0].suggestion.action.index === 2);
     }
     assert.equal(events.filter(([key]) => key === "dispose").length, 3);
