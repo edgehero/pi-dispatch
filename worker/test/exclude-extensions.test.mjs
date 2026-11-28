@@ -527,7 +527,13 @@ test("the docs' numbers and lists are the code's", () => {
 	assert.match(designText, /Traces to\*\*: `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`/);
 	const interfacesText = flat("specs/interfaces.md");
 	assert.doesNotMatch(interfacesText, /before a table has a row|a worker at the tag|`INT-CONTAINER-JOB-INPUTS` AMENDED\*\*: `PI_EXCLUDE_EXTENSIONS`/);
-	assert.ok(interfacesText.slice(interfacesText.indexOf("## INT-CONTAINER-RUNTIME-CONTRACT"), interfacesText.indexOf("## INT-CONTAINER-RUNTIME-CONTRACT") + 60000).includes("`PI_EXCLUDE_EXTENSIONS`"), "the variables are in the contract the spec names");
+	// Issue #1118: the entry runs from its own heading to the next one, never to a character count, so a longer contract
+	// cannot push the name out of a test that asks whether the contract names it.
+	const rawInterfaces = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
+	const contractAt = rawInterfaces.indexOf("\n## INT-CONTAINER-RUNTIME-CONTRACT\n");
+	assert.ok(contractAt >= 0, "specs/interfaces.md has an INT-CONTAINER-RUNTIME-CONTRACT entry");
+	const contractEnd = rawInterfaces.indexOf("\n## ", contractAt + 1);
+	assert.ok(rawInterfaces.slice(contractAt, contractEnd < 0 ? undefined : contractEnd).replace(/\s+/g, " ").includes("`PI_EXCLUDE_EXTENSIONS`"), "the variables are in the contract the spec names");
 	assert.match(upgrading, /3\. \*\*Upgrade the job image\.\*\* Pull the release's image and point `PI_JOB_IMAGE` at it\. An image a trigger names in `run\.image` moves too/, "the order's own step, which said PI_JOB_IMAGE alone");
 		assert.match(doc, /\| 5\.0\.0 or later \| It runs the job as the file says \| It refuses the file: `run\.excludeExtensions needs triggers file version 2` \|/);
 	assert.doesNotMatch(doc, /every writer stamps|the file refuses to load/);
