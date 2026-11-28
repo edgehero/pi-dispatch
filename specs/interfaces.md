@@ -38,7 +38,6 @@ Evidence convention as in `constitution.md`.
 
   ```typescript
   enforceOfflineMode(process.env);     // BEFORE the runtime: create() reads PI_OFFLINE once, at construction
-  enforceTelemetryOff(process.env);    // PI_TELEMETRY overrides the setting at 0.99.1; forced to "0". See (m)
   // Prefer the operator overlay's models.json when the :ro overlay is mounted (REQ-GLOBAL-PI-OVERLAY) --
   // how a CUSTOM provider/model becomes resolvable. Definitions only; the key still flows env -> auth.json.
   const modelsPath = existsSync("/opt/pi-global/models.json") ? "/opt/pi-global/models.json" : `${agentDir}/models.json`;
@@ -184,7 +183,7 @@ Evidence convention as in `constitution.md`.
     modelRuntime,                          // the SAME instance the meter proved
     model,
     sessionManager,
-    // retry pinned (maxAgentDelayMs 60000 included), cacheWarming "off", enableInstallTelemetry false. See (m).
+    // retry pinned (maxAgentDelayMs 60000 included), cacheWarming "off". See (m).
     settingsManager: SettingsManager.inMemory(jobSettings({ maxRetries, baseDelayMs })),
     resourceLoader,
   }));
@@ -462,13 +461,18 @@ Evidence convention as in `constitution.md`.
   `-> dist/core/provider-composer.js` (`streamWith`: a composed provider with no base resolves the api in the
   compat registry) · `-> dist/core/extensions/virtual-modules.js` and `loader.js getAliases` (extensions get pi's
   own pi-ai compat and pi-coding-agent) · `-> dist/core/settings-manager.js:664,679-682` (maxAgentDelayMs,
-  cacheWarming default "streaming"; `"idle"` since 1.5.2) · `-> dist/core/telemetry.js:6-7` (PI_TELEMETRY overrides the setting) ·
+  cacheWarming default "streaming"; `"idle"` since 1.5.2) · `-> dist/core/telemetry.js:6-7` (PI_TELEMETRY overrides the setting; gone at 1.7.0, see (m)) ·
   `-> dist/index.js` (`ModelRuntime` a value export; `AuthStorage` absent). The 0.80.7 evidence below is kept
   as the record of the previous pin. Re-verified at 1.0.3 (issue #587): the same, plus
   `-> dist/core/model-runtime.js` (`create` takes `options.credentials` and falls back to
   `AuthStorage.create(authPath)` only without it; `prepareRequest` merges the resolved credential's `env` under
   the call's `options.env`) · `-> dist/core/auth-storage.js` (`AuthStorage.inMemory(data)` over an in-memory backend;
-  a file-backed store re-reads auth.json when its revision changes).
+  a file-backed store re-reads auth.json when its revision changes). Re-verified at 1.7.0 (issue #1119): no
+  `core/telemetry.js`, no `enableInstallTelemetry` in `core/settings-defaults.js` or `settings-schema.js`, and
+  `SettingsManager` has no `getEnableInstallTelemetry` · `-> dist/core/client-identity.js` (`getClientIdentity()`
+  takes no argument and answers `attribution: PI_ATTRIBUTION`) · `-> dist/core/sdk.js:205` (every session request's
+  `identity` is that) · `-> pi-ai dist/utils/identity.js` (`getAttributionHeaders` answers no header for an
+  identity whose `attribution` is null; `getIdentityHeaders` applies below the model's, provider's and request's own).
 - **Evidence (the previous pin, 0.80.7, kept as the record)**: `npm @earendil-works/pi-coding-agent@0.80.7 →
   dist/core/sdk.d.ts → CreateAgentSessionOptions` — `authStorage?: AuthStorage` ("Default:
   AuthStorage.create(agentDir/auth.json)"), `modelRegistry?: ModelRegistry` ("Default:
@@ -570,15 +574,21 @@ Evidence convention as in `constitution.md`.
   agentDir)` consults only its arguments. It is a CLI-layer
   variable, so the session dir must be passed explicitly, and an operator who sets it gets silence.
 
-- **(m) Three settings and one env var are spend or egress controls at 0.99.1, and each is pinned against
-  pi's own default.** `cacheWarming: "off"`: pi 0.86.0 made `"streaming"` the default, which re-sends the
+- **(m) Two settings are spend controls and one request field an egress control, each pinned against pi's
+  own default.** `cacheWarming: "off"`: pi 0.86.0 made `"streaming"` the default, which re-sends the
   cached prefix with maxTokens 1 during long tool runs, for up to an hour, as paid requests the turn budget
   never sees, and pi 1.5.2 made `"idle"` the default, which also warms between agent runs. `retry.maxAgentDelayMs: 60000`: new since 0.80.7, it caps the backoff between agent retries at
   pi's own default; pinned so an upstream default change cannot move unattended retry timing. Compaction and
   branch-summary retries (`summarization_retry_*`) now use the same `retry` budget, and each is a paid call.
-  `enableInstallTelemetry: false` and `PI_TELEMETRY=0`: the env var, when set at all, OVERRIDES the setting
-  (telemetry.js), so the runner forces it (`enforceTelemetryOff`) beside `enforceOfflineMode`; in a job it
-  gates pi's attribution headers to OpenRouter, NVIDIA NIM and Cloudflare. And the model runtime is created
+  Provider attribution off: up to pi 1.6.1 a third setting, `enableInstallTelemetry: false`, and `PI_TELEMETRY=0`,
+  which overrode it and which the runner forced (`enforceTelemetryOff`), kept pi's attribution headers off a job's
+  requests (`HTTP-Referer`, `X-OpenRouter-Title` and `X-OpenRouter-Categories` to OpenRouter, an invoke origin to
+  NVIDIA NIM, a client name to OpenCode). pi 1.7.0 removed install telemetry, the setting and the variable, and puts
+  `attribution: PI_ATTRIBUTION` in every session request's identity (`client-identity.js`), so the runner sets
+  `identity.attribution` to `null` in the options of every call through either half of its meter, a ModelRuntime
+  call or a legacy pi-ai call (`usage-meter.mjs` `withoutAttribution`, issue #1119): pi-ai then adds none of those
+  headers, and an operator's own configured headers are untouched, as at 1.6.1. jobSettings pins no telemetry key, the runner writes no
+  `PI_TELEMETRY`, and the image sets none. And the model runtime is created
   with a discarding `modelsStore` and `allowModelNetwork: false`: pi's default store writes `models-store.json`
   beside modelsPath, which on the overlay's :ro mount fails EACCES once per provider on every refresh. Also
   not loaded, by construction: pi 0.99's built-in extensions (`builtin:mcp`, `builtin:codemode`,
@@ -6475,11 +6485,11 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   agent and session directory keys at runtime from `APP_NAME`, so the bolt imports pi's `config.js` to
   evaluate them, and asserts that config.js is the only module it imports for that. Two sets are
   subtracted from the namespace: the names the worker writes (`CONTAINER_ENV_NAMES`, reserved already)
-  and the ones the runner assigns before pi runs, derived from `image/runner/src` (`PI_OFFLINE`,
-  `PI_TELEMETRY` at the pin), each asserted to still be read by pi. `PI_CODING_AGENT_DIR` is the reason:
+  and the ones the runner assigns before pi runs, derived from `image/runner/src` (`PI_OFFLINE` at the pin;
+  `PI_TELEMETRY` until pi 1.7.0 stopped reading it, issue #1119), each asserted to still be read by pi. `PI_CODING_AGENT_DIR` is the reason:
   it points the job's pi at another agent directory, and with it another `auth.json`. Names pi reads
-  outside its namespace (the terminal, the OS, the editor, the proxy variables, the `llama.cpp`
-  extension's `LLAMA_BASE_URL`) are found and left out, and the bolt pins that list, so a new one is a
+  outside its namespace (the terminal, `OSC7577_TOKEN` among them since pi 1.7.0, the OS, the editor, the proxy
+  variables, the `llama.cpp` extension's `LLAMA_BASE_URL`) are found and left out, and the bolt pins that list, so a new one is a
   decision rather than a silent skip.
   **The set deliberately EXCLUDES a provider's KEY variables**, and that is what keeps
   `REQ-TRIGGER-SECRETS`' documented bound true: an `anthropic` job may still bind `OPENAI_API_KEY` for a
@@ -16442,6 +16452,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-28 (#1119) | **`INT-SDK-SESSION-OPTIONS` AMENDED**, (m) and its code block: pi 1.7.0 removed install telemetry, the `enableInstallTelemetry` setting and `PI_TELEMETRY`, so `enforceTelemetryOff` and jobSettings' telemetry key are gone (the image sets no `PI_TELEMETRY` either), and pi now puts `attribution: PI_ATTRIBUTION` in every session request's identity; the runner keeps a job's requests free of pi's attribution headers by setting `identity.attribution` to `null` on every call through either half of its meter (a ModelRuntime call or a legacy pi-ai call), which leaves an operator's configured headers as they were. CORRECTED in the same sentence: the headers that setting gated went to OpenRouter, NVIDIA NIM and OpenCode, not Cloudflare (pi-ai's `utils/identity.js` at 1.6.1 and 1.7.0). The evidence's `dist/core/telemetry.js:6-7` pin is marked gone, with a re-verified-at-1.7.0 note citing `client-identity.js`, `sdk.js:205` and pi-ai's `identity.js`; its other line pins are in files the bump left as they were (`model-runtime.js`), left the same length (`sdk.js`) or changed only below the cited lines (`settings-manager.js`). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the steering family's namespace paragraph: the runner assigns only `PI_OFFLINE` now, and `OSC7577_TOKEN` (pi-tui's program resume token, read and deleted before pi starts a child) joins the terminal names pi reads outside its namespace and leaves bindable. UNCHANGED, checked: `INT-CONTAINER-RUNTIME-CONTRACT` (no capability, mount or env name moves; the image's `PI_TELEMETRY` line was never part of it), `INT-RUNNER-EXIT-CODE-PROTOCOL` (an image call under a cap is refused `cost-cap` / `unboundable` as before). **Code evidence**: image/runner/src/config.mjs -> jobSettings; image/runner/run-job.mjs; image/runner/src/usage-meter.mjs -> withoutAttribution, markOptions, wrapModelRuntime, wrapProviderStreams; image/Dockerfile; worker/src/provider-steering.mjs (comment); worker/test/provider-steering.test.mjs -> OUTSIDE_PI_NAMESPACE; worker/test/fixtures/provider-steering-sites.json. |
 | 2026-11-28 (#1068) | **`INT-CONSOLE-SETUP-HOST` AMENDED**, its private key state: a shadowed source is a variable pi reads before the key, in the `.env` or the planner's environment, or the key's own name in that environment; one pi reads after the key is a fallback and never refuses Add or Replace, and the write leaves its line in place; while one is set the plan's `source` is never `pi-api-key`, since the worker forwards the fallback and never reads that login. UNCHANGED, checked: the request, plan and result shapes and the plan's `source` words. **Code evidence**: worker/src/setup-host.mjs -> providerPlan. |
 | 2026-11-28 (#1039, #1048) | **`INT-SANDBOX-GATEWAY-CONTRACT` AMENDED**, its "Authorization lease" bullet, a dated paragraph: the broker revokes a lost operator from the session store and one synchronous read each of the token file and enrollment at the start of every tick, before `observeTime()` and the fleet read and also while the previous tick still runs, a read that throws being left to the full judgment, and that early judgment renews nothing (the renewal's own judgment, after its `observedAt` and the fleet read, is unchanged); an attached terminal's words for the store's answers to its renewals and driver controls (admission in `gateway/src/server.mjs` keeps its own), word by word: a refusal read at or after the session's own deadline is `authorization-unavailable` whatever its word and whether or not the timer has run, since the store refuses a lapse and a revocation alike as `authorization-expired` (an answer read after the deadline but before the timer could read `session-ended` before); before it, `control-unavailable`, `control-invalid` and `intent-invalid` are `authorization-unavailable` where they were `session-ended`, an accepted renewal without a positive lease likewise, a runtime inspection that throws during a renewal is `runtime-unavailable` where it was `authorization-unavailable`, and a driver control refused `authorization-expired` before the deadline is `session-ended` (a resize's already was; the roster acknowledgement and the two watch controls were `authorization-unavailable`). Found by the rootless Podman browser stage that removes a driver's token right after a watcher joins. UNCHANGED, checked: the store's scripts and refusal words, `GATEWAY_END_REASONS` (every ending used was already a member) and the browser's `GATEWAY_END_WORDS`, the lease arithmetic (`observedAt + authMs`, `PEXPIREAT`, the gateway's request-start deadline), `REQ-SANDBOX-BROWSER-GATEWAY` (its "One window and expiry" bullet holds as written), and the watch endings of the 2026-11-02 (#754, #792, implemented) row. **Code evidence**: admin/src/console/gateway-broker.mjs -> revokeLost, live, registryFor, tick; gateway/src/session.mjs -> STORE_UNANSWERED, refusedEnding, runGatewaySession (lapsed); gateway/src/sharing.mjs -> makeSharingController (refusal) |
 | 2026-11-28 (#1114) | **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: NEW sub-bullet "How the job's env reaches the container": one function (`jobEnvArgs`) decides each entry for both builders, `-e NAME=VALUE` for a structural name, an egress variable, `TERM`, `TMOUT`, an empty value, a name the client acts on (`CLIENT_ENV_GUARD`, any case), a name no shell spells and a case twin that is not its group's upper-case spelling, and a bare `-e NAME` for every other, so every credential name the worker writes (upper case) is a name on the argv, an operator's twin of one staying inline; the client is spawned with this process's environment minus every key a bare name folds to plus the job's values (`jobClientEnv`); before the spawn `assertJobEnvArgv` reads every token but the last (the image) and requires its env flags to equal `jobEnvArgs`'s exactly, in order, refusing a fused or dangling `-e` too and checking env flags only, a refusal spawning nothing; a kept credential (never a `run.secretFiles` path variable) is logged by name as `secret_env_on_argv`; podman passes the same client env, openshell none. "Which daemon" AMENDED: the job's `docker run` gets an env now, and still describes the CLI the endpoint read asked, since no name the CLI acts on is ever bare. The `PI_FORWARD_ENV` clause reads "exact `-e NAME`". UNCHANGED, checked: `INT-SANDBOX-CONTRACT` (a sandbox's env is the terminal pair, `HOME`, the size pair and the egress set, all inline, so its argv is token for token what it was), `INT-LIVE-PROBE-CONTRACT` (no `-e` at all). **Code evidence**: worker/src/docker-run.mjs -> jobEnvArgs, jobClientEnv, assertJobEnvArgv, CLIENT_ENV_GUARD, BARE_ENV_NAME; worker/src/run-container.mjs -> makeRunContainer (clientEnv, `secret_env_on_argv`) |

@@ -448,6 +448,21 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: pi 1.7.0 (#1119)
+
+The job image and the worker run pi 1.7.0. pi 1.7.0 removed its install telemetry, the `enableInstallTelemetry`
+setting and `PI_TELEMETRY`, which also kept pi's attribution headers off a job's requests; the runner now keeps them off
+itself, so a job sends a provider the headers it sent before. pi now prices an image model's output at its image output
+price, and the cost cap bounds a model that has one at that price.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Job image and workers | Both run pi 1.7.0. Upgrade the image first, then every worker, as [the order](#the-order) says. The image no longer sets `PI_TELEMETRY`, which nothing reads any more. |
+| Overlay `models.json` | Same shape. pi 1.7.0 reads two more keys, `cost.imageOutput` (on a model's table or in `modelOverrides`, a number) and `compat.supportsReasoningReplay` (Bedrock, a boolean), and a worker from this release checks both the way pi does. A model with an image output price above 0 counts as priced: a job on a declared endpoint's model that has one reserves in the dollar windows, and the cap bounds its output at that price. |
+| Mixed versions | Nothing to order beyond the image first. An older worker loads the two keys without checking them and counts a model priced only by its image output as free; an older image's pi ignores them. |
+
+See [codemode's models](mcp.md) and [what the cap charges](costs.md#what-the-cap-charges).
+
 ### Unreleased: a Qwen Token Plan provider on the shared key reads as set by it (#1068)
 
 Since pi 1.6.0 each Qwen Token Plan provider reads its own variable first and then the region variable both plans
