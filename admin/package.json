@@ -63,7 +63,7 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.6.1",
+    "@earendil-works/pi-coding-agent": "1.7.0",
     "@edgehero/pi-dispatch": "*",
     "esbuild": "^0.28.1",
     "moment": "2.31.0",
