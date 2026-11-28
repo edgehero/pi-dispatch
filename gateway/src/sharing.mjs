@@ -7,9 +7,14 @@ export function sharingFrame(room) {
 export const geometryFrame = room => ({ type: "geometry", ...room.geometry });
 
 /** No bytes or authority are stored here. Redis owns consent, revisions and attachment identity. */
-export function makeSharingController({ store, intent, connectionId, browserHash, ws, authorized, fail, onLocalStop = () => {}, audit = async () => {} }) {
+export function makeSharingController({ store, intent, connectionId, browserHash, ws, authorized, lapsed = () => false, fail, onLocalStop = () => {}, audit = async () => {} }) {
 	let revision = -1, geometryRevision = -1, chain = Promise.resolve(), pendingControls = 0;
 	const identity = { intentId: intent.intentId, connectionId, browserHash };
+	// The store refuses a control of a revoked driver with the same word it refuses that driver's renewal with, so the
+	// browser reads the same ending whichever of the two reaches the store first (issues #1039, #1048). A new watcher
+	// makes the driver's page acknowledge the roster at once; a console revoking that driver meanwhile is a session end.
+	// Read after the session's own deadline, the same word is the lapse, as for a renewal.
+	const refusal = result => new Error(!lapsed() && result.refused === "authorization-expired" ? "session-ended" : "authorization-unavailable");
 	const send = value => {
 		if (!authorized() || ws.readyState !== 1) return;
 		const wire = JSON.stringify(value);
@@ -35,7 +40,7 @@ export function makeSharingController({ store, intent, connectionId, browserHash
 	async function apply(method, extra, force = false) {
 		if (!authorized()) return;
 		const result = await store[method]({ ...identity, ...extra });
-		if (!result.ok || !result.room) throw new Error(result.refused === "authorization-expired" ? "session-ended" : "authorization-unavailable");
+		if (!result.ok || !result.room) throw refusal(result);
 		if (authorized()) observe(result.room, force);
 	}
 	return {
@@ -70,11 +75,11 @@ export function makeSharingController({ store, intent, connectionId, browserHash
 				// Revocation still happens when accounting fails. Enabling never does.
 				if (accountingFailed && policy && extra.enabled) throw new Error("audit-unavailable");
 				const result = await store[method]({ ...identity, ...extra });
-				if (!result.ok || !result.room) throw new Error("authorization-unavailable");
+				if (!result.ok || !result.room) throw refusal(result);
 				try { await audit(kind, intent, connectionId, reason); } catch { accountingFailed = true; }
 				if (accountingFailed) throw new Error("audit-unavailable");
 				if (authorized()) observe(result.room, true);
-			}).catch(error => fail(error.message === "audit-unavailable" ? "audit-unavailable" : "authorization-unavailable")).finally(() => { pendingControls--; });
+			}).catch(error => fail(["audit-unavailable", "session-ended"].includes(error.message) ? error.message : "authorization-unavailable")).finally(() => { pendingControls--; });
 			return true;
 		},
 		get settled() { return chain; },

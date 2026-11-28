@@ -40,14 +40,14 @@ export function makeGatewayBroker({ redis, sessions, readTokens, findToken, read
   const protocolRefusal = (result) => refusal(["watch-limit", "watch-disabled", "watch-removed", "driver-ended", "self-watch"].includes(result?.refused) ? result.refused : "changed");
   const secret = () => random(32).toString("base64url");
   const full = (sessionId) => held.size + pending.size >= GATEWAY_BROKER_LIMITS.pending || [...held.values()].filter((e) => e.sessionId === sessionId).length + [...pending.values()].filter((id) => id === sessionId).length >= GATEWAY_BROKER_LIMITS.perSession;
-  const live = (session) => {
+  const live = (session, tokens = readTokens) => {
     if (closed || readOnly() || !session || session.role !== "operator") return null;
-    const file = readTokens()?.file;
+    const file = tokens()?.file;
     const current = file && sessions.peek(session.id, file);
     return current?.role === "operator" ? current : null;
   };
-  const registryFor = (entry) => {
-    const read = readRegistry();
+  const registryFor = (entry, enrollment = readRegistry) => {
+    const read = enrollment();
     return read.config && read.digest === entry.registryDigest && read.config.consoleOrigin === entry.consoleOrigin && read.config.hosts[entry.target.host]?.origin === entry.gatewayOrigin;
   };
   async function registered(target) {
@@ -62,19 +62,39 @@ export function makeGatewayBroker({ redis, sessions, readTokens, findToken, read
     held.delete(id);
     await protocol.revoke({ intentId: id, owner: entry.owner, reason });
   }
+  // Identity first (issues #1039, #1048). The token file, the console session and enrollment are synchronous reads,
+  // so an operator whose token went, whose sign-in ended or whose host's enrollment changed is revoked here at once:
+  // never after the clock and fleet reads below, and never skipped because the previous tick is still running.
+  // Revoked only after the lease it last renewed ran out, the gateway's own deadline comes first and the browser
+  // reads "could not confirm its authority" for a revocation the console had already decided. It renews nothing.
+  function revokeLost() {
+    // One read of each file serves the whole pass. A read that throws caches nothing, and each entry skips this pass.
+    let tokens, enrollment;
+    const tokensOnce = () => tokens ??= readTokens(), enrollmentOnce = () => enrollment ??= readRegistry();
+    const revoking = [];
+    for (const [id, entry] of held) {
+      let lost;
+      try { lost = !live({ id: entry.sessionId, role: "operator" }, tokensOnce) || !registryFor(entry, enrollmentOnce); } catch { continue; /* The full judgment drops it, as before. */ }
+      if (lost) revoking.push(revoke(id, entry, "session-ended").catch(() => { /* Not renewed either, so its short lease expires. */ }));
+    }
+    return Promise.all(revoking);
+  }
   async function tick() {
-    if (running || closed || held.size === 0) return;
+    if (closed || held.size === 0) return;
+    const revoked = revokeLost();
+    if (running || held.size === 0) { await revoked; return; }
     running = true;
     try {
-      // Capture Redis's instant BEFORE the current identity/registration judgment. Carry this
-      // immutable observation into every lease write; a delayed command cannot buy five new seconds.
+      // Capture Redis's instant BEFORE the identity/registration judgment each renewal rests on (the one after the
+      // fleet read, not the early one above). Carry this immutable observation into every lease write; a delayed
+      // command cannot buy five new seconds.
       let clock;
       try { clock = await protocol.observeTime(); } catch { clock = null; }
       const observedAt = clock?.ok && Number.isSafeInteger(clock.nowMs) && clock.nowMs >= 0 ? clock.nowMs : null;
       // One bounded fleet read serves every intent. Serial reads per attachment could outlive the authority lease.
       let snapshot;
       try { snapshot = await readSessions(); } catch { snapshot = { unreachable: true }; }
-      await Promise.all([...held].map(async ([id, entry]) => {
+      await Promise.all([revoked, ...[...held].map(async ([id, entry]) => {
         try {
           const current = !snapshot?.unreachable && snapshot?.sessions?.some((s) => tuple(s) === tuple(entry.target));
           if (!current || !live({ id: entry.sessionId, role: "operator" }) || !registryFor(entry)) { await revoke(id, entry, "session-ended"); return; }
@@ -85,7 +105,7 @@ export function makeGatewayBroker({ redis, sessions, readTokens, findToken, read
             if (!result?.ok) held.delete(id);
           }
         } catch { held.delete(id); /* No renewal: its short lease expires even when the control store cannot answer. */ }
-      }));
+      })]);
     } finally { running = false; }
   }
   const timer = schedule ? setInterval(tick, GATEWAY_BROKER_LIMITS.tickMs) : null;

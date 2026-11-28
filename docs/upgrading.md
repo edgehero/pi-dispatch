@@ -448,6 +448,27 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: a browser terminal whose operator was revoked says "Operator session ended" (#1039, #1048)
+
+A console from this release revokes a browser terminal whose operator lost authority (a removed or rotated token, an
+ended sign-in, a read-only console, a changed gateway enrollment) at the start of its next one-second check, before it
+reads the time and the shell registrations, and also while the previous check is still running. A slow registration
+read could hold that revocation past the five-second lease, and the terminal then ended as "Authorization could not
+be checked". A sandbox gateway from this release ends a driver the console revoked as "Operator session ended" also
+when the driver's own roster acknowledgement (sent when a watcher joins) or watch control reaches the control store
+before its renewal, where it said "Authorization could not be checked". It ends a terminal whose control store could
+not be read, or answered with something that does not parse, as "Authorization could not be checked", where it said
+"Operator session ended", and a runtime inspection that fails during a renewal as "Sandbox runtime unavailable". A
+terminal whose lease ran out with nobody revoking it says "Authorization could not be checked" also when the store's
+refusal is read a moment after the lease ended, before the gateway's own check, where it could say "Operator session
+ended". The console and the sandbox gateway: the worker, the job image and the receiver are unchanged, and nothing
+stored changes.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Control store (`sandbox-gateway:` keys) | Nothing: the same keys, scripts and refusal words. |
+| Mixed versions | Nothing to order. An older console revokes after its reads, as before; an older gateway keeps its old words. Each fixes its own half. |
+
 ### Unreleased: job credentials leave the docker and podman command line (#1114)
 
 A worker from this release starts each job's `docker run` (or `podman run`) with every credential as a bare `-e NAME`
