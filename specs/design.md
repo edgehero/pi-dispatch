@@ -6134,6 +6134,25 @@ passes are bounded (the bullet above); the session and fork-source turns are as 
   that threw, an answer with no stream) ends `aborted` with the error's message and zero usage, never `error`: the
   meter builds no message pi would auto-retry (pinned). A caller's abort while it waits ends it `aborted` with zero
   usage, and no provider is called.
+- **Amended at pi 1.7.0 (issue #1119, provider attribution)**: both halves also hand every call on with
+  `identity.attribution` set to `null` in its options (`withoutAttribution`): the runtime wrappers every ModelRuntime
+  call, the compat half every legacy pi-ai call, with or without a guard, the identity's other fields and every other
+  option as given (the dispatch mark too, so a forward is still told from a re-entry, which is claimed on the options
+  as given). pi 1.7.0 removed install telemetry, and with it the switch (`enableInstallTelemetry: false`,
+  `PI_TELEMETRY=0`) that kept pi's attribution headers off a job's session requests, and puts
+  `attribution: PI_ATTRIBUTION` in every session request's identity. pi-ai documents a null attribution as no
+  attribution headers, overriding a merged identity's, and applies an identity's headers below the model's, the
+  provider's and the request's own, so a session sends what it sent at 1.6.1 and an operator's configured headers are
+  untouched. pi-agent-core's agent loop puts pi's attribution in every call it makes, at 1.6.1 too, so an extension
+  driving its own Agent through pi-ai's legacy stream functions sent it then and sends none now. Between them the two
+  halves see every call a session, a role child, an extension or a metered pi child makes through pi. Rejected: a
+  `before_provider_headers` handler setting the headers to null (pi documents that use), which needs a registration in
+  every loader (the job's, a watch run's, each in-process role child's, each pi child's) and a hand-kept list of each
+  provider's header names. Residuals, which send pi's attribution or whatever identity their caller gives: a runner
+  whose meter did not install (it records `usage_meter_unavailable`, and a job with a cost cap or a model list is
+  refused); a pi child the meter cannot reach (the floor, OQ-011); an extension's call through pi-ai's per-api stream
+  functions imported directly, or a raw fetch, which go around the meter altogether (`docs/costs.md`); and a person's
+  own pi in the image (`pi-dispatch sandbox`), which ran with `PI_TELEMETRY=0` before.
 - **Why**: The bus is **per instance** and no event carries a session id, so a subagent session an extension
   spawns is invisible to it — a 16-wide fanout registers as roughly **one** turn, and both the cap and the
   run record then understate spend on exactly the most expensive jobs. The registry is the one choke point
@@ -6364,9 +6383,13 @@ passes are bounded (the bullet above); the session and fork-source turns are as 
       `-e <child-meter.ts> --no-mcp` FIRST in the arguments (OQ-011 M6), and hands `usage-meter.mjs` over on `globalThis`. A CLI whose
       first argument is a subcommand (`auth config install list mcp remove uninstall update`, pinned) gets no `-e`.
       It gets a ledger written `done` with zeros at once instead (part E): once `setupCli` has run, its command line
-      reads only `pi`, so the parent's detector cannot tell `pi list` from a session by its arguments.
+      reads only `pi`, so the parent's detector cannot tell `pi list` from a session by its arguments. Since pi 1.7.0
+      the first argument is read as pi's main() reads it, after `--agent-dir <dir>` is taken out wherever it stands
+      before a `--` (`piCommandArgs`, held to pi's `takeAgentDirArg` case by case, issue #1119): read off argv[2], `pi
+      --agent-dir d list` got the `-e` in front and pi read `list` as a prompt, a paid call.
       `--version` and `--export` exit before any extension loads, having spent nothing, so an exit handler ends
-      their stub `done` with zeros instead of leaving it `starting`. It does so only when the meter never started:
+      their stub `done` with zeros instead of leaving it `starting`, and so does an `--agent-dir` with no directory,
+      which pi refuses before any extension loads. It does so only when the meter never started:
       any other run that exits before the meter starts keeps its `starting` stub for the parent to judge.
     - A NESTED RUNNER takes the same route (part D, `nestedRunnerKind`): the realpath of `argv[1]` is this image's
       `run-job.mjs` and `PI_DISPATCH_RUNNER_PID` names another process. It gets the stub and `-e` first, and no
@@ -6788,6 +6811,24 @@ stays outside `PRICED_APIS` for the same reason. Its module reaches `calculateCo
 or the token counts the catalog price is applied to, and the catalog files no model under it (Radius lists its
 decision models from its gateway at run time). A classify on it under a cap is refused before dispatch as
 `unboundable`, and every decision feature runs under a cap.
+AMENDED 2026-11-28 (pi 1.7.0, #1119): `calculateCost` prices image output. A cost table may carry `imageOutput`
+(the table's, never a tier's): image output tokens are priced at it and the rest of the output at `output`, and every
+output token counts as an image token when the provider reports no split. So the bound's output rate, per table, is the
+higher of the table's `output` and its base table's `imageOutput` (1.5 x it on the synthetic long-context tier,
+whose lift at settle is 1.5 x pi's output cost); an `imageOutput` that is not a finite non-negative number makes the
+call unboundable; a model whose only price is its image rate is not zero-rated, in the bound (step 3), for `classify`
+(an output price) and for the meter (`pricedModel`). The worker reads it the same way wherever it copies the bound or
+the rate set: where it judges a job zero-rated (`isZeroCost`, with `composedCost` merging an override's `imageOutput`
+as pi's composer now does), in the first-call bound doctor's cap fit and a trigger's plan read
+(`firstCallBoundMicros`: the higher of the two output rates, null for a broken image rate), in the failover price gate
+(`failoverPriceEligible`: a broken image rate is not eligible) and in doctor's cheaper-route proposal (the image rate,
+`output` when a table has none, is compared too). The pricing façade's `isZeroRated` reads the four rates only, since
+no model it lists carries an image rate (pinned). The two image apis, `openrouter-images` (now priced through `calculateCost` at the catalog's image rate, or at
+what OpenRouter reports billing) and the new `pi-image` (Radius's, priced from its server's usage), stay outside
+`PRICED_APIS`: their one call, `generateImages`, is refused under a cap whatever its api, before any bound is asked. A
+job reaches `openrouter-images` through codemode's `models.generateImages()` and no `pi-image` model (the catalog
+files none, and a job's runtime never asks Radius's gateway). Rejected: pricing an image call from the table, which
+the provider's reported total replaces and which knows no output bound (an image model carries no `maxTokens`).
 
 
 - **Decision**: A per-job dollar cap (`PI_MAX_COST_MICROS`, integer micro-dollars) is enforced by the RUNNER,
@@ -8761,6 +8802,14 @@ decision models from its gateway at run time). A classify on it under a cap is r
   the pin, and a refused call stops the job as any refused model call does (the meter's first refusal is its stop),
   so a capped or listed job cannot try a model and carry on; an image model pi's catalog prices at zero settles at
   zero on a job with no cap, since pi prices it from the catalog alone.
+- **Amended at pi 1.7.0 (issue #1119)**: `models.generateImages()` takes a third argument, `{ aspectRatio, size }`,
+  which pi sends to OpenRouter as `image_config`; nothing the guard or the meter reads moves, and the call is refused
+  under a cap as before. pi now prices an OpenRouter image call at the catalog's `imageOutput` (every output token,
+  when OpenRouter reports no split) or at what OpenRouter reports billing, so the residual above covers fewer models:
+  70 of the catalog's 74 image models carry an image rate, and the other four (OpenRouter's three auto routers and one
+  free model) settle at zero only when OpenRouter reports no billed cost. The
+  new `pi-image` api (Radius's image models) has no model in a job's runtime: the catalog files none and the runtime
+  never asks Radius's gateway (`DES-DOLLAR-RESERVE-AND-SETTLE`).
 
 ## DES-FORGE-MCP
 
@@ -21311,6 +21360,7 @@ still checked inside its draft job: its load reads only the reference's syntax.
 
 | Date | Change |
 |---|---|
+| 2026-11-28 (#1119, pi 1.7.0) | **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED** in two places. A dated bullet: both meter halves hand every call on with `identity.attribution` null (the runtime wrappers every ModelRuntime call, the compat half every legacy pi-ai call, the dispatch mark kept), since pi 1.7.0 removed the telemetry switch that kept pi's attribution headers (OpenRouter's `HTTP-Referer`, `X-OpenRouter-Title`, `X-OpenRouter-Categories`, NVIDIA NIM's invoke origin, OpenCode's client name) off a job's session requests and now attributes every session request; a session sends the headers it sent at 1.6.1, and an extension's own Agent, which pi-agent-core attributes on every call at 1.6.1 too, sends none now; with the rejected `before_provider_headers` handler and the residuals (no meter, an unmetered child, pi-ai's per-api stream functions imported directly or a raw fetch, a person's own pi in the image). The preload bullet: the subcommand is read as pi 1.7.0's main() reads it, after `--agent-dir <dir>` is taken out (`piCommandArgs`, held to pi's `takeAgentDirArg`), where argv[2] alone let `pi --agent-dir d list` become a prompt; an `--agent-dir` with no directory ends its stub `done`. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, a dated paragraph after the 1.6.1 one: pi 1.7.0 prices image output at a table's `imageOutput`, so the bound's output rate per table is the higher of `output` and the base table's `imageOutput` (1.5 x it on the synthetic long-context tier), a broken one is unboundable, and a model priced only by it is not zero-rated in the bound, for `classify`, in the meter's `pricedModel` or in the worker's `isZeroCost` (and `composedCost` merges an override's `imageOutput`); every worker copy of the bound or the rate set reads it too: `firstCallBoundMicros` (doctor's cap fit, a trigger's plan), `failoverPriceEligible` and doctor's cheaper-route proposal, and the façade's four-rate `isZeroRated` is named as safe (no model it lists has the rate); `openrouter-images` and the new `pi-image` reach `calculateCost` but stay outside `PRICED_APIS`, since `generateImages` is refused under a cap whatever its api, and a job's runtime holds no `pi-image` model. **`DES-MCP-CODEMODE-MODELS` AMENDED**, a dated bullet: `models.generateImages()`'s new `{ aspectRatio, size }` changes nothing the guard reads; an OpenRouter image call is priced at the image rate or at what OpenRouter reports billing, so the zero-price residual narrows to four catalog models. UNCHANGED, checked: `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` (every module that sends a request still hands the built payload to `onPayload` and sends its result; the classifiers' and `pi-decision`'s one place is json-request's `postJsonRequest` now, which classifier-shared's `postClassifierRequest` only calls), `DES-MODEL-FAILOVER` (no retry or response hook moved in the files it was measured on), `DES-RECOVERY-REPLAY-CLASSES` (pi-agent-core changed its version only). **Code evidence**: image/runner/src/usage-meter.mjs -> withoutAttribution, markOptions, wrapModelRuntime, wrapProviderStreams, callCostBound, PRICE_RATES, pricedModel, PRICED_APIS (comment); image/runner/src/child-route.mjs -> piCommandArgs, injectChildMeter; image/runner/src/child-preload.mjs -> exitsBeforeExtensions; image/runner/src/config.mjs -> jobSettings; worker/src/model-endpoints.mjs -> composedCost, isZeroCost; worker/src/models-json.mjs -> ModelCost, ProviderCompat; worker/src/model-catalog.mjs -> firstCallBoundMicros; worker/src/model-status.mjs -> failoverPriceEligible; worker/src/doctor-model-proposals.mjs -> cheaperRouteChecks; worker/src/pricing.mjs -> isZeroRated (comment). |
 | 2026-11-28 (#1068) | **`DES-BROWSER-FIRST-RUN-SETUP` AMENDED**, its API-keys bullet: shadowing is judged in pi's order by the inventory and the host writer alike; a variable after the slot is a fallback that outranks nothing (the Qwen Token Plan region variable since pi 1.6.0), and a row on it alone reads configured by it with Add offered; rejected: dropping the console's environment from the rule, and an exception naming the Qwen ids. UNCHANGED, checked: `DES-OPERATOR-CONSOLE`'s own-key lines, which name a slot's variable, never a fallback. **Code evidence**: admin/src/provider-inventory.mjs -> providerKeyOrder, readProviderInventory; worker/src/setup-host.mjs -> providerPlan. |
 | 2026-11-28 (#1039, #1048) | **`DES-SANDBOX-GATEWAY-ATTACH-ONLY` AMENDED**, its "Liveness and boundaries" bullet, a dated paragraph: the broker revokes a lost operator at the start of every tick from the session store and one synchronous read each of the token file and enrollment, before the clock and fleet reads and also while the previous tick still runs, the renewal still resting on the judgment made after its own `observedAt`; a revocation the store holds reads "Operator session ended" to a driver whether its renewal or a control (the roster acknowledgement a new watcher prompts) reaches the store first; a store that could not answer reads "Authorization could not be checked", never a revocation; and a refusal read at or after the session's own deadline is the lapse whether or not its timer has run, since the store refuses a lease that ran out with the revocation's word. Why: the rootless Podman browser stage that removes a driver's token right after a watcher joins ended it as "could not confirm its authority" now and then. UNCHANGED, checked: the same bullet's lease rules (`observedAt + authMs`, the gateway's request-start deadline), the "A stolen session or revoked operator" counterexample (a revocation is still bounded by the lease and seen sooner), and "Accepted residuals" (revocation is still bounded, not instantaneous). **Code evidence**: admin/src/console/gateway-broker.mjs -> revokeLost, tick; gateway/src/session.mjs -> refusedEnding, runGatewaySession (lapsed); gateway/src/sharing.mjs -> makeSharingController (refusal) |
 | 2026-11-28 (#1117) | **`DES-OPENSHELL-VENUE` CORRECTED**, the provider paragraph: the `provider create` child's environment is the worker's own plus the values, as on every other `openshell` step (so it reaches the same gateway with the same settings), not PATH, HOME, XDG_CONFIG_HOME and the values alone, a set no release built; it runs as the worker's uid, which holds that environment already, and its argv carries the names alone. UNCHANGED, checked: `DES-PROJECT-SECRET-BUNDLES` (its openshell text names no environment for that child) and `OQ-028`'s openshell residual (the child's `/proc/<pid>/environ`, readable only by the worker's uid and root, already true). **Code evidence**: worker/src/backend-openshell.mjs -> stageRun (makeProvider, `valueEnv`). |
