@@ -46,7 +46,6 @@ export async function subscriptionPiChild({ root, entry, model = OPENAI_MODEL, a
 		PI_CODING_AGENT_DIR: join(root, "agent"),
 		TMPDIR: process.env.TMPDIR ?? tmpdir(),
 		PI_OFFLINE: "1",
-		PI_TELEMETRY: "0",
 		// What openChildLedger leaves in a job's environment for every descendant.
 		PI_DISPATCH_CHILD_LEDGER: ledger,
 		PI_DISPATCH_RUNNER_PID: runnerIdentity(process.pid),

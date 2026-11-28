@@ -17,6 +17,9 @@ test("console observations share the actual failover model composition and coold
 	assert.equal(readModelCooldowns, workerCooldowns);
 	assert.equal(failoverPriceEligible(model), true, "a verified zero-rate table is priced");
 	for (const bad of [{ ...model, api: "pi-messages" }, { ...model, maxTokens: 0 }, { ...model, cost: { ...model.cost, output: NaN } }, { ...model, cost: { ...model.cost, input: -1 } }, { ...model, cost: { input: 0, output: 0 } }]) assert.equal(failoverPriceEligible(bad), false);
+	// Issue #1119: pi 1.7.0's optional imageOutput is a rate the runner's bound reads; a broken one it cannot bound.
+	for (const imageOutput of [-1, NaN, "30", null]) assert.equal(failoverPriceEligible({ ...model, cost: { ...model.cost, imageOutput } }), false, String(imageOutput));
+	assert.equal(failoverPriceEligible({ ...model, cost: { ...model.cost, imageOutput: 30 } }), true, "a usable image rate is priced");
 	assert.equal(failoverModelStatus("unknown/not-a-model").known, false);
 	const overlay = { providers: { custom: { api: "openai-completions", baseUrl: "http://192.0.2.1/v1", compat: { maxTokensField: "max_tokens" }, models: [{ id: "priced", cost: model.cost }, { id: "rate-not-enough", api: "pi-messages", cost: model.cost }] } } };
 	assert.equal(failoverModelStatus("custom/priced", { models: overlay }).priced, true);

@@ -10,6 +10,7 @@ import {
 	LOCAL_ADDRESSES,
 	MODEL_ENDPOINTS_VERSION,
 	baseUrlTarget,
+	composedCost,
 	endpointsForModel,
 	endpointsForProvider,
 	zeroRatedVerdict,
@@ -491,6 +492,18 @@ test("zeroRatedVerdict: any priced rate, in the table or a tier, is not zero-rat
 		const models = { providers: { local: { baseUrl: ZR_URL, models: [{ id: "q", cost }] } } };
 		assert.equal(zr(models, [{ provider: "local", id: "q" }]).zeroRated, false, JSON.stringify(cost));
 	}
+});
+
+test("issue #1119: an image output rate above 0 is a price, in the table or an override, as pi 1.7.0 composes and bills it", () => {
+	// pi prices image tokens at imageOutput, and every output token as one when the server reports no split, so a model
+	// whose four rates are 0 still bills; the runner's bound says so too (callCostBound step 3).
+	const zeros = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	const own = (cost, overrides) => ({ providers: { local: { baseUrl: ZR_URL, models: [{ id: "q", cost }], ...(overrides ? { modelOverrides: { q: { cost: overrides } } } : {}) } } });
+	assert.match(zr(own({ ...zeros, imageOutput: 5 }), [{ provider: "local", id: "q" }]).why, /local\/q is not zero-rated/);
+	assert.match(zr(own(zeros, { imageOutput: 5 }), [{ provider: "local", id: "q" }]).why, /local\/q is not zero-rated/, "the override's rate, merged as pi merges it");
+	assert.deepEqual(zr(own({ ...zeros, imageOutput: 5 }, { imageOutput: 0 }), [{ provider: "local", id: "q" }]), { zeroRated: true }, "and an override of 0 frees it");
+	assert.deepEqual(zr(own({ ...zeros, imageOutput: 0 }), [{ provider: "local", id: "q" }]), { zeroRated: true });
+	assert.deepEqual(composedCost({ models: own({ ...zeros, imageOutput: 5 }, { input: 1 }), provider: "local", modelId: "q" }), { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, imageOutput: 5, tiers: undefined });
 });
 
 test("zeroRatedVerdict: modelOverrides cost applies field by field over the base, as pi composes it", () => {

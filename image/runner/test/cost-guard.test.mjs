@@ -170,6 +170,29 @@ test("callCostBound: all-zero rates are 0, an unpriced api or a broken table is 
 	assert.ok(Object.isFrozen(PRICED_APIS));
 });
 
+test("issue #1119: an image output rate bounds every output token, whatever tier applies; it is a rate like the others", () => {
+	// pi 1.7.0's calculateCost prices image tokens at the model's imageOutput and the rest of the output at the table's
+	// output, and takes every output token as an image token when the provider reports no split. So a table's output
+	// is bounded at the higher of the two, and imageOutput is read off the base table even when a tier prices the input.
+	const painter = { ...FLAT, cost: { ...FLAT.cost, imageOutput: 30 } };
+	assert.equal(callCostBound("streamSimple", painter, inputOf(10_000), {}, NO_ENV), 10_000 * 1 + 1000 * 30, "1000 output tokens at 30, not at the table's 2");
+	assert.equal(callCostBound("streamSimple", { ...FLAT, cost: { ...FLAT.cost, imageOutput: 1 } }, inputOf(10_000), {}, NO_ENV), 10_000 + 1000 * 2, "a lower image rate leaves the output rate the bound");
+	const tiered = { ...FLAT, cost: { ...painter.cost, tiers: [{ inputTokensAbove: 20_000, input: 2, output: 4, cacheRead: 1, cacheWrite: 0 }] } };
+	assert.equal(callCostBound("streamSimple", tiered, inputOf(30_000), {}, NO_ENV), 30_000 * 2 + 1000 * 30, "the tier's input, the base table's image rate");
+	// A model whose only price is its image rate is not zero-rated, and a classifier with one has an output price.
+	const imagesOnly = { ...FLAT, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, imageOutput: 9.8 } };
+	assert.equal(callCostBound("streamSimple", imagesOnly, inputOf(10_000), {}, NO_ENV), Math.ceil(1000 * 9.8));
+	assert.equal(callCostBound("classify", { ...imagesOnly, api: "openai-decisions" }, inputOf(10_000), {}, NO_ENV), Infinity, "pi exposes no output bound for classify");
+	assert.equal(callCostBound("streamSimple", { ...FLAT, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, imageOutput: 0 } }, inputOf(10_000), {}, NO_ENV), 0, "an image rate of 0 leaves the model free");
+	for (const imageOutput of [-1, Number.NaN, "30", null]) {
+		assert.equal(callCostBound("streamSimple", { ...FLAT, cost: { ...FLAT.cost, imageOutput } }, inputOf(10_000), {}, NO_ENV), Infinity, String(imageOutput));
+	}
+	// On the synthetic long-context tier the image rate is 1.5 x too: settle lifts such a call to 1.5 x pi's output cost,
+	// whose image tokens are priced at imageOutput. Base table: 300k x 1 + 1000 x 30; synthetic: 300k x 2 + 1000 x 45.
+	const anthropicPainter = { ...painter, api: "anthropic-messages", provider: "anthropic" };
+	assert.equal(callCostBound("streamSimple", anthropicPainter, inputOf(300_000), {}, NO_ENV), 300_000 * 2 + 1000 * 45);
+});
+
 test("callCostBound rounds UP to a whole micro-dollar", () => {
 	const fractional = { ...FLAT, cost: { input: 0.1, output: 0, cacheRead: 0, cacheWrite: 0 } };
 	assert.equal(callCostBound("streamSimple", fractional, inputOf(10_004), {}, NO_ENV), 1001, "1000.4 micro-dollars is 1001, never 1000");

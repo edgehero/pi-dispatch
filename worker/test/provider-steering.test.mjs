@@ -73,7 +73,7 @@ const SITES_FILE = new URL("./fixtures/provider-steering-sites.json", import.met
 const OUTSIDE_PI_NAMESPACE = [
 	"ALACRITTY_WINDOW_ID", "CI", "COLORFGBG", "COLORTERM", "COLUMNS", "DISPLAY", "EDITOR", "GHOSTTY_RESOURCES_DIR", "GIT_SSH_COMMAND", "HF_HOME",
 	"HF_TOKEN", "HF_TOKEN_PATH", "HTTPS_PROXY", "HTTP_PROXY", "ITERM_SESSION_ID", "KITTY_WINDOW_ID", "LINES",
-	"LLAMA_API_KEY", "LLAMA_BASE_URL", "MOSH_CONNECTION", "ORCA_IMAGE_PROTOCOL", "PNPM_HOME", "ProgramFiles", "SHELL", "SSH_CLIENT",
+	"LLAMA_API_KEY", "LLAMA_BASE_URL", "MOSH_CONNECTION", "ORCA_IMAGE_PROTOCOL", "OSC7577_TOKEN", "PNPM_HOME", "ProgramFiles", "SHELL", "SSH_CLIENT",
 	"SSH_CONNECTION", "SSH_TTY", "STY", "SystemRoot", "TERM", "TERMINAL_EMULATOR", "TERMUX_VERSION",
 	"TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TMUX", "VISUAL", "WARP_SESSION_ID", "WARP_TERMINAL_SESSION_UUID",
 	"WAYLAND_DISPLAY", "WEZTERM_PANE", "WSLENV", "WSL_DISTRO_NAME", "WSL_INTEROP", "WT_SESSION",
@@ -473,7 +473,11 @@ test("the names pi reads outside its own namespace are pinned, so dropping them 
 	// `stack`: a value named `env` that is not the environment); pi-agent-core's `env.cwd` and `env.is` left with
 	// its dist/harness at pi 1.0.3 (issue #587). Pinned, so a new name pi starts reading outside its
 	// namespace is looked at rather than silently skipped. Names the SDK derivation reserves anyway are left
-	// out of this list.
+	// out of this list. pi 1.7.0's OSC7577_TOKEN (issue #1119) is the terminal's: a token a terminal that resumes
+	// programs hands its first process, which pi-tui's takeProgramResumeToken reads and deletes from the environment
+	// before pi starts a child. It selects no provider, model or endpoint and authenticates nothing a provider reads,
+	// and the runner, which runs pi as a library, never calls it; a job's pi child deletes it from its own environment.
+	// So it stays bindable like the rest.
 	const { pi, sdk } = await derive();
 	const dropped = new Set();
 	for (const { reads } of pi.sources) for (const name of reads.names.keys()) if (!name.startsWith(pi.prefix) && !sdk.has(name)) dropped.add(name);
@@ -504,7 +508,8 @@ test("pi's namespace is read through config.js alone, outside the vendored bundl
 test("the runner's own writes are derived, and only those are subtracted from pi's namespace", { skip }, async () => {
 	const { assigned } = await derive();
 	// Pinned for the reader, derived for the bolt: the assertion that matters is in the equality test.
-	assert.deepEqual([...assigned.keys()].sort(), ["PI_OFFLINE", "PI_TELEMETRY"]);
+	// PI_TELEMETRY left at pi 1.7.0 (issue #1119): pi no longer reads it, and the runner no longer writes it.
+	assert.deepEqual([...assigned.keys()].sort(), ["PI_OFFLINE"]);
 	// The runner's own names are pi's prefix and nothing of pi's: if pi ever read one, a child would act on it.
 	const { pi } = await derive();
 	for (const name of RUNNER_ENV_NAMES) assert.equal(pi.names.has(name), false, `pi now reads ${name}, a name the runner sets for its children`);

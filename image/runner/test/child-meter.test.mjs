@@ -953,6 +953,16 @@ test("injectChildMeter: -e goes FIRST, before the spawner's own -e and before an
 		assert.equal(injectChildMeter(cmd, "cli", "/m.ts"), false, sub);
 		assert.deepEqual(cmd.slice(2), [sub, "x"]);
 	}
+	// Issue #1119: read as pi 1.7.0 reads it, after `--agent-dir <dir>` is taken out (before any `--` only).
+	for (const args of [["--agent-dir", "/d", "list"], ["--agent-dir", "/d", "--agent-dir", "/e", "install", "npm:x"]]) {
+		const cmd = argv(...args);
+		assert.equal(injectChildMeter(cmd, "cli", "/m.ts"), false, args.join(" "));
+		assert.deepEqual(cmd.slice(2), args);
+	}
+	const flagged = argv("--agent-dir", "/d", "-p", "list");
+	assert.equal(injectChildMeter(flagged, "cli", "/m.ts"), true, "a prompt after the flag is still a session");
+	assert.deepEqual(flagged.slice(2), ["-e", "/m.ts", "--no-mcp", "--agent-dir", "/d", "-p", "list"]);
+	assert.equal(injectChildMeter(argv("--", "--agent-dir", "/d", "list"), "cli", "/m.ts"), true, "after `--` it is a message");
 	// rpc-entry prepends `--mode rpc` itself, so its args[0] is never a subcommand.
 	const rpc = argv("list");
 	assert.equal(injectChildMeter(rpc, "rpc", "/m.ts"), true);
@@ -963,6 +973,13 @@ test("injectChildMeter: -e goes FIRST, before the spawner's own -e and before an
 	assert.equal(exitsBeforeExtensions(["-p", "--export", "s.jsonl"]), true);
 	assert.equal(exitsBeforeExtensions(["-p", "--", "--version"]), false, "after `--` it is a message");
 	assert.equal(exitsBeforeExtensions(["-p", "hi"]), false);
+	// pi 1.7.0 refuses an `--agent-dir` with no directory and exits before any extension loads.
+	assert.equal(exitsBeforeExtensions(["-p", "--agent-dir"]), true);
+	assert.equal(exitsBeforeExtensions(["--agent-dir", "", "-p"]), true);
+	assert.equal(exitsBeforeExtensions(["--agent-dir", "/d", "-p"]), false);
+	assert.equal(exitsBeforeExtensions(["-p", "--", "--agent-dir"]), false, "after `--` it is a message");
+	assert.equal(exitsBeforeExtensions(["--agent-dir", "--version", "-p"]), false, "pi takes the flag as the directory");
+	assert.equal(exitsBeforeExtensions(["--agent-dir", "/d", "--version"]), true);
 });
 
 test("wrapperSource: the real module once, re-exported whole, and its class, compat copy and catalog handed over; without them, no class", () => {

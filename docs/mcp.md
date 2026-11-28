@@ -157,8 +157,11 @@ The job loads pi's MCP, codemode and tool_search, as the pi CLI does, and connec
   script's `models.classify()` and `models.generateImages()` are on, as in the pi CLI: each is metered with the job,
   held to its model list, and under a cost cap refused when it cannot be bounded (every image call, and a classifier
   with an output price). A refused call stops the whole job, as any model call the cap or the list refuses does, so
-  a job under a cap cannot try an image model and carry on. An image model pi's catalog prices at zero is counted
-  at zero. Since pi 1.6.1 a classify result carries the provider's `responseId`, which the script sees and the job
+  a job under a cap cannot try an image model and carry on. Since pi 1.7.0 an OpenRouter image call is counted at what
+  OpenRouter reports it billed, else at the model's prices: its image output price for the image tokens OpenRouter
+  reports, or for every output token when it reports no split. An image model the catalog prices at zero throughout
+  (OpenRouter's auto routers, a free model) is counted at zero unless OpenRouter reports a cost. The third argument pi 1.7.0 added, `{ aspectRatio, size }`, works and
+  changes none of this. Since pi 1.6.1 a classify result carries the provider's `responseId`, which the script sees and the job
   records nowhere, and an OpenRouter System One answer is counted at what OpenRouter billed rather than at the catalog
   price. A Radius decision model is refused under a cap, its cost coming from Radius's server
   ([costs.md](costs.md#pi-140-summaries-and-radius)). `"codemodeModels": false` at the top of the overlay's

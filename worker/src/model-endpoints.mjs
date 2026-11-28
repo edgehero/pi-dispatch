@@ -413,6 +413,7 @@ export function endpointsForProvider({ models, provider, endpoints }) {
  *      (`builtinModel(provider, id)`, injected so this module never imports pi). Neither: `null`;
  *   2. the OVERRIDE: `modelOverrides.<id>.cost`, field by field over the base (`applyModelOverride`), and only on a
  *      chat model (pi skips the override on an image or classifier model). The overlay's own models are chat models.
+ *      Since pi 1.7.0 the fields are the four rates, `imageOutput` and `tiers` (issue #1119).
  */
 export function composedCost({ models, provider, modelId, builtinModel }) {
 	const entry = providerOf(models, provider);
@@ -433,15 +434,20 @@ export function composedCost({ models, provider, modelId, builtinModel }) {
 	const cost = override !== null && typeof override === "object" ? override.cost : undefined;
 	if (cost === undefined || cost === null) return base;
 	if (typeof cost !== "object" || Array.isArray(cost)) return null;
-	return { input: cost.input ?? base.input, output: cost.output ?? base.output, cacheRead: cost.cacheRead ?? base.cacheRead, cacheWrite: cost.cacheWrite ?? base.cacheWrite, tiers: cost.tiers ?? base.tiers };
+	return { input: cost.input ?? base.input, output: cost.output ?? base.output, cacheRead: cost.cacheRead ?? base.cacheRead, cacheWrite: cost.cacheWrite ?? base.cacheWrite, imageOutput: cost.imageOutput ?? base.imageOutput, tiers: cost.tiers ?? base.tiers };
 }
 
 const RATE_KEYS = ["input", "output", "cacheRead", "cacheWrite"];
 
-/** Every rate of a cost table and of each of its tiers is exactly 0. A rate that is absent or not a number is not 0. */
+/**
+ * Every rate of a cost table and of each of its tiers is exactly 0. A rate that is absent or not a number is not 0.
+ * The table's `imageOutput` (pi 1.7.0, issue #1119), which pi prices image tokens at and a model may leave out, is
+ * absent or exactly 0, as the runner's bound reads a zero-rated model (callCostBound step 3).
+ */
 export function isZeroCost(cost) {
 	if (cost === null || typeof cost !== "object") return false;
 	if (!RATE_KEYS.every((k) => cost[k] === 0)) return false;
+	if (cost.imageOutput !== undefined && cost.imageOutput !== 0) return false;
 	if (cost.tiers === undefined || cost.tiers === null) return true;
 	return Array.isArray(cost.tiers) && cost.tiers.every((t) => t !== null && typeof t === "object" && RATE_KEYS.every((k) => t[k] === 0));
 }

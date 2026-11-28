@@ -28,8 +28,14 @@ export function failoverModelView(ref, { models = null, lookup = builtinModel } 
 	return view ? { ...view, contextWindow: override?.contextWindow ?? base?.contextWindow, maxTokens: override?.maxTokens ?? base?.maxTokens } : null;
 }
 
+/**
+ * Whether the runner's cost bound can price a call on this view: a priced api, an output it can bound, a positive
+ * `maxTokens`, and every rate a finite number of 0 or more, pi 1.7.0's optional `imageOutput` included when present
+ * (issue #1119: the bound reads it, and makes a call on a broken one unboundable).
+ */
 export function failoverPriceEligible(view) {
-	return Boolean(view && FAILOVER_PRICED_APIS.includes(view.api) && !outputUnboundable(view) && Number.isFinite(view.maxTokens) && view.maxTokens > 0 && ["input", "output", "cacheRead", "cacheWrite"].every((key) => Number.isFinite(view.cost?.[key]) && view.cost[key] >= 0));
+	const rate = (value) => Number.isFinite(value) && value >= 0;
+	return Boolean(view && FAILOVER_PRICED_APIS.includes(view.api) && !outputUnboundable(view) && Number.isFinite(view.maxTokens) && view.maxTokens > 0 && ["input", "output", "cacheRead", "cacheWrite"].every((key) => rate(view.cost?.[key])) && (view.cost.imageOutput === undefined || rate(view.cost.imageOutput)));
 }
 
 export function failoverModelStatus(ref, { models = null, lookup = builtinModel } = {}) {

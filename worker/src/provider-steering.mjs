@@ -70,9 +70,9 @@
  * packages it declares read (pi-tui runs in the same process). The agent and session directory keys are
  * built at runtime from pi's app name, so the bolt imports pi's `config.js` to evaluate them. Two sets are
  * subtracted: the names the worker writes into the container (`CONTAINER_ENV_NAMES`, reserved already),
- * and the ones the runner assigns before pi runs, derived from `image/runner/src` (`PI_OFFLINE`,
- * `PI_TELEMETRY`). `dist/bundle/`, the vendored single-file build, is not the code the runner loads and is
- * not scanned.
+ * and the ones the runner assigns before pi runs, derived from `image/runner/src` (`PI_OFFLINE`; `PI_TELEMETRY`
+ * until pi 1.7.0 stopped reading it, issue #1119). `dist/bundle/`, the vendored single-file build, is not the code
+ * the runner loads and is not scanned.
  *
  * THE LIMITS, stated because a set like this is only worth what its boundary is honest about.
  *

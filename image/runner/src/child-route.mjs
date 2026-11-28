@@ -37,6 +37,31 @@ export const PI_ENTRIES = Object.freeze([
 export const PI_SUBCOMMANDS = Object.freeze(["auth", "config", "install", "list", "mcp", "remove", "uninstall", "update"]);
 
 /**
+ * The arguments pi's main() reads its subcommand from, given the ones it was started with (argv[2] on), or null when pi
+ * refuses them and exits before it loads any extension. Since pi 1.7.0 main() first takes `--agent-dir <dir>` out,
+ * wherever it stands before a `--` (cli/agent-dir-arg.js takeAgentDirArg, issue #1119), so `pi --agent-dir d list` runs
+ * the subcommand, and a preload that read argv[2] alone put its `-e` in front and turned `list` into a paid prompt. A
+ * copy of pi's rule, held to it case by case in pinned-api.test.mjs: an `--agent-dir` with no directory after it is
+ * pi's error exit.
+ */
+export function piCommandArgs(args) {
+	const rest = [];
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--") {
+			rest.push(...args.slice(i));
+			break;
+		}
+		if (arg !== "--agent-dir") {
+			rest.push(arg);
+			continue;
+		}
+		if (!args[++i]) return null;
+	}
+	return rest;
+}
+
+/**
  * This process's pid namespace, as the inode number in `readlink /proc/self/ns/pid` (`pid:[4026532560]` gives
  * "4026532560"), or null where it cannot be read (no /proc: macOS, where the tests also run).
  */
@@ -112,14 +137,15 @@ export function subscriptionAdapterRoots(env) {
 /**
  * Insert `-e <meterPath> --no-mcp` first in a pi entry's arguments (argv[2] on), in place, then `-e <root>` for each
  * of `adapters` (subscriptionAdapterRoots, issue #1098), so a subscription's adapter loads right after the meter and
- * before every extension of the spawner's. False, and argv untouched, for a CLI whose first argument is a subcommand.
+ * before every extension of the spawner's. False, and argv untouched, for a CLI whose first argument is a subcommand,
+ * read as pi reads it (piCommandArgs).
  * First, not last and not before the first `--`: everything after `--` is a message, and in front of the spawner's own
  * `-e`s is what loads the meter before them (measured in both CLIs). `--no-mcp` drops only the `builtin:mcp` path from
  * the final set, so the meter still loads (pinned in child-meter.integration.test.mjs), and a spawner's own
  * `-e builtin:mcp` is dropped with it.
  */
 export function injectChildMeter(argv, kind, meterPath = CHILD_METER_PATH, adapters = []) {
-	if (kind === "cli" && PI_SUBCOMMANDS.includes(argv[2])) return false;
+	if (kind === "cli" && PI_SUBCOMMANDS.includes(piCommandArgs(argv.slice(2))?.[0])) return false;
 	argv.splice(2, 0, "-e", meterPath, CHILD_NO_MCP, ...adapters.flatMap((root) => ["-e", root]));
 	return true;
 }

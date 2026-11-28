@@ -207,6 +207,19 @@ test("getPricedModel returns the pi-ai model for known pairs and null for everyt
 	assert.equal(getPricedModel("anthropic", "constructor"), null);
 });
 
+test("issue #1119: no model the façade lists or prices carries an image output rate, so a reprice is priced as at 1.6.1", () => {
+	// pi 1.7.0's calculateCost prices every output token at `cost.imageOutput` when the usage carries no image token
+	// count, and reprice passes none (a recorded profile has no such count). That is right only while no model it prices
+	// has the rate: the catalog's image models (openrouter-images) are not chat models, which are all getBuiltinModel and
+	// getBuiltinModels hand back. A chat model that gains one fails here, and the profile must then carry the split.
+	assert.deepEqual(listPricedModels().filter((m) => m.cost.imageOutput !== undefined).map((m) => `${m.provider}/${m.id}`), []);
+	assert.equal(getPricedModel("openrouter", "google/gemini-2.5-flash-image"), null, "an image model is not one the façade prices");
+	// The premise, so the pin is about something: pi does price output at the image rate when the table has one.
+	const usage = { input: 0, output: 1000, cacheRead: 0, cacheWrite: 0, totalTokens: 1000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+	calculateCost({ cost: { input: 0, output: 2, cacheRead: 0, cacheWrite: 0, imageOutput: 30 } }, usage);
+	assert.equal(usage.cost.total, (1000 * 30) / 1_000_000);
+});
+
 // ── isZeroRated ─────────────────────────────────────────────────────────────────────────────────────────
 
 test("isZeroRated: opus false, qwen-token-plan true, kimi-for-coding false, null/{}/costless false", () => {
@@ -259,7 +272,12 @@ test("piAiVersion default path resolves the real pin, and the pricing surface is
 	// createProvider, which merges dynamic models once per refresh and returns that one array from getAllModels and
 	// getModels instead of a fresh one per call; calculateCost is byte-identical to 1.5.2's, and the runner's one
 	// caller (pinPriceTable) reads the array and copies each price, never mutating it.
+	// Re-verified at 1.7.0 (issue #1119): models.js changed only in calculateCost, which prices image output tokens at the
+	// model's `cost.imageOutput` and the rest of the output at `output`, counting every output token as an image token when
+	// the usage carries no `imageOutput` split. reprice hands it no split, so a target with an image rate would be priced
+	// as all image tokens; no model this façade lists or prices carries one (pinned in the test above), so every price it
+	// gives is the one 1.6.1 gave.
 	const models = readFileSync(join(dirname(entry), "models.js"));
-	assert.equal(createHash("sha256").update(models).digest("hex"), "2ff2fee9fba91b4bc823913c418c030c869dd4945cc81f667a894e019fc23808", `pi-ai ${realPackage.version}'s dist/models.js changed: re-verify calculateCost and the pricing surface, then update this hash`);
+	assert.equal(createHash("sha256").update(models).digest("hex"), "9ae4c0e59640369a510d9c88875808db3bf0502719c490848a5f5f0dd5197ee5", `pi-ai ${realPackage.version}'s dist/models.js changed: re-verify calculateCost and the pricing surface, then update this hash`);
 	assert.equal(piAiVersion(), piAiVersion(), "cached: repeated calls agree");
 });

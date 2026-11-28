@@ -154,6 +154,25 @@ test("a short task's first-call bound is the runner's own at that size, for ever
 	assert.equal(firstCallFloorMicros({ cost: { input: 5, output: 20, cacheRead: 1, cacheWrite: 1 }, maxTokens: 10 }), catalog.firstCallBoundMicros({ cost: { input: 5, output: 20, cacheRead: 1, cacheWrite: 1 }, maxTokens: 10 }, FIRST_CALL_MIN_CONTEXT_BYTES));
 });
 
+test("issue #1119: the first-call bound prices the output at an image output rate as the runner does, and a broken one says nothing", () => {
+	// pi 1.7.0 prices image tokens at cost.imageOutput, every output token when the provider reports no split, and an
+	// overlay model may carry it. No builtin chat model does, so the walk above cannot see this; the runner's own bound
+	// can.
+	const bytes = catalog.FIRST_CALL_SHORT_TASK_BYTES;
+	const context = { systemPrompt: "x".repeat(bytes - JSON.stringify({ systemPrompt: "" }).length) };
+	const painter = { id: "painter", provider: "mine", api: "openai-completions", baseUrl: "https://openrouter.ai/api/v1", maxTokens: 16384, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, imageOutput: 30 } };
+	assert.equal(catalog.firstCallBoundMicros(painter, bytes), callCostBound("streamSimple", painter, context, {}, {}), "the runner's bound at that size");
+	assert.equal(catalog.firstCallBoundMicros(painter, bytes), 16384 * 30, "16384 output tokens at 30");
+	assert.equal(firstCallFloorMicros(painter), 16384 * 30, "the floor is not 0 for a model priced only by its image rate");
+	const lower = { ...painter, cost: { input: 1, output: 4, cacheRead: 0, cacheWrite: 0, imageOutput: 2 } };
+	assert.equal(catalog.firstCallBoundMicros(lower, bytes), callCostBound("streamSimple", lower, context, {}, {}), "a lower image rate leaves the output rate");
+	for (const imageOutput of [-1, Number.NaN, "30", null]) {
+		const broken = { ...painter, cost: { ...painter.cost, imageOutput } };
+		assert.equal(callCostBound("streamSimple", broken, context, {}, {}), Infinity, `the premise: the runner cannot bound ${String(imageOutput)}`);
+		assert.equal(catalog.firstCallBoundMicros(broken, bytes), null, String(imageOutput));
+	}
+});
+
 test("the doctor floor keeps the runner's overhead, and stays a lower bound of the runner's own bound for every builtin chat model", () => {
 	assert.equal(FIRST_CALL_OVERHEAD_TOKENS, BOUND_OVERHEAD_TOKENS, "the copy in model-catalog.mjs follows the runner's constant");
 	// A request of exactly FIRST_CALL_MIN_CONTEXT_BYTES serialised: the floor may never exceed what the guard reserves for it.

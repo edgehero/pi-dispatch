@@ -30,7 +30,6 @@ import {
 	assertSessionMountReady,
 	commandName,
 	enforceOfflineMode,
-	enforceTelemetryOff,
 	jobSettings,
 	mountAdvisories,
 	parseRunnerEnv,
@@ -268,9 +267,6 @@ async function main() {
 	// live `npm install` at agent runtime, from inside the job, against a network the job's own input
 	// can influence. Idempotent and only ever tightening. INT-SDK-SESSION-OPTIONS.
 	enforceOfflineMode(process.env);
-	// Same moment, same reason (issue #509): pi reads PI_TELEMETRY at each call and it OVERRIDES the setting
-	// jobSettings pins, so the override is closed here, before the runtime or any request exists.
-	enforceTelemetryOff(process.env);
 	// And before anything can reach the network: loading pi (the static import above) replaced the env-proxy dispatcher
 	// NODE_USE_ENV_PROXY installed, so with egress armed the provider call went direct and died on the job's
 	// `--internal` network (issue #427). Free, and a no-op unless NODE_USE_ENV_PROXY=1 reached the container.
@@ -336,7 +332,7 @@ async function main() {
 	if (!modelRuntime.hasConfiguredAuth(model.provider)) throw configError(`no configured auth for ${cfg.provider}`);
 	assertThinkingLevel(model, cfg.thinkingLevel);
 
-	// Retry pinned, cache warming off, telemetry off: every key and why, in src/config.mjs jobSettings.
+	// Retry pinned, cache warming off: every key and why, in src/config.mjs jobSettings.
 	const settingsManager = SettingsManager.inMemory(jobSettings(cfg.retry));
 
 	// HOISTED so the root session id exists BEFORE the meter does. createAgentSession would otherwise

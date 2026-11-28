@@ -877,8 +877,10 @@ test("a payload hook that changes the model fails the call before it is sent and
 		const options = { maxTokens: 10 };
 		await new Spy().streamSimple(LISTED, {}, options).result();
 		// A cost cap adds a final-payload hook. The copy also carries the dispatch mark (issue
-		// #543), a symbol, so it never reaches a payload.
-		assert.deepEqual([Object.keys(seen[0]), seen[0].maxTokens, Object.getOwnPropertySymbols(seen[0])], [["maxTokens", "onPayload"], 10, [DISPATCH_MARK]], "a cap measures the final payload even without a model list");
+		// #543), a symbol, so it never reaches a payload, and an identity with no attribution (issue #1119), which every
+		// call through the runtime layer carries, guard or not.
+		assert.deepEqual([Object.keys(seen[0]), seen[0].maxTokens, Object.getOwnPropertySymbols(seen[0])], [["maxTokens", "onPayload", "identity"], 10, [DISPATCH_MARK]], "a cap measures the final payload even without a model list");
+		assert.deepEqual(seen[0].identity, { attribution: null });
 	} finally {
 		layer3.restore();
 	}

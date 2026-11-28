@@ -664,28 +664,6 @@ export function enforceOfflineMode(env = process.env) {
 }
 
 /**
- * Force pi's install telemetry off for this process (issue #509).
- *
- * At the 0.99.1 pin `PI_TELEMETRY`, when set at all, OVERRIDES the `enableInstallTelemetry` setting
- * (dist/core/telemetry.js: `telemetryEnv !== undefined ? isTruthyEnvFlag(telemetryEnv) : setting`), so the
- * in-memory setting the runner pins (jobSettings below) is only half the switch: a `PI_TELEMETRY=1` that
- * reached the container through PI_FORWARD_ENV or `run.secrets` would turn it back on. What it gates in a
- * job is not the install ping (interactive mode only) but pi's attribution HEADERS on OpenRouter, NVIDIA
- * NIM and Cloudflare requests (provider-attribution.js), a fingerprint of this deployment sent to a third
- * party that nobody asked for. pi reads the variable at each call, not at module load, so setting it here,
- * beside the offline mode and before the runtime, the settings or any request exist, is in time.
- *
- * Unconditional, unlike enforceOfflineMode's early return, because the canonical "off" value is the only
- * one that can be left in place: "0", "false", "no" and "" all read as off to pi, and normalising them costs
- * nothing.
- */
-// env-internal PI_TELEMETRY: pi's own override of its telemetry setting, written here and read only by pi;
-// nothing in this project sets it, and an operator's value is overwritten on purpose.
-export function enforceTelemetryOff(env = process.env) {
-	env.PI_TELEMETRY = "0";
-}
-
-/**
  * The SettingsManager.inMemory() object every job runs on (INT-SDK-SESSION-OPTIONS), one spelling for
  * run-job.mjs and for the loopback tests that must run pi the way the runner does.
  *
@@ -701,7 +679,10 @@ export function enforceTelemetryOff(env = process.env) {
  *   maxTokens 1 during long tool runs, for up to an hour, as extra PAID requests the turn budget never
  *   sees, and pi 1.5.2's default, "idle", also warms between agent runs. A job pays for its turns, not for
  *   keeping a cache warm between them.
- * - `enableInstallTelemetry: false`: see enforceTelemetryOff, which closes the env override of it.
+ *
+ * No telemetry key: pi 1.7.0 removed install telemetry, its `enableInstallTelemetry` setting and `PI_TELEMETRY`
+ * (issue #1119), and with them the switch that also kept pi's attribution headers off. Those are kept off by the
+ * meter's runtime wrapper now (usage-meter.mjs, withoutAttribution).
  *
  * inMemory() writes to the GLOBAL scope of a storage with no project file, so a serviced project's
  * .pi/settings.json cannot override any of these spend controls.
@@ -710,7 +691,6 @@ export function jobSettings(retry) {
 	return {
 		retry: { enabled: true, maxAgentDelayMs: 60_000, ...retry },
 		cacheWarming: "off",
-		enableInstallTelemetry: false,
 	};
 }
 
