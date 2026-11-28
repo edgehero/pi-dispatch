@@ -3,12 +3,16 @@ import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { field } from "./config-ui.mjs";
 import { providerHelp, PRIMARY_PROVIDER_HELP } from "../../provider-help.mjs";
-import { DECLARED_KEY_NOTES, declaredKeysView, providerInventoryView, PROVIDER_KEY_REASONS } from "../../provider-inventory.mjs";
+import { DECLARED_KEY_NOTES, declaredKeysView, providerInventoryView, providerKeyReasonParts } from "../../provider-inventory.mjs";
 import { setupFacts } from "../../setup-view.mjs";
 
 const GUIDED = PRIMARY_PROVIDER_HELP;
 const STATUS = Object.freeze({ configured: ["ok", "Set in deployment"], missing: ["idle", "Not set"], managed: ["idle", "Managed subscription"], shadowed: ["attention", "Other credential takes precedence"], unknown: ["attention", "Source unknown"], unsupported: ["idle", "Provider setup required"] });
-const SOURCE = Object.freeze({ "deployment-env": "Present in the deployment's .env. Presence does not verify that a key works.", managed: "A managed subscription binding selects the credential. Review its host-owned connection below.", shadowed: "A different credential source takes precedence. Review it on the deployment host before changing this slot.", "pi-fallback": "No deployment key is set. The configured host pi-login fallback may supply a credential.", missing: "No key is declared for this slot.", unknown: "The credential source could not be established safely. Check the deployment on its host.", special: "This provider needs its own authentication setup instead of a general API-key paste." });
+// Issue #1068: a configured row whose slot is unset is configured by the shared variable pi reads in its place.
+const FALLBACK_BADGE = Object.freeze(["ok", "Shared key set"]);
+const SOURCE = Object.freeze({ "deployment-env": "Present in the deployment's .env. Presence does not verify that a key works.", managed: "A managed subscription binding selects the credential. Review its host-owned connection below.", shadowed: "A different credential source takes precedence. Review it on the deployment host before changing this slot.", "pi-fallback": "No deployment key is set. The configured host pi-login fallback may supply a credential.", "fallback-key": "This slot is not set. The variable pi reads in its place is set; presence does not verify that a key works.", missing: "No key is declared for this slot.", unknown: "The credential source could not be established safely. Check the deployment on its host.", special: "This provider needs its own authentication setup instead of a general API-key paste." });
+// A variable name in a sentence, set as the slot's own key is, so a long one wraps rather than widening a phone's page.
+const keyName = key => html`<span class="code pk-key">${key}</span>`;
 const name = provider => providerHelp(provider).label === "Custom provider" ? provider : providerHelp(provider).label;
 const can = (view, action) => view.role === "operator" && !view.readOnly && setupFacts(view.data?.setup, { role: view.role }).actions.includes(action);
 const actionFor = mode => mode === "replace" ? "setup-provider-key-replace" : "setup-provider-key";
@@ -67,7 +71,7 @@ function guide(provider) {
 
 function row(view, item, declared) {
   const shortcut = item.mode && can(view, actionFor(item.mode));
-  return html`<li class="pk-row" data-provider="${item.provider}"><div class="pk-row__title">${ui.icon("key", { size: "sm" })}<b>${name(item.provider)}</b>${item.usage.includes("default") ? ui.chip("Default") : null}${ui.badge(...STATUS[item.status])}</div>${item.key ? html`<span class="code pk-key">${item.key}</span>` : null}<p class="pk-note">${SOURCE[item.source]}${item.providers.length > 1 ? ` Shared by ${item.providers.join(", ")}; a change affects all of them.` : null}</p>${declaredLine(item, item.key ? declared.slots.get(item.key) : undefined)}${item.reason && PROVIDER_KEY_REASONS[item.reason] ? html`<p class="pk-note">${PROVIDER_KEY_REASONS[item.reason]}</p>` : null}${shortcut ? html`<fieldset data-config-controls disabled><button class="btn btn--ghost btn--sm" type="button" data-provider-pick="${item.provider}" data-provider-mode="${item.mode}" aria-label="${`${item.mode === "replace" ? "Replace" : "Add"} key for ${name(item.provider)}`}">${item.mode === "replace" ? "Replace key" : "Add key"}</button></fieldset>` : null}</li>`;
+  return html`<li class="pk-row" data-provider="${item.provider}"><div class="pk-row__title">${ui.icon("key", { size: "sm" })}<b>${name(item.provider)}</b>${item.usage.includes("default") ? ui.chip("Default") : null}${ui.badge(...(item.status === "configured" && item.source === "fallback-key" ? FALLBACK_BADGE : STATUS[item.status]))}</div>${item.key ? html`<span class="code pk-key">${item.key}</span>` : null}<p class="pk-note">${SOURCE[item.source]}${item.providers.length > 1 ? ` Shared by ${item.providers.join(", ")}; a change affects all of them.` : null}</p>${declaredLine(item, item.key ? declared.slots.get(item.key) : undefined)}${providerKeyReasonParts(item) ? html`<p class="pk-note">${providerKeyReasonParts(item, keyName)}</p>` : null}${shortcut ? html`<fieldset data-config-controls disabled><button class="btn btn--ghost btn--sm" type="button" data-provider-pick="${item.provider}" data-provider-mode="${item.mode}" aria-label="${`${item.mode === "replace" ? "Replace" : "Add"} key for ${name(item.provider)}`}">${item.mode === "replace" ? "Replace key" : "Add key"}</button></fieldset>` : null}</li>`;
 }
 
 function editor(view, inventory) {

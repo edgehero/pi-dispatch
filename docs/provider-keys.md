@@ -8,6 +8,24 @@ or unknown source facts. A configured key has not been validated by this page. T
 deployment default, providers in validated trigger/model/fallback/role routes, explicit managed bindings and
 known slots that are configured but currently unused. Providers sharing one slot appear together.
 
+A row follows the order in which pi reads a provider's variables. One that pi reads before the slot outranks a key
+saved there, such as Anthropic's `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_OAUTH_TOKEN` before `ANTHROPIC_API_KEY`, so the
+row reads **Other credential takes precedence**; so does the slot's own variable when it is set in the environment the
+console runs in, since that wins over the `.env`. One that pi reads after the slot is a fallback, read only while the
+slot is unset. Since pi 1.6.0 each Qwen Token Plan provider reads its own variable first and then the region variable
+both plans used to share:
+
+| Provider | Slot | Fallback |
+|---|---|---|
+| `qwen-token-plan` | `QWEN_TOKEN_PLAN_TEAM_API_KEY` | `QWEN_TOKEN_PLAN_API_KEY` |
+| `qwen-token-plan-individual` | `QWEN_TOKEN_PLAN_INDIVIDUAL_API_KEY` | `QWEN_TOKEN_PLAN_API_KEY` |
+| `qwen-token-plan-cn` | `QWEN_TOKEN_PLAN_TEAM_CN_API_KEY` | `QWEN_TOKEN_PLAN_CN_API_KEY` |
+| `qwen-token-plan-individual-cn` | `QWEN_TOKEN_PLAN_INDIVIDUAL_CN_API_KEY` | `QWEN_TOKEN_PLAN_CN_API_KEY` |
+
+With only the fallback set, the row reads **Shared key set** and names both variables: its jobs run on the shared
+one. **Add key** saves the provider's own variable, which pi prefers from then on, and leaves the shared one in place
+for the other plan that reads it. With the provider's own variable set, the shared one does not change the row.
+
 A row's status is this host's sources alone. A trigger may bring its own key instead: its `run.secrets` binds the
 provider's API-key variable, and every call its jobs make to that provider, for its own model, a watch rule's
 `decide` model or an auxiliary model, then spends that key and never reads the host's
@@ -81,7 +99,8 @@ across Add and Replace, for no more than 60 seconds.
 
 A managed binding continues to own its provider even when disconnected. An inherited environment credential
 or higher-priority bearer/OAuth source may also make an environment-file key ineffective. Those cases show
-host recovery instead of silently replacing a different source. Where a host pi API-key login is the fallback,
+host recovery instead of silently replacing a different source. A fallback pi reads after the slot never does: Add
+goes ahead beside it and writes the slot's line alone. Where a host pi API-key login is the fallback,
 the preview explicitly explains that a deployment key will take precedence; it never edits `auth.json`.
 
 Saving a key does not reload a running worker or validate the key through paid inference. Restarting uses a

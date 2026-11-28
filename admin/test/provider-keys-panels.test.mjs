@@ -80,6 +80,25 @@ test("known managed or shadowed slots are disabled and unknown sources withhold 
   assert.match(doc.body.textContent, /Key changes are unavailable while credential sources are unknown/);
 });
 
+test("issue #1068: a slot pi reads a shared fallback in place of reads as set by it, names both variables, and offers Add; dispatch_connections carries the same names", () => {
+  const value = inventory();
+  value.defaultProvider = "qwen-token-plan";
+  value.rows.unshift({ provider: "qwen-token-plan", key: "QWEN_TOKEN_PLAN_TEAM_API_KEY", providers: ["qwen-token-plan"], usage: ["default", "configured"], present: false, source: "fallback-key", status: "configured", mode: "add", reason: "fallback-key", fallbackKey: "QWEN_TOKEN_PLAN_API_KEY" });
+  value.choices.push({ provider: "qwen-token-plan", key: "QWEN_TOKEN_PLAN_TEAM_API_KEY", providers: ["qwen-token-plan"], mode: "add", supported: true });
+  const doc = draw({ data: { setup: { enabled: true, actions: ["setup-provider-key", "setup-provider-key-replace"] }, connections: { providerKeys: value } } });
+  const row = doc.querySelector('[data-provider="qwen-token-plan"]');
+  assert.match(row.textContent, /Shared key set/);
+  assert.doesNotMatch(row.textContent, /Other credential takes precedence|Set in deployment|takes precedence/);
+  assert.match(row.textContent, /This slot is not set\. The variable pi reads in its place is set; presence does not verify that a key works\./);
+  assert.match(row.textContent, /pi reads QWEN_TOKEN_PLAN_API_KEY for this provider, and prefers QWEN_TOKEN_PLAN_TEAM_API_KEY once it is set\. Adding a key here leaves QWEN_TOKEN_PLAN_API_KEY in place for the other providers that read it\./);
+  assert.deepEqual(row.querySelectorAll("p.pk-note .code.pk-key").map(span => span.textContent), ["QWEN_TOKEN_PLAN_API_KEY", "QWEN_TOKEN_PLAN_TEAM_API_KEY", "QWEN_TOKEN_PLAN_API_KEY"], "each name wraps as the slot's own does");
+  assert.equal(row.querySelector("button[data-provider-pick]").getAttribute("data-provider-mode"), "add");
+  assert.equal(doc.querySelector('option[value="qwen-token-plan"]').disabled, false);
+  assert.equal(doc.querySelector('select[name="provider"]').value, "qwen-token-plan", "the default provider is the editor's first choice again");
+  const model = modelConnections({ providerKeys: value }).providerKeys.rows.find(r => r.provider === "qwen-token-plan");
+  assert.deepEqual([model.status, model.source, model.reason, model.mode, model.present, model.fallbackKey], ["configured", "fallback-key", "fallback-key", "add", false, "QWEN_TOKEN_PLAN_API_KEY"]);
+});
+
 test("intentionally withheld agent metadata is neutral while an operator's unreadable source stays actionable", () => {
   const agent = draw({ role: "agent", data: { connections: null, setup: null } });
   assert.match(agent.body.textContent, /Provider key inventory is not published in this agent view/);
