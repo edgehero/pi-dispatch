@@ -448,6 +448,21 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: a Qwen Token Plan provider on the shared key reads as set by it (#1068)
+
+Since pi 1.6.0 each Qwen Token Plan provider reads its own variable first and then the region variable both plans
+used to share (`QWEN_TOKEN_PLAN_API_KEY`, or `QWEN_TOKEN_PLAN_CN_API_KEY` for the two `-cn` providers). A console from
+this release shows a provider whose own variable is unset and whose shared one is set as **Shared key set**, where it
+showed **Other credential takes precedence**, and offers **Add key** for the provider's own variable, which pi prefers
+from then on ([the variables pi reads](provider-keys.md)). The worker's setup host, which writes that key, refused it
+the same way, so Add takes the console and the worker. Jobs are unchanged: they ran on the shared variable and still
+do until the provider's own key is saved. Anthropic's rows read as before.
+
+| Stored state | What changes and how to move it |
+|---|---|
+| `.env` | Add writes the provider's own variable and nothing else; the shared one stays for the other plan. Nothing to move. |
+| Mixed versions | A newer console beside an older worker on its host offers Add, which that worker's setup host refuses as another credential source; upgrade the worker on the console's host for Add. An older console shows the row as before. `dispatch_connections` gains the source and reason `fallback-key` and a `fallbackKey` name on such a row. |
+
 ### Unreleased: a browser terminal whose operator was revoked says "Operator session ended" (#1039, #1048)
 
 A console from this release revokes a browser terminal whose operator lost authority (a removed or rotated token, an

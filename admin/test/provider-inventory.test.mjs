@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { readProviderInventory, providerInventoryView, providerCanonicalKey, PROVIDER_SLOT_ALIASES, declaredKeyTriggers, declaredKeysView, DECLARED_KEY_TRIGGERS_MAX, DECLARED_KEY_VIA } from "../src/provider-inventory.mjs";
+import { readProviderInventory, providerInventoryView, providerCanonicalKey, providerKeyOrder, providerKeyReasonParts, PROVIDER_KEY_REASONS, PROVIDER_SLOT_ALIASES, declaredKeyTriggers, declaredKeysView, DECLARED_KEY_TRIGGERS_MAX, DECLARED_KEY_VIA } from "../src/provider-inventory.mjs";
 import { PROVIDER_KEY_NAMES } from "../src/provider-key-names.mjs";
 import { apiKeyVariable, nonApiKeyKind } from "@edgehero/pi-dispatch/provider-key";
 
@@ -427,4 +427,113 @@ test("issue #1013: an answer rule and the zeroTouch block that declare a slot's 
   assert.ok(!JSON.stringify(view).includes(SECRET));
   // The rebuild keeps only well formed holders, each once.
   assert.deepEqual(declaredKeysView({ declaredKeys: [{ key: "OPENAI_API_KEY", triggers: [], holders: [{ rule: "help" }, { rule: "help", via: "decision" }, { rule: "Bad Id" }, { zeroTouch: true, via: "decide" }, { zeroTouch: true }, {}] }] }).slots.get("OPENAI_API_KEY").holders, [{ rule: "help" }, { zeroTouch: true }]);
+});
+
+// Issue #1068: since pi 1.6.0 each Qwen Token Plan provider reads its own variable first, then the region variable both
+// plans shared. The four ids, their slot and that shared variable, from pi's generated table.
+const QWEN = Object.freeze(["qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual", "qwen-token-plan-individual-cn"]);
+const qwenRow = (provider, { file = {}, env = {}, document } = {}) => {
+  const lines = Object.entries({ PI_PROVIDER: provider, ...file }).map(([name, value]) => `${name}=${value}\n`).join("");
+  return fixture({ env: lines, ...(document ? { document } : {}) }).read({ env }).rows.find(row => row.provider === provider);
+};
+const outcome = row => ({ status: row.status, source: row.source, reason: row.reason, mode: row.mode, present: row.present, fallbackKey: row.fallbackKey });
+
+test("issue #1068: pi's order splits a provider's variables around its slot, and only the four Qwen Token Plan ids read one after it, a variable other providers read too", () => {
+  const behind = Object.keys(PROVIDER_KEY_NAMES).filter(provider => providerKeyOrder(provider).behind.length > 0);
+  assert.deepEqual(behind, [...QWEN], "a pi release that adds a fallback variable is a decision this table has to see");
+  for (const provider of QWEN) {
+    const { ahead, behind: after } = providerKeyOrder(provider);
+    assert.deepEqual(ahead, [], provider);
+    assert.deepEqual([...ahead, providerCanonicalKey(provider), ...after], PROVIDER_KEY_NAMES[provider], `${provider}: the split keeps pi's whole list in its order`);
+    // "shared" and "the other providers that read it" in the row's words are true only of a variable two providers read.
+    for (const name of after) assert.ok(Object.values(PROVIDER_KEY_NAMES).filter(names => names.includes(name)).length >= 2, `${provider}: ${name} is read by another provider too`);
+  }
+  assert.deepEqual(providerKeyOrder("anthropic"), { ahead: ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"], behind: [] }, "Anthropic's slot is its last candidate");
+  // docs/provider-keys.md restates the table for operators: held to it both ways, row for row.
+  const doc = fs.readFileSync(new URL("../../docs/provider-keys.md", import.meta.url), "utf8");
+  const table = doc.slice(doc.indexOf("| Provider | Slot | Fallback |")).split("\n\n")[0].split("\n").slice(2);
+  const tick = cell => cell.trim().replace(/^`|`$/g, "");
+  assert.deepEqual(table.map(line => line.split("|").slice(1, 4).map(tick)).sort(), behind.flatMap(provider => providerKeyOrder(provider).behind.map(name => [provider, providerCanonicalKey(provider), name])).sort());
+  assert.deepEqual(providerKeyOrder("amazon-bedrock"), { ahead: [], behind: [] });
+  assert.deepEqual(providerKeyOrder("custom-provider"), { ahead: [], behind: [] });
+});
+
+test("issue #1068: a Qwen Token Plan provider on the shared variable alone reads as configured by it, with Add offered; its own key makes the shared one irrelevant", () => {
+  for (const provider of QWEN) {
+    const slot = providerCanonicalKey(provider);
+    const [shared] = providerKeyOrder(provider).behind;
+    const configuredBy = { status: "configured", source: "fallback-key", reason: "fallback-key", mode: "add", present: false, fallbackKey: shared };
+    const own = { status: "configured", source: "deployment-env", reason: null, mode: "replace", present: true, fallbackKey: undefined };
+    // The table: where each variable is set (the deployment's .env, or this console's own environment) and what the row reads.
+    for (const [label, input, expected] of [
+      ["the shared variable alone, in the .env", { file: { [shared]: SECRET } }, configuredBy],
+      ["the shared variable alone, in this console's environment", { env: { [shared]: SECRET } }, configuredBy],
+      ["its own variable alone", { file: { [slot]: SECRET } }, own],
+      ["both, in the .env", { file: { [slot]: SECRET, [shared]: SECRET } }, own],
+      ["its own in the .env, the shared one in this console's environment", { file: { [slot]: SECRET }, env: { [shared]: SECRET } }, own],
+      ["its own in this console's environment, which outranks the .env line", { env: { [slot]: SECRET } }, { status: "shadowed", source: "shadowed", reason: "source-shadowed", mode: null, present: false, fallbackKey: undefined }],
+      ["neither", {}, { status: "missing", source: "missing", reason: "pi-fallback-possible", mode: "add", present: false, fallbackKey: undefined }],
+    ]) {
+      const row = qwenRow(provider, input);
+      assert.deepEqual(outcome(row), expected, `${provider}, ${label}`);
+      assert.ok(!JSON.stringify(row).includes(SECRET), `${provider}, ${label}: names only`);
+    }
+    const sentence = providerKeyReasonParts(qwenRow(provider, { file: { [shared]: SECRET } })).join("");
+    assert.equal(sentence, `pi reads ${shared} for this provider, and prefers ${slot} once it is set. Adding a key here leaves ${shared} in place for the other providers that read it.`);
+  }
+  // A fallback in the environment is what the worker forwards, so the pi login is not what the row waits on.
+  assert.equal(qwenRow("qwen-token-plan", { file: { PI_AUTH_FROM_PI: "0", QWEN_TOKEN_PLAN_API_KEY: SECRET } }).reason, "fallback-key");
+  // The other plan's own variable is nobody's fallback here.
+  assert.equal(qwenRow("qwen-token-plan", { file: { QWEN_TOKEN_PLAN_INDIVIDUAL_API_KEY: SECRET } }).status, "missing");
+});
+
+test("issue #1068: Anthropic's outcomes are as they were for every variable in each place, its slot being last in pi's order", () => {
+  const names = PROVIDER_KEY_NAMES.anthropic;
+  const f = fixture();
+  // Every assignment of the three variables to the .env and this console's environment, judged by the rule before issue
+  // #1068: any of them in the environment, or a variable other than the slot in the .env, shadowed the row.
+  for (let mask = 0; mask < 64; mask += 1) {
+    const file = names.filter((_, n) => mask & (1 << n));
+    const env = Object.fromEntries(names.filter((_, n) => mask & (8 << n)).map(name => [name, SECRET]));
+    fs.writeFileSync(join(f.dir, ".env"), `PI_SETTINGS_FILE=settings.json\n${file.map(name => `${name}=${SECRET}\n`).join("")}`, { mode: 0o600 });
+    const row = f.read({ env }).rows.find(r => r.provider === "anthropic");
+    const shadowed = Object.keys(env).length > 0 || file.some(name => name !== "ANTHROPIC_API_KEY");
+    const hasKey = file.includes("ANTHROPIC_API_KEY");
+    const expected = shadowed ? { status: "shadowed", source: "shadowed", reason: "source-shadowed", mode: null, present: hasKey, fallbackKey: undefined }
+      : hasKey ? { status: "configured", source: "deployment-env", reason: null, mode: "replace", present: true, fallbackKey: undefined }
+        : { status: "missing", source: "missing", reason: "pi-fallback-possible", mode: "add", present: false, fallbackKey: undefined };
+    assert.deepEqual(outcome(row), expected, `file: ${file.join(",") || "none"}; environment: ${Object.keys(env).join(",") || "none"}`);
+    assert.equal(Object.hasOwn(row, "fallbackKey"), false);
+  }
+});
+
+test("issue #1068: the projection keeps a fallback only as a variable pi reads after that row's slot, and Add on a configured row only with one", () => {
+  const row = { provider: "qwen-token-plan", usage: ["default"], present: false, source: "fallback-key", status: "configured", mode: "add", reason: "fallback-key", fallbackKey: "QWEN_TOKEN_PLAN_API_KEY" };
+  const view = rows => providerInventoryView({ state: "ready", defaultProvider: "qwen-token-plan", rows, choices: [] }).rows;
+  assert.deepEqual(view([row]), [{ provider: "qwen-token-plan", key: "QWEN_TOKEN_PLAN_TEAM_API_KEY", providers: ["qwen-token-plan"], usage: ["default"], present: false, source: "fallback-key", status: "configured", mode: "add", reason: "fallback-key", fallbackKey: "QWEN_TOKEN_PLAN_API_KEY" }]);
+  for (const [label, forged] of [
+    ["the slot itself", { fallbackKey: "QWEN_TOKEN_PLAN_TEAM_API_KEY" }],
+    ["another provider's variable", { fallbackKey: "QWEN_TOKEN_PLAN_CN_API_KEY" }],
+    ["a name pi never reads", { fallbackKey: "PATH" }],
+    ["a value in the name's place", { fallbackKey: SECRET }],
+    ["no name", { fallbackKey: undefined }],
+    ["a provider pi reads no fallback for", { provider: "anthropic", fallbackKey: "ANTHROPIC_AUTH_TOKEN" }],
+  ]) {
+    const [got] = view([{ ...row, ...forged }]);
+    assert.equal(got.source, "unknown", label);
+    assert.equal(got.mode, null, `${label}: a configured row offers Add only where pi reads a fallback in the slot's place`);
+    assert.equal(Object.hasOwn(got, "fallbackKey"), false, label);
+    assert.equal(got.reason, null, `${label}: no sentence about a shared variable pi does not read here`);
+  }
+  const [other] = view([{ ...row, source: "deployment-env" }]);
+  assert.equal(Object.hasOwn(other, "fallbackKey"), false, "a fallback name rides only on a fallback row");
+  assert.equal(other.reason, null, "and so does its reason");
+  const [anthropic] = view([{ provider: "anthropic", usage: ["default"], present: true, source: "deployment-env", status: "configured", mode: "replace", reason: "fallback-key" }]);
+  assert.equal(anthropic.reason, null, "an Anthropic row never says a shared variable stands in for its slot");
+  assert.equal(providerKeyReasonParts(anthropic), null);
+  assert.equal(view([{ ...row, present: true }])[0].mode, null, "a present slot is never Add");
+  assert.deepEqual(providerKeyReasonParts({ ...row, fallbackKey: undefined }), [PROVIDER_KEY_REASONS["fallback-key"]], "without the names the sentence is the vocabulary's own");
+  assert.deepEqual(providerKeyReasonParts({ reason: "source-shadowed" }), [PROVIDER_KEY_REASONS["source-shadowed"]]);
+  assert.deepEqual(providerKeyReasonParts(view([row])[0], name => `<${name}>`).filter((_, n) => n % 2 === 1), ["<QWEN_TOKEN_PLAN_API_KEY>", "<QWEN_TOKEN_PLAN_TEAM_API_KEY>", "<QWEN_TOKEN_PLAN_API_KEY>"], "each name, and only a name, goes through the caller's setting");
+  assert.equal(providerKeyReasonParts({ reason: "invented" }), null);
 });

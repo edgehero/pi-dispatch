@@ -184,6 +184,8 @@ export const CONFIGURATION_DRAW = Object.freeze({
   "connections-provider-multiple.operator": () => connection({ change: (_, reads) => { const original = reads.environment; reads.environment = options => { const got = original(options); return { ...got, env: { ...got.env, OPENAI_API_KEY: "fixture-only", GEMINI_API_KEY: "fixture-only" } }; }; } }),
   "connections-provider-shared.operator": () => connection({ change: (_, reads) => { const original = reads.environment; reads.environment = options => { const got = original(options); return { ...got, env: { ...got.env, MOONSHOT_API_KEY: "fixture-only" } }; }; } }),
   "connections-provider-shadowed.operator": () => connection({ change: (_, reads) => { const original = reads.environment; reads.environment = options => { const got = original(options); return { ...got, env: { ...got.env, ANTHROPIC_AUTH_TOKEN: "fixture-only" } }; }; } }),
+  // Issue #1068: the region variable both Qwen Token Plan plans shared, alone: each plan reads as set by it, Add offered.
+  "connections-provider-fallback.operator": () => connection({ change: (_, reads) => { const original = reads.environment; reads.environment = options => { const got = original(options); return { ...got, env: { ...got.env, QWEN_TOKEN_PLAN_API_KEY: "fixture-only" } }; }; } }),
   "connections-readonly.operator": () => connection({}, "operator", true),
   "connections-metadata-unreadable.viewer": () => connection({ unread: true }, "viewer"),
   "connections-unavailable.viewer": () => draw("connections", { connections: null, role: "viewer" }),

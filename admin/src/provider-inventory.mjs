@@ -26,8 +26,11 @@ export const PROVIDER_KEY_REASONS = Object.freeze({
   "pi-fallback-possible": "No deployment key is set. A host pi API-key login may be used; preview explains any source switch.",
   "special-auth": "This provider needs its supported host authentication flow, not a generic token field.",
   "custom-provider": "This custom provider has no reviewed environment-key mapping. Follow its host configuration.",
+  // Issue #1068: the slot is unset and a variable pi reads after it is set (`fallback-key` source). The row names that
+  // variable as `fallbackKey`, and `providerKeyReasonParts` puts both names in this sentence where the row has them.
+  "fallback-key": "pi reads a variable this provider shares with others, and prefers this slot once it is set. Adding a key here leaves the shared variable in place for the other providers that read it.",
 });
-const SOURCES = ["deployment-env", "managed", "shadowed", "pi-fallback", "missing", "unknown", "special"];
+const SOURCES = ["deployment-env", "managed", "shadowed", "pi-fallback", "fallback-key", "missing", "unknown", "special"];
 const STATUSES = ["configured", "missing", "managed", "shadowed", "unknown", "unsupported"];
 const USAGE = ["default", "trigger", "allowed-model", "fallback", "role", "binding", "configured"];
 const id = value => typeof value === "string" && providerIdProblem(value) === null ? value : null;
@@ -37,6 +40,29 @@ export function providerCanonicalKey(provider) {
   return key && nonApiKeyKind(key) === null ? key : null;
 }
 export const PROVIDER_SLOT_ALIASES = Object.freeze(Object.fromEntries([...new Set(Object.keys(PROVIDER_KEY_NAMES).map(providerCanonicalKey).filter(Boolean))].sort().map(key => [key, Object.freeze(Object.keys(PROVIDER_KEY_NAMES).filter(provider => providerCanonicalKey(provider) === key).sort())])));
+
+/**
+ * Issue #1068: a provider's candidates split around its slot in pi's order (`PROVIDER_KEY_NAMES` is pi's list, first
+ * read first): `ahead` the variables pi reads before the slot, `behind` those it falls back to only while the slot and
+ * every one ahead of it are unset. Since pi 1.6.0 each Qwen Token Plan provider reads its own variable first and then
+ * the region variable both plans shared, so that one is behind the slot; Anthropic's slot is its last candidate, so
+ * nothing is behind it. A provider with no slot keeps every candidate ahead, as the shadow rule read it before.
+ */
+export function providerKeyOrder(provider) {
+  const candidates = known(provider) ? PROVIDER_KEY_NAMES[provider] : [];
+  const at = candidates.indexOf(providerCanonicalKey(provider));
+  return at < 0 ? { ahead: [...candidates], behind: [] } : { ahead: candidates.slice(0, at), behind: candidates.slice(at + 1) };
+}
+
+/**
+ * A row's reason as its sentence, in parts, or null: `fallback-key` names the slot and the variable pi reads in its
+ * place, each through `name` (the panel sets them as code, which wraps a long name at a phone's width).
+ */
+export function providerKeyReasonParts(row, name = value => value) {
+  if (!row?.reason || !Object.hasOwn(PROVIDER_KEY_REASONS, row.reason)) return null;
+  if (row.reason !== "fallback-key" || !row.key || !row.fallbackKey) return [PROVIDER_KEY_REASONS[row.reason]];
+  return ["pi reads ", name(row.fallbackKey), " for this provider, and prefers ", name(row.key), " once it is set. Adding a key here leaves ", name(row.fallbackKey), " in place for the other providers that read it."];
+}
 /** Issue #1000: the trigger positions one slot's own-key line names; the rest are counted, never dropped silently. */
 export const DECLARED_KEY_TRIGGERS_MAX = 16;
 /** Issue #1029: the role models a trigger may reach a slot by alone, a watch rule's classifier or an auxiliary model. */
@@ -371,15 +397,24 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
     for (const why of usage) row.usage.add(why);
   }
   const rows = [...grouped.values()].map(row => {
-    const candidates = known(row.provider) ? PROVIDER_KEY_NAMES[row.provider] : [];
     const hasKey = environmentUnknown ? null : row.key ? present(file, row.key) : false;
     const managed = row.providers.some(provider => Object.hasOwn(bindings, provider));
-    const shadowed = candidates.some(key => definedCredential(env, key) || key !== row.key && definedCredential(file, key));
+    // Issue #1068, in pi's order. A variable pi reads before the slot outranks it wherever it is set, in the .env or in
+    // this console's own environment (Anthropic's bearer and OAuth tokens before its API key). The slot's own name in
+    // this console's environment outranks the file's line, since the shell's value wins over the .env. A variable pi
+    // reads after the slot outranks nothing: it was counted as another source too, so a Qwen Token Plan provider on the
+    // region variable both plans shared read as shadowed, with no way to add its own key, while its jobs ran on it.
+    const { ahead, behind } = providerKeyOrder(row.provider);
+    const shadowed = ahead.some(key => definedCredential(env, key) || definedCredential(file, key)) || Boolean(row.key) && definedCredential(env, row.key);
     const special = !row.key || needsHostAuthentication(row.provider);
-    const status = environmentUnknown || policyUnknown || configurationUnknown ? "unknown" : managed ? "managed" : shadowed ? "shadowed" : special ? "unsupported" : hasKey ? "configured" : "missing";
-    const source = status === "unknown" ? "unknown" : managed ? "managed" : shadowed ? "shadowed" : special ? "special" : hasKey ? "deployment-env" : "missing";
-    const reason = environmentUnknown ? "env-unreadable" : configurationUnknown ? "settings-unreadable" : policyUnknown ? "policy-unreadable" : managed ? "managed-binding" : shadowed ? "source-shadowed" : special ? known(row.provider) ? "special-auth" : "custom-provider" : !hasKey && configured.PI_AUTH_FROM_PI !== "0" ? "pi-fallback-possible" : referencesUnknown === "refused" ? "references-refused" : referencesUnknown ? "references-unreadable" : null;
-    return { ...row, usage: USAGE.filter(why => row.usage.has(why)), present: hasKey, source, status, mode: ["configured", "missing"].includes(status) ? hasKey ? "replace" : "add" : null, reason };
+    // With the slot unset in both, the first such variable that is set is what pi reads for this provider: the row is
+    // configured by it, and Add stays offered for the slot. The slot set, it is irrelevant to the row.
+    const fallbackKey = hasKey === false && !managed && !shadowed && !special ? behind.find(key => definedCredential(file, key) || definedCredential(env, key)) ?? null : null;
+    const status = environmentUnknown || policyUnknown || configurationUnknown ? "unknown" : managed ? "managed" : shadowed ? "shadowed" : special ? "unsupported" : hasKey || fallbackKey ? "configured" : "missing";
+    const source = status === "unknown" ? "unknown" : managed ? "managed" : shadowed ? "shadowed" : special ? "special" : hasKey ? "deployment-env" : fallbackKey ? "fallback-key" : "missing";
+    // A fallback in the environment is the credential the worker forwards, so pi's own login is not read for it.
+    const reason = environmentUnknown ? "env-unreadable" : configurationUnknown ? "settings-unreadable" : policyUnknown ? "policy-unreadable" : managed ? "managed-binding" : shadowed ? "source-shadowed" : special ? known(row.provider) ? "special-auth" : "custom-provider" : fallbackKey ? "fallback-key" : !hasKey && configured.PI_AUTH_FROM_PI !== "0" ? "pi-fallback-possible" : referencesUnknown === "refused" ? "references-refused" : referencesUnknown ? "references-unreadable" : null;
+    return { ...row, usage: USAGE.filter(why => row.usage.has(why)), present: hasKey, source, status, mode: ["configured", "missing"].includes(status) ? hasKey ? "replace" : "add" : null, reason, ...(source === "fallback-key" ? { fallbackKey } : {}) };
   }).sort((a, b) => (b.usage.includes("default") - a.usage.includes("default")) || a.provider.localeCompare(b.provider));
   const choices = Object.keys(PROVIDER_KEY_NAMES).map(provider => ({ provider, key: providerCanonicalKey(provider), providers: providerCanonicalKey(provider) ? [...PROVIDER_SLOT_ALIASES[providerCanonicalKey(provider)]] : [provider], mode: "add", supported: Boolean(providerCanonicalKey(provider)) && !needsHostAuthentication(provider) }));
   const inventory = providerInventoryView({ state: environmentUnknown || policyUnknown || configurationUnknown ? "unknown" : referencesUnknown ? "partial" : "ready", defaultProvider, rows, choices });
@@ -401,7 +436,13 @@ export function providerInventoryView(raw) {
     const provider = id(row?.provider);
     if (!provider) return [];
     const key = providerCanonicalKey(provider);
-    return [{ provider, key, providers: key ? [...PROVIDER_SLOT_ALIASES[key]] : [provider], usage: USAGE.filter(why => Array.isArray(row.usage) && row.usage.includes(why)), present: typeof row.present === "boolean" ? row.present : null, source: SOURCES.includes(row.source) ? row.source : "unknown", status: STATUSES.includes(row.status) ? row.status : "unknown", mode: key && !needsHostAuthentication(provider) && row.status === "configured" && row.present === true && row.mode === "replace" ? "replace" : key && !needsHostAuthentication(provider) && row.status === "missing" && row.present === false && row.mode === "add" ? "add" : null, reason: Object.hasOwn(PROVIDER_KEY_REASONS, row.reason) ? row.reason : null }];
+    const editable = key && !needsHostAuthentication(provider);
+    // Issue #1068: a fallback is a name pi reads after this provider's slot, and nothing else, so a DTO cannot put
+    // another provider's variable, Add on a configured slot, or the `fallback-key` sentence on a row pi reads no
+    // fallback for.
+    const fallbackKey = row.source === "fallback-key" && providerKeyOrder(provider).behind.includes(row.fallbackKey) ? row.fallbackKey : null;
+    const source = row.source === "fallback-key" ? fallbackKey ? "fallback-key" : "unknown" : SOURCES.includes(row.source) ? row.source : "unknown";
+    return [{ provider, key, providers: key ? [...PROVIDER_SLOT_ALIASES[key]] : [provider], usage: USAGE.filter(why => Array.isArray(row.usage) && row.usage.includes(why)), present: typeof row.present === "boolean" ? row.present : null, source, status: STATUSES.includes(row.status) ? row.status : "unknown", mode: editable && row.status === "configured" && row.present === true && row.mode === "replace" ? "replace" : editable && row.present === false && row.mode === "add" && (row.status === "missing" || row.status === "configured" && fallbackKey !== null) ? "add" : null, reason: Object.hasOwn(PROVIDER_KEY_REASONS, row.reason) && (row.reason !== "fallback-key" || fallbackKey !== null) ? row.reason : null, ...(fallbackKey ? { fallbackKey } : {}) }];
   });
   const choices = (Array.isArray(raw?.choices) ? raw.choices : []).slice(0, Object.keys(PROVIDER_KEY_NAMES).length).flatMap(row => known(row?.provider) ? [{ provider: row.provider, key: providerCanonicalKey(row.provider), providers: providerCanonicalKey(row.provider) ? [...PROVIDER_SLOT_ALIASES[providerCanonicalKey(row.provider)]] : [row.provider], mode: "add", supported: Boolean(providerCanonicalKey(row.provider)) && !needsHostAuthentication(row.provider) }] : []);
   return { state: ["ready", "partial", "unknown"].includes(raw?.state) ? raw.state : "unknown", defaultProvider: id(raw?.defaultProvider), rows, choices };

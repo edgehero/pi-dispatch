@@ -233,6 +233,62 @@ test("selected-provider Add preserves every other key and the effective default;
 	assert.equal(fs.readFileSync(path, "utf8"), after);
 });
 
+// Issue #1068: since pi 1.6.0 each Qwen Token Plan provider reads its own variable first and then the region variable
+// both plans shared, so that one is a fallback the plan's own key outranks, never a source that outranks it.
+test("issue #1068: Add of a Qwen Token Plan plan's own key goes ahead beside the shared region variable and leaves it in place, while a variable pi reads first still refuses", async () => {
+	const { providerKeyCandidates } = await import("../src/env-allowlist.mjs");
+	for (const provider of ["qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual", "qwen-token-plan-individual-cn"]) {
+		const [key, shared] = providerKeyCandidates(provider);
+		const base = `PI_PROVIDER=${provider}\n${shared}=private-shared-canary\nUNRELATED=preserve\n`;
+		const deps = await pinnedProviders(host(base));
+		const path = join(deps.cwd, ".env");
+		const p = await runSetupHost(request("setup-provider-key", "plan", { input: { provider } }), deps);
+		assert.equal(p.state, "planned", `${provider}: the shared variable in the .env`);
+		assert.equal(p.plan.key, key);
+		assert.equal(p.plan.mode, "add");
+		assert.equal(validSetupResult(p), true);
+		assert.equal(JSON.stringify(p).includes("private-shared-canary"), false);
+		const added = await runSetupHost(request("setup-provider-key", "apply", { expected: p.plan.digest, input: { provider, value: `private-${provider}` } }), deps);
+		assert.equal(added.state, "applied");
+		assert.equal(fs.readFileSync(path, "utf8"), `${base}${key}=private-${provider}\n`, "only the plan's own line is added; the shared one stays for the other plan");
+		// The shared variable in this shell instead: also a fallback.
+		const shell = await pinnedProviders(host(`PI_PROVIDER=${provider}\n`));
+		assert.equal((await runSetupHost(request("setup-provider-key", "plan", { input: { provider } }), { ...shell, env: { [shared]: "private-shared-canary" } })).state, "planned", `${provider}: the shared variable in this shell`);
+		// The plan's own key in this shell outranks the .env line, as before.
+		assert.equal((await runSetupHost(request("setup-provider-key", "plan", { input: { provider } }), { ...shell, env: { [key]: "inherited" } })).reason, "provider-shadowed", `${provider}: its own key in this shell`);
+	}
+	// Anthropic's slot is its last variable, so every other one is read first and refuses, in the .env or in this shell.
+	for (const name of ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"]) {
+		const deps = await pinnedProviders(host(`PI_PROVIDER=anthropic\n${name}=private\n`));
+		assert.equal((await runSetupHost(request("setup-provider-key", "plan", { input: { provider: "anthropic" } }), deps)).reason, "provider-shadowed", `${name} in the .env`);
+	}
+	for (const name of ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]) {
+		const deps = await pinnedProviders(host("PI_PROVIDER=anthropic\n"));
+		assert.equal((await runSetupHost(request("setup-provider-key", "plan", { input: { provider: "anthropic" } }), { ...deps, env: { [name]: "inherited" } })).reason, "provider-shadowed", `${name} in this shell`);
+	}
+});
+
+test("issue #1068: an Add beside the shared region variable names no pi login as replaced, since the worker forwards the shared variable and never reads the login", async () => {
+	const { resolveProviderCredentialAndSource } = await import("../src/env-allowlist.mjs");
+	const withLogin = async (text, env = {}) => {
+		const deps = await pinnedProviders(host(`PI_PROVIDER=qwen-token-plan\nPI_CODING_AGENT_DIR=agent\n${text}`));
+		const dir = join(deps.cwd, "agent"); fs.mkdirSync(dir, { mode: 0o700 });
+		fs.writeFileSync(join(dir, "auth.json"), JSON.stringify({ "qwen-token-plan": { type: "api_key", key: "private-login-canary" } }), { mode: 0o600 });
+		const p = await runSetupHost(request("setup-provider-key", "plan", { input: { provider: "qwen-token-plan" } }), { ...deps, env });
+		assert.equal(p.state, "planned");
+		assert.equal(JSON.stringify(p).includes("private-login-canary"), false);
+		return { source: p.plan.source, dir };
+	};
+	for (const [label, text, env] of [["in the .env", "QWEN_TOKEN_PLAN_API_KEY=private-shared\n", {}], ["in this shell", "", { QWEN_TOKEN_PLAN_API_KEY: "private-shared" }]]) {
+		const { source, dir } = await withLogin(text, env);
+		assert.equal(source, "none", `the shared variable ${label}: the preview must not say the key replaces the pi login`);
+		// What a job on this host spends: the shared variable, the login unread.
+		assert.equal(resolveProviderCredentialAndSource({ provider: "qwen-token-plan", hostEnv: { QWEN_TOKEN_PLAN_API_KEY: "private-shared" }, authFromPi: true, agentDir: dir }).source, "host-env");
+	}
+	// With no variable set, the login is what jobs spend, and the preview still says the key replaces it.
+	assert.equal((await withLogin("")).source, "pi-api-key");
+});
+
 test("provider selection and alias groups are derived exhaustively from the actual pinned mapping", async () => {
 	const deps = await pinnedProviders(host("PI_AUTH_FROM_PI=0\n"));
 	const { apiKeyVariable, needsHostAuthentication, nonApiKeyKind } = await import("../src/provider-key.mjs");

@@ -94,16 +94,25 @@ async function providerPlan(request, ctx, envRead) {
 		} catch { return failure("env-unsafe"); }
 		sources.push(policy);
 	}
-	if (candidates.some((name) => typeof ctx.env[name] === "string" && ctx.env[name] !== "")) return failure("provider-shadowed");
+	// Issue #1068, in pi's order (candidates are pi's list, first read first): a variable before the key outranks the line
+	// this writes, wherever it is set, and so does this shell's value of the key itself, which wins over the .env. One
+	// after the key is a fallback pi reads only while the key is unset (the region variable both Qwen Token Plan plans
+	// shared, since pi 1.6.0): it outranks nothing, and counting it refused an Add that takes effect. The write leaves it
+	// in place, for the other providers that read it.
+	const ahead = candidates.slice(0, candidates.indexOf(key) + 1);
+	if (ahead.some((name) => typeof ctx.env[name] === "string" && ctx.env[name] !== "")) return failure("provider-shadowed");
 	const present = deploymentServiceEnv({ env: {}, dir: ctx.dir, keys: candidates, fs: ctx.fs, uid: ctx.uid, platform: ctx.platform });
 	if (present.untrusted || present.unreadable || present.hazardSkipped?.length || present.unread?.length) return failure("env-unsafe");
-	if (candidates.some((name) => name !== key && Boolean(present.env[name]))) return failure("provider-shadowed");
+	if (ahead.some((name) => name !== key && Boolean(present.env[name]))) return failure("provider-shadowed");
 	if (String(envRead.bytes).split("\n").filter((line) => new RegExp(`^[ \\t]*(?:export[ \\t]+)?${key}[ \\t]*=`).test(line)).length > 1) return failure("env-unsafe");
 	const assigned = typeof present.env[key] === "string" && present.env[key] !== "";
 	if (mode === "add" && assigned) return failure("key-present");
 	if (mode === "replace" && !assigned) return failure("key-missing");
 	let source = assigned ? "deployment-env" : "none";
-	if (!assigned && configured.PI_AUTH_FROM_PI !== "0") {
+	// Issue #1068: with such a fallback set, in the .env or this shell, the worker forwards it and never reads the pi
+	// login (`resolveProviderCredentialAndSource`), so naming a login here would say the key supersedes one no job uses.
+	const fallback = candidates.slice(candidates.indexOf(key) + 1).some((name) => Boolean(present.env[name]) || (typeof ctx.env[name] === "string" && ctx.env[name] !== ""));
+	if (!assigned && !fallback && configured.PI_AUTH_FROM_PI !== "0") {
 		// Only identify the declaration being superseded. Its value never leaves this child,
 		// and this does not claim the provider has accepted or can spend with that credential.
 		const agentDir = resolve(ctx.dir, configured.PI_CODING_AGENT_DIR || join(ctx.serviceDeps.home, ".pi", "agent"));
