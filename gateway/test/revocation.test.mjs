@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { gatewayHash, gatewayRandom, makeGatewayStore } from "@edgehero/pi-dispatch/sandbox-gateway-protocol";
+import { GATEWAY_AUTH_MS, gatewayHash, gatewayRandom, makeGatewayStore } from "@edgehero/pi-dispatch/sandbox-gateway-protocol";
 import { makeGatewayBroker } from "../../admin/src/console/gateway-broker.mjs";
 import { makeSessionStore } from "../../admin/src/console/sessions.mjs";
 import { makeRedisClient } from "../../worker/src/connection.mjs";
@@ -15,7 +15,7 @@ const url = process.env.VALKEY_TEST_URL;
 const sha = value => createHash("sha256").update(value).digest("hex");
 
 /** A driver launched and authorized through the real broker, connected through the real store, attached as a session. */
-async function attachedDriver(t, { now } = {}) {
+async function attachedDriver(t, { now, readTokens = file => ({ file }) } = {}) {
 	const redis = makeRedisClient(url, { disconnectTimeoutMs: 0 }); redis.on("error", () => {});
 	const prefix = `gateway-revocation:${gatewayRandom().replaceAll("-", "_")}:`, real = makeGatewayStore({ redis, prefix });
 	t.after(async () => { const keys = await redis.keys(`${prefix}*`); if (keys.length) await redis.del(...keys); redis.disconnect(); });
@@ -24,7 +24,7 @@ async function attachedDriver(t, { now } = {}) {
 	const file = { version: 1, generation: 0, tokens: [{ name: "ops", role: "operator", sha256: sha(token) }] };
 	const sessions = makeSessionStore(), signedIn = sessions.create({ name: "ops", role: "operator", tokenHash: sha(token), generation: 0 });
 	const session = sessions.peek(signedIn.id, file), actor = { name: "ops", role: "operator", session: "a".repeat(12) };
-	const broker = makeGatewayBroker({ store: real, sessions, findToken, readTokens: () => ({ file }), readRegistry: () => ({ config: { consoleOrigin, hosts: { [target.host]: { origin: gatewayOrigin } } }, digest: "r1" }), readSessions: async () => ({ sessions: [target] }), audit: { append() {} }, schedule: false });
+	const broker = makeGatewayBroker({ store: real, sessions, findToken, readTokens: () => readTokens(file), readRegistry: () => ({ config: { consoleOrigin, hosts: { [target.host]: { origin: gatewayOrigin } } }, digest: "r1" }), readSessions: async () => ({ sessions: [target] }), audit: { append() {} }, schedule: false });
 	t.after(() => broker.close());
 
 	const launched = await broker.launch({ session, body: { host: target.host, id: target.id, width: 1440 }, origin: consoleOrigin, actor });
@@ -68,4 +68,29 @@ test("a driver whose lease ran out with nobody revoking it ends as unconfirmed, 
 	at = 10; await w.acknowledge();
 	assert.deepEqual(w.ends, ["authorization-unavailable"], "Authorization could not be checked, never Operator session ended");
 	assert.equal((await w.real.renewAttachment({ intentId: w.launched.intentId, connectionId: w.connectionId, browserHash: w.browserHash })).refused, "authorization-expired", "the store's word is the same as for a revocation");
+});
+
+test("a tokens file the console cannot read ends the terminal as unconfirmed once its lease runs out, never as a session end (issue #1122)", { skip: !url && "needs VALKEY_TEST_URL" }, async t => {
+	let at = 0, unreadable = false;
+	const w = await attachedDriver(t, { now: () => at, readTokens: file => unreadable ? { refusal: "the console tokens file could not be read" } : { file } });
+	await w.broker.tick(); await w.driver.tick();
+	assert.deepEqual(w.ends, [], "renewed through the real broker and store, the driver stays");
+	const auth = `${w.prefix}auth:${w.launched.intentId}`, leased = await w.redis.pexpiretime(auth);
+
+	// Half written, say: the console revokes nothing and renews nothing, so the lease it last renewed keeps running down.
+	unreadable = true; await w.broker.tick(); await w.broker.tick();
+	at = 10; await w.driver.tick();
+	assert.deepEqual(w.ends, [], "inside the lease the terminal stays");
+	assert.equal((await w.real.readIntent(w.launched.intentId)).state, "connected", "nobody revoked it");
+	assert.equal(await w.redis.pexpiretime(auth), leased, "and nobody renewed it");
+
+	// Still unreadable when that lease ends (the owner key gone, as a lapse leaves it): the store refuses the next renewal
+	// with the revocation's word, and the answer is read at the session's deadline, which is never later than that
+	// renewal's start plus the lease, before its timer runs.
+	await w.redis.del(auth); await w.broker.tick();
+	assert.equal((await w.real.readIntent(w.launched.intentId)).state, "connected", "still nobody revoked it");
+	w.store.renewAttachment = async input => { const answer = await w.real.renewAttachment(input); at = 20 + GATEWAY_AUTH_MS; return answer; };
+	at = 20; await w.driver.tick();
+	for (let turn = 0; turn < 200 && !w.ends.length; turn++) await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(w.ends, ["authorization-unavailable"], "Authorization could not be checked, never Operator session ended");
 });

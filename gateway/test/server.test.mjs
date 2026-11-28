@@ -8,9 +8,11 @@ import WebSocket from "ws";
 import { gatewayHash, gatewayRandom, GATEWAY_PENDING_MS, GATEWAY_GRANT_MS } from "@edgehero/pi-dispatch/sandbox-gateway-protocol";
 import { GATEWAY_LIMITS } from "../src/terminal-protocol.mjs";
 import { createGatewayServer } from "../src/server.mjs";
+import { mountGateway } from "../src/browser.mjs";
+import { Target, world } from "./helpers/frontend-world.mjs";
 
 const defer = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
-async function fixture(t, { kind = "drive", secure = false, now = () => 0, inspect = async () => ({ ok: true }), redeem = null, renewAttachment = null, audit = async () => {}, attach = async () => ({ stream: new PassThrough(), resize: async () => {}, detach() { this.stream.destroy(); } }) } = {}) {
+async function fixture(t, { kind = "drive", secure = false, now = () => 0, pause = undefined, inspect = async () => ({ ok: true }), redeem = null, renewAttachment = null, audit = async () => {}, attach = async () => ({ stream: new PassThrough(), resize: async () => {}, detach() { this.stream.destroy(); } }) } = {}) {
 	const intentId = gatewayRandom(), cookie = gatewayRandom(), audits = [], calls = [];
 	const intent = { intentId, kind: "drive", sessionKey: gatewayHash("session"), runFacts: null, target: { host: "host-a", id: "run-a", nonce: "a".repeat(32), containerId: "b".repeat(64), venue: "local" }, gatewayOrigin: "http://gateway.localhost", consoleOrigin: "http://console.localhost", browserHash: gatewayHash(cookie), actor: { name: "ops", role: "operator", session: "a".repeat(12) }, connectedAt: 123, theme: "dark" };
 	intent.kind = kind;
@@ -18,9 +20,9 @@ async function fixture(t, { kind = "drive", secure = false, now = () => 0, inspe
 	const cookieKey = secure ? "__Host-pdg_browser" : "pdg_browser", hostname = new URL(intent.gatewayOrigin).host;
 	const room = { driverConnectionId: gatewayRandom(), driverActor: { name: "driver", role: "operator", session: "b".repeat(12) }, enabled: false, epoch: gatewayRandom(), rosterRevision: 0, watchers: {}, geometry: { cols: 80, rows: 24, revision: 1 } };
 	if (kind === "watch") intent.driver = { intentId: gatewayRandom(), connectionId: room.driverConnectionId, epoch: room.epoch };
-	const store = { startDriver: async args => { room.driverConnectionId = args.connectionId; return { ok: true, intent, room, authRemainingMs: 5000 }; }, readyWatch: async () => ({ ok: true, intent, room, authRemainingMs: 5000 }), readRoom: async () => room, readIntent: async () => intent, bindIntent: async args => { calls.push(["bind", args]); return { ok: true, intent }; }, redeem: async args => { calls.push(["redeem", args]); return redeem ? redeem(args) : { ok: true, intent }; }, renewAttachment: async (...args) => renewAttachment ? renewAttachment(...args) : ({ ok: true, intent, room, authRemainingMs: 5000, ...(kind === "watch" ? { rosterSeen: true } : {}) }), release: async args => { calls.push(["release", args]); return { ok: true }; } };
+	const store = { startDriver: async args => { room.driverConnectionId = args.connectionId; return { ok: true, intent, room, authRemainingMs: 5000 }; }, readyWatch: async () => ({ ok: true, intent, room, authRemainingMs: 5000 }), readRoom: async () => room, readIntent: async () => intent, bindIntent: async args => { calls.push(["bind", args]); return { ok: true, intent }; }, redeem: async args => { calls.push(["redeem", args]); return redeem ? redeem(args) : { ok: true, intent, authRemainingMs: 5000 }; }, renewAttachment: async (...args) => renewAttachment ? renewAttachment(...args) : ({ ok: true, intent, room, authRemainingMs: 5000, ...(kind === "watch" ? { rosterSeen: true } : {}) }), release: async args => { calls.push(["release", args]); return { ok: true }; } };
 	const runtime = { inspect: async target => { calls.push(["inspect", target]); return inspect(target); }, attach: async (...args) => { calls.push(["attach", ...args]); return attach(...args); }, attachWatch: async (...args) => { calls.push(["attachWatch", ...args]); return attach(...args); } };
-	const app = createGatewayServer({ config: { origin: intent.gatewayOrigin, consoleOrigin: intent.consoleOrigin, host: "host-a", sockets: { local: "/fixed.sock" }, idleMinutes: 30 }, store, runtime, assets: { script: "", terminalScript: "", css: "" }, audit: async (...args) => { audits.push(args); await audit(...args); }, now });
+	const app = createGatewayServer({ config: { origin: intent.gatewayOrigin, consoleOrigin: intent.consoleOrigin, host: "host-a", sockets: { local: "/fixed.sock" }, idleMinutes: 30 }, store, runtime, assets: { script: "", terminalScript: "", css: "" }, audit: async (...args) => { audits.push(args); await audit(...args); }, now, ...(pause ? { pause } : {}) });
 	await new Promise(resolve => app.server.listen(0, "127.0.0.1", resolve)); const port = app.server.address().port;
 	t.after(() => app.close());
 	async function api(path, data, headers = {}) {
@@ -293,4 +295,118 @@ test("a refused upgrade gives its connection slot back even if the client ignore
 	let count = await open();
 	while (count > 0 && Date.now() < end) { await new Promise(resolve => setTimeout(resolve, 20)); count = await open(); }
 	assert.equal(count, 0);
+});
+
+// Admission reads the store's refusals by the attached terminal's rule (issue #1123). Before the admission's deadline a
+// refusal is the store's word, so `authorization-expired` is the console's revocation: "Operator session ended". At or
+// after that deadline, or from a store that could not answer, it is "Authorization could not be checked". The watch
+// words pass through. Each case below sets the injected clock as the refusal is read.
+const frames = async ws => {
+	const seen = []; ws.on("error", () => {});
+	ws.on("message", (data, binary) => seen.push(binary ? "terminal bytes" : JSON.parse(String(data))));
+	await new Promise(resolve => ws.once("close", resolve)); return seen;
+};
+const talkative = () => { const stream = new PassThrough(); stream.write("PRIVATE_TERMINAL_OUTPUT"); return { stream, resize: async () => {}, detach() { this.detached = true; stream.destroy(); } }; };
+
+test("a refusal at the upgrade check reaches the page as its ending, against the deadline the grant's redemption set (issue #1123)", async t => {
+	for (const [kind, refused, readAt, granted, ending] of [
+		["drive", "authorization-expired", 100, 5000, "session-ended"],
+		["drive", "authorization-expired", 5000, 5000, "authorization-unavailable"],
+		["drive", "authorization-expired", 300, 300, "authorization-unavailable"],
+		["drive", "intent-missing", 100, 5000, "session-ended"],
+		["drive", "control-unavailable", 100, 5000, "authorization-unavailable"],
+		["drive", "control-invalid", 100, 5000, "authorization-unavailable"],
+		["drive", "window-lost", 100, 5000, "window-lost"],
+		["watch", "watch-removed", 100, 5000, "watch-removed"],
+		["watch", "driver-ended", 100, 5000, "driver-ended"],
+		["drive", "thrown", 100, 5000, "authorization-unavailable"],
+	]) {
+		const label = `${kind} ${refused} read at ${readAt} of a ${granted} ms grant`;
+		let clock = 0, f;
+		f = await fixture(t, { kind, now: () => clock, redeem: async () => ({ ok: true, intent: f.intent, authRemainingMs: granted }), renewAttachment: async () => { clock = readAt; if (refused === "thrown") throw new Error("PRIVATE_STORE_ERROR"); return { refused }; } });
+		const connected = await f.connect(); assert.equal(connected.status, 200, label);
+		assert.deepEqual(await frames(f.socket(connected.body.connectionId)), [{ type: "ended", reason: ending }], label);
+		assert.equal(f.calls.some(c => c[0].startsWith("attach")), false, label); assert.deepEqual(f.audits, [], label);
+		assert.deepEqual(f.calls.filter(c => c[0] === "release").map(c => c[1].reason), [ending], label);
+	}
+	// A request the upgrade check never reaches is still refused before any socket opens.
+	const f = await fixture(t), connected = await f.connect();
+	const wrong = f.socket(connected.body.connectionId, { cookie: `pdg_browser=${gatewayRandom()}` }); wrong.on("error", () => {});
+	const [, response] = await once(wrong, "unexpected-response"); assert.equal(response.statusCode, 403); response.resume(); wrong.terminate();
+});
+
+test("a revocation read while a watch waits for its roster, at startDriver or at readyWatch ends as a session end before the deadline and unconfirmed at or after it, with no terminal byte sent (issue #1123)", async t => {
+	// "thrown" is a store call that throws: a store that could not answer, as at the upgrade check.
+	const cases = [["authorization-expired", 100, "session-ended"], ["authorization-expired", 5000, "authorization-unavailable"], ["control-unavailable", 100, "authorization-unavailable"], ["thrown", 100, "authorization-unavailable"]];
+	const refusing = refused => { if (refused === "thrown") throw new Error("PRIVATE_STORE_ERROR"); return { refused }; };
+	for (const [refused, readAt, ending] of [...cases, ["watch-disabled", 100, "watch-disabled"], ["window-lost", 100, "window-lost"]]) {
+		const label = `roster poll ${refused} at ${readAt}`;
+		let clock = 0, reads = 0, f;
+		f = await fixture(t, { kind: "watch", now: () => clock, pause: async () => {}, renewAttachment: async () => {
+			if (++reads === 1) return { ok: true, intent: f.intent, room: f.room, authRemainingMs: 5000, rosterSeen: false };
+			clock = readAt; return refusing(refused);
+		} });
+		assert.deepEqual(await frames(f.socket((await f.connect()).body.connectionId)), [{ type: "ended", reason: ending }], label);
+		assert.equal(f.calls.some(c => c[0].startsWith("attach")), false, label);
+	}
+	for (const [kind, step, extra] of [["drive", "startDriver", [["window-lost", 100, "window-lost"], ["intent-missing", 100, "authorization-unavailable"]]], ["watch", "readyWatch", [["watch-removed", 100, "watch-removed"], ["roster-unseen", 100, "authorization-unavailable"]]]]) {
+		for (const [refused, readAt, ending] of [...cases, ...extra]) {
+			const label = `${step} ${refused} at ${readAt}`;
+			let clock = 0, channel = null;
+			const f = await fixture(t, { kind, now: () => clock, attach: async () => channel = talkative() });
+			f.store[step] = async () => { clock = readAt; return refusing(refused); };
+			assert.deepEqual(await frames(f.socket((await f.connect()).body.connectionId)), [{ type: "ended", reason: ending }], `${label}: no terminal byte, no ready`);
+			assert.equal(channel?.detached, true, label);
+			assert.deepEqual(f.audits.map(a => [a[0], a[3]]), [["opening", undefined], ["open", undefined], ["end", ending]], label);
+			assert.doesNotMatch(JSON.stringify(f.audits), /PRIVATE_STORE_ERROR/, label);
+		}
+	}
+});
+
+test("admission's lease starts before its redemption is sent: a clock that moves during redeem and the runtime inspection does not extend it (issue #1123)", async t => {
+	// The store measured the lease after the request left, so the gateway's deadline must not be later than the store's.
+	for (const [readAt, ending] of [[4999, "session-ended"], [5000, "authorization-unavailable"]]) {
+		let clock = 0, f;
+		f = await fixture(t, { now: () => clock, inspect: async () => { clock = 2000; return { ok: true }; },
+			redeem: async () => { clock = 1000; return { ok: true, intent: f.intent, authRemainingMs: 5000 }; },
+			renewAttachment: async () => { clock = readAt; return { refused: "authorization-expired" }; } });
+		const connected = await f.connect(); assert.equal(connected.status, 200);
+		assert.deepEqual(await frames(f.socket(connected.body.connectionId)), [{ type: "ended", reason: ending }], `read at ${readAt}`);
+	}
+});
+
+test("a client that sends a bad frame after an upgrade that only told it its ending cannot take the gateway down (issue #1123)", async t => {
+	// An "error" ws emits with no listener ends the whole process, as an unhandled one on a refused socket did.
+	const f = await fixture(t, { renewAttachment: async () => ({ refused: "authorization-expired" }) }), connected = await f.connect();
+	const client = connectSocket(f.port, "127.0.0.1"); client.on("error", () => {});
+	client.write(`GET /socket/${connected.body.connectionId} HTTP/1.1\r\nHost: gateway.localhost\r\nOrigin: http://gateway.localhost\r\nCookie: pdg_browser=${f.cookie}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+	let received = "";
+	await new Promise(resolve => { client.on("data", chunk => { received += chunk.toString("latin1"); if (received.includes("session-ended")) resolve(); }); client.once("close", resolve); });
+	assert.match(received, /^HTTP\/1\.1 101 /); assert.match(received, /"reason":"session-ended"/);
+	const gone = new Promise(resolve => client.once("close", resolve));
+	client.write(Buffer.from([0x81, 0x01, 0x61])); // A client frame must be masked: this one is not.
+	await gone;
+	assert.equal((await f.api(`/s/${f.intentId}`, undefined, { cookie: "" })).status, 200, "still serving");
+});
+
+test("the page itself says its operator session ended when the console's revocation is read at the upgrade check (issue #1123)", async t => {
+	// The real page controller over the real server: it read a refused upgrade as "Terminal connection lost".
+	let f;
+	f = await fixture(t, { now: () => 0, renewAttachment: async () => ({ refused: "authorization-expired" }) });
+	const connected = (await f.connect()).body, w = world();
+	let closed; const gone = new Promise(resolve => { closed = resolve; });
+	w.window.WebSocket = class extends Target {
+		readyState = 0; bufferedAmount = 0;
+		constructor(url) {
+			super(); this.ws = f.socket(new URL(url).pathname.split("/").at(-1)); this.ws.on("error", () => this.emit("error"));
+			this.ws.on("open", () => { this.readyState = 1; this.emit("open"); });
+			this.ws.on("message", data => this.emit("message", { data: String(data) }));
+			this.ws.on("close", () => { this.readyState = 3; this.emit("close"); closed(); });
+		}
+		send(text) { this.ws.send(text); }
+		close(code, reason) { this.ws.close(code, reason); }
+	};
+	await mountGateway({ ...w, connection: { connectionId: connected.connectionId, host: connected.host, id: connected.id, by: connected.by, idleMinutes: connected.idleMinutes, startedAt: connected.startedAt, theme: connected.theme, kind: connected.kind } });
+	await gone;
+	assert.equal(w.document.getElementById("gateway-state-title").textContent, "Operator session ended");
 });

@@ -4,6 +4,7 @@ import { WebSocketServer } from "ws";
 import { GATEWAY_ID_RE, GATEWAY_PENDING_MS, GATEWAY_GRANT_MS, GATEWAY_AUTH_MS, gatewayHash, gatewayRandom, gatewayTargetKey } from "@edgehero/pi-dispatch/sandbox-gateway-protocol";
 import { gatewayDimensions, GATEWAY_LIMITS } from "./terminal-protocol.mjs";
 import { runGatewaySession } from "./session.mjs";
+import { endingFor, GATEWAY_ANSWERS } from "./endings.mjs";
 import { gatewayPage } from "./page.mjs";
 
 const cookieName = secure => secure ? "__Host-pdg_browser" : "pdg_browser";
@@ -26,13 +27,15 @@ async function body(req) {
 	return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-export function createGatewayServer({ config, store, runtime, assets, audit, now = () => performance.now(), random = gatewayRandom, log = () => {}, sessionFn = runGatewaySession } = {}) {
+export function createGatewayServer({ config, store, runtime, assets, audit, now = () => performance.now(), random = gatewayRandom, log = () => {}, sessionFn = runGatewaySession, pause = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
 	const admitted = new Map(), sessions = new Map(), reserved = new Set();
 	const expectedHost = new URL(config.origin).host;
 	const secure = new URL(config.origin).protocol === "https:";
 	const stopWatches = (driverConnectionId, { reason = "driver-ended", watcherKey = null } = {}) => {
 		for (const s of sessions.values()) if (s.intent?.kind === "watch" && s.intent.driver.connectionId === driverConnectionId && (!watcherKey || gatewayHash(s.intent.intentId) === watcherKey)) void s.finish(reason);
 	};
+	// A store call that throws is a store that could not answer, read by the rule as that refusal is (issue #1123).
+	const asked = async call => { try { return await call(); } catch { return { refused: "control-unavailable" }; } };
 	const enrolled = (m) => m?.gatewayOrigin === config.origin && m?.consoleOrigin === config.consoleOrigin && m?.target?.host === config.host && config.sockets[m.target.venue];
 	const hostOk = (req) => req.headers.host === expectedHost && req.rawHeaders.filter((_, i) => i % 2 === 0 && req.rawHeaders[i].toLowerCase() === "host").length === 1;
 	const originOk = (req) => req.headers.origin === config.origin && (!req.headers["sec-fetch-site"] || req.headers["sec-fetch-site"] === "same-origin");
@@ -72,6 +75,7 @@ export function createGatewayServer({ config, store, runtime, assets, audit, now
 			const intent = await store.readIntent(m.intentId);
 			if (!enrolled(intent) || intent.browserHash !== gatewayHash(cookie)) { json(res, 409, { error: "intent-unavailable" }); return; }
 			if (m.sessionKey !== null && intent.sessionKey !== m.sessionKey) { json(res, 409, { error: "workbench-session-changed" }); return; }
+			const redeemedAt = now();
 			const result = await store.redeem({ intentId: m.intentId, browserHash: gatewayHash(cookie), connectionId });
 			if (!result.ok) {
 				json(res, 409, { error: result.refused, ...(result.refused === "window-busy" && idOk(result.winnerConnectionId) ? { kind: intent.kind, targetKey: gatewayTargetKey(intent.target), ownerKey: gatewayHash(result.winnerConnectionId), host: intent.target.host, id: intent.target.id } : {}) }); return;
@@ -81,7 +85,10 @@ export function createGatewayServer({ config, store, runtime, assets, audit, now
 			if (result.intent.kind === "watch" && (!room || room.driverConnectionId !== result.intent.driver.connectionId || room.epoch !== result.intent.driver.epoch)) { json(res, 409, { error: "driver-ended" }); return; }
 			const observation = await runtime.inspect(result.intent.target);
 			if (!observation.ok) { json(res, 409, { error: ["runtime-environment", "sandbox-ended"].includes(observation.refused) ? observation.refused : "runtime-unavailable" }); return; }
-			admitted.set(connectionId, { intent: result.intent, driverActor: room?.driverActor, browserHash: gatewayHash(cookie), cols: m.cols, rows: m.rows, until: now() + GATEWAY_LIMITS.upgradeMs });
+			// The deadline of the authority this grant redeemed, read like a session's (issue #1123): a refusal at the upgrade
+			// check before it is the store's word, and one at or after it is the lapse. Never later than the store's expiry.
+			const authUntil = redeemedAt + (Number.isFinite(result.authRemainingMs) && result.authRemainingMs > 0 ? Math.min(GATEWAY_AUTH_MS, result.authRemainingMs) : 0);
+			admitted.set(connectionId, { intent: result.intent, driverActor: room?.driverActor, browserHash: gatewayHash(cookie), cols: m.cols, rows: m.rows, until: now() + GATEWAY_LIMITS.upgradeMs, authUntil });
 			reservation = null; consumed = null;
 			json(res, 200, { connectionId, kind: result.intent.kind, sessionKey: result.intent.sessionKey, targetKey: gatewayTargetKey(result.intent.target), ownerKey: gatewayHash(connectionId), runFacts: result.intent.runFacts, host: intent.target.host, id: intent.target.id, by: result.intent.actor.name, startedAt: result.intent.connectedAt, idleMinutes: config.idleMinutes, theme: intent.theme, ...(room ? { driver: { name: room.driverActor.name, ownerKey: gatewayHash(room.driverConnectionId) }, geometry: room.geometry } : {}) });
 		} catch { log("gateway_request_failed"); if (!res.headersSent) json(res, 503, { error: "control-unavailable" }); else res.end(); }
@@ -109,12 +116,23 @@ export function createGatewayServer({ config, store, runtime, assets, audit, now
 			if (!a || a.upgrading || a.browserHash !== gatewayHash(cookie)) { refuse(); return; }
 			a.upgrading = true;
 			const requestedAt = now();
-			const authority = await store.renewAttachment({ intentId: a.intent.intentId, connectionId, browserHash: a.browserHash });
-			if (!authority.ok || !Number.isFinite(authority.authRemainingMs) || authority.authRemainingMs <= 0 || authority.authRemainingMs > GATEWAY_AUTH_MS || now() - requestedAt >= authority.authRemainingMs) throw new Error("authorization-unavailable");
+			const authority = await asked(() => store.renewAttachment({ intentId: a.intent.intentId, connectionId, browserHash: a.browserHash }));
+			// A refusal is told in the frame the page already reads, after the upgrade (issue #1123): a refused upgrade reads
+			// only as a lost connection, so a revocation said "Terminal connection lost". The cookie, origin, host and
+			// admission checks above still refuse before any socket opens.
+			const ending = !authority.ok ? endingFor(authority.refused, now() >= a.authUntil)
+				: !Number.isFinite(authority.authRemainingMs) || authority.authRemainingMs <= 0 || authority.authRemainingMs > GATEWAY_AUTH_MS || now() - requestedAt >= authority.authRemainingMs ? "authorization-unavailable" : null;
 			if (socket.destroyed) throw new Error("disconnected");
 			let upgraded = false;
 			wss.handleUpgrade(req, socket, head, (ws) => {
 				upgraded = true;
+				if (ending) {
+					// Nothing else is read from this socket, but a client's bad frame is still an "error" ws emits.
+					ws.on("error", () => {});
+					try { ws.send(JSON.stringify({ type: "ended", reason: ending })); ws.close(1000, ending); } catch { ws.terminate(); }
+					void discard(ending);
+					return;
+				}
 				// Let ws finish its own key/version/framing checks before touching the runtime. No
 				// client input is accepted until the later ready receipt; there is no replay queue.
 				const controller = new AbortController();
@@ -140,12 +158,12 @@ export function createGatewayServer({ config, store, runtime, assets, audit, now
 						let current = authority;
 						while (a.intent.kind === "watch" && !current.rosterSeen) {
 							if (cancelled || now() >= expiresAt) { await endPending("authorization-unavailable"); return; }
-							await new Promise(resolve => setTimeout(resolve, GATEWAY_LIMITS.pollMs));
+							await pause(GATEWAY_LIMITS.pollMs);
 							if (cancelled) return;
 							const polledAt = now();
-							current = await store.renewAttachment({ intentId: a.intent.intentId, connectionId, browserHash: a.browserHash });
+							current = await asked(() => store.renewAttachment({ intentId: a.intent.intentId, connectionId, browserHash: a.browserHash }));
 							if (cancelled) return;
-							if (!current.ok) { await endPending(["watch-disabled", "watch-removed", "driver-ended"].includes(current.refused) ? current.refused : "authorization-unavailable"); return; }
+							if (!current.ok) { await endPending(endingFor(current.refused, now() >= expiresAt)); return; }
 							if (!Number.isFinite(current.authRemainingMs) || current.authRemainingMs <= 0 || current.authRemainingMs > GATEWAY_AUTH_MS) { await endPending("authorization-unavailable"); return; }
 							// The reply describes authority at this request's start, never five new seconds
 							// after a delayed response. New observations may only shorten this admission.
@@ -168,8 +186,9 @@ export function createGatewayServer({ config, store, runtime, assets, audit, now
 						if (cancelled) return;
 						if (now() >= expiresAt) { await endPending("authorization-unavailable"); return; }
 						const liveRequestedAt = now();
-						const live = a.intent.kind === "watch" ? await store.readyWatch({ intentId: a.intent.intentId, connectionId, browserHash: a.browserHash }) : await store.startDriver({ intentId: a.intent.intentId, connectionId, browserHash: a.browserHash, cols: a.cols, rows: a.rows });
-						if (!live.ok || !live.room) { await endPending(["watch-disabled", "watch-removed", "driver-ended"].includes(live.refused) ? live.refused : "authorization-unavailable"); return; }
+						const live = await asked(() => a.intent.kind === "watch" ? store.readyWatch({ intentId: a.intent.intentId, connectionId, browserHash: a.browserHash }) : store.startDriver({ intentId: a.intent.intentId, connectionId, browserHash: a.browserHash, cols: a.cols, rows: a.rows }));
+						// Every refusal during admission is read against its deadline, as an attached terminal's are (issue #1123).
+						if (!live.ok || !live.room) { await endPending(endingFor(live.refused, now() >= expiresAt, GATEWAY_ANSWERS.start)); return; }
 						if (!Number.isFinite(live.authRemainingMs) || live.authRemainingMs <= 0 || live.authRemainingMs > GATEWAY_AUTH_MS) { await endPending("authorization-unavailable"); return; }
 						const remaining = Math.min(expiresAt, liveRequestedAt + live.authRemainingMs) - now();
 						if (cancelled || remaining <= 0 || ws.readyState !== 1) { await endPending("authorization-unavailable"); return; }

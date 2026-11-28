@@ -2,13 +2,8 @@ import { performance } from "node:perf_hooks";
 import { GATEWAY_AUTH_MS } from "@edgehero/pi-dispatch/sandbox-gateway-protocol";
 import { gatewayDimensions, GATEWAY_LIMITS } from "./terminal-protocol.mjs";
 import { makeSharingController } from "./sharing.mjs";
+import { endingFor } from "./endings.mjs";
 export { GATEWAY_LIMITS } from "./terminal-protocol.mjs";
-
-// What a refused renewal tells the browser (issues #1039, #1048). A refusal is the store's word that this authority
-// ended; four words say more exactly how, and pass through. A store that could not be read, or answered with nothing
-// that parses, is no evidence anyone revoked the operator, so the browser hears its authority was not confirmed.
-const STORE_UNANSWERED = Object.freeze(["control-unavailable", "control-invalid", "intent-invalid"]);
-const refusedEnding = refused => ["window-lost", "watch-disabled", "watch-removed", "driver-ended"].includes(refused) ? refused : STORE_UNANSWERED.includes(refused) ? "authorization-unavailable" : "session-ended";
 
 /** No transcript or replay buffer: bytes exist only while crossing a currently authorized attachment. */
 export function runGatewaySession({ ws, channel, store, intent, connectionId, browserHash, room = null, authRemainingMs, idleMinutes, runtime, audit, now = () => performance.now(), setTimer = setInterval, clearTimer = clearInterval, onEnd = () => {}, onClosing = () => {}, onLocalStop = () => {} }) {
@@ -59,7 +54,8 @@ export function runGatewaySession({ ws, channel, store, intent, connectionId, br
 		try {
 			const result = await store.renewAttachment({ intentId: intent.intentId, connectionId, browserHash });
 			if (ended) return;
-			if (!result.ok) { await finish(lapsed() ? "authorization-unavailable" : refusedEnding(result.refused)); return; }
+			// A refused renewal ends by the rule admission uses too (issues #1039, #1048, #1123).
+			if (!result.ok) { await finish(endingFor(result.refused, lapsed())); return; }
 			if (!Number.isFinite(result.authRemainingMs) || result.authRemainingMs <= 0) { await finish("authorization-unavailable"); return; }
 			if (!authorized()) return;
 			deadline = requestedAt + Math.min(GATEWAY_AUTH_MS, result.authRemainingMs);

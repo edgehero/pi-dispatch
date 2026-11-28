@@ -468,6 +468,10 @@ test("dispatch_runs advertises that raw logs are off-limits, and its params are 
  */
 test("dispatch_runs.execute returns run records as JSON and never any .log content", async () => {
   const prevLogsDir = process.env.PI_LOGS_DIR;
+  // The run list also reads the deployment's mirror in Valkey. Name one no client can be built for, so that read fails
+  // at once and the list says so (issue #1121): left unset, it dialled redis://127.0.0.1:6379, a developer's own Redis.
+  const prevValkeyUrl = process.env.VALKEY_URL;
+  process.env.VALKEY_URL = "not-a-url";
   const dir = tempDir("admin-runtool-");
   const record = {
     jobId: "j-log",
@@ -496,6 +500,7 @@ test("dispatch_runs.execute returns run records as JSON and never any .log conte
     assert.ok(Array.isArray(parsed.runs) && parsed.runs.some((r) => r.jobId === "j-log"), "returns the record");
     assert.deepEqual(parsed.hosts, [], "a pre-#57 record names no host and none is invented");
     assert.equal(typeof parsed.mirror, "string", "and the completeness of the list is always stated");
+    assert.match(parsed.mirror, /^unreachable/, "the mirror read reached no Valkey");
     // THE LOAD-BEARING ASSERTION, unchanged: not one byte of the raw .log reaches a tool result.
     assert.ok(!listText.includes("SECRET_LOG_MARKER"), "list path never carries raw .log bytes");
 
@@ -505,6 +510,7 @@ test("dispatch_runs.execute returns run records as JSON and never any .log conte
     assert.ok(!oneText.includes("SECRET_LOG_MARKER"), "jobId path never carries raw .log bytes");
   } finally {
     process.env.PI_LOGS_DIR = prevLogsDir;
+    if (prevValkeyUrl === undefined) delete process.env.VALKEY_URL; else process.env.VALKEY_URL = prevValkeyUrl;
   }
 });
 

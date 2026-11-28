@@ -22,8 +22,8 @@
  * idle, then max (a session idle past its limit at its twelfth hour was ended by the idle limit first), then all (the
  * file's `generation` moved: `sessions end-all`), then role (an entry with its hash, none with its role), then revoked
  * (no entry with its hash). A tombstone is written only where a session that WAS live ends: a failing `get`, `sweep`,
- * `destroy`, and `endAll` (an operator's Sign everyone out, issue #849, whose `all` moves no generation). `peek` and
- * `verdict` write nothing, so the hub can ask every tick without ending anything itself.
+ * `destroy`, and `endAll` (an operator's Sign everyone out, issue #849, whose `all` moves no generation). `peek`,
+ * `verdict` and `holds` write nothing, so the hub can ask every tick without ending anything itself.
  *
  *   - Keyed by the 256-bit id alone, and each reason describes that session's own token, so a tombstone tells a
  *     browser nothing about any other token or session.
@@ -268,6 +268,15 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
      * `maxMs`, no tombstone ever forgotten); else null.
      */
     endedOf,
+
+    /**
+     * Whether the store holds session `id`, with no file and no side effect (issue #1122). A session signed out, or ended
+     * by a request or a sweep, is gone from it whatever the tokens file says, so a caller that cannot read the file still
+     * knows that much. One idle past its limit is held until a request or a sweep ends it.
+     */
+    holds(id) {
+      return typeof id === "string" && sessions.has(id);
+    },
 
     /**
      * End a session on purpose: `reason` is `elsewhere` (signed out, or signed in again over its cookie) or null (a
